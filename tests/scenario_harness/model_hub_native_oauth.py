@@ -1,18 +1,73 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
-from core.handlers.model_hub.adapter import DiscoveredModel, OAuthFlowState
+from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
+    ObservationDiscovery,
+    ObservationOutcome,
+    OAuthFlowState,
+    SourceObservation,
+    make_source_observation,
+)
 from core.handlers.model_hub.events import BoundedEventLog
-from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter, _account_label, _signed_in
+from core.handlers.model_hub.native_oauth import (
+    AgentAuthNativeOAuthAdapter,
+    _account_label,
+    _signed_in,
+    _VENDOR_BACKENDS,
+)
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubService, UnavailableEngineAdapter
+from core.handlers.model_hub.service import (
+    ModelHubService,
+    UnavailableEngineAdapter,
+    _NATIVE_VENDOR_BACKENDS,
+)
+from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS
+
+
+def native_custody_vendors() -> frozenset[str]:
+    """Every vendor id a sanctioned CLI can hold custody of.
+
+    Two tables state this fact — the service's route table and the native
+    bridge's — and they are expected to agree. Unioning them means a drift
+    widens native custody rather than inventing a hub-only vendor on top of it.
+    """
+
+    return frozenset(_NATIVE_VENDOR_BACKENDS) | frozenset(_VENDOR_BACKENDS)
+
+
+def hub_only_subscription_vendors() -> tuple[str, ...]:
+    """The subscription vendors the hub channel owns outright.
+
+    Derived, not listed: a vendor is hub-only when the engine can start an OAuth
+    flow for it and no sanctioned CLI holds custody of that flow's grant.
+
+    Custody is compared on the engine start ROW, not on the vendor id, because
+    one vendor can answer to two names. ``codex`` and ``openai`` share an
+    endpoint, a callback provider, and an auth provider, so they are the same
+    subscription reached by two ids — and the natively-custodied one of the two
+    claims the row for both. A vendor added to either product table lands here
+    without anyone editing a scenario; a second name for an existing vendor does
+    not.
+    """
+
+    custodied = native_custody_vendors()
+    native_rows = {_OAUTH_ENDPOINTS[vendor] for vendor in custodied & set(_OAUTH_ENDPOINTS)}
+    return tuple(
+        sorted(
+            vendor
+            for vendor, row in _OAUTH_ENDPOINTS.items()
+            if row not in native_rows
+        )
+    )
 
 
 class MemoryStore:
@@ -172,21 +227,62 @@ class NativeOAuthScenarioHarness:
         )
 
 
+@dataclass(frozen=True)
+class HubOAuthStartForm:
+    """What one start asks of the user, as the engine declares it.
+
+    The real adapter reads this from the start response rather than from the
+    vendor, so a case that wants a device flow sets the form and every vendor
+    answers with it. There is deliberately no per-vendor table here: which form
+    a given vendor was observed to issue is a fact about the pinned engine, and
+    freezing a second copy of it in a harness would outlive the pin it came from.
+    """
+
+    expects: str = "paste_code"
+    auth_url: str | None = "https://example.test/oauth"
+    device_code: str | None = None
+    instructions_key: str | None = "settings.models.oauth.pasteCode.hint"
+
+
+#: The engine refusal the real adapter ends on when no protocol probe can prove
+#: an upstream for a finished grant: every candidate raised, nothing was
+#: received, and so there is no reachability evidence at all. This is the default
+#: observation because it is what the three hub-only subscriptions actually reach
+#: today — `_OAUTH_OBSERVABLE_VENDORS` admits `anthropic` and `openai`/`codex`
+#: only, so a finished gemini/kimi/xai grant has no proven protocol and the hub
+#: create path refuses to persist a Source (AUTH-SETUP-118).
+#: A case that wants the grant to bind sets a proven observation instead.
+UNPROVEN_OAUTH_OBSERVATION = make_source_observation(
+    outcome=ObservationOutcome.ADAPTER_ERROR,
+    reachable=None,
+    authenticated=None,
+    protocol=None,
+    discovery=ObservationDiscovery.NOT_ATTEMPTED,
+    models=(),
+)
+
+
 class FakeHubOAuthAdapter(UnavailableEngineAdapter):
     def __init__(self):
         self.flows: dict[str, OAuthFlowState] = {}
         self.synced = []
+        self.start_form = HubOAuthStartForm()
+        self.start_calls: list[str] = []
+        self.observation = UNPROVEN_OAUTH_OBSERVATION
+        self.observation_calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+        self.revoked: list[str] = []
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+        self.start_calls.append(vendor)
         flow = OAuthFlowState(
             flow_id=f"hub_{uuid.uuid4().hex[:8]}",
             source_id=source_id,
             vendor=vendor,
             state="awaiting_action",
-            auth_url="https://example.test/oauth",
-            device_code=None,
-            expects="paste_code",
-            instructions_key="settings.models.oauth.pasteCode.hint",
+            auth_url=self.start_form.auth_url,
+            device_code=self.start_form.device_code,
+            expects=self.start_form.expects,
+            instructions_key=self.start_form.instructions_key,
             error_key=None,
             expires_at_iso="2026-07-25T00:15:00+00:00",
             credential_ref=None,
@@ -202,6 +298,19 @@ class FakeHubOAuthAdapter(UnavailableEngineAdapter):
 
     async def discover_models(self, vendor, protocol, base_url, credential_ref):
         return (DiscoveredModel(id="claude-opus-4-6"),)
+
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order,
+    ) -> SourceObservation:
+        self.observation_calls.append((vendor, base_url, tuple(protocol_order)))
+        return self.observation
+
+    async def revoke_credential(self, credential_ref: str) -> None:
+        self.revoked.append(credential_ref)
 
     def complete(self, flow_id: str) -> None:
         flow = self.flows[flow_id]

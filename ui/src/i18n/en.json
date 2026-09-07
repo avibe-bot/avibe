@@ -1142,7 +1142,10 @@
       "subscriptionPicker": {
         "vendor": {
           "anthropic": "Claude subscription",
-          "openai": "ChatGPT subscription"
+          "openai": "ChatGPT subscription",
+          "gemini": "Gemini",
+          "kimi": "Kimi",
+          "xai": "xAI"
         },
         "recommendation": {
           "native": "Native recommended",
@@ -1549,6 +1552,9 @@
         "title": {
           "anthropic": "Connect Claude subscription",
           "openai": "Connect ChatGPT subscription",
+          "gemini": "Connect Gemini subscription",
+          "kimi": "Connect Kimi subscription",
+          "xai": "Connect xAI subscription",
           "generic": "Connect subscription",
           "reauth": "Sign in to “{{name}}” again"
         },

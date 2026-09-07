@@ -50,8 +50,8 @@ import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
   recommendedSubscriptionChannel,
+  subscriptionChooser,
   subscriptionOptionOrder,
-  subscriptionVendorCopy,
 } from './subscriptionOptions';
 import { GuardGapList } from './GuardGapList';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
@@ -156,6 +156,10 @@ export const OAuthConnectDialog: React.FC<{
   }, []);
 
   const accent = vendor === 'openai' ? 'gold' : 'mint';
+  // The vendor's chooser copy, or null for a subscription no sanctioned CLI can
+  // hold. Read once, outside the effect that consumes it: it is a fact about the
+  // vendor, not about this open.
+  const chooser = subscriptionChooser(vendor);
   // One derivation for 「which journey is this」, read by the start call, the
   // terminal handler and the title alike.
   const reauthId = reauth?.id ?? null;
@@ -191,8 +195,13 @@ export const OAuthConnectDialog: React.FC<{
     const occupied = nativeSubscriptionSlotTaken(vendor, sources);
     setNativeSlotTaken(occupied);
     setChannel(initialSubscriptionChannel(vendor, sources));
-    setPhase('choose');
-  }, [isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
+    // A vendor with no chooser copy has no channel choice to put in front of the
+    // user, so it opens straight into its flow — the same entry the re-auth
+    // journey takes above. The gesture that allocated its provider tab was the
+    // menu item that opened this dialog (PD-1), since there is no 去登录 here to
+    // allocate one.
+    setPhase(chooser === null ? 'flow' : 'choose');
+  }, [chooser, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
   /**
    * One owner for 「the server moved the rows the page behind this dialog draws」,
@@ -744,9 +753,13 @@ export const OAuthConnectDialog: React.FC<{
     }
   }, [flowActive, presentation?.auth_url]);
 
-  const choosing = !isReauth && phase === 'choose';
-  const vendorCopy = subscriptionVendorCopy(vendor);
-  const vendorName = vendor === 'openai' ? 'ChatGPT' : 'Claude';
+  // The chooser is only for a vendor whose copy exists. A hub-held subscription
+  // has no channel choice to make, so it opens straight into its flow (the open
+  // effect above), and this guard is the render-side half of the same rule: a
+  // chooser drawn for such a vendor would read every line off `null` and
+  // interpolate i18n keys at the user. Narrowing on `chooser` here rather than on
+  // a bare phase check is what makes that a type error, not a runtime one.
+  const choosing = !isReauth && phase === 'choose' && chooser !== null;
   const recommended = recommendedSubscriptionChannel(vendor);
   const optionOrder = subscriptionOptionOrder(vendor);
   const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
@@ -761,7 +774,9 @@ export const OAuthConnectDialog: React.FC<{
     window.requestAnimationFrame(() => optionRefs.current[next]?.focus());
   };
 
-  if (choosing) {
+  if (choosing && chooser) {
+    const vendorCopy = chooser.copy;
+    const vendorName = chooser.brand;
     return (
       <DialogPrimitive.Root open={open} onOpenChange={(value) => !value && onClose()}>
         <DialogPrimitive.Portal>

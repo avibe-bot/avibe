@@ -39,7 +39,7 @@ from config.v2_config import (
 )
 from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
-from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub.service import ModelHubError, _NATIVE_VENDOR_BACKENDS
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
@@ -48,7 +48,9 @@ from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_sess
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
+    HubOAuthStartForm,
     NativeOAuthScenarioHarness,
+    hub_only_subscription_vendors,
 )
 from vibe.api import (
     get_claude_auth,
@@ -63,7 +65,7 @@ from vibe.claude_config import (
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
-from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS
+from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS, _OAUTH_OBSERVABLE_VENDORS
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -1445,6 +1447,157 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         agent = harness.service.get_agent_sources("claude")
         self.assertEqual(agent["sources"]["order"], [source.id])
         self.assertEqual(agent["supply_status"], "ok")
+
+    async def test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody(self):
+        """Scenario: AUTH-SETUP-115, AUTH-SETUP-116.
+
+        The three hub-only subscription vendors take the same two-step journey
+        the shipped ones do, only through the hub adapter: a start reaches the
+        engine's own OAuth endpoint and comes back with the presentation form the
+        engine declared, and the native channel refuses them before it would
+        spawn any CLI login.
+
+        Both halves are properties of the derived hub-only vocabulary, not of a
+        list of vendor names, so a vendor that becomes hub-only later is covered
+        by this case without editing it. The refusal is checked against the
+        ``native_cli`` gate's own table too: a vendor that the native bridge
+        cannot hand to a CLI is refused there, and if the two tables ever
+        disagreed about who owns custody, this case would name the disagreement
+        instead of quietly starting a CLI login.
+        """
+        vendors = hub_only_subscription_vendors()
+        # Deriving the set proves nothing if it came back empty, and the two
+        # shipped subscriptions are the rows that must stay out of it.
+        self.assertTrue(vendors)
+        self.assertFalse(set(vendors) & set(_NATIVE_VENDOR_BACKENDS))
+        self.assertIn("anthropic", _NATIVE_VENDOR_BACKENDS)
+        self.assertIn("openai", _NATIVE_VENDOR_BACKENDS)
+
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+
+        for form in (
+            # Form C: the grant comes back through a redirect, so the flow asks
+            # the user to paste the callback URL the provider landed on.
+            HubOAuthStartForm(
+                expects="paste_callback_url",
+                auth_url="https://example.test/oauth",
+                device_code=None,
+                instructions_key=None,
+            ),
+            # Form B: the provider issued a device code, so there is nothing to
+            # paste and the flow only has to be watched.
+            HubOAuthStartForm(
+                expects="none",
+                auth_url="https://example.test/device",
+                device_code="ABCD-1234",
+                instructions_key=None,
+            ),
+        ):
+            hub = HubOAuthScenarioHarness(Path(state_dir.name))
+            hub.adapter.start_form = form
+            native = NativeOAuthScenarioHarness(Path(state_dir.name))
+
+            for vendor in vendors:
+                with self.subTest(vendor=vendor, expects=form.expects):
+                    started = await hub.service.oauth_start(
+                        {"vendor": vendor, "channel": "hub"}
+                    )
+
+                    flow = started["flow"]
+                    self.assertEqual(flow["vendor"], vendor)
+                    self.assertEqual(flow["channel"], "hub")
+                    self.assertEqual(flow["intent"], "create")
+                    self.assertEqual(flow["state"], "awaiting_action")
+                    self.assertEqual(flow["presentation"]["expects"], form.expects)
+                    self.assertEqual(flow["presentation"]["auth_url"], form.auth_url)
+                    self.assertEqual(flow["presentation"]["device_code"], form.device_code)
+                    # The start reached the hub adapter — the engine's own OAuth
+                    # endpoint — and not a CLI login.
+                    self.assertEqual(hub.adapter.start_calls, [vendor])
+                    # Nothing persisted yet: a started flow is a claim on the
+                    # engine, not a Source.
+                    self.assertEqual(hub.store.config.sources, [])
+                    hub.adapter.start_calls.clear()
+
+                    with self.assertRaises(ModelHubError) as refused:
+                        await native.service.oauth_start(
+                            {"vendor": vendor, "channel": "native_cli"}
+                        )
+
+                    self.assertEqual(refused.exception.code, "engine_down")
+                    self.assertEqual(refused.exception.status, 503)
+                    self.assertEqual(native.agent_auth.start_calls, [])
+
+    async def test_unproven_hub_subscription_grant_refuses_and_leaves_no_source(self):
+        """Scenario: AUTH-SETUP-117.
+
+        A finished grant is not a Source. Persisting one needs an interface to
+        talk to the upstream over, and the hub path can learn it two ways: a
+        response-backed protocol observation, or a protocol fixed by the vendor's
+        native backend. A hub-only subscription has neither — no probe can name
+        its upstream, and no sanctioned CLI fixes its interface — so its grant
+        ends in an honest refusal, and, just as importantly, in a clean one: the
+        credential the grant produced is revoked and the flow is forgotten, so a
+        retry after either route learns this vendor starts from nothing.
+
+        The refusal is driven here by an observation the fake adapter is told to
+        return, which is the same terminal product the real adapter reaches on
+        its own when every protocol probe raises for a vendor it cannot name an
+        upstream for. ``_OAUTH_OBSERVABLE_VENDORS`` declares that boundary and
+        ``tests/test_model_hub_runtime.py`` pins it against the probe; this case
+        holds what the service does on the far side of it.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = HubOAuthScenarioHarness(Path(state_dir.name))
+        # The default observation is the unproven one, so this case needs no
+        # setup at all; stating it keeps the intent visible next to the refusal.
+        self.assertEqual(harness.adapter.observation.protocol, None)
+
+        for vendor in hub_only_subscription_vendors():
+            with self.subTest(vendor=vendor):
+                started = await harness.service.oauth_start(
+                    {"vendor": vendor, "channel": "hub"}
+                )
+                flow_id = started["flow"]["flow_id"]
+                source_id = started["flow"]["source_id"]
+                harness.adapter.complete(flow_id)
+
+                with self.assertRaises(ModelHubError) as refused:
+                    await harness.service.oauth_status(flow_id)
+
+                self.assertEqual(refused.exception.code, "discovery_failed")
+                self.assertEqual(refused.exception.status, 400)
+                self.assertEqual(
+                    refused.exception.detail, "modelHub.errors.discovery_failed"
+                )
+                # Observation was attempted for the finished grant, across the
+                # whole protocol order: the refusal is a proof that failed, not
+                # a path that was never taken.
+                self.assertEqual(
+                    harness.adapter.observation_calls,
+                    [(vendor, None, SOURCE_PROTOCOLS)],
+                )
+                # Clean: no Source, credential revoked and unjournaled, flow
+                # forgotten so the same vendor can be started again.
+                self.assertEqual(harness.store.config.sources, [])
+                self.assertEqual(harness.adapter.revoked, ["cred_consent01"])
+                self.assertEqual(harness.service.revocations.list(), [])
+                with self.assertRaises(ModelHubError) as forgotten:
+                    await harness.service.oauth_status(flow_id)
+                self.assertEqual(forgotten.exception.code, "flow_not_found")
+                self.assertEqual(forgotten.exception.status, 404)
+
+                retried = await harness.service.oauth_start(
+                    {"vendor": vendor, "channel": "hub"}
+                )
+                self.assertNotEqual(retried["flow"]["flow_id"], flow_id)
+                self.assertNotEqual(retried["flow"]["source_id"], source_id)
+
+                harness.adapter.start_calls.clear()
+                harness.adapter.observation_calls.clear()
+                harness.adapter.revoked.clear()
 
     async def test_lost_model_hub_oauth_start_response_reuses_nonce_flow(self):
         """Scenario: AUTH-SETUP-210.
@@ -2838,12 +2991,18 @@ def test_api_key_setup_does_not_schedule_a_model(
     ],
 )
 @pytest.mark.parametrize("validation_before_auth", [False, True])
-@pytest.mark.parametrize("vendor", tuple(_OAUTH_ENDPOINTS))
+@pytest.mark.parametrize("vendor", sorted(_OAUTH_OBSERVABLE_VENDORS))
 @pytest.mark.parametrize("credential_valid", [True, False])
 def test_hub_oauth_model_free_observation_closed_loop(
     monkeypatch, tmp_path, caplog, status, body, validation_before_auth, vendor, credential_valid,
 ):
-    """Scenario: AUTH-SETUP-113"""
+    """Scenario: AUTH-SETUP-113
+
+    Scoped to the vendors whose grant can be observed, because materializing a
+    Source is what this asserts. A vendor that can sign in but not be observed
+    ends its flow in a refusal instead (AUTH-SETUP-117), and the two sets are
+    kept apart by `_OAUTH_OBSERVABLE_VENDORS` rather than by a list here.
+    """
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
     from vibe.model_hub_runtime.state import EngineStateStore

@@ -29,6 +29,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
+    SOURCE_PROTOCOLS,
     SourceBinding,
 )
 from core.handlers.model_hub.classification import (
@@ -6512,57 +6513,139 @@ def test_model_discovery_translates_local_spool_failures(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    ("vendor", "endpoint"),
-    [
-        ("anthropic", "/anthropic-auth-url"),
-        ("openai", "/codex-auth-url"),
-        ("codex", "/codex-auth-url"),
-    ],
-)
-def test_oauth_start_uses_webui_callback_for_observable_vendors(
+class _OAuthStartClient:
+    """One engine client that answers whichever start endpoint it is asked for."""
+
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+        self.start_path: str | None = None
+        self.start_query: object = None
+
+    def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+        if path == "/auth-files":
+            return {"files": []}
+        if path.endswith("-auth-url"):
+            self.start_path = path
+            self.start_query = query
+            return dict(self.response)
+        raise AssertionError((method, path, query, payload, timeout))
+
+
+class _OAuthStartSupervisor:
+    def __init__(self, store: EngineStateStore, client: _OAuthStartClient) -> None:
+        self.state_store = store
+        self._client = client
+
+    def client(self) -> _OAuthStartClient:
+        return self._client
+
+
+def _start_oauth_against(
     tmp_path: Path,
     vendor: str,
-    endpoint: str,
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.start_query = None
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if path == "/auth-files":
-                return {"files": []}
-            if path == endpoint:
-                self.start_query = query
-                return {"state": "engine-state", "url": "https://example.test/oauth"}
-            raise AssertionError((method, path, query, payload, timeout))
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self._client = client
-
-        def client(self):
-            return self._client
-
-    async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        client = Client()
+    response: dict[str, object],
+) -> tuple[_OAuthStartClient, object]:
+    async def run():
+        store = EngineStateStore(tmp_path / f"state-{vendor}")
+        client = _OAuthStartClient(response)
         adapter = CLIProxyEngineAdapter(
-            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            supervisor=_OAuthStartSupervisor(store, client),  # type: ignore[arg-type]
             state_store=store,
         )
+        return client, await adapter.start_oauth("src_fixture123", vendor)
 
-        flow = await adapter.start_oauth("src_fixture123", vendor)
-
-        assert client.start_query == {"is_webui": "true"}
-        assert flow.expects == "paste_callback_url"
-
-    asyncio.run(run())
+    return asyncio.run(run())
 
 
-@pytest.mark.parametrize("vendor", ["antigravity", "kimi", "xai"])
-def test_oauth_start_rejects_engine_only_vendors_before_engine_work(
+@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
+def test_oauth_start_calls_the_endpoint_its_vendor_row_declares(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    """Admission and routing are the vendor row's job, for every row.
+
+    Seeding the whole table rather than a list of vendor names keeps a row added
+    later covered without editing this test.
+    """
+
+    endpoint, _callback_provider, _auth_provider = runtime_adapter_module._OAUTH_ENDPOINTS[vendor]
+
+    client, _flow = _start_oauth_against(
+        tmp_path,
+        vendor,
+        {"state": "engine-state", "url": "https://example.test/oauth"},
+    )
+
+    assert client.start_path == endpoint
+    assert client.start_query == {"is_webui": "true"}
+
+
+@pytest.mark.parametrize(
+    ("response", "expects", "auth_url", "device_code"),
+    [
+        pytest.param(
+            {"state": "engine-state", "url": "https://example.test/oauth"},
+            "paste_callback_url",
+            "https://example.test/oauth",
+            None,
+            id="redirect-callback",
+        ),
+        pytest.param(
+            {
+                "state": "engine-state",
+                "flow": "device",
+                "url": "https://example.test/device",
+                "user_code": "ABCD-1234",
+                "expires_in": 600,
+            },
+            "none",
+            "https://example.test/device",
+            "ABCD-1234",
+            id="device-code",
+        ),
+        pytest.param(
+            # xAI and Kimi omit `user_code` when the upstream returned none, so
+            # `flow` alone has to carry the form.
+            {"state": "engine-state", "flow": "device", "verification_uri": "https://example.test/device"},
+            "none",
+            "https://example.test/device",
+            None,
+            id="device-flow-without-a-code",
+        ),
+    ],
+)
+@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
+def test_oauth_start_reads_the_presentation_form_from_the_engine_response(
+    tmp_path: Path,
+    vendor: str,
+    response: dict[str, object],
+    expects: str,
+    auth_url: str,
+    device_code: str | None,
+) -> None:
+    """What the flow asks of the user comes from the response, never the vendor.
+
+    Every vendor is driven through every response shape on purpose: the form is a
+    property of what the engine answered, so no vendor may carry its own table of
+    what to render. That is also why the per-vendor forms observed at the pinned
+    engine commit are recorded in the PR rather than frozen here — a form is only
+    as current as the response that carried it.
+    """
+
+    _client, flow = _start_oauth_against(tmp_path, vendor, response)
+
+    assert flow.expects == expects
+    assert flow.auth_url == auth_url
+    assert flow.device_code == device_code
+
+
+@pytest.mark.parametrize(
+    "vendor",
+    # `antigravity`, `claude`, and `grok` are names the engine answers to. None of
+    # them is an Avibe vendor id, so admission by engine vocabulary is refused.
+    ["antigravity", "claude", "grok", "qwen", "iflow", ""],
+)
+def test_oauth_start_rejects_vendors_no_row_admits_before_engine_work(
     tmp_path: Path,
     vendor: str,
 ) -> None:
@@ -6583,7 +6666,61 @@ def test_oauth_start_rejects_engine_only_vendors_before_engine_work(
         ):
             await adapter.start_oauth("src_fixture123", vendor)
 
+    assert vendor not in runtime_adapter_module._OAUTH_ENDPOINTS
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
+def test_oauth_grant_protocol_observation_admits_fewer_vendors_than_oauth_start(
+    vendor: str,
+) -> None:
+    """A vendor that can sign in cannot always be observed afterwards.
+
+    A hub Source persists only behind a response-backed protocol observation, and
+    the OAuth probe needs a per-vendor upstream URL and header set to produce one.
+    A vendor admitted to `_OAUTH_ENDPOINTS` without that is refused here, which is
+    what makes `observe_source` report `adapter_error` instead of inventing a
+    protocol for it. AUTH-SETUP-117 records the consequence for those vendors.
+
+    The set is asserted against the probe rather than restated, so a vendor whose
+    upstream is added without declaring it — or declared without being added —
+    fails here instead of shipping a flow that cannot end.
+    """
+
+    auth = runtime_adapter_module._AuthRecord(
+        identity="account.json",
+        auth_index="0",
+        name="account.json",
+        provider=vendor,
+        fingerprint="fp",
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            self.calls.append(path)
+            return {"status_code": 200, "body": json.dumps({"type": "message"})}
+
+    observed: set[str] = set()
+    for protocol in SOURCE_PROTOCOLS:
+        client = Client()
+        try:
+            runtime_adapter_module._probe_oauth_protocol_response(
+                client=client,  # type: ignore[arg-type]
+                auth=auth,
+                vendor=vendor,
+                protocol=protocol,
+            )
+        except EngineClientError as refused:
+            assert refused.status_code == 404
+            assert client.calls == []
+            continue
+        assert client.calls == ["/api-call"]
+        observed.add(protocol)
+
+    assert bool(observed) is (vendor in runtime_adapter_module._OAUTH_OBSERVABLE_VENDORS)
 
 
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
@@ -6952,11 +7089,15 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
             state_store=store,
         )
 
+        # An unadmitted vendor must not consume the provider slot. Named with an
+        # engine-side name rather than an Avibe vendor id, because an Avibe id
+        # that is unadmitted today is exactly what a vendor expansion admits
+        # tomorrow — and then this stops testing a refusal at all.
         with pytest.raises(
             EngineStateError,
             match="lacks Model Hub response-backed observation",
         ):
-            await adapter.start_oauth("src_fixture123", "gemini")
+            await adapter.start_oauth("src_fixture123", "antigravity")
 
         failed_flow = await adapter.start_oauth("src_fixture123", "anthropic")
         supervisor.unavailable = True

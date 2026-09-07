@@ -61,12 +61,29 @@ from vibe.model_hub_runtime.supervisor import (
 )
 
 
+# The subscription vendors the engine can start an OAuth flow for, and the three
+# names each one answers to on the way through it:
+#
+#   management endpoint  where the start request goes
+#   callback provider    the name `POST /oauth-callback` accepts for the session
+#                        the start registered, for the vendors that take one
+#   auth provider        the `provider` the finished grant carries in
+#                        `GET /auth-files`, which is how a flow finds its own
+#
+# The three can differ for one vendor — Claude starts at `/anthropic-auth-url`,
+# answers a callback as `anthropic`, and lands as `claude` — so none of them is
+# derivable from the Avibe vendor id, and each row states all three. What the
+# flow *asks of the user* is not in here: it is read from the start response,
+# which is the only thing that knows whether this vendor issued a device code or
+# expects a redirect URL back.
 _OAUTH_ENDPOINTS = {
     "anthropic": ("/anthropic-auth-url", "anthropic", "claude"),
     "openai": ("/codex-auth-url", "codex", "codex"),
     "codex": ("/codex-auth-url", "codex", "codex"),
+    "gemini": ("/antigravity-auth-url", "antigravity", "antigravity"),
+    "kimi": ("/kimi-auth-url", "kimi", "kimi"),
+    "xai": ("/xai-auth-url", "xai", "xai"),
 }
-_WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
@@ -797,6 +814,21 @@ def _anthropic_wrapperless_elimination_proof(
     ):
         return "anthropic"
     return None
+
+
+# The vendors a finished OAuth grant can be persisted for, which is a narrower
+# set than the one `_OAUTH_ENDPOINTS` lets sign in. Signing in and binding are
+# two separate admissions: the hub create path persists a Source only behind a
+# response-backed protocol observation, and the probe below needs a per-vendor
+# upstream URL and header set to produce one. A vendor admitted to sign in
+# without that ends its flow in an honest refusal rather than inventing a
+# protocol for it, so anything looping over the bindable vendors loops over
+# this set and not over `_OAUTH_ENDPOINTS`.
+#
+# `tests/test_model_hub_runtime.py` pins the probe's actual behaviour against
+# this declaration, so editing the branches below without editing this is a
+# test failure rather than a silent widening.
+_OAUTH_OBSERVABLE_VENDORS = frozenset({"anthropic", "openai", "codex"})
 
 
 def _probe_oauth_protocol_response(
@@ -1825,7 +1857,12 @@ class CLIProxyEngineAdapter:
                 client.management_request,
                 "GET",
                 engine_endpoint,
-                query={"is_webui": "true"} if normalized_vendor in _WEBUI_OAUTH_VENDORS else None,
+                # Every start Avibe makes is Web-UI-originated, which is all this
+                # flag states. The engine decides what follows from it: a vendor
+                # whose grant comes back through a redirect starts a forwarder
+                # for it, and one that issues a device code has nothing to
+                # forward and ignores the flag.
+                query={"is_webui": "true"},
             )
             engine_state = str(payload.get("state") or "").strip()
             if not engine_state:

@@ -134,6 +134,47 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_custom_auto_policy_response_cannot_reject_or_exclude_credentials
+  - id: AUTH-SETUP-115
+    name: Hub-only subscription vendors start a hub-channel flow carrying the engine-declared presentation form
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody
+  - id: AUTH-SETUP-116
+    name: Hub-only subscription vendors refuse native_cli custody before any CLI login starts
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody
+  - id: AUTH-SETUP-117
+    name: Unproven hub-only subscription grant refuses cleanly, revoking the credential and leaving no Source
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_unproven_hub_subscription_grant_refuses_and_leaves_no_source
+  - id: AUTH-SETUP-118
+    name: Hub-only subscription grant binds to a Gateway Source and supplies its models
+    status: gap
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    reason: >-
+      The spec's acceptance asks the generic §1.4 states to drive each new
+      vendor's grant to a bound hub Source, but its Out-of-scope fence forbids
+      touching the protocol proof ladder — and the hub create path persists a
+      Source only behind a response-backed protocol observation
+      (`_require_proven_observation` → `observe_source` →
+      `_probe_oauth_protocol_response`), and `_OAUTH_OBSERVABLE_VENDORS` admits
+      `anthropic` and `openai`/`codex` only. So a finished gemini/kimi/xai grant
+      currently ends in an honest 422 `discovery_failed` refusal
+      (AUTH-SETUP-117), not a Source. Binding it is a ladder change, out of
+      scope here.
+      `tests/test_model_hub_runtime.py::test_oauth_grant_protocol_observation_admits_fewer_vendors_than_oauth_start`
+      pins the vendor boundary that must widen first; the device-code and
+      callback-replay happy paths are tracked as MH-OAUTH-B-001 / MH-OAUTH-C-001.
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
