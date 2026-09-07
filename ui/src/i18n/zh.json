@@ -1142,7 +1142,10 @@
       "subscriptionPicker": {
         "vendor": {
           "anthropic": "Claude 订阅",
-          "openai": "ChatGPT 订阅"
+          "openai": "ChatGPT 订阅",
+          "gemini": "Gemini",
+          "kimi": "Kimi",
+          "xai": "xAI"
         },
         "recommendation": {
           "native": "推荐由 Agent 管理",
@@ -1549,6 +1552,9 @@
         "title": {
           "anthropic": "连接 Claude 订阅",
           "openai": "连接 ChatGPT 订阅",
+          "gemini": "连接 Gemini 订阅",
+          "kimi": "连接 Kimi 订阅",
+          "xai": "连接 xAI 订阅",
           "generic": "连接订阅",
           "reauth": "重新登录「{{name}}」"
         },

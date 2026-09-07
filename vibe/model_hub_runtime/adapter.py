@@ -61,12 +61,65 @@ from vibe.model_hub_runtime.supervisor import (
 )
 
 
+# The subscription vendors the engine can start an OAuth flow for, and the three
+# names each one answers to on the way through it:
+#
+#   management endpoint  where the start request goes
+#   callback provider    the name `POST /oauth-callback` accepts for the session
+#                        the start registered, for the vendors that take one
+#   auth provider        the `provider` the finished grant carries in
+#                        `GET /auth-files`, which is how a flow finds its own
+#
+# The three can differ for one vendor — Claude starts at `/anthropic-auth-url`,
+# answers a callback as `anthropic`, and lands as `claude` — so none of them is
+# derivable from the Avibe vendor id, and each row states all three. What the
+# flow *asks of the user* is not in here: it is read from the start response,
+# which is the only thing that knows whether this vendor issued a device code or
+# expects a redirect URL back.
 _OAUTH_ENDPOINTS = {
     "anthropic": ("/anthropic-auth-url", "anthropic", "claude"),
     "openai": ("/codex-auth-url", "codex", "codex"),
     "codex": ("/codex-auth-url", "codex", "codex"),
+    "gemini": ("/antigravity-auth-url", "antigravity", "antigravity"),
+    "kimi": ("/kimi-auth-url", "kimi", "kimi"),
+    "xai": ("/xai-auth-url", "xai", "xai"),
 }
-_WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
+
+# The local surface the pinned engine serves a hub-held subscription on.
+#
+# A subscription's protocol is not a fact about the vendor's public API — it is a
+# fact about how the engine that holds the credential exposes it to us, the same
+# kind of shipped product knowledge as `vibe/data/api_key_vendors.json`. It is
+# stated for the vendors whose grant no response probe can reach: the credential
+# never leaves the engine, and the upstream behind it is the vendor's CLI plane
+# rather than an endpoint Avibe may synthesize a request against.
+#
+# Read from the engine at the commit `cliproxyapi_manifest.json` pins
+# (v7.2.149, `2a6b87ac`); each row is one of its serving surfaces, not a guess:
+#
+#   gemini  `internal/translator/antigravity/openai/chat-completions/init.go:9`
+#           registers `translator.Register(OpenAI, Antigravity, ...)`, so an
+#           OpenAI-chat request is translated to the antigravity upstream at
+#           `cloudcode-pa.googleapis.com/v1internal:generateContent`.
+#   kimi    `internal/runtime/executor/kimi_executor.go:54` reports
+#           `FormatOpenAI` from `RequestToFormat`, `:119` translates to
+#           `openai`, and `:150` calls the upstream's `/v1/chat/completions`.
+#   xai     `internal/runtime/executor/xai_executor_request.go:517` accepts
+#           `FormatOpenAI` and folds its output controls into the Responses body
+#           the executor sends to `/responses`
+#           (`internal/runtime/executor/xai_executor_execute.go:45`).
+#
+# All three land on `openai_chat`, which is also what the api-key catalog pins
+# for the same three vendor ids — one vendor, one protocol, whichever channel
+# holds the credential. That agreement is what lets `_validate_source_target`
+# admit these Sources without a base URL, so keep the two tables consistent: a
+# subscription pinned to a protocol its api-key sibling contradicts would need
+# that validator taught about a second pin.
+_HUB_SUBSCRIPTION_PROTOCOLS = {
+    "gemini": "openai_chat",
+    "kimi": "openai_chat",
+    "xai": "openai_chat",
+}
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
@@ -100,6 +153,19 @@ class _ProtocolEvidence:
     authentication: _AuthenticationEvidence
     shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
     status: int | None = field(default=None, compare=False)
+
+
+# What a finished hub subscription grant establishes on its own.
+#
+# The engine accepted the credential — that is what completing the grant means —
+# so authentication is `ACCEPTED`. It says nothing about which protocol, because
+# no request was made: `_HUB_SUBSCRIPTION_PROTOCOLS` supplies that instead, so
+# the proof stays `UNPROVEN` and there is no response shape to record.
+_ENGINE_SERVED_SUBSCRIPTION_EVIDENCE = _ProtocolEvidence(
+    protocol=_ProtocolProof.UNPROVEN,
+    authentication=_AuthenticationEvidence.ACCEPTED,
+    shape=_ProtocolObservationShape.NONE,
+)
 
 
 @dataclass(frozen=True)
@@ -753,6 +819,17 @@ def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
     )
 
 
+def hub_subscription_serving_protocol(vendor: str) -> str | None:
+    """The protocol a hub-held subscription for this vendor is served on.
+
+    ``None`` for a vendor whose grant is proven by response instead of pinned,
+    which is why callers ask this before deciding to probe rather than after
+    failing to.
+    """
+
+    return _HUB_SUBSCRIPTION_PROTOCOLS.get(vendor.strip().lower())
+
+
 def _protocol_is_persistable_without_shape_proof(
     *,
     credential_kind: str,
@@ -760,6 +837,12 @@ def _protocol_is_persistable_without_shape_proof(
     protocol: str,
     protocol_order: Sequence[str],
 ) -> bool:
+    if credential_kind == "oauth":
+        # A hub subscription's protocol is pinned rather than proven, so there is
+        # no response shape to wait for. Nothing else about an OAuth credential
+        # is persistable this way: an unpinned vendor returns False here and
+        # stays on the probe.
+        return hub_subscription_serving_protocol(vendor) == protocol
     if credential_kind != "api_key":
         return False
     pinned_protocol = pinned_api_key_protocol(vendor)
@@ -797,6 +880,24 @@ def _anthropic_wrapperless_elimination_proof(
     ):
         return "anthropic"
     return None
+
+
+# The vendors whose finished OAuth grant is bound by *probing* it: the ones with
+# a public upstream URL and header set the probe below can synthesize a request
+# against, and read the protocol back out of the response.
+#
+# This is one of the two routes a grant binds by, not the whole admission. The
+# other is `_HUB_SUBSCRIPTION_PROTOCOLS`, where the protocol is pinned from the
+# engine's serving surface because there is no reachable upstream to ask. Every
+# vendor `_OAUTH_ENDPOINTS` can sign in takes exactly one of the two — a flow
+# that could start and then not bind would be a dead end — and
+# `tests/test_model_hub_runtime.py` asserts that partition rather than listing
+# the members, so a vendor added to the start table without a binding route
+# fails a test instead of shipping.
+#
+# That test also pins the probe's actual behaviour against this set, so widening
+# one without the other is a failure rather than a silent change.
+_OAUTH_OBSERVABLE_VENDORS = frozenset({"anthropic", "openai", "codex"})
 
 
 def _probe_oauth_protocol_response(
@@ -1572,7 +1673,10 @@ class CLIProxyEngineAdapter:
     ) -> SourceObservation:
         """Observe sequentially and stop at the first persistable proof.
 
-        ``protocol_order`` orders attempts only. A protocol-specific response
+        ``protocol_order`` orders attempts only, with one exception: a hub
+        subscription whose serving protocol the engine declares is answered by
+        that pin whenever the order contains it, because no other candidate
+        could be served. A protocol-specific response
         with accepted authentication proves the current attempt and terminates
         observation. A shipped vendor catalog pin or a concrete `custom`
         declaration also terminates observation after a shaped success.
@@ -1614,6 +1718,16 @@ class CLIProxyEngineAdapter:
         else:
             raise EngineStateError("credential does not match observation target")
 
+        if credential_kind == "oauth":
+            served_protocol = hub_subscription_serving_protocol(normalized_vendor)
+            if served_protocol is not None and served_protocol in protocol_order:
+                # A pinned subscription's protocol does not depend on the order it
+                # is asked in: the engine serves this auth kind on one surface,
+                # and every other candidate would only be attempted to be refused.
+                # A caller that asks for an order excluding the pin is left on the
+                # ordinary path, where it reaches that refusal for itself.
+                protocol_order = (served_protocol,)
+
         failures: list[EngineClientError] = []
         received_rejection = False
         received_proven_unknown = False
@@ -1638,6 +1752,14 @@ class CLIProxyEngineAdapter:
                         base_url=base_url,
                         secret=secret or "",
                     )
+                elif credential_kind == "oauth" and owner_scoped_protocol:
+                    # A pinned subscription has no upstream to probe: the engine
+                    # holds the credential and serves it on the surface
+                    # `_HUB_SUBSCRIPTION_PROTOCOLS` names. The completed grant is
+                    # the evidence, so this stands in for a response that was
+                    # accepted without narrowing the protocol by shape — which is
+                    # what the pin is there to narrow instead.
+                    evidence = _ENGINE_SERVED_SUBSCRIPTION_EVIDENCE
                 else:
                     assert oauth_auth is not None
                     evidence = await asyncio.to_thread(
@@ -1811,7 +1933,7 @@ class CLIProxyEngineAdapter:
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None:
-            raise EngineStateError("OAuth vendor lacks Model Hub response-backed observation")
+            raise EngineStateError("OAuth vendor lacks a Model Hub subscription flow")
         engine_endpoint, callback_provider, auth_provider = endpoint
         with self._oauth_lock:
             self._expire_oauth_flows_locked()
@@ -1825,7 +1947,12 @@ class CLIProxyEngineAdapter:
                 client.management_request,
                 "GET",
                 engine_endpoint,
-                query={"is_webui": "true"} if normalized_vendor in _WEBUI_OAUTH_VENDORS else None,
+                # Every start Avibe makes is Web-UI-originated, which is all this
+                # flag states. The engine decides what follows from it: a vendor
+                # whose grant comes back through a redirect starts a forwarder
+                # for it, and one that issues a device code has nothing to
+                # forward and ignores the flag.
+                query={"is_webui": "true"},
             )
             engine_state = str(payload.get("state") or "").strip()
             if not engine_state:

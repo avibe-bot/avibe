@@ -136,6 +136,19 @@ from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity
 CONTRACT_VERSION = 10
 
 
+def seeded_source_name(vendor: str) -> str:
+    """The name a newly created Source of ``vendor`` starts life with.
+
+    One owner for both create paths. A vendor id is a routing key, not a name,
+    so the shipped catalog's label is the seed wherever it lists the vendor —
+    otherwise a subscription reads as ``xai`` beside an api-key Source of the
+    same vendor reading ``xAI``. Falls back to the id for a vendor the catalog
+    does not list, which is the only name that channel has. The user owns the
+    field from here on; this is the seed, not the display rule.
+    """
+    return catalog_api_key_vendor_label(vendor) or vendor
+
+
 def _storable_backend_model_metadata(
     display_name: object,
     reasoning_efforts: object,
@@ -2705,7 +2718,7 @@ class ModelHubService:
             return flow, repair_result
         await self._create_oauth_source(
             [],
-            display_name=binding.vendor,
+            display_name=seeded_source_name(binding.vendor),
             billing="monthly",
             created_at=self.now().isoformat(),
             oauth_ref=flow_id,
@@ -2760,7 +2773,7 @@ class ModelHubService:
             vendor = normalize_model_hub_vendor_id(vendor)
         except ValueError:
             raise ModelHubError("discovery_failed") from None
-        display_name = payload.get("display_name") or catalog_api_key_vendor_label(vendor) or vendor
+        display_name = payload.get("display_name") or seeded_source_name(vendor)
         if kind not in {"subscription", "api_key"}:
             raise ModelHubError("discovery_failed")
         if (
