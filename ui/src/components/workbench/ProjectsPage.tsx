@@ -52,6 +52,7 @@ import { mobileSessionActions } from './chatSessionActions';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
+import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 
 const DOT: Record<string, string> = {
   running: 'bg-mint shadow-glow-dot-mint',
@@ -93,7 +94,8 @@ const MobileProjectRow: React.FC<{
   state: ProjectSessionsState;
   onToggle: () => void;
   onLeaveToChat: () => void;
-}> = ({ project, open, state, onToggle, onLeaveToChat }) => {
+  dragHandle?: ProjectDragHandle;
+}> = ({ project, open, state, onToggle, onLeaveToChat, dragHandle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { capabilities } = useInstanceAuthorization();
@@ -163,9 +165,10 @@ const MobileProjectRow: React.FC<{
     <>
       <div className="flex items-center pr-1.5">
         <button
+          {...dragHandle}
           type="button"
           onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
+          className="project-drag-header flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
         >
           {open ? <FolderOpen className="size-4 shrink-0 text-cyan-ink" /> : <Folder className="size-4 shrink-0 text-muted" />}
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{project.display_name}</span>
@@ -415,6 +418,8 @@ export const ProjectsPage: React.FC = () => {
     toggleExpanded,
     loadMore,
     reloadSessions,
+    reorderProjects,
+    isReorderingProjects,
   } = useWorkbenchProjectsTree();
   const [showNewProject, setShowNewProject] = useState(false);
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<MobileProjectsVisibleCounts>(
@@ -515,7 +520,11 @@ export const ProjectsPage: React.FC = () => {
         </div>
       )}
 
-      {list.map((project) => {
+      <SortableProjectList projects={list} mobile
+        disabled={!capabilities.can_manage_projects || isReorderingProjects}
+        onReorder={reorderProjects}
+      >
+      {(project, dragHandle) => {
         const open = isExpanded(project.id);
         const state = sessionsOf(project.id);
         const allSessionRows = state.sessions ?? [];
@@ -526,6 +535,7 @@ export const ProjectsPage: React.FC = () => {
         return (
           <div key={project.id} className="overflow-hidden rounded-xl border border-border bg-surface">
             <MobileProjectRow
+              dragHandle={dragHandle}
               project={project}
               open={open}
               state={state}
@@ -581,7 +591,8 @@ export const ProjectsPage: React.FC = () => {
             )}
           </div>
         );
-      })}
+      }}
+      </SortableProjectList>
 
       {showNewProject && canCreateProject && (
         <NewProjectDialog

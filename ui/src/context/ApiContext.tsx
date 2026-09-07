@@ -693,6 +693,7 @@ export type ApiContextType = {
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
   listProjects: (includeArchived?: boolean, options?: { cache?: boolean }) => Promise<{ projects: WorkbenchProject[] }>;
+  reorderProjects: (order: string[], expectedOrder: string[]) => Promise<{ projects: WorkbenchProject[] }>;
   getWorkbenchProjectsBootstrap: (params?: {
     includeArchived?: boolean;
     projectIds?: string[];
@@ -1213,6 +1214,7 @@ export type WorkbenchEventHandlers = {
    * one twice.
    */
   onConnected?: () => void;
+  onProjectsChanged?: () => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -3096,6 +3098,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onAuthorizationChanged?.(envelope.data);
       });
     });
+    source.addEventListener('projects.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<Record<string, never>>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/projects') || path.startsWith('/api/workbench/projects-bootstrap'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onProjectsChanged?.();
+      });
+    });
     source.addEventListener('remote.authorization', (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data) as { state?: RemoteAuthorizationState };
@@ -3916,6 +3927,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return params?.cache === false ? getJson(path) : getCachedJson(path);
     },
     createProject: (payload) => postJson('/api/projects', payload),
+    reorderProjects: async (order, expectedOrder) => {
+      try {
+        const { payloadJson } = await requestJson('/api/projects/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order, expected_order: expectedOrder }),
+        });
+        return payloadJson;
+      } catch (error) {
+        if (!(error instanceof ApiError)) showToast(t('errors.invalid_project_order'), 'error');
+        throw error;
+      }
+    },
     updateProject: async (projectId, payload) => {
       const { payloadJson } = await requestJson(`/api/projects/${encodeURIComponent(projectId)}`, {
         method: 'PATCH',

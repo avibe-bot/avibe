@@ -889,3 +889,21 @@ pre,
   font-size: inherit;
 }
 .vr-fileview-text .vr-fileview-md pre code { font-size: 0.92em; }
+
+/* The project header remains a scroll/tap target until a touch hold activates. */
+.project-drag-header {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.project-drag-header[aria-describedby] { cursor: grab; }
+.project-drag-header[aria-pressed="true"] { cursor: grabbing; }
+.project-drag-preview { animation: project-pickup 140ms ease-out; }
+@keyframes project-pickup {
+  from { opacity: 0.75; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .project-drag-preview { animation: none; }
+  .project-sortable { transition: none !important; }
+}

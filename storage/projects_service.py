@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from storage.agent_session_rows import reserve_write_lock
 from storage import project_access_service
-from storage.models import agents, scope_settings, scopes
+from storage.models import agents, scope_settings, scopes, state_meta
 from vibe.authorization import (
     AuthorizationContext,
     require_instance_role,
@@ -32,6 +33,20 @@ from vibe.authorization import (
 
 PROJECT_PLATFORM = "avibe"
 PROJECT_SCOPE_TYPE = "project"
+PROJECT_ORDER_KEY = "workbench.project_order.v1"
+
+
+class ProjectOrderConflict(ValueError):
+    """The visible order changed since the client began its drag."""
+
+
+def _saved_project_order(conn: Connection) -> list[str]:
+    raw = conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == PROJECT_ORDER_KEY)).scalar_one_or_none()
+    try:
+        order = json.loads(raw) if raw else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return list(dict.fromkeys(item for item in order if isinstance(item, str))) if isinstance(order, list) else []
 
 
 def _utc_now_iso() -> str:
@@ -286,7 +301,7 @@ def list_projects(
     include_archived: bool = False,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return all avibe projects sorted by recency, optionally including archived ones."""
+    """Return projects in saved order, appending unsorted projects by creation."""
 
     query = (
         select(*_PROJECT_COLUMNS)
@@ -295,7 +310,7 @@ def list_projects(
             .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
         )
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .order_by(scopes.c.last_seen_at.desc())
+        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
     )
     rows = conn.execute(query).mappings().all()
     out: list[dict[str, Any]] = []
@@ -305,10 +320,57 @@ def list_projects(
             continue
         out.append(_project_dict(row))
     context = require_instance_role(authorization_context, "viewer")
+    positions = {project_id: index for index, project_id in enumerate(_saved_project_order(conn))}
+    out.sort(key=lambda project: positions.get(project["id"], len(positions)))
     return [
         _project_for_context(conn, context, project)
         for project in project_access_service.filter_accessible_projects(conn, context, out)
     ]
+
+
+def reorder_projects(
+    conn: Connection,
+    order: Any,
+    *,
+    expected_order: Any,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Reorder visible active projects while preserving every other project's slot."""
+    context = require_instance_role(authorization_context, "member")
+    for ids in (order, expected_order):
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError("Project order must be a list of project ids.")
+        if len(ids) != len(set(ids)):
+            raise ValueError("Project order must not contain duplicate ids.")
+    if set(order) != set(expected_order):
+        raise ValueError("Project order must contain the same projects as its baseline.")
+    reserve_write_lock(conn)
+    visible = list_projects(conn, authorization_context=context)
+    if expected_order != [project["id"] for project in visible]:
+        raise ProjectOrderConflict("Project order changed. Refresh the list and try again.")
+
+    # Keep hidden and archived slots; a restricted caller can only permute the
+    # projects they can currently see. New projects follow all existing slots.
+    all_ids = conn.execute(
+        select(scopes.c.native_id)
+        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
+        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
+    ).scalars().all()
+    known = set(all_ids)
+    saved = [project_id for project_id in _saved_project_order(conn) if project_id in known]
+    saved_set = set(saved)
+    complete = saved + [project_id for project_id in all_ids if project_id not in saved_set]
+    visible_ids = set(order)
+    replacement = iter(order)
+    merged = [next(replacement) if project_id in visible_ids else project_id for project_id in complete]
+    statement = sqlite_insert(state_meta).values(
+        key=PROJECT_ORDER_KEY, value_json=json.dumps(merged), updated_at=_utc_now_iso()
+    )
+    conn.execute(statement.on_conflict_do_update(
+        index_elements=[state_meta.c.key],
+        set_={"value_json": statement.excluded.value_json, "updated_at": statement.excluded.updated_at},
+    ))
+    return list_projects(conn, authorization_context=context)
 
 
 def _require_visible_project(
@@ -409,7 +471,7 @@ def create_project(
                 .where(scope_settings.c.scope_id == scope_id)
                 .values(enabled=1, updated_at=now)
             )
-        # Treat (re)opening as recent activity so the project sorts to the top.
+        # Keep the activity timestamp for consumers outside the fixed project tree.
         conn.execute(
             update(scopes)
             .where(scopes.c.id == scope_id)

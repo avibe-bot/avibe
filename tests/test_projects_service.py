@@ -46,6 +46,104 @@ def _ensure_agent(name: str, backend: str) -> str:
         store.close()
 
 
+def _ordered_projects(conn, tmp_path, count=4):
+    rows = []
+    for index in range(count):
+        folder = tmp_path / f"ordered-{index}"
+        folder.mkdir()
+        row = projects_service.create_project(conn, str(folder))
+        conn.execute(scopes.update().where(scopes.c.id == row["scope_id"]).values(
+            first_seen_at=f"2026-01-0{index + 1}T00:00:00Z"
+        ))
+        rows.append(row)
+    return rows
+
+
+def test_project_positions_survive_activity_metadata_and_restoration(engine, tmp_path):
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        for row in rows:
+            projects_service.update_project(conn, row["id"], display_name="Renamed")
+            projects_service.create_project(conn, row["folder_path"])
+        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        saved = list(reversed(ids))
+        projects_service.reorder_projects(conn, saved, expected_order=ids)
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, rows[1]["id"])
+        assert [p["id"] for p in projects_service.list_projects(conn)] == [i for i in saved if i != ids[1]]
+        projects_service.create_project(conn, rows[1]["folder_path"])
+        assert [p["id"] for p in projects_service.list_projects(conn)] == saved
+        fresh = tmp_path / "fresh-project"
+        fresh.mkdir()
+        new = projects_service.create_project(conn, str(fresh))
+        assert [p["id"] for p in projects_service.list_projects(conn)] == [*saved, new["id"]]
+
+
+def test_project_reorder_preserves_hidden_and_archived_slots(engine, tmp_path):
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        _restrict_project_to(conn, ids[1], "insider@example.com")
+        projects_service.archive_project(conn, ids[2])
+        context = _acl_context("member", email="outsider@example.com")
+        result = projects_service.reorder_projects(
+            conn, [ids[3], ids[0]], expected_order=[ids[0], ids[3]], authorization_context=context
+        )
+        assert [p["id"] for p in result] == [ids[3], ids[0]]
+        assert [p["id"] for p in projects_service.list_projects(conn, include_archived=True)] == [
+            ids[3], ids[1], ids[2], ids[0]
+        ]
+
+
+def test_project_reorder_rejects_stale_view_without_changing_saved_order(engine, tmp_path):
+    with engine.begin() as conn:
+        ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
+        saved = list(reversed(ids))
+        projects_service.reorder_projects(conn, saved, expected_order=ids)
+        with pytest.raises(projects_service.ProjectOrderConflict):
+            projects_service.reorder_projects(conn, ids[1:] + ids[:1], expected_order=ids)
+        assert [p["id"] for p in projects_service.list_projects(conn)] == saved
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor"])
+def test_project_reorder_requires_project_management(engine, tmp_path, role):
+    with engine.begin() as conn:
+        ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
+        with pytest.raises(InstanceAuthorizationError):
+            projects_service.reorder_projects(conn, ids[::-1], expected_order=ids, authorization_context=_remote_context(role))
+        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+
+
+@pytest.mark.parametrize("order,expected", [(None, []), ([1], [1]), (["x", "x"], ["x", "x"]), (["x"], []), ([], ["x"])])
+def test_project_reorder_accepts_only_a_permutation(engine, order, expected):
+    with engine.begin() as conn:
+        with pytest.raises(ValueError):
+            projects_service.reorder_projects(conn, order, expected_order=expected)
+
+
+def test_project_reorder_http_roundtrip_and_invalidation(engine, tmp_path, monkeypatch):
+    from vibe.ui_server import app
+    from tests.ui_server_test_helpers import csrf_headers
+
+    events = []
+    monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda *args: events.append(args))
+    with engine.begin() as conn:
+        ids = [row["id"] for row in _ordered_projects(conn, tmp_path)]
+    client = app.test_client()
+    response = client.put("/api/projects/order", json={"order": ids[::-1], "expected_order": ids}, headers=csrf_headers(client))
+    assert response.status_code == 200
+    assert [p["id"] for p in response.get_json()["projects"]] == ids[::-1]
+    assert ("projects.changed", {}) in events
+    bootstrap = client.get("/api/workbench/projects-bootstrap").get_json()
+    assert [p["id"] for p in bootstrap["projects"]] == ids[::-1]
+    stale = client.put("/api/projects/order", json={"order": ids, "expected_order": ids}, headers=csrf_headers(client))
+    assert stale.status_code == 409
+    malformed = client.put("/api/projects/order", json=["project"], headers=csrf_headers(client))
+    assert malformed.status_code == 400
+
+
 def _remote_context(role: str) -> AuthorizationContext:
     return AuthorizationContext(
         instance_role=role,

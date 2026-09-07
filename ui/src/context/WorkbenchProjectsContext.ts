@@ -43,6 +43,8 @@ export interface WorkbenchProjectsActions {
    *  i.e. no project-bound scope) forks with `null` and simply has no row to place. */
   forkSession: (projectId: string | null, sessionId: string) => Promise<WorkbenchSession | null>;
   renameProject: (projectId: string, name: string) => Promise<void>;
+  reorderProjects: (order: string[], expectedOrder: string[]) => Promise<void>;
+  isReorderingProjects: boolean;
   /** Set the project's default Agent route (Project Settings): patches the shared
    *  cache FIRST, so the sidebar + Projects page + the picker's own highlight move
    *  within the click, then persists behind it. Pass an all-null route to clear
@@ -69,7 +71,7 @@ export interface WorkbenchProjectsActions {
    *  tasks/watches/runs) then drops the row from the tree. Throws on failure.
    *  `null` project = standalone session (nothing to drop from the tree). */
   archiveSession: (projectId: string | null, sessionId: string) => Promise<void>;
-  /** Create a project AND place it in the shared tree (dedup-by-id, hoist to top,
+  /** Create a project AND place it in the shared tree (dedup-by-id, append new,
    *  expand, fetch sessions), then return it so the caller can navigate/select.
    *
    *  The commit lives here rather than at the call site because a write is the

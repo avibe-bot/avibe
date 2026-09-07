@@ -12,6 +12,7 @@ import {
 } from './WorkbenchProjectsContext';
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
+import { orderProjects } from '../lib/projectOrder';
 import { overwritesRefusedFields, useCoalescedWrite } from '../lib/useCoalescedWrite';
 import { errorMessage } from '@/lib/errorMessage';
 import { useConsumerActivation } from '@/lib/useConsumerActivation';
@@ -153,6 +154,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const { active, isActive, activate } = useConsumerActivation();
   const [projects, setProjects] = useState<WorkbenchProject[] | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [isReorderingProjects, setIsReorderingProjects] = useState(false);
+  const pendingProjectOrderRef = useRef<string[] | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [sessions, setSessions] = useState<Record<string, ProjectSessionsState>>({});
   const [creating, setCreating] = useState<Set<string>>(new Set());
@@ -247,7 +250,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         | ((prev: WorkbenchProject[] | null) => WorkbenchProject[] | null),
       options?: { confirmed?: ProjectRouteConfirmation[] | null },
     ) => {
-      const requested = typeof next === 'function' ? next(projectsRef.current) : next;
+      const incoming = typeof next === 'function' ? next(projectsRef.current) : next;
+      const requested = incoming && pendingProjectOrderRef.current
+        ? orderProjects(incoming, pendingProjectOrderRef.current)
+        : incoming;
       // ── The in-flight pick outranks every incoming row ────────────────────
       // A read that STARTS after a pick still answers with what the server held
       // before the PATCH committed, and its read stamp is legitimately current —
@@ -991,6 +997,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       onConnected: () => {
         void reconcileProjectTree();
       },
+      onProjectsChanged: () => {
+        acceptProjectsMutation();
+        if (isActive()) void fetchProjects({ cache: false });
+      },
       // An authorization change is invalidation rather than revalidation, and the
       // two answer different questions. Demand decides whether a replacement READ
       // is worth issuing; it never decides whether the cache the change voided is
@@ -1081,9 +1091,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     return disconnect;
   }, [
     acceptSessionMutation,
+    acceptProjectsMutation,
     api,
     discardAuthorizedTree,
     isActive,
+    fetchProjects,
     projectIdForSession,
     readTreeForActiveConsumer,
     reconcileProjectTree,
@@ -1424,18 +1436,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [acceptSessionMutation, api],
   );
 
-  const upsertProjectToTop = useCallback(
+  const upsertProject = useCallback(
     (project: WorkbenchProject) => {
       acceptProjectsMutation();
       // create_project is find-or-create by path: opening a tracked folder returns
-      // the existing project, refreshed. Drop any stale copy, hoist to top, expand.
+      // the existing project, refreshed. Keep its slot, append new rows, expand.
       // The route this snapshot carries can be older than a pick still in flight;
       // defending that is ``commitProjects``' job now, not this call site's. Only
       // the CONFIRMATION stays here: this is a mutation response, so it may not
       // record a token for a route whose write has not answered yet.
       const routeInFlight = latestProjectRouteRef.current.has(project.id);
       commitProjects(
-        (prev) => (prev ? [project, ...prev.filter((p) => p.id !== project.id)] : [project]),
+        (prev) => prev?.some((p) => p.id === project.id)
+          ? prev.map((p) => p.id === project.id ? project : p)
+          : [...(prev ?? []), project],
         routeInFlight ? undefined : { confirmed: [project] },
       );
       setExpanded((prev) => {
@@ -1468,11 +1482,44 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const write = readOwnershipRef.current.beginRead('projects-authorization');
       const project = await api.createProject(payload);
       if (!readOwnershipRef.current.isMutationCurrent(write, 'projects-authorization')) return null;
-      upsertProjectToTop(project);
+      const alreadyVisible = projectsRef.current?.some((p) => p.id === project.id);
+      upsertProject(project);
+      // A restored project may have a saved slot outside the currently visible
+      // list. Reopening a visible project already has the right slot locally.
+      if (!alreadyVisible) void fetchProjects({ cache: false });
       return project;
     },
-    [api, upsertProjectToTop],
+    [api, upsertProject, fetchProjects],
   );
+
+  const reorderProjects = useCallback(async (order: string[], expectedOrder: string[]) => {
+    if (pendingProjectOrderRef.current || order.every((id, index) => id === expectedOrder[index])) return;
+    const write = readOwnershipRef.current.beginRead('projects-authorization');
+    pendingProjectOrderRef.current = order;
+    setIsReorderingProjects(true);
+    acceptProjectsMutation();
+    commitProjects((prev) => prev);
+    try {
+      const result = await api.reorderProjects(order, expectedOrder);
+      if (!readOwnershipRef.current.isMutationCurrent(write, 'projects-authorization')) return;
+      pendingProjectOrderRef.current = null;
+      acceptProjectsMutation();
+      // A reorder owns positions only. A concurrent rename/route save owns its
+      // fields, even if this response was captured before that save completed.
+      commitProjects((prev) => prev && orderProjects(prev, result.projects.map((p) => p.id)));
+    } catch {
+      pendingProjectOrderRef.current = null;
+      if (readOwnershipRef.current.isMutationCurrent(write, 'projects-authorization')) {
+        commitProjects((prev) => prev && orderProjects(prev, expectedOrder));
+      }
+      // The shared API layer reports the failure; re-read also resolves an
+      // ambiguous transport failure where the server may have saved the move.
+    } finally {
+      pendingProjectOrderRef.current = null;
+      setIsReorderingProjects(false);
+      void fetchProjects({ cache: false });
+    }
+  }, [acceptProjectsMutation, api, commitProjects, fetchProjects]);
 
   const sessionsOf = useCallback((projectId: string) => sessions[projectId] ?? EMPTY_SESSIONS, [sessions]);
   const isExpanded = useCallback((projectId: string) => expanded.has(projectId), [expanded]);
@@ -1496,6 +1543,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       createSessionForProject,
       forkSession,
       renameProject,
+      reorderProjects,
+      isReorderingProjects,
       setProjectDefaultAgent,
       isSavingDefaultAgent,
       archiveProject,
@@ -1519,6 +1568,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       createSessionForProject,
       forkSession,
       renameProject,
+      reorderProjects,
+      isReorderingProjects,
       setProjectDefaultAgent,
       isSavingDefaultAgent,
       archiveProject,

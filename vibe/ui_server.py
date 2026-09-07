@@ -8333,6 +8333,30 @@ def projects_create():
     return jsonify(project), 201
 
 
+@app.route("/api/projects/order", methods=["PUT"])
+def projects_order_put():
+    from storage import projects_service
+    from vibe.sse_broker import broker
+
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return _coded_error_response("invalid_project_order", "Project order must be an object.", 400)
+    try:
+        with _projects_engine().begin() as conn:
+            projects = projects_service.reorder_projects(
+                conn,
+                payload.get("order"),
+                expected_order=payload.get("expected_order"),
+                authorization_context=getattr(g, "authorization_context", None),
+            )
+    except projects_service.ProjectOrderConflict as exc:
+        return _coded_error_response("project_order_conflict", str(exc), 409)
+    except ValueError as exc:
+        return _coded_error_response("invalid_project_order", str(exc), 400)
+    broker.publish("projects.changed", {})
+    return jsonify({"projects": projects})
+
+
 @app.route("/api/projects/<project_id>", methods=["GET"])
 def projects_get(project_id: str):
     from storage import projects_service
