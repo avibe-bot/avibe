@@ -8340,7 +8340,7 @@ def projects_order_put():
 
     payload = request.json or {}
     if not isinstance(payload, dict):
-        return _coded_error_response("invalid_project_order", "Project order must be an object.", 400)
+        return _coded_error_response("invalid_project_order", t("projects.orderInvalid", _request_ui_language()), 400)
     try:
         with _projects_engine().begin() as conn:
             projects = projects_service.reorder_projects(
@@ -8349,10 +8349,10 @@ def projects_order_put():
                 expected_order=payload.get("expected_order"),
                 authorization_context=getattr(g, "authorization_context", None),
             )
-    except projects_service.ProjectOrderConflict as exc:
-        return _coded_error_response("project_order_conflict", str(exc), 409)
-    except ValueError as exc:
-        return _coded_error_response("invalid_project_order", str(exc), 400)
+    except projects_service.ProjectOrderConflict:
+        return _coded_error_response("project_order_conflict", t("projects.orderConflict", _request_ui_language()), 409)
+    except ValueError:
+        return _coded_error_response("invalid_project_order", t("projects.orderInvalid", _request_ui_language()), 400)
     broker.publish("projects.changed", {})
     return jsonify({"projects": projects})
 
@@ -11855,6 +11855,9 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
         return True
     data = _workbench_event_data(payload)
+    if event_type == "projects.changed":
+        # This global invalidation is safe only while it carries no project data.
+        return context.has_role("viewer") and data == {}
     if data is None:
         return False
 

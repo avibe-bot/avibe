@@ -5,7 +5,8 @@
 Project navigation retains its order independently of activity, names, or
 session state. Without a saved order, projects follow creation time ascending
 with their stable id as the tie-breaker. Newly created projects append. Saved
-positions survive archiving and restoration.
+positions survive archiving and restoration. Creation appends to the same saved
+order in its write transaction, independently of timestamp precision or id values.
 
 The existing project service owns the order in `state_meta` under
 `workbench.project_order.v1`. `PUT /api/projects/order` accepts `order` and
@@ -42,3 +43,14 @@ route and SQLite persistence independently of the browser fixture.
 Implementation uses dnd-kit for touch activation, collision detection,
 auto-scrolling, keyboard movement, and sortable transforms. It is recorded in
 the UI manifest and lockfile; existing layout and visual tokens are reused.
+
+## Review Inventory
+
+Head `5c7ef040a3`, review `5128930144`: three findings, one reviewed head.
+Root-cause classes are the second SSE visibility gate, timestamp-based insertion
+ordering, and untranslated API fallback messages. No repeated-class threshold
+has been reached. The scoped fixes use the existing global-invalidation path
+with an empty-payload policy, the existing order record during creation, and
+the backend translation catalogs. Regression tests cover the real SSE generator
+for every non-owner instance role, creation under a fixed/backwards clock with
+adversarial ids, and every error branch in both supported languages.

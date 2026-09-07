@@ -49,6 +49,28 @@ def _saved_project_order(conn: Connection) -> list[str]:
     return list(dict.fromkeys(item for item in order if isinstance(item, str))) if isinstance(order, list) else []
 
 
+def _complete_project_order(conn: Connection) -> list[str]:
+    all_ids = conn.execute(
+        select(scopes.c.native_id)
+        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
+        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
+    ).scalars().all()
+    known = set(all_ids)
+    saved = [project_id for project_id in _saved_project_order(conn) if project_id in known]
+    saved_set = set(saved)
+    return saved + [project_id for project_id in all_ids if project_id not in saved_set]
+
+
+def _save_project_order(conn: Connection, order: list[str]) -> None:
+    statement = sqlite_insert(state_meta).values(
+        key=PROJECT_ORDER_KEY, value_json=json.dumps(order), updated_at=_utc_now_iso()
+    )
+    conn.execute(statement.on_conflict_do_update(
+        index_elements=[state_meta.c.key],
+        set_={"value_json": statement.excluded.value_json, "updated_at": statement.excluded.updated_at},
+    ))
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -351,25 +373,11 @@ def reorder_projects(
 
     # Keep hidden and archived slots; a restricted caller can only permute the
     # projects they can currently see. New projects follow all existing slots.
-    all_ids = conn.execute(
-        select(scopes.c.native_id)
-        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
-    ).scalars().all()
-    known = set(all_ids)
-    saved = [project_id for project_id in _saved_project_order(conn) if project_id in known]
-    saved_set = set(saved)
-    complete = saved + [project_id for project_id in all_ids if project_id not in saved_set]
+    complete = _complete_project_order(conn)
     visible_ids = set(order)
     replacement = iter(order)
     merged = [next(replacement) if project_id in visible_ids else project_id for project_id in complete]
-    statement = sqlite_insert(state_meta).values(
-        key=PROJECT_ORDER_KEY, value_json=json.dumps(merged), updated_at=_utc_now_iso()
-    )
-    conn.execute(statement.on_conflict_do_update(
-        index_elements=[state_meta.c.key],
-        set_={"value_json": statement.excluded.value_json, "updated_at": statement.excluded.updated_at},
-    ))
+    _save_project_order(conn, merged)
     return list_projects(conn, authorization_context=context)
 
 
@@ -460,6 +468,7 @@ def create_project(
 
     context = require_instance_role(authorization_context, "member")
     folder = _resolve_folder(folder_path)
+    reserve_write_lock(conn)
     now = _utc_now_iso()
 
     existing = _find_project_by_workdir(conn, context, str(folder))
@@ -482,6 +491,7 @@ def create_project(
     project_id = _new_project_id()
     scope_id = _make_scope_id(project_id)
     name = (display_name or folder.name).strip() or project_id
+    order = _complete_project_order(conn)
 
     conn.execute(
         scopes.insert().values(
@@ -517,6 +527,7 @@ def create_project(
             updated_at=now,
         )
     )
+    _save_project_order(conn, [*order, project_id])
     return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 

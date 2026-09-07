@@ -8,6 +8,8 @@ project is restored after archiving, without a dedicated unarchive endpoint.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,7 @@ from storage import (
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import scope_settings, scopes
+from storage.models import scope_settings, scopes, state_meta
 from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
 
 
@@ -57,6 +59,36 @@ def _ordered_projects(conn, tmp_path, count=4):
         ))
         rows.append(row)
     return rows
+
+
+def test_project_creation_appends_independently_of_clock_and_random_id(engine, tmp_path, monkeypatch):
+    clock = "2026-01-01T00:00:00Z"
+    monkeypatch.setattr(projects_service, "_utc_now_iso", lambda: clock)
+    generated = iter(["proj_z", "proj_a", "proj_m"])
+    monkeypatch.setattr(projects_service, "_new_project_id", lambda: next(generated))
+    created = []
+    for index in range(3):
+        folder = tmp_path / f"same-second-{index}"
+        folder.mkdir()
+        with engine.begin() as conn:
+            created.append(projects_service.create_project(conn, str(folder))["id"])
+        with engine.connect() as conn:
+            assert [p["id"] for p in projects_service.list_projects(conn)] == created
+        # Even a backwards wall-clock adjustment cannot insert the next row ahead.
+        if index == 1:
+            clock = "2025-12-31T23:59:59Z"
+
+
+def test_first_creation_preserves_legacy_project_order(engine, tmp_path):
+    with engine.begin() as conn:
+        rows = _ordered_projects(conn, tmp_path)
+        ids = [row["id"] for row in rows]
+        conn.execute(state_meta.delete().where(state_meta.c.key == projects_service.PROJECT_ORDER_KEY))
+        assert [p["id"] for p in projects_service.list_projects(conn)] == ids
+        folder = tmp_path / "post-upgrade"
+        folder.mkdir()
+        new = projects_service.create_project(conn, str(folder))
+        assert [p["id"] for p in projects_service.list_projects(conn)] == [*ids, new["id"]]
 
 
 def test_project_positions_survive_activity_metadata_and_restoration(engine, tmp_path):
@@ -142,6 +174,62 @@ def test_project_reorder_http_roundtrip_and_invalidation(engine, tmp_path, monke
     assert stale.status_code == 409
     malformed = client.put("/api/projects/order", json=["project"], headers=csrf_headers(client))
     assert malformed.status_code == 400
+
+
+@pytest.mark.parametrize("lang", ["en", "zh"])
+@pytest.mark.parametrize("payload,key,code,status", [
+    (["invalid"], "orderInvalid", "invalid_project_order", 400),
+    ({}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": [1], "expected_order": [1]}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": ["x", "x"], "expected_order": ["x", "x"]}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": ["x"], "expected_order": []}, "orderInvalid", "invalid_project_order", 400),
+    ({"order": [], "expected_order": []}, "orderConflict", "project_order_conflict", 409),
+])
+def test_project_order_api_errors_keep_codes_and_localized_fallbacks(engine, tmp_path, lang, payload, key, code, status):
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe.i18n import t
+    from vibe.ui_server import app
+
+    with engine.begin() as conn:
+        _ordered_projects(conn, tmp_path, count=1)
+    client = app.test_client()
+    response = client.put("/api/projects/order", json=payload, headers={
+        **csrf_headers(client), "Accept-Language": lang,
+    })
+    assert response.status_code == status
+    expected = t(f"projects.{key}", lang)
+    assert expected != f"projects.{key}"
+    assert t(f"projects.{key}", "en") != t(f"projects.{key}", "zh")
+    assert response.get_json()["error"] == {"code": code, "message": expected}
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor", "member"])
+def test_remote_project_order_invalidation_reaches_the_real_event_stream(role):
+    from vibe import ui_server
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    async def collect():
+        with ui_server.app.test_request_context("/api/events"):
+            g.authorization_context = _remote_context(role)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                broker.publish("projects.changed", {"project_ids": ["hidden-project"]})
+                broker.publish("projects.changed", {})
+                return await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+
+    frame = asyncio.run(collect())
+    if isinstance(frame, bytes):
+        frame = frame.decode("utf-8")
+    assert "event: projects.changed\n" in frame
+    assert "hidden-project" not in frame
+    data = next(line.removeprefix("data: ") for line in frame.splitlines() if line.startswith("data: "))
+    assert json.loads(data)["data"] == {}
 
 
 def _remote_context(role: str) -> AuthorizationContext:
