@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
 
 import aiohttp
+import jwt
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
@@ -140,9 +141,9 @@ class _ProtocolObservationTaxonomy:
     """One protocol's request shape and response evidence table.
 
     The request path and body are part of the same authority as the response
-    taxonomy. OpenAI probes deliberately provide the common ``model`` field
-    while omitting the candidate-specific ``input`` or ``messages`` field, so
-    each endpoint reaches its own protocol-shaped validation error.
+    taxonomy. Every probe omits ``model`` so observation does not request model
+    scheduling. A validation error supplies only provisional authentication;
+    the transport must independently establish credential-sensitive evidence.
     """
 
     request_path: str
@@ -621,7 +622,17 @@ def _owner_authentication_candidate(
     return evidence
 
 
-def _control_api_key(secret: str) -> str:
+def _control_credential(secret: str) -> str:
+    prefix, separator, signature = secret.rpartition(".")
+    if separator and signature:
+        try:
+            jwt.decode(secret, options={"verify_signature": False})
+        except jwt.PyJWTError:
+            pass
+        else:
+            # Preserve JWT header, claims and signature length. Change the first
+            # sextet so this cannot alter only unused base64 padding bits.
+            return prefix + "." + ("B" if signature[0] == "A" else "A") + signature[1:]
     # Preserve the existing prefix, length and ASCII character class where
     # possible, without ever reusing punctuation-only or other opaque keys.
     for index in range(len(secret) - 1, -1, -1):
@@ -706,7 +717,7 @@ async def _probe_protocol_response(
             evidence = await request(headers)
             if evidence.authentication is not _AuthenticationEvidence.ACCEPTED:
                 return evidence
-            control_secret = _control_api_key(secret)
+            control_secret = _control_credential(secret)
             control_headers = dict(headers)
             if protocol == "anthropic":
                 control_headers["x-api-key"] = control_secret
@@ -879,6 +890,8 @@ def _probe_oauth_protocol_response(
     auth: _AuthRecord,
     vendor: str,
     protocol: str,
+    state_store: EngineStateStore,
+    credential_ref: str,
 ) -> _ProtocolEvidence:
     """Probe one allowlisted OAuth upstream through the engine-held credential."""
 
@@ -888,7 +901,6 @@ def _probe_oauth_protocol_response(
     if vendor == "anthropic" and protocol == "anthropic":
         url = f"https://api.anthropic.com{taxonomy.oauth_path or taxonomy.request_path}"
         headers = {
-            "Authorization": "Bearer $TOKEN$",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Anthropic-Version": "2023-06-01",
@@ -898,7 +910,6 @@ def _probe_oauth_protocol_response(
     elif vendor in {"openai", "codex"} and protocol == "openai_responses":
         url = f"https://chatgpt.com{taxonomy.oauth_path or taxonomy.request_path}"
         headers = {
-            "Authorization": "Bearer $TOKEN$",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Originator": "codex-tui",
@@ -910,6 +921,13 @@ def _probe_oauth_protocol_response(
             "OAuth credential does not support this protocol path",
             status_code=404,
         )
+    try:
+        token = state_store.read_oauth_access_token(credential_ref)
+    except EngineStateError:
+        raise EngineClientError("OAuth probe credential is unavailable", error_type="credential_unavailable") from None
+    # Both requests must use one snapshot; engine substitution could refresh or
+    # replace the candidate between deriving the control and sending the probe.
+    headers["Authorization"] = f"Bearer {token}"
     def request(probe_headers: dict[str, str], *, is_control: bool = False) -> _ProtocolEvidence:
         payload = client.management_request(
             "POST",
@@ -940,7 +958,7 @@ def _probe_oauth_protocol_response(
     evidence = request(headers)
     if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
         control = request(
-            {**headers, "Authorization": f"Bearer avibe-control-{secrets.token_hex(16)}"}, is_control=True,
+            {**headers, "Authorization": f"Bearer {_control_credential(token)}"}, is_control=True,
         )
         if control.authentication is not _AuthenticationEvidence.REJECTED:
             return replace(evidence, authentication=_AuthenticationEvidence.UNKNOWN)
@@ -1744,6 +1762,8 @@ class CLIProxyEngineAdapter:
                         auth=oauth_auth,
                         vendor=normalized_vendor,
                         protocol=protocol,
+                        state_store=self.state_store,
+                        credential_ref=credential_ref,
                     )
             except EngineClientError as exc:
                 failures.append(exc)

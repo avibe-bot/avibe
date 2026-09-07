@@ -4,6 +4,7 @@ import ast
 import asyncio
 import inspect
 import json
+import re
 import tempfile
 import threading
 from collections import deque
@@ -16,7 +17,9 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
+import jwt
 import pytest
+import yaml
 from aiohttp import web
 from jsonschema import Draft7Validator, FormatChecker
 from sqlalchemy import create_engine, delete, select
@@ -99,7 +102,7 @@ from vibe.model_hub_runtime.adapter import (
     _authenticate_protected_inventory,
     _AuthenticationEvidence,
     CLIProxyEngineAdapter,
-    _control_api_key,
+    _control_credential,
     _owner_authentication_candidate,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
@@ -7187,7 +7190,7 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
 
 @pytest.mark.parametrize("secret", [chr(code) * 3 for code in range(33, 127)] + ["", "\u00e9\u00e9", "\u4e2d\u6587", "sk-proj-!A!"])
 def test_api_key_control_is_distinct_for_the_complete_opaque_input_domain(secret: str) -> None:
-    control = _control_api_key(secret)
+    control = _control_credential(secret)
     assert control != secret
     assert control
     if secret:
@@ -7198,6 +7201,43 @@ def test_api_key_control_is_distinct_for_the_complete_opaque_input_domain(secret
         for first, last in (("0", "9"), ("a", "z"), ("A", "Z")):
             if first <= before <= last:
                 assert first <= after <= last
+
+
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("algorithm", ["HS256", "RS256"])
+def test_structured_credential_control_changes_signature_not_claims(expired: bool, algorithm: str) -> None:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    signing_key = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        if algorithm == "RS256" else "test-credential-control-key-with-32-bytes"
+    )
+    verification_key = signing_key.public_key() if algorithm == "RS256" else signing_key
+    claims = {"sub": "account-test", "exp": 1 if expired else 4000000000, "scope": "model.read"}
+    token = jwt.encode(claims, signing_key, algorithm=algorithm, headers={"kid": "test-key"})
+    control = _control_credential(token)
+    assert jwt.get_unverified_header(control) == jwt.get_unverified_header(token)
+    assert jwt.decode(control, options={"verify_signature": False}) == claims
+    assert len(control) == len(token)
+    assert control.rpartition(".")[0] == token.rpartition(".")[0]
+    with pytest.raises(jwt.InvalidSignatureError):
+        jwt.decode(control, verification_key, algorithms=[algorithm], options={"verify_exp": False})
+
+
+def test_auth_setup_executable_scenarios_are_registered() -> None:
+    root = Path(__file__).parent / "scenarios/auth_setup"
+    catalog = yaml.safe_load((root / "catalog.yaml").read_text())
+    registered = {entry["id"]: entry for entry in catalog["scenarios"]}
+    tree = ast.parse((root / "test_auth_setup_scenarios.py").read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        doc = ast.get_docstring(node) or ""
+        match = re.match(r"Scenario:\s+(AUTH-SETUP-\d+)\b", doc)
+        if match:
+            scenario_id = match.group(1)
+            assert scenario_id in registered, (scenario_id, node.name)
+            assert registered[scenario_id]["test"].endswith("::" + node.name)
 
 
 @pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
@@ -7249,6 +7289,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         vendor,
         "codex-test.json",
     )
+    state_store._secure_write_json(state_store.auth_dir / "codex-test.json", {"access_token": "test-oauth-token"})
     client = Mock()
     api_calls: list[dict] = []
 
@@ -7267,7 +7308,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
             }
         if path == "/api-call":
             api_calls.append(payload)
-            if payload["header"]["Authorization"] != "Bearer $TOKEN$":
+            if payload["header"]["Authorization"] != "Bearer test-oauth-token":
                 return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
             return {
                 "status_code": 400,

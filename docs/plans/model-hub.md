@@ -360,6 +360,9 @@ alone can precede authorization. The model-free probe must reject a control
 credential, or a protected API-key model-list endpoint must reject that control
 and accept the supplied key. Public inventory and the inventory waiver never
 establish authentication; protocol owners cannot override explicit rejection.
+The control must preserve the candidate's credential structure, not merely its
+presence. JWT controls retain the header, claims and signature length, changing
+signature bytes; opaque controls retain the preceding prefix and length.
 
 For OpenAI/Codex Hub subscriptions, the bound OAuth transport owns the fixed
 official Responses endpoint. Model-free observation may combine that endpoint
@@ -368,6 +371,11 @@ missing-model error, to establish `openai_responses` (2026-09-07). Login success
 alone, unknown authentication, and credential rejection do not establish it.
 This does not grant endpoint ownership to user-supplied API-key URLs or relax
 `custom` Auto detection.
+Inside the private runtime, OAuth probes read the bound managed access-token
+file after path and permission checks. Candidate and control use the same
+ephemeral snapshot on the existing allowlisted engine transport and auth index;
+neither is written back or exposed through Model Hub API results, events, logs,
+or Agent configuration. Missing or unsafe material cannot establish proof.
 
 The form exposes a vendor select first (V4 06r / 模型网关 05). Auto detect plus
 the three supported protocols remain on `custom`. A failed observation still

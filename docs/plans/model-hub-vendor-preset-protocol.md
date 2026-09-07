@@ -172,9 +172,10 @@ observation can instead verify that the existing model-list path rejects the
 control and accepts the supplied key. Public or indeterminate inventory cannot
 prove authentication, and `accept_unavailable_inventory` cannot waive it.
 Explicit credential rejection is never overridden by a vendor pin/declaration.
-The API-key control is always distinct, including punctuation-only credentials.
-It changes one character while preserving length and the preceding prefix, and
-retains the ASCII character class where possible. All requests remain model-free,
+The shared credential control is always distinct, including punctuation-only
+credentials. It preserves length and the preceding prefix, retaining the ASCII
+character class where possible. For JWTs it preserves the header and claims and
+changes signature bytes without changing signature length. All API-key requests remain model-free,
 non-redirecting, and bounded by the observation deadline.
 Status-only rejection applies only to catalog/declaration-owned candidates or
 deliberately changed control credentials. Unrecognized primary 401/403 responses
@@ -201,6 +202,13 @@ Missing-model validation succeeds; credential rejection, rate limiting, upstream
 errors, and unstructured success responses create no Source.
 Identical validation responses for candidate/control credentials also create no
 Source; the engine's local OAuth inventory is not an upstream authentication probe.
+The scenario also covers syntax checks before schema checks before signature
+verification, with valid and expired JWTs and valid/invalid opaque OAuth tokens.
+OAuth candidate/control requests share one private managed-token snapshot; no
+fabricated token format or engine-local model list can substitute for proof.
+The runtime never rewrites the token file or surfaces its content through Model
+Hub API results, events, logs or Agent configuration. Unsafe or unavailable
+managed material leaves observation unverified.
 
 ## Acceptance
 

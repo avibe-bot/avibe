@@ -1780,6 +1780,33 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("invalid_state", [None, "missing", "no_token", "invalid_json", "permissions", "symlink", "path_escape"])
+def test_oauth_probe_reads_only_private_bound_material(tmp_path: Path, invalid_state) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    name = "../outside.json" if invalid_state == "path_escape" else "oauth-test.json"
+    credential_ref = store.bind_oauth_credential("src_oauthprobe", "openai", name)
+    path = store.auth_dir / "oauth-test.json"
+    token = "test-private-oauth-token"
+    if invalid_state == "symlink":
+        outside = tmp_path / "outside.json"
+        outside.write_text(json.dumps({"access_token": token}))
+        store.auth_dir.mkdir(mode=0o700)
+        path.symlink_to(outside)
+    elif invalid_state != "missing":
+        store._secure_write_json(path, {} if invalid_state == "no_token" else {"access_token": token})
+        if invalid_state == "invalid_json":
+            path.write_text("not-json")
+        if invalid_state == "permissions":
+            path.chmod(0o644)
+    before = path.read_bytes() if path.exists() else None
+    if invalid_state is None:
+        assert store.read_oauth_access_token(credential_ref) == token
+    else:
+        with pytest.raises(EngineStateError):
+            store.read_oauth_access_token(credential_ref)
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
 def test_source_record_requires_valid_reasoning_state() -> None:
     payload = {
         "source_id": "src_fixture123",

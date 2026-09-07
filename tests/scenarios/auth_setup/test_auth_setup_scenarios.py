@@ -2841,8 +2841,10 @@ def test_api_key_setup_does_not_schedule_a_model(
     ],
 )
 @pytest.mark.parametrize("validation_before_auth", [False, True])
+@pytest.mark.parametrize("vendor", ["openai", "anthropic"])
+@pytest.mark.parametrize("credential_valid", [True, False])
 def test_hub_oauth_model_free_observation_closed_loop(
-    monkeypatch, tmp_path, status, body, creates_source, validation_before_auth,
+    monkeypatch, tmp_path, caplog, status, body, creates_source, validation_before_auth, vendor, credential_valid,
 ):
     """Scenario: AUTH-SETUP-113"""
     from tests.test_model_hub_api import _service
@@ -2853,28 +2855,57 @@ def test_hub_oauth_model_free_observation_closed_loop(
     state_store = EngineStateStore(tmp_path / "engine-state")
     api_calls = []
     inventory_calls = []
-    creates_source = creates_source and not validation_before_auth
+    creates_source = creates_source and not validation_before_auth and credential_valid
+    protocol = "openai_responses" if vendor == "openai" else "anthropic"
+    if vendor == "anthropic" and "error" in body:
+        body = {"type": "error", **body}
+    signing_key = "test-oauth-signature-key-with-32-bytes"
+    bound_token = (
+        jwt.encode({"sub": "account-test", "exp": time.time() + (3600 if credential_valid else -3600)}, signing_key)
+        if vendor == "openai"
+        else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
+    )
+    auth_name = "oauth-test.json"
+    state_store._secure_write_json(state_store.auth_dir / auth_name, {"access_token": bound_token})
 
     def management_request(method, path, *, query=None, payload=None):
         if path == "/auth-files":
             return {"files": [{
                 "id": "codex-test", "auth_index": "auth-index-test",
-                "name": "codex-test.json", "provider": "codex",
+                "name": auth_name, "provider": "codex" if vendor == "openai" else "claude",
                 "id_token": {"chatgpt_account_id": "account-test"},
             }]}
         if path == "/api-call":
             assert method == "POST"
             assert payload["auth_index"] == "auth-index-test"
-            assert payload["url"] == "https://chatgpt.com/backend-api/codex/responses"
-            assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
+            assert payload["url"] == (
+                "https://chatgpt.com/backend-api/codex/responses" if vendor == "openai"
+                else "https://api.anthropic.com/v1/messages?beta=true"
+            )
+            if vendor == "openai":
+                assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
             assert "model" not in json.loads(payload["data"])
             api_calls.append(payload)
-            if not validation_before_auth and payload["header"]["Authorization"] != "Bearer $TOKEN$":
+            token = payload["header"]["Authorization"].removeprefix("Bearer ").replace("$TOKEN$", bound_token)
+            try:
+                if vendor == "openai":
+                    jwt.decode(token, options={"verify_signature": False})
+                elif not re.fullmatch(r"sk-ant-oat01-[a-z-]+", token):
+                    raise ValueError("Malformed opaque token")
+            except (jwt.PyJWTError, ValueError):
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
+            if validation_before_auth and status == 400:
+                return {"status_code": status, "body": json.dumps(body)}
+            try:
+                if vendor == "openai":
+                    jwt.decode(token, signing_key, algorithms=["HS256"])
+                elif token != "sk-ant-oat01-test-valid":
+                    raise ValueError("Invalid opaque token")
+            except (jwt.PyJWTError, ValueError):
                 return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
             return {"status_code": status, "body": json.dumps(body)}
         if path == "/auth-files/models":
-            assert creates_source
-            assert query == {"name": "codex-test.json"}
+            assert query == {"name": auth_name}
             inventory_calls.append(query)
             return {"models": [{"id": "gpt-5.6"}]}
         raise AssertionError((method, path))
@@ -2892,13 +2923,13 @@ def test_hub_oauth_model_free_observation_closed_loop(
     runner = ScenarioRunner(harness)
 
     async def start_login(h):
-        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        started = await service.oauth_start({"vendor": vendor, "channel": "hub"})
         h.flow_id = started["flow"]["flow_id"]
         assert not store.config.sources
 
     async def complete_consent(h):
         flow = adapter.flows[h.flow_id]
-        h.credential_ref = state_store.bind_oauth_credential(flow.source_id, "openai", "codex-test.json")
+        h.credential_ref = state_store.bind_oauth_credential(flow.source_id, vendor, auth_name)
         adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
 
     async def materialize_source(h):
@@ -2906,11 +2937,12 @@ def test_hub_oauth_model_free_observation_closed_loop(
             terminal = await service.oauth_status(h.flow_id)
             source = terminal["source"]
             assert terminal["flow"]["state"] == "success"
-            assert source["protocol"] == "openai_responses"
+            assert source["protocol"] == protocol
             assert source["supply_channel"] == "hub"
             assert source["credential_ref"] == h.credential_ref
             assert [model["id"] for model in source["models"]] == ["gpt-5.6"]
             assert service.list_sources() == [source]
+            assert bound_token not in json.dumps(terminal)
             assert (await service.oauth_status(h.flow_id))["source"] == source
             assert adapter.revoked == []
         else:
@@ -2918,8 +2950,10 @@ def test_hub_oauth_model_free_observation_closed_loop(
                 await service.oauth_status(h.flow_id)
             assert not store.config.sources
             assert adapter.revoked == [h.credential_ref]
-        assert len(api_calls) == (2 if status == 400 else 1)
+        assert len(api_calls) == (2 if status == 400 and (credential_valid or validation_before_auth) else 1)
         assert len(inventory_calls) == int(creates_source)
+        assert json.loads((state_store.auth_dir / auth_name).read_text())["access_token"] == bound_token
+        assert bound_token not in caplog.text
 
     asyncio.run(runner.run(
         ScenarioStep("start_login", start_login),

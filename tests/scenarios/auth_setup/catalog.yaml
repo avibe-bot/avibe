@@ -125,8 +125,15 @@ scenarios:
     status: covered
     kind: negative_path
     layer: scenario
-    backend: codex
+    backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_model_free_observation_closed_loop
+  - id: AUTH-SETUP-114
+    name: Auto policy responses neither reject credentials nor falsely exclude competing protocols
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_custom_auto_policy_response_cannot_reject_or_exclude_credentials
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
