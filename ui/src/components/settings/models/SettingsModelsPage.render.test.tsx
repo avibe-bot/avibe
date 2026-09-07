@@ -125,9 +125,9 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
-const renderPage = (sources: Source[]) => {
+const renderPage = (sources: Source[], agents?: AgentSupply[]) => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
-  vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+  vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(agents ?? [
     directAgent('claude'),
     directAgent('codex'),
     directAgent('opencode'),
@@ -165,6 +165,29 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  it.each(['automatic', 'passthrough', 'manual'] as const)('renders %s relations from the actual chain collection for all backends', async (origin) => {
+    const agents = (['claude', 'codex', 'opencode'] as const).map((backend): AgentSupply => ({
+      ...takeoverAgent, backend, sources: { order: [retainedSource.id], eligibility: [] },
+      routes: origin === 'manual' ? { 'gpt-5.6-sol': { hops: [{ source_id: retainedSource.id, model_id: 'upstream' }] } } : {},
+      model_supply: [{ model_id: 'gpt-5.6-sol', route_origin: origin, chain_length: 1, has_runnable_hop: true }],
+    }));
+    vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(async (backend) => [{
+      ...takeoverChain, backend, route_origin: origin,
+      manual_override: agents.find((agent) => agent.backend === backend)?.routes?.['gpt-5.6-sol'] ?? null,
+      current: { source_id: retainedSource.id, model_id: 'upstream' },
+      chain: [{ ...takeoverChain.chain[1], source_id: retainedSource.id, model_id: 'upstream' }], supply_state: 'ok',
+    }]);
+    const view = renderPage([retainedSource], agents);
+    await waitFor(() => expect(view.container.querySelectorAll('[data-wire-source-id="src_retained"]')).toHaveLength(3));
+    await waitFor(() => {
+      for (const backend of ['claude', 'codex', 'opencode']) {
+        expect(view.container.querySelector(`[data-wire-agent-backend="${backend}"]`)?.classList
+          .contains(`model-hub-wire--${origin === 'passthrough' ? 'passthrough' : 'gateway'}`)).toBe(true);
+      }
+    });
+    if (origin === 'passthrough') expect(view.container.querySelector('.model-hub-legend-swatch--passthrough')).not.toBeNull();
+  });
+
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
     const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
     const addedId = 'catalog-model-added';

@@ -129,10 +129,11 @@ export const SupplyGraph: React.FC<{
   );
 };
 
-const LEGEND_ORDER: SupplyRelationKind[] = ['native', 'gateway', 'connected_unused', 'takeover', 'unavailable'];
+const LEGEND_ORDER: SupplyRelationKind[] = ['native', 'gateway', 'passthrough', 'connected_unused', 'takeover', 'unavailable'];
 const LEGEND_COPY: Record<SupplyRelationKind, string> = {
   native: 'native',
   gateway: 'viaGateway',
+  passthrough: 'passthrough',
   connected_unused: 'connectedUnused',
   takeover: 'takeover',
   unavailable: 'unavailable',

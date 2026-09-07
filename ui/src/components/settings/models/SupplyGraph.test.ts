@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { modelChainKey } from './modelRows';
-import { readyRegion } from './regionRead';
+import { degradedRegion, loadingRegion, readyRegion, unreadRegion } from './regionRead';
 import { freshRuntimeProjection } from './runtimeLifecycle';
 import { buildSupplyRelations as buildRelations } from './supplyRelations';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
@@ -60,6 +60,80 @@ const chain = (current: string, headHealth: AgentChain['chain'][number]['health'
 });
 
 describe('buildSupplyRelations', () => {
+  describe.each(['claude', 'codex', 'opencode'] as const)('%s effective routes', (backend) => {
+    it.each(['automatic', 'passthrough', 'manual'] as const)('draws every %s supplier once from the effective chain', (origin) => {
+      const projection: AgentChain = { ...chain('relay'), backend, route_origin: origin,
+        chain: chain('relay').chain.map((hop) => ({ ...hop, channel: 'hub' })),
+        manual_override: origin === 'manual' ? chain('relay').manual_override : null };
+      const supplied: AgentSupply = { ...agent, backend,
+        menu_kind: backend === 'opencode' ? 'open' : 'fixed', menu: { view: 'featured', checked: ['model-a'] },
+        routes: origin === 'manual' ? agent.routes : {},
+        model_supply: [{ model_id: 'model-a', route_origin: origin, chain_length: 3, has_runnable_hop: true }] };
+      const sources = [source('native', 'hub'), source('relay', 'hub'), source('unused', 'hub'), source('off-route', 'hub')];
+      expect(buildSupplyRelations([supplied], sources, { [modelChainKey(backend, 'model-a')]: readyRegion(projection) })).toEqual([
+        { sourceId: 'native', backend, kind: 'connected_unused' },
+        { sourceId: 'relay', backend, kind: origin === 'passthrough' ? 'passthrough' : 'gateway' },
+        { sourceId: 'unused', backend, kind: 'connected_unused' },
+      ]);
+    });
+  });
+
+  it('unions all catalog chains, deduplicates sources and keeps mixed origins in normal supply ink', () => {
+    const ids = Array.from({ length: 8 }, (_, index) => `model-${index}`);
+    const supplied: AgentSupply = { ...agent, routes: {}, builtin_models: ids, model_supply: [] };
+    const chains = Object.fromEntries(ids.map((modelId, index) => [modelChainKey('claude', modelId), readyRegion({
+      ...chain('relay'), model_id: modelId, manual_override: null,
+      route_origin: index === 7 ? 'automatic' as const : 'passthrough' as const,
+    })]));
+    expect(buildSupplyRelations([supplied], [source('relay', 'hub')], chains)).toEqual([
+      { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
+    ]);
+  });
+
+  it('does not infer inherited relations from defaults, stale reads or another model identity', () => {
+    const supplied: AgentSupply = { ...agent, routes: {} };
+    const inherited: AgentChain = { ...chain('relay'), manual_override: null, route_origin: 'automatic' };
+    const key = modelChainKey('claude', 'model-a');
+    const sources = [source('relay', 'hub')];
+    for (const read of [loadingRegion<AgentChain>(), unreadRegion<AgentChain>(),
+      degradedRegion(inherited, 'refreshing', false), degradedRegion(inherited, 'read_failed', true),
+      readyRegion({ ...inherited, backend: 'codex' as const }), readyRegion({ ...inherited, model_id: 'other' }),
+      readyRegion({ ...inherited, current: null, chain: [], route_origin: null })]) {
+      expect(buildSupplyRelations([supplied], sources, { [key]: read })).toEqual([]);
+    }
+    expect(buildRelations([supplied], sources, { [key]: readyRegion(inherited) }, null)).toEqual([]);
+  });
+
+  it('does not draw dormant overrides or stale chain entries outside the canonical catalog', () => {
+    const supplied: AgentSupply = { ...agent, catalog_models: [] };
+    expect(buildSupplyRelations([supplied], [source('relay', 'hub')], {
+      [modelChainKey('claude', 'model-a')]: readyRegion(chain('relay')),
+    })).toEqual([]);
+  });
+
+  it('keeps paused and takeover state ahead of passthrough ink', () => {
+    const supplied: AgentSupply = { ...agent, routes: {} };
+    const projection: AgentChain = { ...chain('relay', 'cooldown', false), manual_override: null, route_origin: 'passthrough',
+      chain: chain('relay', 'cooldown', false).chain.map((hop) => ({ ...hop, channel: 'hub' })) };
+    const relations = buildSupplyRelations([supplied], [source('native', 'hub'), source('relay', 'hub')], {
+      [modelChainKey('claude', 'model-a')]: readyRegion(projection),
+    });
+    expect(relations).toEqual([
+      { sourceId: 'native', backend: 'claude', kind: 'unavailable' },
+      { sourceId: 'relay', backend: 'claude', kind: 'takeover' },
+    ]);
+  });
+
+  it('uses a fresh empty chain over old manual membership and retains only known membership while unread', () => {
+    const key = modelChainKey('claude', 'model-a');
+    const sources = [source('relay', 'hub')];
+    expect(buildSupplyRelations([agent], sources, { [key]: unreadRegion() })).toEqual([
+      { sourceId: 'relay', backend: 'claude', kind: 'connected_unused' },
+    ]);
+    expect(buildSupplyRelations([agent], sources, { [key]: readyRegion({ ...chain('relay'), chain: [], current: null,
+      manual_override: null, route_origin: null }) })).toEqual([]);
+  });
+
   it('derives relation ink from configured routes and the exact current hop', () => {
     const sources = [source('native', 'native_cli'), source('relay', 'hub'), source('unused', 'hub')];
     const key = modelChainKey('claude', 'model-a');

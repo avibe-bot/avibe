@@ -37,6 +37,22 @@ describe('Model Hub theme token policy', () => {
 });
 
 describe('Model Hub visual token policy', () => {
+  it('uses the passthrough badge ink for active passthrough wires and their legend', () => {
+    const root = postcss.parse(surfaceCss);
+    const declarations = (selector: string) => {
+      const result: Record<string, string> = {};
+      root.walkRules(selector, (rule) => rule.walkDecls((decl) => { result[decl.prop] = decl.value; }));
+      return result;
+    };
+    const ink = declarations('.model-hub-route-origin--passthrough').color;
+    expect(ink).toBe('var(--gold-ink)');
+    expect(declarations('.model-hub-wire--passthrough')).toMatchObject({
+      stroke: ink, 'stroke-width': 'var(--model-hub-wire-active-width)',
+    });
+    expect(declarations('.model-hub-legend-swatch--passthrough').background).toBe(ink);
+    expect(declarations('.model-hub-wire--unavailable')['stroke-width']).toBe('var(--model-hub-wire-muted-width)');
+  });
+
   it('contains full Default Routing text in stretched columns and growing rows', () => {
     const root = postcss.parse(surfaceCss);
     const declarations = (selector: string) => {

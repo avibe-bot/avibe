@@ -1,12 +1,13 @@
 import { modelChainKey, type ModelChainIndex } from './modelRows';
+import { catalogModelIds } from './backendCatalog';
 import { equalHopIdentity, hopBelongsToSource } from './hopIdentity';
 import { foldRegionRead } from './regionRead';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { classifyChainLink, classifySourceStatus } from './sourceStateClassification';
 import { isTakeoverChain } from './takeover';
-import type { AgentBackend, AgentSupply, Source } from './types';
+import type { AgentBackend, AgentChain, AgentSupply, Source } from './types';
 
-export type SupplyRelationKind = 'native' | 'gateway' | 'connected_unused' | 'takeover' | 'unavailable';
+export type SupplyRelationKind = 'native' | 'gateway' | 'passthrough' | 'connected_unused' | 'takeover' | 'unavailable';
 
 export type SupplyRelation = {
   sourceId: string;
@@ -16,23 +17,16 @@ export type SupplyRelation = {
 
 const relationKind = (
   source: Source,
-  agent: AgentSupply,
-  chains: ModelChainIndex,
+  chains: readonly AgentChain[],
 ): SupplyRelationKind => {
   let isCurrent = false;
   let isTakeover = false;
   let isUnavailable = false;
   let hasRunnableLink = false;
-  for (const modelId of Object.keys(agent.routes ?? {})) {
-    const read = chains[modelChainKey(agent.backend, modelId)];
-    const chain = read ? foldRegionRead(read, {
-      loading: () => null,
-      ready: (value) => value,
-      unread: () => null,
-      degraded: () => null,
-    }) : null;
-    if (!chain) continue;
+  let passthroughOnly = true;
+  for (const chain of chains) {
     for (const link of chain.chain.filter((candidate) => hopBelongsToSource(candidate, source.id))) {
+      passthroughOnly &&= chain.route_origin === 'passthrough';
       hasRunnableLink ||= link.runnable;
       if (!link.runnable && classifyChainLink(link) !== null) isUnavailable = true;
       if (equalHopIdentity(chain.current, link)) {
@@ -42,7 +36,7 @@ const relationKind = (
     }
   }
   if (isTakeover) return 'takeover';
-  if (isCurrent) return source.supply_channel === 'native_cli' ? 'native' : 'gateway';
+  if (isCurrent) return source.supply_channel === 'native_cli' ? 'native' : passthroughOnly ? 'passthrough' : 'gateway';
   if ((!hasRunnableLink && isUnavailable) || classifySourceStatus(source.state.status) !== null) return 'unavailable';
   return 'connected_unused';
 };
@@ -53,17 +47,28 @@ export function buildSupplyRelations(
   chains: ModelChainIndex,
   runtime: FreshRuntimeProjection | null,
 ): SupplyRelation[] {
-  const sourceById = new Map(sources.map((source) => [source.id, source]));
   const relations: SupplyRelation[] = [];
   for (const agent of agents) {
     if (!agentHasLiveChainProjection(runtime, agent)) continue;
-    const sourceIds = new Set(
-      Object.values(agent.routes ?? {}).flatMap((route) => route.hops.map((hop) => hop.source_id)),
-    );
+    const sourceIds = new Set<string>();
+    const effectiveChains: AgentChain[] = [];
+    for (const modelId of catalogModelIds(agent)) {
+      const key = modelChainKey(agent.backend, modelId);
+      const read = chains[key];
+      const chain = read ? foldRegionRead(read, {
+        loading: () => null,
+        ready: (value) => modelChainKey(value.backend, value.model_id) === key ? value : null,
+        unread: () => null,
+        degraded: () => null,
+      }) : null;
+      if (chain) effectiveChains.push(chain);
+      // Unread chains can retain known manual membership, never inferred defaults
+      // or stale inherited hops. Only fresh chains classify current supply.
+      for (const hop of chain?.chain ?? agent.routes?.[modelId]?.hops ?? []) sourceIds.add(hop.source_id);
+    }
     for (const source of sources) {
       if (!sourceIds.has(source.id)) continue;
-      const canonical = sourceById.get(source.id);
-      if (canonical) relations.push({ sourceId: source.id, backend: agent.backend, kind: relationKind(canonical, agent, chains) });
+      relations.push({ sourceId: source.id, backend: agent.backend, kind: relationKind(source, effectiveChains) });
     }
   }
   return relations;

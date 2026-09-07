@@ -1076,6 +1076,7 @@
       "legend": {
         "native": "Agent 管理",
         "viaGateway": "模型网关管理",
+        "passthrough": "透传",
         "connectedUnused": "已启用 · 当前未被使用",
         "takeover": "已自动切换 · 临时使用备用供应商",
         "unavailable": "当前不可用",
