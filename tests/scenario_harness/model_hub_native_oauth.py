@@ -30,7 +30,7 @@ from core.handlers.model_hub.service import (
     UnavailableEngineAdapter,
     _NATIVE_VENDOR_BACKENDS,
 )
-from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS
+from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS, hub_subscription_serving_protocol
 
 
 def native_custody_vendors() -> frozenset[str]:
@@ -244,14 +244,13 @@ class HubOAuthStartForm:
     instructions_key: str | None = "settings.models.oauth.pasteCode.hint"
 
 
-#: The engine refusal the real adapter ends on when no protocol probe can prove
-#: an upstream for a finished grant: every candidate raised, nothing was
-#: received, and so there is no reachability evidence at all. This is the default
-#: observation because it is what the three hub-only subscriptions actually reach
-#: today — `_OAUTH_OBSERVABLE_VENDORS` admits `anthropic` and `openai`/`codex`
-#: only, so a finished gemini/kimi/xai grant has no proven protocol and the hub
-#: create path refuses to persist a Source (AUTH-SETUP-118).
-#: A case that wants the grant to bind sets a proven observation instead.
+#: The engine refusal the real adapter ends on when a finished grant has no way
+#: to establish a protocol: every probe candidate raised, nothing was received,
+#: and so there is no reachability evidence at all. This is what a vendor with
+#: neither a response probe nor an engine-declared serving pin reaches, which is
+#: why it stays the default: it is the shape a *new* start row would produce
+#: before it is given a binding route (AUTH-SETUP-117).
+#: A case whose grant is supposed to bind sets `engine_served_observation`.
 UNPROVEN_OAUTH_OBSERVATION = make_source_observation(
     outcome=ObservationOutcome.ADAPTER_ERROR,
     reachable=None,
@@ -260,6 +259,29 @@ UNPROVEN_OAUTH_OBSERVATION = make_source_observation(
     discovery=ObservationDiscovery.NOT_ATTEMPTED,
     models=(),
 )
+
+
+def engine_served_observation(vendor: str, *, models: tuple[str, ...]) -> SourceObservation:
+    """What the real adapter reports for a subscription bound by its serving pin.
+
+    The protocol is read from the pin rather than restated, so a pin the engine
+    changes at the next bump flows into the scenario instead of being asserted
+    against a frozen copy of it. Reachability and authentication come from the
+    engine-managed flow that just completed: it holds the credential, and
+    completing the grant is it accepting the credential.
+    """
+
+    protocol = hub_subscription_serving_protocol(vendor)
+    if protocol is None:
+        raise AssertionError(f"{vendor} has no engine-declared serving protocol")
+    return make_source_observation(
+        outcome=ObservationOutcome.OBSERVED,
+        reachable=True,
+        authenticated=True,
+        protocol=protocol,
+        discovery=ObservationDiscovery.SUCCEEDED,
+        models=tuple(DiscoveredModel(id=model) for model in models),
+    )
 
 
 class FakeHubOAuthAdapter(UnavailableEngineAdapter):

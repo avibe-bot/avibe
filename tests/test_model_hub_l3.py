@@ -102,6 +102,8 @@ from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
     _AuthenticationEvidence,
     CLIProxyEngineAdapter,
+    hub_subscription_serving_protocol,
+    _HUB_SUBSCRIPTION_PROTOCOLS,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
@@ -109,7 +111,7 @@ from vibe.model_hub_runtime.adapter import (
     _ProtocolObservationShape,
     _ProtocolProof,
 )
-from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, pinned_api_key_protocol
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore
 
@@ -7383,6 +7385,92 @@ def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof
     assert ambiguous.authenticated is True
     discover_models.assert_not_awaited()
     assert [call.kwargs["protocol"] for call in oauth_probe.call_args_list] == list(SOURCE_PROTOCOLS)
+
+
+@pytest.mark.parametrize("vendor", sorted(_HUB_SUBSCRIPTION_PROTOCOLS))
+def test_hub_subscription_observation_binds_on_the_engine_declared_protocol(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    """A pinned subscription binds without a probe, and asks for nothing else.
+
+    The engine holds the credential and serves it on one surface, so there is no
+    upstream Avibe may synthesize a request against — the completed grant is the
+    reachability and authentication evidence, and the pin supplies the protocol.
+    Seeding the whole pin table keeps a vendor added later covered without
+    editing this test.
+    """
+
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.bind_oauth_credential(
+        "src_hubsubscript",
+        vendor,
+        f"{vendor}-test.json",
+    )
+    client = Mock()
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {
+                "files": [
+                    {
+                        "id": f"{vendor}-test",
+                        "auth_index": "auth-index-test",
+                        "name": f"{vendor}-test.json",
+                        "provider": vendor,
+                    }
+                ]
+            }
+        raise AssertionError((method, path))
+
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    adapter = CLIProxyEngineAdapter(
+        supervisor=supervisor,
+        state_store=state_store,
+    )
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_oauth_protocol_response",
+            side_effect=AssertionError("a pinned subscription must not be probed"),
+        ),
+        patch.object(
+            adapter,
+            "discover_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id=f"{vendor}-model"),)),
+        ) as discover_models,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                vendor,
+                None,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    pinned = hub_subscription_serving_protocol(vendor)
+    assert observed.outcome.value == "observed"
+    assert observed.reachable is True
+    assert observed.authenticated is True
+    assert observed.protocol == pinned
+    assert observed.model_ids == (f"{vendor}-model",)
+    assert discover_models.await_args.args[:3] == (vendor, pinned, None)
+
+
+@pytest.mark.parametrize("vendor", sorted(_HUB_SUBSCRIPTION_PROTOCOLS))
+def test_hub_subscription_pin_agrees_with_the_same_vendors_api_key_pin(vendor: str) -> None:
+    """One vendor, one protocol, whichever channel holds the credential.
+
+    `_validate_source_target` admits a Source with no base URL by consulting the
+    api-key catalog pin, so a subscription pinned to a protocol its api-key
+    sibling contradicts would need that validator taught about a second pin.
+    Asserting the agreement here is cheaper than carrying that second pin.
+    """
+
+    assert hub_subscription_serving_protocol(vendor) == pinned_api_key_protocol(vendor)
 
 
 DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD = {

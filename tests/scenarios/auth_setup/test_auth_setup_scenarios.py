@@ -50,6 +50,7 @@ from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
     HubOAuthStartForm,
     NativeOAuthScenarioHarness,
+    engine_served_observation,
     hub_only_subscription_vendors,
 )
 from vibe.api import (
@@ -65,7 +66,11 @@ from vibe.claude_config import (
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
-from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS, _OAUTH_OBSERVABLE_VENDORS
+from vibe.model_hub_runtime.adapter import (
+    _OAUTH_ENDPOINTS,
+    _OAUTH_OBSERVABLE_VENDORS,
+    hub_subscription_serving_protocol,
+)
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -1533,20 +1538,22 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         """Scenario: AUTH-SETUP-117.
 
         A finished grant is not a Source. Persisting one needs an interface to
-        talk to the upstream over, and the hub path can learn it two ways: a
-        response-backed protocol observation, or a protocol fixed by the vendor's
-        native backend. A hub-only subscription has neither — no probe can name
-        its upstream, and no sanctioned CLI fixes its interface — so its grant
-        ends in an honest refusal, and, just as importantly, in a clean one: the
-        credential the grant produced is revoked and the flow is forgotten, so a
-        retry after either route learns this vendor starts from nothing.
+        talk to the upstream over, and the hub path can learn it three ways: a
+        response-backed protocol observation, an engine-declared serving pin, or
+        a protocol fixed by the vendor's native backend. A grant that reaches
+        none of them ends in an honest refusal, and, just as importantly, in a
+        clean one: the credential the grant produced is revoked and the flow is
+        forgotten, so a retry starts from nothing.
 
-        The refusal is driven here by an observation the fake adapter is told to
-        return, which is the same terminal product the real adapter reaches on
-        its own when every protocol probe raises for a vendor it cannot name an
-        upstream for. ``_OAUTH_OBSERVABLE_VENDORS`` declares that boundary and
-        ``tests/test_model_hub_runtime.py`` pins it against the probe; this case
-        holds what the service does on the far side of it.
+        This is the negative that guards the whole start table rather than any
+        vendor in it. The refusal is driven by an observation the fake adapter is
+        told to return — the same terminal product the real adapter reaches when
+        it can neither probe an upstream nor read a pin — so the case states what
+        the service does with an unbindable grant, which is exactly what a start
+        row added without a binding route would produce. That such a row cannot
+        exist today is asserted separately, as a partition over the start table,
+        in ``tests/test_model_hub_runtime.py``; the happy path the three shipped
+        vendors actually take is AUTH-SETUP-118.
         """
         state_dir = tempfile.TemporaryDirectory()
         self.addCleanup(state_dir.cleanup)
@@ -1598,6 +1605,78 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 harness.adapter.start_calls.clear()
                 harness.adapter.observation_calls.clear()
                 harness.adapter.revoked.clear()
+
+    async def test_hub_subscription_grant_binds_a_source_and_supplies_its_models(self):
+        """Scenario: AUTH-SETUP-118.
+
+        The happy path, end to end through the generic §1.4 states: authorize
+        against a stubbed engine, and the finished grant becomes a hub Gateway
+        Source carrying the engine-declared serving protocol, with the models
+        that subscription supplies attached to it.
+
+        The protocol is never named here. It comes from the same pin the adapter
+        reads, so a pin the engine changes at the next bump flows into this case
+        instead of being asserted against a frozen copy of it — and a vendor
+        added to the pin table is covered without editing the case. The models
+        are named, because a Source that binds and supplies nothing is not the
+        outcome this scenario exists to prove.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+
+        for vendor in hub_only_subscription_vendors():
+            with self.subTest(vendor=vendor):
+                harness = HubOAuthScenarioHarness(Path(state_dir.name))
+                harness.adapter.observation = engine_served_observation(
+                    vendor,
+                    models=(f"{vendor}-plan-model",),
+                )
+
+                started = await harness.service.oauth_start(
+                    {"vendor": vendor, "channel": "hub"}
+                )
+                flow_id = started["flow"]["flow_id"]
+                harness.adapter.complete(flow_id)
+                terminal = await harness.service.oauth_status(flow_id)
+
+                self.assertEqual(terminal["flow"]["state"], "success")
+                self.assertEqual(terminal["flow"]["intent"], "create")
+
+                source = terminal["source"]
+                self.assertEqual(source, harness.service.list_sources()[0])
+                self.assertEqual(source["vendor"], vendor)
+                self.assertEqual(source["supply_channel"], "hub")
+                self.assertEqual(source["billing"], "monthly")
+                self.assertIsNone(source["base_url"])
+                self.assertEqual(
+                    source["protocol"],
+                    hub_subscription_serving_protocol(vendor),
+                )
+                self.assertEqual(source["credential_ref"], "cred_consent01")
+                self.assertEqual(
+                    [model["id"] for model in source["models"]],
+                    [f"{vendor}-plan-model"],
+                )
+                self.assertEqual(
+                    [model["origin"] for model in source["models"]],
+                    ["discovered"],
+                )
+                # The grant was observed once, and the credential it produced was
+                # kept: a bound Source is the opposite of AUTH-SETUP-117's clean
+                # refusal, which revokes.
+                self.assertEqual(len(harness.adapter.observation_calls), 1)
+                observed_vendor, observed_base_url, _order = (
+                    harness.adapter.observation_calls[0]
+                )
+                self.assertEqual((observed_vendor, observed_base_url), (vendor, None))
+                self.assertEqual(harness.adapter.revoked, [])
+                self.assertEqual(harness.service.revocations.list(), [])
+                # The Source reached the Gateway as an upstream, not just the
+                # config file.
+                self.assertEqual(
+                    [binding.source_id for binding in harness.adapter.synced[-1]],
+                    [source["id"]],
+                )
 
     async def test_lost_model_hub_oauth_start_response_reuses_nonce_flow(self):
         """Scenario: AUTH-SETUP-210.
@@ -2998,10 +3077,12 @@ def test_hub_oauth_model_free_observation_closed_loop(
 ):
     """Scenario: AUTH-SETUP-113
 
-    Scoped to the vendors whose grant can be observed, because materializing a
-    Source is what this asserts. A vendor that can sign in but not be observed
-    ends its flow in a refusal instead (AUTH-SETUP-117), and the two sets are
-    kept apart by `_OAUTH_OBSERVABLE_VENDORS` rather than by a list here.
+    Scoped to the vendors whose protocol is proved by a response, because what
+    this asserts is a property of the request that proves it: no `model` field.
+    A vendor bound by an engine-declared serving pin issues no such request at
+    all — the completed grant is its evidence — so its closed loop is
+    AUTH-SETUP-118. `_OAUTH_OBSERVABLE_VENDORS` keeps the routes apart rather
+    than a list here.
     """
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter

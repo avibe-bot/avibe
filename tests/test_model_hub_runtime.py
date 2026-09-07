@@ -6662,7 +6662,7 @@ def test_oauth_start_rejects_vendors_no_row_admits_before_engine_work(
 
         with pytest.raises(
             EngineStateError,
-            match="lacks Model Hub response-backed observation",
+            match="lacks a Model Hub subscription flow",
         ):
             await adapter.start_oauth("src_fixture123", vendor)
 
@@ -6671,20 +6671,23 @@ def test_oauth_start_rejects_vendors_no_row_admits_before_engine_work(
 
 
 @pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
-def test_oauth_grant_protocol_observation_admits_fewer_vendors_than_oauth_start(
+def test_every_oauth_start_vendor_binds_by_exactly_one_route(
     vendor: str,
 ) -> None:
-    """A vendor that can sign in cannot always be observed afterwards.
+    """A flow that can start must be able to end, by one route or the other.
 
-    A hub Source persists only behind a response-backed protocol observation, and
-    the OAuth probe needs a per-vendor upstream URL and header set to produce one.
-    A vendor admitted to `_OAUTH_ENDPOINTS` without that is refused here, which is
-    what makes `observe_source` report `adapter_error` instead of inventing a
-    protocol for it. AUTH-SETUP-117 records the consequence for those vendors.
+    A finished grant becomes a hub Source only once a protocol is established,
+    and there are exactly two ways to establish one: probe the upstream and read
+    the protocol out of the response, or take the engine-declared serving pin for
+    a vendor whose credential never leaves the engine. This asserts the partition
+    over the whole start table — every row takes one route, none takes both, none
+    takes neither — so a vendor admitted to `_OAUTH_ENDPOINTS` without a binding
+    route fails here instead of shipping a flow that authorizes and then dies in
+    `discovery_failed`.
 
-    The set is asserted against the probe rather than restated, so a vendor whose
-    upstream is added without declaring it — or declared without being added —
-    fails here instead of shipping a flow that cannot end.
+    The probe's own reach is pinned against `_OAUTH_OBSERVABLE_VENDORS` at the
+    same time, by driving the real probe rather than restating the set: widening
+    one without the other is a failure, not a silent change.
     """
 
     auth = runtime_adapter_module._AuthRecord(
@@ -6721,6 +6724,13 @@ def test_oauth_grant_protocol_observation_admits_fewer_vendors_than_oauth_start(
         observed.add(protocol)
 
     assert bool(observed) is (vendor in runtime_adapter_module._OAUTH_OBSERVABLE_VENDORS)
+
+    pinned = runtime_adapter_module.hub_subscription_serving_protocol(vendor)
+    assert (pinned is not None) != bool(observed), (
+        f"{vendor} must bind by exactly one of a response probe or an engine-declared pin"
+    )
+    if pinned is not None:
+        assert pinned in SOURCE_PROTOCOLS
 
 
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
@@ -7095,7 +7105,7 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
         # tomorrow — and then this stops testing a refusal at all.
         with pytest.raises(
             EngineStateError,
-            match="lacks Model Hub response-backed observation",
+            match="lacks a Model Hub subscription flow",
         ):
             await adapter.start_oauth("src_fixture123", "antigravity")
 
