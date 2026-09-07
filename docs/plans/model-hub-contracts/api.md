@@ -602,6 +602,13 @@ state. It counts only runnable exact hops in that model's effective Route chain,
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
 
+Inventory updates that refine an inherited `passthrough` plan into `automatic`
+matching do not report displaced speculative candidates as `would_remove_hops` or
+`removed_hops`, in either Hub or Direct mode. They leave saved route intent unchanged.
+Explicit manual-hop invalidations, lost inventory matches, and newly introduced
+protected-supply gaps still use the exact-plan guard. This exception does not apply
+to Source deletion, default-membership changes, or Restore.
+
 Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the complete
 `guard-refusal.schema.json` shape. The first refusal is:
 
