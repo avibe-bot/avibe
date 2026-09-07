@@ -1024,6 +1024,71 @@ def test_numeric_candidates_use_the_column_affinity():
         assert ("n", -1) not in proposals
 
 
+@pytest.mark.parametrize("pattern,width", [("[A-Z]*", 4), ("*[A-Z]", 4), ("[A-Z]*[A-Z]", 4), ("*[A-Z]*", 4), ("[A-Z]???", 4), ("[A-Z][A-Z][A-Z][A-Z]", 4), ("*", 0), ("*", guard.SEED_TEXT_LIMIT)])
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+@pytest.mark.parametrize("separate", [False, True])
+@pytest.mark.parametrize("alphabet", ["A-Z", "0-9A-Z"])
+def test_text_shape_composition_preserves_every_requirement(tmp_path, pattern, width, order, separate, alphabet):
+    requirements = [f"length(code) = {width}", f"code glob '{pattern}'", f"code not glob '*[^{alphabet}]*'"]
+    expressions = [requirements[index] for index in order]
+    if not separate:
+        expressions = [" and ".join(expressions)]
+    checks = ", ".join(f"constraint ck_{index} check ({expression})" for index, expression in enumerate(expressions))
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (id integer primary key, code text not null, {checks})")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize(
+    "columns,clauses",
+    [
+        (columns, clauses)
+        for names in [("low", "high"), ("low", "middle", "high")]
+        for columns in itertools.permutations(names)
+        for clauses in itertools.permutations(["low > 0", *(f"{right} >= {left}" for left, right in itertools.pairwise(names))])
+    ],
+)
+def test_numeric_repairs_coordinate_columns_without_order_dependence(tmp_path, columns, clauses):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        declared = ", ".join(f'"{name}" integer not null' for name in columns)
+        connection.execute(f"create table shaped (id integer primary key, {declared}, constraint ck_counts check ({' and '.join(clauses)}))")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+def test_joint_numeric_evaluation_has_a_finite_budget():
+    required = [(f"n{index}", "INTEGER") for index in range(6)]
+    values = {name: 0 for name, _ in required}
+    expression = " and ".join(f"{name} > 0" for name in values) + " and n5 < 0"
+    statements = []
+    with sqlite3.connect(":memory:") as connection:
+        connection.set_trace_callback(statements.append)
+        assert guard.shape_proposals(connection, expression, required, values) == []
+    assert len(statements) == guard.SEED_ATTEMPTS
+
+
+@pytest.mark.parametrize("changed", range(6))
+def test_joint_numeric_search_preserves_single_column_repairs(changed):
+    required = [(f"n{index}", "INTEGER") for index in range(6)]
+    values = {name: 0 for name, _ in required}
+    expression = " and ".join(f"{name} >= 0" for name in values) + f" and n{changed} > 0"
+    with sqlite3.connect(":memory:") as connection:
+        assert guard.shape_proposals(connection, expression, required, values) == [(f"n{changed}", 1)]
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_prefix_sources_can_be_derived_from_json_checks(tmp_path, reverse):
     db_path = tmp_path / "vibe.sqlite"

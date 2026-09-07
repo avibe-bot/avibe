@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import itertools
 import json
 import re
 import sqlite3
@@ -967,15 +968,22 @@ def json_proposals(
     return proposals
 
 
-def glob_witness(connection: sqlite3.Connection, pattern: str) -> str | None:
+def glob_witness(
+    connection: sqlite3.Connection,
+    pattern: str,
+    *,
+    width: int | None = None,
+    alphabet: str = string.printable,
+) -> str | None:
     """Offer one finite witness, using SQLite itself to interpret character classes."""
-    parts = []
+    parts: list[str | None] = []
     for token in re.findall(r"\[[^]]+\]|.", pattern, re.DOTALL):
         if token == "*":
+            parts.append(None)
             continue
         if token == "?" or token.startswith("["):
             accepted = next(
-                (char for char in string.printable if connection.execute("select ? glob ?", (char, token)).fetchone()[0]),
+                (char for char in alphabet if connection.execute("select ? glob ?", (char, token)).fetchone()[0]),
                 None,
             )
             if accepted is None:
@@ -983,7 +991,19 @@ def glob_witness(connection: sqlite3.Connection, pattern: str) -> str | None:
             parts.append(accepted)
         else:
             parts.append(token)
-    witness = "".join(parts)
+    minimum = sum(part is not None for part in parts)
+    size = minimum if width is None else width
+    if not minimum <= size <= SEED_TEXT_LIMIT or (size > minimum and (None not in parts or not alphabet)):
+        return None
+    padding = size - minimum
+    expanded = []
+    for part in parts:
+        if part is None:
+            expanded.append(alphabet[:1] * padding)
+            padding = 0
+        else:
+            expanded.append(part)
+    witness = "".join(expanded)
     return witness if connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] else None
 
 
@@ -1002,33 +1022,46 @@ def shape_proposals(
     """
     names = {identifier_key(name): name for name in values}
     text = {name: value for name, value in values.items() if isinstance(value, str)}
+    widths = {}
     shapes = text_constraints if text_constraints is not None else expression
     for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', shapes, re.IGNORECASE):
         name = names.get(identifier_key(name), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
         if name in text and size is not None:
+            widths[name] = size
             text[name] = text[name][:size].ljust(size, "0")
-    for name, negated, quoted in re.findall(
+    globs = re.findall(
         r"\b\"?(\w+)\"?\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
         shapes,
         re.IGNORECASE,
-    ):
+    )
+    alphabets = {name: string.printable for name in text}
+    # Restrict the alphabet before generating a witness so later CHECK order cannot
+    # erase a required width or introduce characters forbidden by another CHECK.
+    for name, negated, quoted in globs:
         name = names.get(identifier_key(name), name)
         if name not in text:
             continue
         pattern = quoted.replace("''", "'")
-        if not negated:
-            witness = glob_witness(connection, pattern)
-            if witness is not None:
-                text[name] = witness
-        elif pattern.startswith("*[^") and pattern.endswith("]*"):
-            allowed = [
+        if negated and pattern.startswith("*[^") and pattern.endswith("]*"):
+            allowed = "".join(
                 char
-                for char in string.printable
+                for char in alphabets[name]
                 if not connection.execute("select ? glob ?", (char, pattern)).fetchone()[0]
-            ]
+            )
+            alphabets[name] = allowed
             if allowed:
                 text[name] = "".join(char if char in allowed else allowed[0] for char in text[name])
+    for name, negated, quoted in globs:
+        name = names.get(identifier_key(name), name)
+        if negated or name not in text:
+            continue
+        pattern = quoted.replace("''", "'")
+        if connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0]:
+            continue
+        witness = glob_witness(connection, pattern, width=widths.get(name), alphabet=alphabets[name])
+        if witness is not None:
+            text[name] = witness
     for name, start, width, other in SUBSTRING_REQUIREMENT.findall(shapes):
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
@@ -1048,20 +1081,33 @@ def shape_proposals(
         f'cast(? as {declared}) as "{name}"' if declared else f'? as "{name}"'
         for name, declared in required
     )
-    for name, declared in required:
-        if "INT" in declared.upper() and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)):
-            for candidate in dict.fromkeys(value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)):
-                if not SQLITE_INT_MIN <= candidate <= SQLITE_INT_MAX:
-                    continue
-                parameters = [candidate if column == name else values[column] for column, _ in required]
-                try:
-                    accepted = connection.execute(f"select ({expression}) from (select {projection})", parameters).fetchone()[0]
-                except sqlite3.OperationalError:
-                    # An omitted/defaulted column may prevent evaluating the standalone CHECK.
-                    # Leave that case to the existing insert path and its visible refusal.
-                    continue
-                if accepted:
-                    proposals.append((name, candidate))
+    numeric = [
+        name for name, declared in required
+        if "INT" in declared.upper() and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
+    ]
+    candidates = list(dict.fromkeys(
+        value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
+        if SQLITE_INT_MIN <= value <= SQLITE_INT_MAX
+    ))
+    # A CHECK may require multiple columns to move together. Keep the evaluation
+    # bounded, but evaluate whole assignments rather than rejecting partial moves.
+    domains = [list(dict.fromkeys([values[name], *candidates])) for name in numeric]
+    single_changes = (
+        tuple(candidate if name == changed else values[name] for name in numeric)
+        for changed in numeric for candidate in candidates if candidate != values[changed]
+    )
+    assignments = itertools.chain(single_changes, itertools.product(*domains)) if numeric else ()
+    for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
+        changes = dict(zip(numeric, assignment))
+        parameters = [changes.get(column, values[column]) for column, _ in required]
+        try:
+            accepted = connection.execute(f"select ({expression}) from (select {projection})", parameters).fetchone()[0]
+        except sqlite3.OperationalError:
+            # Omitted/defaulted columns still leave the actual INSERT authoritative.
+            break
+        if accepted:
+            proposals.extend((name, value) for name, value in changes.items() if value != values[name])
+            break
     return proposals
 
 
