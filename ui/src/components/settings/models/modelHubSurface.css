@@ -2253,6 +2253,11 @@
   filter: drop-shadow(var(--shadow-glow-wire-mint));
 }
 
+.model-hub-wire--passthrough {
+  stroke: var(--gold-ink);
+  stroke-width: var(--model-hub-wire-active-width);
+}
+
 .model-hub-wire--connected_unused {
   stroke: color-mix(in srgb, var(--foreground) 15%, transparent);
   stroke-width: var(--model-hub-wire-muted-width);
@@ -2294,6 +2299,10 @@
 
 .model-hub-legend-swatch--connected_unused {
   height: 1px;
+}
+
+.model-hub-legend-swatch--passthrough {
+  background: var(--gold-ink);
 }
 
 /* ── Backend model catalog ────────────────────────────────────────────────

@@ -1076,6 +1076,7 @@
       "legend": {
         "native": "Native",
         "viaGateway": "Gateway supply",
+        "passthrough": "Passthrough",
         "connectedUnused": "Enabled · not currently used",
         "takeover": "Taken over · temporarily rerouted",
         "unavailable": "Supply paused",
