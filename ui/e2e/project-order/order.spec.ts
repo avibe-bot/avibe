@@ -10,6 +10,56 @@ test.beforeEach(async ({ page }) => {
   await expect(rows(page)).toHaveCount(8);
 });
 
+test('only the folder and disclosure icons advertise dragging; the title remains a click target', async ({ page, isMobile }, testInfo) => {
+  const first = header(page, 0);
+  const title = first.getByText('Avibe', { exact: true });
+  const icons = first.locator('.project-drag-icon');
+  for (const expanded of [false, true]) {
+    if (expanded) await title.click();
+    await expect(first).toHaveCSS('cursor', 'pointer');
+    await title.hover();
+    await expect(title).toHaveCSS('cursor', 'pointer');
+    await expect(icons).toHaveCount(2);
+    for (const icon of await icons.all()) {
+      await icon.hover();
+      await expect(icon).toHaveCSS('cursor', 'grab');
+    }
+    for (const label of await first.locator('span').all()) {
+      await expect(label).toHaveCSS('cursor', 'pointer');
+    }
+  }
+  await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
+  await icons.first().click();
+  await expect(rows(page).first().getByText('Conversation 1', { exact: true })).not.toBeVisible();
+  await icons.nth(1).click();
+  await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
+  await title.hover();
+  await page.screenshot({ path: testInfo.outputPath('project-cursor-targets.png'), scale: 'css' });
+  if (!isMobile) {
+    await first.focus();
+    await page.keyboard.press('Space', { delay: 80 });
+    await expect(first).toHaveCSS('cursor', 'grabbing');
+    await expect(title).toHaveCSS('cursor', 'grabbing');
+    for (const icon of await icons.all()) await expect(icon).toHaveCSS('cursor', 'grabbing');
+    await page.keyboard.press('Escape');
+    await expect(title).toHaveCSS('cursor', 'pointer');
+  }
+});
+
+test('a project that cannot be reordered keeps click cursors on its icons', async ({ page }) => {
+  await page.evaluate(() => localStorage.setItem('project-order-fixture', JSON.stringify(['project-0'])));
+  await page.reload();
+  await expect(rows(page)).toHaveCount(1);
+  const first = header(page, 0);
+  await expect(first).not.toHaveAttribute('aria-describedby');
+  await expect(first).toHaveCSS('cursor', 'pointer');
+  for (const icon of await first.locator('.project-drag-icon').all()) {
+    await expect(icon).toHaveCSS('cursor', 'pointer');
+  }
+  await first.getByText('Avibe', { exact: true }).click();
+  await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
+});
+
 test('header click expands; a direct drag animates neighbors and persists across reload', async ({ page, isMobile }, testInfo) => {
   await header(page, 0).click();
   await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
