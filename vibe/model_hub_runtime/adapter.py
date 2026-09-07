@@ -893,6 +893,14 @@ async def _authenticate_with_models_witness(
     with another valid key, so the answer is unambiguous. An open catalogue
     therefore stays inconclusive and the source saves the way it does today.
 
+    Acceptance is bounded accordingly: the interface admits this credential and
+    refuses admission without one, which is not proof that it read the value.
+    An interface that requires a credential without reading it answers those two
+    requests identically, so it is admitted as well, and the third request that
+    would separate the two carries an altered credential and attests to nothing
+    in either direction. The first real call catches a credential nothing
+    validated, exactly where it catches one revoked after its add.
+
     Only a catalog pin or a concrete declaration asks, because the answer names
     no protocol; that owner supplies it. The accepted result carries the
     listing, so one call both authenticates the source and populates it.

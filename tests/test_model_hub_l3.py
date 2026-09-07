@@ -6896,17 +6896,23 @@ def _run_catalog_pin_observation(
     status: int,
     body: dict[str, object],
     listing: str,
+    interface_key: str | None = None,
 ) -> tuple[list[tuple[str, str]], object]:
     """Observe a pinned vendor whose probe answers `status` and whose model
     listing behaves as `listing`.
 
     ``listing`` names what the interface does with ``GET /v1/models``:
     ``gated`` answers the stored credential and refuses an uncredentialed
-    caller, ``open`` answers anybody, ``rejects`` refuses every caller, and
-    ``absent`` publishes no listing at all.
+    caller, ``open`` answers anybody, ``rejects`` refuses every caller,
+    ``absent`` publishes no listing at all, and ``presence`` requires a
+    credential without ever reading its value.
+
+    ``interface_key`` is the credential this interface would actually accept,
+    which the stored one matches unless a caller says otherwise.
     """
 
     key = f"test-{vendor}-{status}"
+    accepted_key = key if interface_key is None else interface_key
     state_store = EngineStateStore(tmp_path / f"engine-state-{vendor}-{status}")
     credential_ref = state_store.store_api_key(
         key,
@@ -6929,7 +6935,10 @@ def _run_catalog_pin_observation(
 
         async def capture_probe(request: web.Request) -> web.Response:
             requests.append((request.method, request.path))
-            if supplied_credential(request) != key:
+            # An interface that never reads the credential's value answers the
+            # model-less probe out of its schema check, which precedes any key
+            # lookup, so the probe leaves a key it never validated unknown.
+            if listing != "presence" and supplied_credential(request) != accepted_key:
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             return web.json_response(body, status=status)
 
@@ -6937,9 +6946,12 @@ def _run_catalog_pin_observation(
             requests.append((request.method, request.path))
             if listing == "absent":
                 return web.json_response({"error": "unknown route"}, status=404)
-            refused = listing == "rejects" or (
-                listing == "gated" and supplied_credential(request) != key
-            )
+            if listing == "presence":
+                refused = not supplied_credential(request)
+            else:
+                refused = listing == "rejects" or (
+                    listing == "gated" and supplied_credential(request) != accepted_key
+                )
             if refused:
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             return web.json_response({"data": [{"id": f"{vendor}/listed"}]})
@@ -7018,6 +7030,64 @@ def test_catalog_pin_authentication_comes_from_a_credential_gated_listing(
         assert observed.model_ids == ()
     assert requests[0] == ("POST", _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path)
     assert set(requests[1:]) <= {("GET", "/v1/models")}
+
+
+@pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
+def test_a_listing_gate_on_presence_answers_exactly_like_one_on_the_key(
+    tmp_path: Path,
+    vendor: str,
+    protocol: str,
+) -> None:
+    """Add-time verification cannot see which of the two an interface is doing.
+
+    Observation may make exactly two requests: one carrying the stored
+    credential and one carrying none. An interface that reads the value answers
+    a credential it accepts with its catalogue and an uncredentialed caller
+    with a refusal. An interface that only requires the header to be there
+    answers *any* credential with the same catalogue and that same refusal --
+    including one it would never have accepted, since its probe answers out of
+    a schema check that precedes the key lookup it never performs. Both worlds
+    hand back an identical pair of responses, so no reading of that pair
+    separates them; only a third request carrying a different value could, and
+    an altered credential attests to nothing in either direction, which is why
+    this ladder has no synthetic credential control.
+
+    So the witness admits both, and a credential an interface never validated
+    is left to the first real call and the existing needs-action path -- the
+    same place a credential revoked after it was added is caught.
+    """
+
+    validated = _run_catalog_pin_observation(
+        tmp_path / "validated",
+        vendor=vendor,
+        protocol=protocol,
+        status=400,
+        body=_catalog_owner_status_body(vendor, 400),
+        listing="gated",
+    )
+    unread = _run_catalog_pin_observation(
+        tmp_path / "unread",
+        vendor=vendor,
+        protocol=protocol,
+        status=400,
+        body=_catalog_owner_status_body(vendor, 400),
+        listing="presence",
+        interface_key="a-credential-this-source-does-not-carry",
+    )
+
+    def observation(result: tuple[list[tuple[str, str]], object]) -> tuple[object, ...]:
+        requests, observed = result
+        return (
+            requests,
+            observed.outcome,
+            observed.protocol,
+            observed.authenticated,
+            observed.model_ids,
+        )
+
+    assert observation(validated) == observation(unread)
+    assert unread[1].outcome.value == "observed"
+    assert unread[1].authenticated is True
 
 
 def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(

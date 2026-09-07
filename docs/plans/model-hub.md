@@ -396,7 +396,12 @@ speaks only about the credential. Every other answer — no listing, a non-JSON 
 timeout, a listing open to anyone — leaves the outcome the paragraph above would have
 produced, unverified-save exit included. There is still no synthetic credential
 control: the control request carries no credential at all, and a public list still
-repairs no proof. Custom Auto is never asked, because a listing names no protocol.
+repairs no proof. What the witness establishes is bounded there — the interface
+admits this credential and refuses admission without one, not that it read the
+value, since a gate on presence alone answers those two requests identically and
+the third request that would separate them is the altered credential this ladder
+declines. A credential no interface validated is caught by the first real call,
+like one revoked after its add. Custom Auto is never asked, because a listing names no protocol.
 
 Completed Hub OAuth consent may retain its bound credential as an unverified Source
 under the fixed vendor protocol. The engine retains OAuth token custody; optional

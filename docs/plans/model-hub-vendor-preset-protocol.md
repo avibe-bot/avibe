@@ -233,6 +233,19 @@ listing.
   objection does not reach it, and what it answers is unambiguous: a listing that
   serves an uncredentialed request belongs to anyone who asks and attests to no
   credential. A public model list still repairs no proof.
+- What that establishes is bounded, and no further evidence lifts the bound: the
+  interface admits this credential and refuses admission without one. It is not
+  proof that the interface read the value. Observation may make two requests —
+  one carrying the credential and one carrying none — and a gate on the value
+  and a gate on presence alone answer that pair identically, the second
+  admitting a key it never validated because its probe answers out of a schema
+  check that precedes the lookup it never performs. Separating them requires a
+  third request carrying a different value, and an altered credential attests to
+  nothing in either direction, so this ladder declines it. A credential an
+  interface never validated therefore adds as verified and is caught by the
+  first real call through the existing needs-action path, where a credential
+  revoked after its add is already caught. Withholding verification for that
+  case withholds it for every case, which is the state this ruling ends.
 - `401`/`403` on that listing rejects the candidate. The shaped-evidence requirement
   exists so that a status cannot establish a *protocol*; this rung holds its protocol
   from its owner already, so the listing's refusal speaks about the credential alone.
