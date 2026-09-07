@@ -147,6 +147,54 @@ invariants change.
 - G-18 / G-27 rows: probe constraint language is now only the Auto
   branch on `custom`.
 
+## Model-independent observation (2026-09-07)
+
+Protocol observation omits `model` for every interface. A fabricated model can
+enter a relay's scheduler and return capacity or upstream errors before request
+validation, making valid credentials impossible to add. A model-free request
+keeps observation independent of model availability and generation. The shared
+request taxonomy applies to API-key and OAuth observation alike.
+
+The owner's 2026-09-07 ruling separates configuration from verification. The
+protocol owners remain catalog pins, custom declarations and response evidence;
+explicit `save_unverified: true` may save either of the first two without an
+upstream request. Custom Auto cannot invent an owner. Canonical input validation,
+credential custody, nonce reconciliation and rollback remain unchanged.
+
+Schema errors never authenticate: they can precede key lookup. Synthetic controls
+were removed because unknown token grammar/checksums and collisions with another
+valid key make their results inconclusive. A public model list cannot repair
+that proof, and the inventory waiver does not waive authentication. Bare 401/403
+responses remain unknown for every owner; only shaped authentication evidence
+rejects a candidate. An unknown Auto sibling is not eliminated by another
+candidate's rejection. API-key observation remains model-free, non-redirecting
+and bounded by its deadline.
+
+Every newly stored Hub credential carries an opaque `verification_pending` marker
+independently of routing health, including observed creates and native-config imports.
+Inventory refresh never clears it. Any actual successful invocation whose captured
+marker and credential still match the fresh Source clears it inside the shared config
+transaction. Later same-credential attempts do not negate proof. Credential/endpoint
+replacement generates a new marker, including same-handle OAuth reauthentication.
+The Source remains configurable and invokable, but list/detail surfaces do not
+claim healthy/in-use status while verification is pending. The normal verified
+save path still requires response-backed authentication and protocol ownership.
+
+Completed Hub OAuth consent may retain its engine-bound credential under the fixed
+vendor protocol with verification pending. Explicit upstream authentication
+rejection keeps the existing needs-action state. The existing allowlisted
+auth-index transport substitutes the engine-held token; no private-token reader
+or fabricated OAuth control is needed. Native CLI OAuth is unchanged.
+
+`AUTH-SETUP-112` covers every catalog pin and concrete custom protocol against
+isolated HTTP middleware with both authentication/schema orders, public/protected
+inventory and alphanumeric/punctuation-only credentials. Unknown validation cannot
+authenticate, while explicit saving performs no additional upstream requests.
+`AUTH-SETUP-113` covers completed Hub OAuth admission, fixed protocol ownership,
+pending verification and idempotent polling across credential shapes and upstream
+outcomes. `AUTH-SETUP-114` covers Auto policy responses that must remain unknown
+and cannot permit unverified saving without a concrete protocol declaration.
+
 ## Acceptance
 
 - DeepSeek official URL + valid key, vendor `deepseek`, adds as

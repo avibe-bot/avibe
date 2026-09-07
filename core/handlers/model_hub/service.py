@@ -269,6 +269,8 @@ class ModelHubConfigStore(Protocol):
 
     def save(self, config: ModelHubConfig) -> None: ...
 
+    def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None: ...
+
 
 class V2ModelHubConfigStore:
     def load(self) -> ModelHubConfig:
@@ -291,6 +293,14 @@ class V2ModelHubConfigStore:
         from config.v2_config import update_config_fields
 
         update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub))
+
+    def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None:
+        from config.v2_config import config_file_lock
+
+        with config_file_lock():
+            config = V2Config.load()
+            if mutator(config.model_hub):
+                config.save()
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
@@ -396,6 +406,7 @@ class ResolvedInvocation:
     supply_channel: Literal["native_cli", "hub"] = "hub"
     credential_ref: Optional[str] = None
     settlement_generation: Optional[int] = None
+    verification_pending: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -2041,16 +2052,19 @@ class ModelHubService:
                 discovered: list[DiscoveredModel] | None
                 if channel == "hub":
                     rollback_credential_ref = cast(str, flow.credential_ref)
-                    observation = await self._require_proven_observation(
+                    observation = await self._observe_provisioned_credential(
                         vendor,
                         None,
                         rollback_credential_ref,
                         SOURCE_PROTOCOLS,
                     )
-                    protocol = cast(
-                        Literal["anthropic", "openai_responses", "openai_chat"],
-                        observation.protocol,
+                    # Completed consent supplies credential custody, not proof
+                    # that a model call works. Its vendor fixes the interface.
+                    protocol = observation.protocol or _FIXED_BACKEND_PROTOCOLS.get(
+                        _NATIVE_VENDOR_BACKENDS.get(vendor, vendor),
                     )
+                    if protocol is None:
+                        raise ModelHubError("discovery_failed")
                     if observation.discovery is ObservationDiscovery.SUCCEEDED:
                         discovered = list(observation.models)
                     elif observation.discovery is ObservationDiscovery.FAILED:
@@ -2060,7 +2074,12 @@ class ModelHubService:
                             detail_key="models.source.error.unclassified",
                         )
                     else:
-                        raise ModelHubError("discovery_failed", status=502)
+                        discovered = None
+                        if observation.authenticated is False:
+                            state = ModelHubSourceStateConfig(
+                                status="needs_action",
+                                detail_key="models.source.needs_action.oauth_expired",
+                            )
                 else:
                     backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
                     protocol = (
@@ -2115,6 +2134,20 @@ class ModelHubService:
                     source = ModelHubSourceConfig.from_payload(source_payload)
                 except (TypeError, ValueError):
                     raise ModelHubError("discovery_failed") from None
+                if channel == "hub":
+                    self._mark_source_unverified(source)
+                if (
+                    channel == "hub"
+                    and observation.outcome is not ObservationOutcome.OBSERVED
+                    and observation.authenticated is not False
+                ):
+                    try:
+                        discovered = await self._discover(source)
+                    except ModelHubError as exc:
+                        if exc.code != "discovery_failed":
+                            raise
+                        # Inventory is optional and never verifies the login.
+                        discovered = None
                 if discovered is not None:
                     self._apply_discovered_models(
                         source,
@@ -2413,6 +2446,7 @@ class ModelHubService:
                     if model.provenance == "manual"
                 ]
                 source.credential_ref = replacement_ref
+                self._mark_source_unverified(source)
                 discovered = await self._discover(source)
                 overrides = self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
@@ -2705,6 +2739,7 @@ class ModelHubService:
             "protocol",
             "client_nonce",
             "accept_unavailable_inventory",
+            "save_unverified",
         }:
             raise ModelHubError("discovery_failed")
         forbidden = {
@@ -2791,13 +2826,16 @@ class ModelHubService:
         if kind != "api_key" and client_nonce is not None:
             raise ModelHubError("discovery_failed")
         accept_unavailable_inventory = payload.get("accept_unavailable_inventory", False)
+        save_unverified = payload.get("save_unverified", False)
         if (
             not isinstance(accept_unavailable_inventory, bool)
+            or not isinstance(save_unverified, bool)
             or (
                 kind != "api_key"
                 and (
                     "protocol" in payload
                     or "accept_unavailable_inventory" in payload
+                    or "save_unverified" in payload
                 )
             )
         ):
@@ -2805,6 +2843,8 @@ class ModelHubService:
         protocol_order: tuple[str, ...] | None = None
         if kind == "api_key":
             protocol_order = self._observation_protocols(vendor, payload)
+            if save_unverified and len(protocol_order) != 1:
+                raise ModelHubError("discovery_failed", detail="modelHub.errors.ambiguous_source")
 
         if oauth_ref:
             return self._source_creation_result(
@@ -2866,9 +2906,13 @@ class ModelHubService:
             }
             if "protocol" in payload:
                 observation_payload["protocol"] = payload["protocol"]
-            observation = await self._require_proven_source_payload(observation_payload)
+            observation = (
+                None if save_unverified
+                else await self._require_proven_source_payload(observation_payload)
+            )
             if (
-                observation.discovery is ObservationDiscovery.FAILED
+                observation is not None
+                and observation.discovery is ObservationDiscovery.FAILED
                 and not accept_unavailable_inventory
             ):
                 raise ModelHubError(
@@ -2877,18 +2921,20 @@ class ModelHubService:
                     detail="modelHub.errors.inventory_unavailable",
                     data={"observation": self._observation_payload(observation)},
                 )
-            source.protocol = cast(
-                Literal["anthropic", "openai_responses", "openai_chat"],
-                observation.protocol,
-            )
-            if observation.discovery is ObservationDiscovery.SUCCEEDED:
+            self._mark_source_unverified(source)
+            if observation is not None:
+                source.protocol = cast(
+                    Literal["anthropic", "openai_responses", "openai_chat"],
+                    observation.protocol,
+                )
+            if observation is not None and observation.discovery is ObservationDiscovery.SUCCEEDED:
                 self._apply_discovered_models(
                     source,
                     manual_models,
                     list(observation.models),
                     allow_empty=True,
                 )
-            elif observation.discovery is ObservationDiscovery.FAILED:
+            else:
                 catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
                 for model in source.models:
                     resolution = resolve_reasoning_tiers(
@@ -2900,10 +2946,11 @@ class ModelHubService:
                     )
                     model.reasoning_efforts = list(resolution.efforts)
                     model.reasoning_efforts_source = resolution.source
-                source.state = ModelHubSourceStateConfig(
-                    status="error",
-                    detail_key="models.source.error.unclassified",
-                )
+                if observation is not None:
+                    source.state = ModelHubSourceStateConfig(
+                        status="error",
+                        detail_key="models.source.error.unclassified",
+                    )
 
             # AC-29 requires the canonical Source validator to run before any
             # permanent credential is provisioned. The placeholder is never saved.
@@ -3002,6 +3049,7 @@ class ModelHubService:
             old_revocation_recorded = False
             try:
                 source.credential_ref = replacement_ref
+                self._mark_source_unverified(source)
                 source.masked_credential = _mask_credential(key)
                 discovered = await self._discover(source)
                 if old_credential_ref != replacement_ref:
@@ -3117,6 +3165,7 @@ class ModelHubService:
                 old_revocation_recorded = False
                 try:
                     source.credential_ref = replacement_ref
+                    self._mark_source_unverified(source)
                     source.base_url = base_url
                     discovered = await self._discover(source)
                     self.revocations.add(source.id, old_credential_ref)
@@ -5236,6 +5285,7 @@ class ModelHubService:
                 },
             )
         source = self._source(config, candidate_payload["source_id"])
+        verification_pending = source.verification_pending
         resolved_model = candidate_payload["model_id"]
         if source.supply_channel == "native_cli":
             ready = self.native_source_ready(
@@ -5299,6 +5349,10 @@ class ModelHubService:
             decision = classify_outcome(outcome, refresh_attempted=True)
         elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
         reachable = decision.action == "return"
+        if reachable:
+            await self._verify_successful_source(
+                source.id, source.credential_ref, verification_pending, outcome,
+            )
         error_key: Optional[str] = None
         latency_ms: Optional[int] = elapsed_ms
         if not reachable:
@@ -6228,6 +6282,44 @@ class ModelHubService:
             resolution=resolution,
         )
 
+    @staticmethod
+    def _mark_source_unverified(source: ModelHubSourceConfig) -> None:
+        # Persist identity with the credential, including same-handle reauth.
+        source.verification_pending = f"vp_{uuid.uuid4().hex}"
+
+    async def _verify_successful_source(
+        self,
+        source_id: str,
+        credential_ref: str | None,
+        verification_pending: str | None,
+        outcome: RawCallOutcome,
+    ) -> None:
+        """Retire pending verification only for the current credential's call."""
+        if outcome.kind is not RawOutcomeKind.SUCCESS or verification_pending is None:
+            return
+        def clear_current(config: ModelHubConfig) -> bool:
+            current = next((item for item in config.sources if item.id == source_id), None)
+            if (
+                current is None
+                or current.credential_ref != credential_ref
+                or current.verification_pending != verification_pending
+            ):
+                return False
+            current.verification_pending = None
+            return True
+
+        try:
+            async with self._mutation_lock:
+                self.store.mutate(clear_current)
+        except ValueError as exc:
+            if "recovery warnings" not in str(exc):
+                raise
+            logger.warning("Could not persist Model Hub verification state during config recovery")
+        except OSError:
+            # Advisory bookkeeping must not turn a completed model call into a
+            # failed response. Retain pending verification for the next success.
+            logger.warning("Could not persist Model Hub verification state")
+
     async def settle_handle_outcome(
         self,
         resolved: ResolvedInvocation | None,
@@ -6260,6 +6352,9 @@ class ModelHubService:
         )
         record_attempt(outcome, decision)
         if decision.action == "return":
+            await self._verify_successful_source(
+                resolved.source_id, resolved.credential_ref, resolved.verification_pending, outcome,
+            )
             return HandleSettlement(
                 outcome=outcome,
                 decision=decision,
@@ -6784,6 +6879,7 @@ class ModelHubService:
             target_model = inspection.model_id
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
+            verification_pending = source.verification_pending
             exact_reasoning_request = self._request_for_exact_reasoning_effort(
                 request,
                 source,
@@ -6861,6 +6957,7 @@ class ModelHubService:
                     outcome=None,
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
+                    verification_pending=verification_pending,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if cancelled is not None:
@@ -6915,6 +7012,7 @@ class ModelHubService:
                         outcome=None,
                         credential_ref=source.credential_ref,
                         settlement_generation=settlement_generation,
+                        verification_pending=verification_pending,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 if cancelled is not None:
@@ -6941,6 +7039,9 @@ class ModelHubService:
                     (),
                 )
             if decision.action == "return":
+                await self._verify_successful_source(
+                    source.id, source.credential_ref, verification_pending, outcome,
+                )
                 self._emit_switch(
                     agent=event_agent,
                     model_id=model_id,
@@ -6958,6 +7059,7 @@ class ModelHubService:
                     outcome=outcome,
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
+                    verification_pending=verification_pending,
                 )
             if decision.action == "surface":
                 source_transition_persisted: bool | None = None

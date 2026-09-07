@@ -893,6 +893,7 @@ export const SourceDetailPanel: React.FC<{
     known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
+    verificationPending: Boolean(source.verification_pending),
   });
   // One authority picks the remedy and another total Record names its concrete
   // control. In particular, `retest` points at the existing refetch button; it is

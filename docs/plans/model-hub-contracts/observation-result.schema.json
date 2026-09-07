@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/observation-result.schema.json",
   "title": "SourceObservation",
-  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state. Any upstream response proves reachability, but a bare HTTP status proves neither protocol nor authentication. Authentication is accepted only for a shaped success or a shaped request error that occurs after authentication; shaped authentication errors are rejected, while shaped server and rate-limit errors leave authentication unknown and settle as adapter_error rather than observed or ambiguous.",
+  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state. Any upstream response proves reachability, but a bare HTTP status proves neither protocol nor authentication. A shaped success can establish authentication; schema errors cannot, because they can precede authentication. No synthetic credential control or public model inventory upgrades that evidence. Shaped authentication errors reject their candidate; unknown sibling candidates in Auto remain unknown. Shaped request, server and rate-limit errors leave authentication unknown and settle as adapter_error rather than observed. Explicit unverified Source creation is separate from this result and never changes its evidence.",
   "type": "object",
   "required": [
     "contract_version",

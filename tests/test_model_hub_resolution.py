@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 from collections import deque
@@ -90,6 +91,11 @@ class MemoryStore:
 
     def requested_model(self, backend: str) -> str:
         return self.requested_models.get(backend, "")
+
+    def mutate(self, mutator):
+        config = copy.deepcopy(self.config)
+        if mutator(config):
+            self.save(config)
 
 
 def test_source_settlement_authority_never_downgrades_a_decided_error() -> None:
@@ -1995,7 +2001,7 @@ def test_credential_cleanup_settlement_has_one_durable_boundary():
     assert raw_cleanup_callers == {"_require_credential_cleanup"}
 
 
-def test_every_persisting_source_path_requires_response_backed_protocol_evidence():
+def test_source_admission_uses_explicit_owners_and_keeps_verified_paths_proven():
     from ast import AsyncFunctionDef, Attribute, Call, Name, parse, walk
     from pathlib import Path
 
@@ -2051,9 +2057,11 @@ def test_every_persisting_source_path_requires_response_backed_protocol_evidence
     assert "_require_proven_source_payload" in calls(
         migration_functions["apply_native_migration"]
     )
-    assert "_require_proven_observation" in calls(
-        service_functions["_create_oauth_source"]
-    )
+    oauth_calls = calls(service_functions["_create_oauth_source"])
+    assert "_observe_provisioned_credential" in oauth_calls
+    assert "_mark_source_unverified" in oauth_calls
+    assert "_mark_source_unverified" in calls(service_functions["create_source"])
+    assert "_mark_source_unverified" in calls(migration_functions["apply_native_migration"])
 
 
 def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):

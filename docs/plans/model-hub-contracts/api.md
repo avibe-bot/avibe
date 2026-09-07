@@ -92,23 +92,44 @@ response. A supplied protocol is established when authentication succeeds and ei
 `vendor` has a shipped catalog pin, the client declared that protocol on `custom`, or
 a matching protocol-shaped response proves it. The protocol probe is deliberately
 schema-invalid and names no synthetic model, so a relay can authenticate and classify it
-without selecting or invoking an upstream model. A bare-origin Base URL uses the
+without selecting or invoking an upstream model. Schema validation does not prove
+authentication. Synthetic altered credentials are not used: unknown token grammars
+and middleware ordering make their rejection inconclusive. Public inventory and
+`accept_unavailable_inventory` never supply authentication proof.
+A bare-origin Base URL uses the
 standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
 root. The endpoint provisions an unbound engine credential only for this operation,
 returns `observation-result.schema.json`, then revokes the transient reference before
 settling. A revoke failure remains in the existing pending-revocation journal. The
 response never contains that reference or any persisted Source.
 
-For an API-key `POST /api/models/sources`, the server performs the same
+For an API-key `POST /api/models/sources` without `save_unverified: true`, the server performs the same
 server-owned observation internally before its independent committed credential
 provisioning. It accepts the create fields and optional protocol constraint, but never
 accepts protocol proof or inventory results from the caller. A null protocol
 produces no Source. A repeated observation that establishes a protocol owner but ends
 with failed inventory discovery produces no Source unless this request explicitly carries
 `accept_unavailable_inventory: true`; the accepted Source has `models: []` and the
-existing uncertain health projection. Subscription OAuth creation follows its
-vendor-specific observation flow before commit. Saved Sources use the stored protocol for
-every later operation.
+existing uncertain health projection.
+
+Explicit `save_unverified: true` instead saves the catalog-pinned or user-declared
+interface without upstream observation or discovery. Custom Auto without a declaration
+is rejected before credential provisioning. Manual models remain manual; no inventory
+is invented. The Source carries an opaque `verification_pending` marker, independently of its
+routing health, and may be configured and invoked. List/detail surfaces label it
+unverified, not healthy/in use. Successful inventory discovery never clears this flag.
+Every newly stored Hub credential starts pending, including observed creates and
+native-config imports. A call captures the persisted marker before invocation; any
+successful call using the same current credential and marker clears it through a
+fresh cross-process config transaction. Newer same-credential attempts do not negate
+success. Credential/endpoint replacement generates a new marker, including same-handle
+OAuth reauthentication; old calls and failed calls cannot verify that replacement.
+Existing Sources lacking the optional marker retain their existing state.
+
+Completed Hub OAuth consent can likewise retain its bound credential under the fixed
+vendor protocol with verification pending. An explicit authentication rejection keeps
+the existing needs-action state. Native CLI OAuth is unchanged. Saved Sources use the
+stored protocol for every later operation. No create path performs a model invocation.
 
 `source-create.schema.json` is the complete `SourceCreate` request. Its field table is
 authoritative; no Source response field may be inferred backwards into the request:

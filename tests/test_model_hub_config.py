@@ -1462,6 +1462,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         "supply_channel": "hub",
         "credential_ref": "cred_serializer_test",
         "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        "verification_pending": "vp_0123456789abcdef0123456789abcdef",
     }
     hub_payload = {
         "sources": [source_example],

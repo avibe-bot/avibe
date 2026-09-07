@@ -1,20 +1,23 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
 import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import jwt
 import pytest
 import yaml
+from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,6 +38,7 @@ from config.v2_config import (
     V2Config,
 )
 from core.agent_auth_service import AgentAuthService
+from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
 from core.handlers.model_hub.service import ModelHubError
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
@@ -58,6 +62,8 @@ from vibe.claude_config import (
 )
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -2683,6 +2689,347 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
             "create_auth_failure",
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("vendor", "protocol"),
+    [(entry.id, entry.protocol) for entry in api_key_vendor_catalog()]
+    + [("custom", protocol) for protocol in SOURCE_PROTOCOLS],
+)
+@pytest.mark.parametrize("auth_before_validation", [True, False])
+@pytest.mark.parametrize("public_inventory", [False, True])
+@pytest.mark.parametrize("valid_key", ["test-model-free-key", "!@#$%^&*"])
+def test_api_key_setup_does_not_schedule_a_model(
+    monkeypatch, tmp_path, vendor, protocol, auth_before_validation, public_inventory, valid_key,
+):
+    """Scenario: AUTH-SETUP-112"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Keep engine lifecycle simulated; exercise real credential custody, HTTP
+    # observation, inventory discovery, and Source admission together.
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    async def scenario():
+        requests = []
+        observed_credentials = set()
+        key_syntax = r"[a-z-]+" if valid_key[0].isalpha() else r"[^\w\s]+"
+        paths = {
+            "anthropic": "/v1/messages",
+            "openai_responses": "/v1/responses",
+            "openai_chat": "/v1/chat/completions",
+        }
+
+        async def upstream(request):
+            body = await request.json() if request.method == "POST" else None
+            requests.append((request.method, request.path, body))
+            supplied_key = (
+                request.headers.get("x-api-key")
+                if protocol == "anthropic"
+                else request.headers.get("Authorization", "").removeprefix("Bearer ")
+            )
+            observed_credentials.add(supplied_key)
+            if not re.fullmatch(key_syntax, supplied_key):
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            if request.method == "POST" and not auth_before_validation and "model" not in body:
+                return web.json_response(
+                    {"error": {"type": "invalid_request_error", "message": "model is required"}},
+                    status=400,
+                )
+            if supplied_key != valid_key and not (request.method == "GET" and public_inventory):
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            if request.method == "GET":
+                return web.json_response({"data": [{"id": "relay-model"}]})
+            if "model" in body:
+                return web.json_response(
+                    {"error": {"type": "rate_limit_error", "message": "No available model capacity"}},
+                    status=429,
+                )
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": "model is required"}},
+                status=400,
+            )
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post(paths[protocol], upstream)
+        upstream_app.router.add_get("/v1/models", upstream)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        draft = {
+            "vendor": vendor,
+            "protocol": protocol,
+            "base_url": f"http://127.0.0.1:{port}",
+            "key": valid_key,
+        }
+        harness = SimpleNamespace()
+        runner = ScenarioRunner(harness)
+        async def observe(h):
+            result = await service.observe_source(draft)
+            observation = result["observation"]
+            assert observation["outcome"] != "observed"
+            assert observation["authenticated"] == "unknown"
+            assert not store.config.sources
+
+        async def confirm(h):
+            with pytest.raises(ModelHubError):
+                await service.create_source({
+                    "kind": "api_key", **draft, "accept_unavailable_inventory": True,
+                })
+            before = len(requests)
+            await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+            assert len(requests) == before
+            assert len(store.config.sources) == 1
+            h.source = store.config.sources[0].to_payload()
+            assert h.source["protocol"] == protocol
+            assert h.source["models"] == []
+            assert h.source["verification_pending"]
+            assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
+
+        async def reject_invalid_key(h):
+            invalid = {**draft, "key": "invalid-test-key" if valid_key[0].isalpha() else "!!??"}
+            result = await service.observe_source(invalid)
+            assert result["observation"]["outcome"] != "observed"
+            assert result["observation"]["authenticated"] != "authenticated"
+            with pytest.raises(ModelHubError):
+                await service.create_source({
+                    "kind": "api_key", **invalid, "accept_unavailable_inventory": True,
+                })
+            assert [source.to_payload() for source in store.config.sources] == ([h.source] if h.source else [])
+
+        try:
+            await runner.run(
+                ScenarioStep("observe", observe),
+                ScenarioStep("confirm", confirm),
+                ScenarioStep("reject_invalid_key", reject_invalid_key),
+            )
+            ScenarioExpect.step_history(runner, ["observe", "confirm", "reject_invalid_key"])
+            assert observed_credentials == {
+                valid_key, "invalid-test-key" if valid_key[0].isalpha() else "!!??",
+            }
+            assert all(
+                path == (paths[protocol] if method == "POST" else "/v1/models")
+                for method, path, _ in requests
+            )
+            assert all("model" not in body for _, _, body in requests if body is not None)
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"error": {"type": "invalid_request_error", "param": "model"}}),
+        (401, {"error": {"code": "invalid_api_key"}}),
+        (403, {"message": "Request blocked by regional policy"}),
+        (429, {"error": {"type": "rate_limit_error"}}),
+        (502, {"error": {"type": "upstream_error"}}),
+        (200, {"ok": True}),
+    ],
+)
+@pytest.mark.parametrize("validation_before_auth", [False, True])
+@pytest.mark.parametrize("vendor", tuple(_OAUTH_ENDPOINTS))
+@pytest.mark.parametrize("credential_valid", [True, False])
+def test_hub_oauth_model_free_observation_closed_loop(
+    monkeypatch, tmp_path, caplog, status, body, validation_before_auth, vendor, credential_valid,
+):
+    """Scenario: AUTH-SETUP-113"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    api_calls = []
+    inventory_calls = []
+    rejected = status == 401 or (not credential_valid and not (validation_before_auth and status == 400))
+    is_openai = vendor in {"openai", "codex"}
+    protocol = "openai_responses" if is_openai else "anthropic"
+    if vendor == "anthropic" and "error" in body:
+        body = {"type": "error", **body}
+    signing_key = "test-oauth-signature-key-with-32-bytes"
+    bound_token = (
+        jwt.encode({"sub": "account-test", "exp": time.time() + (3600 if credential_valid else -3600)}, signing_key)
+        if is_openai
+        else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
+    )
+    auth_name = "oauth-test.json"
+    state_store._secure_write_json(state_store.auth_dir / auth_name, {"access_token": bound_token})
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": [{
+                "id": "codex-test", "auth_index": "auth-index-test",
+                "name": auth_name, "provider": "codex" if is_openai else "claude",
+                "id_token": {"chatgpt_account_id": "account-test"},
+            }]}
+        if path == "/api-call":
+            assert method == "POST"
+            assert payload["auth_index"] == "auth-index-test"
+            assert payload["url"] == (
+                "https://chatgpt.com/backend-api/codex/responses" if is_openai
+                else "https://api.anthropic.com/v1/messages?beta=true"
+            )
+            if is_openai:
+                assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
+            assert "model" not in json.loads(payload["data"])
+            api_calls.append(payload)
+            token = payload["header"]["Authorization"].removeprefix("Bearer ").replace("$TOKEN$", bound_token)
+            try:
+                if is_openai:
+                    jwt.decode(token, options={"verify_signature": False})
+                elif not re.fullmatch(r"sk-ant-oat01-[a-z-]+", token):
+                    raise ValueError("Malformed opaque token")
+            except (jwt.PyJWTError, ValueError):
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
+            if validation_before_auth and status == 400:
+                return {"status_code": status, "body": json.dumps(body)}
+            try:
+                if is_openai:
+                    jwt.decode(token, signing_key, algorithms=["HS256"])
+                elif token != "sk-ant-oat01-test-valid":
+                    raise ValueError("Invalid opaque token")
+            except (jwt.PyJWTError, ValueError):
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
+            return {"status_code": status, "body": json.dumps(body)}
+        if path == "/auth-files/models":
+            assert query == {"name": auth_name}
+            inventory_calls.append(query)
+            return {"models": [{"id": "gpt-5.6"}]}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Simulate consent and engine lifecycle, but run the actual bound-credential
+    # probe, evidence parser, discovery, and terminal Source materialization.
+    monkeypatch.setattr(adapter, "observe_source", transport.observe_source)
+    monkeypatch.setattr(adapter, "discover_models", transport.discover_models)
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": vendor, "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        assert not store.config.sources
+
+    async def complete_consent(h):
+        flow = adapter.flows[h.flow_id]
+        h.credential_ref = state_store.bind_oauth_credential(flow.source_id, vendor, auth_name)
+        adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
+
+    async def materialize_source(h):
+        terminal = await service.oauth_status(h.flow_id)
+        source = terminal["source"]
+        assert terminal["flow"]["state"] == "success"
+        assert source["protocol"] == protocol
+        assert source["supply_channel"] == "hub"
+        assert source["credential_ref"] == h.credential_ref
+        assert source["verification_pending"]
+        assert source["state"]["status"] == ("needs_action" if rejected else "standby")
+        assert [model["id"] for model in source["models"]] == ([] if rejected else ["gpt-5.6"])
+        assert service.list_sources() == [source]
+        assert bound_token not in json.dumps(terminal)
+        assert (await service.oauth_status(h.flow_id))["source"] == source
+        assert adapter.revoked == []
+        assert len(api_calls) == 1
+        assert api_calls[0]["header"]["Authorization"] == "Bearer $TOKEN$"
+        assert len(inventory_calls) == int(not rejected)
+        assert json.loads((state_store.auth_dir / auth_name).read_text())["access_token"] == bound_token
+        assert bound_token not in caplog.text
+
+    asyncio.run(runner.run(
+        ScenarioStep("start_login", start_login),
+        ScenarioStep("complete_consent", complete_consent),
+        ScenarioStep("materialize_source", materialize_source),
+    ))
+    ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("policy_body", ["<html>Request blocked</html>", '{"message":"Regional policy"}'])
+@pytest.mark.parametrize("competing_protocol", [False, True])
+def test_custom_auto_policy_response_cannot_reject_or_exclude_credentials(
+    monkeypatch, tmp_path, status, policy_body, competing_protocol,
+):
+    """Scenario: AUTH-SETUP-114"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    transport = CLIProxyEngineAdapter(
+        supervisor=Mock(), state_store=EngineStateStore(tmp_path / "engine-state"),
+    )
+    service, store, adapter = _service(tmp_path)
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    async def scenario():
+        paths = []
+
+        async def upstream(request):
+            assert request.method == "POST", "Unknown protocol evidence must not reach model discovery"
+            assert "model" not in await request.json()
+            paths.append(request.path)
+            if competing_protocol and request.path == "/v1/responses":
+                if request.headers.get("Authorization") != "Bearer test-policy-key":
+                    return web.Response(status=401, text="Invalid control")
+                return web.json_response(
+                    {"error": {"type": "invalid_request_error", "param": "model"}}, status=400,
+                )
+            if competing_protocol and request.path == "/v1/chat/completions":
+                return web.Response(status=404)
+            return web.Response(status=status, text=policy_body)
+
+        upstream_app = web.Application()
+        upstream_app.router.add_route("*", "/{path:.*}", upstream)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        draft = {"vendor": "custom", "base_url": f"http://127.0.0.1:{port}", "key": "test-policy-key"}
+        runner = ScenarioRunner(SimpleNamespace())
+
+        async def observe(h):
+            result = await service.observe_source(draft)
+            observation = result["observation"]
+            assert observation["outcome"] == "ambiguous"
+            assert observation["protocol"] is None
+            assert observation["authenticated"] == "unknown"
+            assert not store.config.sources
+
+        async def confirm(h):
+            with pytest.raises(ModelHubError):
+                await service.create_source({"kind": "api_key", **draft, "accept_unavailable_inventory": True})
+            before = len(paths)
+            with pytest.raises(ModelHubError):
+                await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+            assert len(paths) == before
+            assert not store.config.sources
+
+        try:
+            await runner.run(ScenarioStep("observe", observe), ScenarioStep("confirm", confirm))
+            ScenarioExpect.step_history(runner, ["observe", "confirm"])
+            assert set(paths) == {"/v1/messages", "/v1/responses", "/v1/chat/completions"}
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
 
 
 if __name__ == "__main__":

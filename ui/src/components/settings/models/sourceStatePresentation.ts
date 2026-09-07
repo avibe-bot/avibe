@@ -97,8 +97,15 @@ export const sourceStatePresentation = (
   surface: SourceStateSurface,
   locale: string,
   now: number = Date.now(),
-  adoption: { known: boolean; backends: string[]; native: boolean } = { known: false, backends: [], native: false },
+  adoption: { known: boolean; backends: string[]; native: boolean; verificationPending?: boolean } = { known: false, backends: [], native: false },
 ): SourceStatePresentation => {
+  if (adoption.verificationPending && (state.status === 'active' || state.status === 'standby')) {
+    return {
+      key: 'settings.models.sourceDetail.status.unverified',
+      textClass: 'model-hub-ink-gold',
+      dotClass: 'bg-gold',
+    };
+  }
   if (state.status === 'active' && !adoption.known) {
     return { key: null, textClass: 'text-muted', dotClass: 'bg-muted' };
   }

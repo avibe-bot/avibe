@@ -1423,7 +1423,7 @@
       },
       "addKey": {
         "title": "添加 API Key",
-        "subtitle": "先检测连接与接口，确认后添加",
+        "subtitle": "API Key 与模型接口",
         "field": {
           "vendor": "服务商",
           "vendor.custom": "自定义 · 兼容端点",
@@ -1432,7 +1432,7 @@
           "vendor.empty": "没有同名的服务商",
           "name": "名称(可选)",
           "protocol": "接口类型",
-          "protocol.hint": "不确定时用自动探测；已知类型时可直接声明所选接口。该路径鉴权成功即可添加；选错了运行时可能失败，而且保存后不可更改",
+          "protocol.hint": "指定接口不代表凭证有效，也不代表实际模型调用兼容",
           "baseUrl": "Base URL",
           "baseUrl.hint": "填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径",
           "apiKey": "API Key",
@@ -1451,7 +1451,7 @@
         "saving": "保存中…",
         "saving.detail": "正在保存这个供应商",
         "fail": {
-          "subtitle": "认出接口是「添加」的前置条件 · 先按下面这条修,再重试",
+          "subtitle": "实际模型调用仍未验证",
           "auth": "供应商拒绝了这个凭据",
           "auth.detail": "检查 API Key、接口类型和 Base URL 的 API 根路径",
           "address": "地址不对:404 Not Found",
@@ -1464,8 +1464,8 @@
         },
         "retry": "重试",
         "undetermined": {
-          "title": "连上了、也通过了鉴权 —— 但认不出它说哪种接口",
-          "detail": "这次返回结构对不上任何一种已知接口。请选择一个明确类型后重试：只要该路径鉴权成功即可添加；但选错了运行时可能失败，而且保存后不可更改"
+          "title": "已连接，但尚未完成验证",
+          "detail": "这次响应不足以同时确认接口类型和凭证有效性"
         },
         "protocol": {
           "auto": "自动探测",
@@ -1476,13 +1476,14 @@
           "detecting": "识别接口中…",
           "manual": "手动指定接口类型",
           "catalogPinned": "内置目录",
-          "catalogPinned.hint": "检测会验证密钥并拉取模型；不再需要靠返回结构证明接口",
+          "catalogPinned.hint": "接口由内置目录指定；凭证是否有效仍需单独验证",
           "declared": "手动指定"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"
         },
         "addAnyway": "仍要添加",
+        "saveUnverified": "未验证保存",
         "success": {
           "title": "添加成功，接下来进入供应商详情",
           "detail": "模型列表、重新拉取和推理强度档位都在那里维护"
@@ -1670,6 +1671,7 @@
           "error": "异常",
           "standbyHintLabel": "这个状态是什么意思",
           "standbyHint": "这个供应商当前可用。当模型网关中的某个后端通过它调用模型时，它就会显示为使用中。",
+          "unverified": "尚未验证",
           "listUpdated": "· 模型列表更新于 {{time}}"
         },
         "summary_one": "{{host}} · {{count}} 个模型",

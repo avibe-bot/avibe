@@ -130,6 +130,8 @@ export type Source = {
   supply_channel: SupplyChannel;
   billing: 'monthly' | 'metered';
   state: SourceState;
+  /** Opaque pending-verification identity; presence means no successful model call yet. */
+  verification_pending?: string | null;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */
@@ -851,7 +853,7 @@ export type ApiKeySourceObservation = {
   protocol?: SourceProtocol;
 };
 
-/** POST /api/models/sources — api_key create observes again before persisting. */
+/** POST /api/models/sources — observation is bypassed only by explicit consent. */
 export type ApiKeySourceCreate = {
   kind: 'api_key';
   vendor: string;
@@ -864,6 +866,8 @@ export type ApiKeySourceCreate = {
   protocol?: SourceProtocol;
   /** Explicit consent for a repeated, protocol-proven inventory failure. */
   accept_unavailable_inventory?: boolean;
+  /** Save a catalog-pinned or declared interface without calling the upstream. */
+  save_unverified?: boolean;
 };
 
 /**

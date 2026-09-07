@@ -33,13 +33,14 @@ export const SourceRow: React.FC<{
     known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
+    verificationPending: Boolean(source.verification_pending),
   });
   const kindKey = source.supply_channel === 'native_cli'
     ? 'nativeCredential'
     : source.kind === 'subscription'
       ? 'subscription'
       : 'apiKey';
-  const adopted = (source.state.status === 'active' || source.state.status === 'standby') && (adoptedBy?.length ?? 0) > 0;
+  const adopted = !source.verification_pending && (source.state.status === 'active' || source.state.status === 'standby') && (adoptedBy?.length ?? 0) > 0;
   return (
     <button
       type="button"

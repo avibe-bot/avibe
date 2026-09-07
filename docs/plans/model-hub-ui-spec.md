@@ -3243,6 +3243,21 @@ Stated as the property rather than as three call sites: **an interface this dial
 not detect says where it came from, and the row that says it also says what detection
 is still for.**
 
+**2026-09-07 owner-approved unverified-save exit.** An explicit catalog pin or
+concrete custom declaration permits `Save unverified` (`addKey.saveUnverified`)
+from the valid initial form and observation failure/undetermined states. Reuse the
+outline footer action with the Save icon; enter the existing persisting phase with
+`save_unverified: true`. Custom Auto has no such exit until an interface is selected.
+Unknown-write reconciliation retains this consent and the nonce. Draft edits retire
+held evidence as before. The footer wraps on narrow screens. This supersedes the
+observation prerequisite in the earlier state tables, not cancellation, settlement
+or focus ownership. No upstream observation or inventory request occurs on this exit.
+Source list/detail show `sourceDetail.status.unverified` in existing advisory ink;
+error/cooldown states retain visual precedence. Adoption and model discovery cannot
+replace this label with healthy/in-use copy. Only an actual successful model call
+retires verification as defined by the Source contract. Ambiguity copy must not
+claim authentication success.
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
@@ -3262,7 +3277,7 @@ is still for.**
 | `WZyA8` selector | the same four interface choices, expanded in place, glyphs on concrete options | selection | yes, Auto detect remains selected until changed | Select one concrete interface; enables 重试 |
 | `Nak7y` ④ foot | 取消 / 重试 (dimmed until a concrete interface is picked) | selection | yes | — |
 | `d6bFlX` state ⑤ strip | the interface *was* identified, and the model list did not come back | observation result | no | — |
-| `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — **three** buttons, the only foot in the product with three | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
+| `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — three buttons | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
 | `sqZa9` success note | that the dialog closes straight into 06 | static | no | — |
 
 **Metrics** `[frame]`: dialog 560 wide, height auto in all five states — the frame

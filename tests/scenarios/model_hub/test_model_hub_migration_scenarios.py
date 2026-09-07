@@ -965,6 +965,7 @@ def test_scan_skips_invalid_endpoint_without_blocking_valid_items(
     assert {item["backend"] for item in scan} == {"opencode"}
     result = asyncio.run(service.migration_apply([item["id"] for item in scan]))
     assert result["applied"] == 2
+    assert all(source.verification_pending for source in store.config.sources)
     assert {source.vendor for source in store.config.sources} == {
         "openrouter",
         "zhipuai",

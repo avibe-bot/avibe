@@ -355,10 +355,44 @@ rungs, documented in `docs/plans/model-hub-vendor-preset-protocol.md`:
    prove reachability and authentication on that protocol's path. Shape proof
    is not required. A wrong declaration fails on a later real call.
 
+**Owner ruling 2026-09-07: configuration and verification are independent.**
+The three owners above still determine the interface, but explicit API-key
+`save_unverified: true` no longer requires a successful observation. It saves only
+a catalog-pinned or user-declared protocol, with canonical validation, credential
+custody, nonce reconciliation and rollback unchanged. Custom Auto without a
+declaration is refused before credential work. No upstream probe or model discovery
+is performed by this explicit save path; supplied manual models remain manual.
+
+Schema errors may precede authentication and never authenticate a key. There is no
+synthetic credential control: unknown grammar/checksums and other valid credentials
+make both rejection and acceptance of an altered token inconclusive. Bare 401/403
+statuses likewise do not prove credential rejection. The ordinary non-persisting
+observation still reports response-backed evidence without inventing certainty.
+
+Completed Hub OAuth consent may retain its bound credential as an unverified Source
+under the fixed vendor protocol. The engine retains OAuth token custody; optional
+model-free observation uses the existing allowlisted auth-index transport and token
+substitution, not private-token reads. Explicit upstream credential rejection retains
+the existing needs-action state. Native CLI OAuth is unchanged.
+
+`Source.verification_pending` is one optional persisted opaque identity, independent
+of health and routing eligibility. Every newly stored Hub credential gets a marker,
+including observed creates and native-config imports. Source list/detail use the
+existing advisory treatment instead of healthy/in-use copy. Inventory never clears it.
+A call captures the marker before invocation; any successful same-credential call
+with that marker, including the existing backend probe, clears it in a fresh shared
+config transaction. Later same-credential attempts do not invalidate success.
+Credential/endpoint replacement generates a new marker even when OAuth reuses the
+same handle, so old calls cannot verify replacement material across processes.
+Legacy Sources retain their existing
+state without retroactive verification claims. Successful verification of one call
+does not promise that every model or operation is supported.
+
 The form exposes a vendor select first (V4 06r / 模型网关 05). Auto detect plus
-the three supported protocols remain on `custom`. A failed observation still
-stores nothing rather than guessing. Unreachable, rejected, timeout, and
-adapter-error paths still cannot save.
+the three supported protocols remain on `custom`. Observation alone never saves
+anything. The explicit unverified-save exit is available after an observation failure
+or directly from a valid declared/pinned draft; it does not turn that failure into
+proof or silently select the first Auto candidate.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use

@@ -19,6 +19,11 @@
   ],
   "additionalProperties": false,
   "properties": {
+    "verification_pending": {
+      "type": ["string", "null"],
+      "pattern": "^vp_[0-9a-f]{32}$",
+      "description": "Opaque, non-secret pending-verification identity, replaced whenever Hub credential material or endpoint is stored, including observed creates and same-handle OAuth reauthentication. Presence means not yet model-call verified, independently of routing health. An invocation captures this marker before admission; any successful call with the same current credential and marker may clear it through a fresh cross-process config mutation. Later same-credential calls do not invalidate proof. Inventory never clears it. Null or omission retains legacy behavior without a retrospective verification claim."
+    },
     "id": {
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"

@@ -510,11 +510,14 @@ class EngineAdapter(Protocol):
         ``protocol_order`` either enumerates Auto-detect probes or names one
         owner-constrained protocol. A returned protocol may be established by
         a protocol-shaped upstream response, by a shipped API-key vendor pin,
-        or by a concrete `custom` declaration. The latter two require a
-        response from that exact path plus the September 4, 2026 auth ladder:
-        401/403 reject, while 2xx and request-error 400/404/422 accept even
-        if the response shape itself stays generic. `custom` Auto detect still
+        or by a concrete `custom` declaration. Schema-validation errors,
+        altered-credential controls and public inventory cannot establish
+        authentication. A shaped success can; a bare status cannot. Auto still
         requires response-backed proof; order alone never proves a protocol.
+        Explicit unverified API-key saving and completed Hub OAuth admission
+        belong to Source creation, not this non-persisting evidence result.
+        They retain a fixed protocol owner with verification pending and do
+        not turn an unknown/rejected observation into authentication proof.
         """
         ...
 
