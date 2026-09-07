@@ -20,6 +20,13 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text()
 
 
+def _use_avibe_references() -> list[Path]:
+    directory = ROOT / "skills/use-avibe"
+    targets = re.findall(r"\]\((references/[^)]+\.md)\)", (directory / "SKILL.md").read_text())
+    assert targets, "the Skill entry must route to its operational references"
+    return [directory / target for target in targets]
+
+
 def _embedded_cli_examples(body: str) -> list[str]:
     """Every embedded `vibe task/watch` example that carries at least one flag.
 
@@ -36,7 +43,9 @@ def _embedded_cli_examples(body: str) -> list[str]:
 
 
 def test_avibe_compatibility_skill_teaches_current_harness_defaults() -> None:
-    for path in ("skills/use-avibe/SKILL.md",):
+    reference = ROOT / "skills/use-avibe/references/harness.md"
+    assert reference in _use_avibe_references()
+    for path in ("skills/use-avibe/references/harness.md",):
         body = _read(path)
 
         assert "Runs are async by default" in body
@@ -79,6 +88,7 @@ def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
     )
     examples = _embedded_cli_examples(
         prompt + "\n" + _read("skills/use-avibe-harness/SKILL.md")
+        + "\n" + "\n".join(path.read_text() for path in _use_avibe_references())
     )
     assert examples, "no embedded vibe task/watch examples found — did the regex drift?"
 
@@ -117,6 +127,7 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
     for path in (
         "skills/use-avibe/SKILL.md",
         "skills/background-watch-hook/SKILL.md",
+        *(path.relative_to(ROOT).as_posix() for path in _use_avibe_references()),
     ):
         body = _read(path)
         for text in disallowed:
@@ -140,7 +151,7 @@ def test_use_avibe_skill_keeps_its_broad_scope_without_a_session_lifecycle_proto
             "context compaction",
             "active Agent Session context",
         ):
-            assert text not in body
+            assert text not in body + "\n".join(path.read_text() for path in _use_avibe_references())
 
 
 def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
