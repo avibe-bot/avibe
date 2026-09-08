@@ -1,0 +1,133 @@
+# Model Hub permissive request boundaries
+
+## Ownership and authorization
+
+Owner approval on 2026-09-09 authorizes implementation and parallel Codex
+delegation following the preceding request-path audit. The user-started Session
+remains the orchestrator and final reviewer. This is not authorization to merge,
+publish an engine or application release, deploy, update/restart the running
+local Avibe, mutate user configuration, or advance the primary checkout.
+
+Implementation starts from default-branch commit
+`e4924db41bcbf37581cda08cf1376a899e70906c`. Independent lanes share this committed
+contract before they branch. Avibe changes integrate into one task branch and
+one normally reviewed PR; no lane stacks a PR on an unmerged peer.
+
+## Evidence and goal
+
+A Codex Blender Session failed at the authenticated Avibe gateway's 16 MiB
+request boundary. Reconstructing its latest persisted context checkpoint and
+subsequent model items found 20 inline PNG images totaling approximately 42 MiB.
+This was not a capture of the rejected wire request. The new user text was
+39 UTF-8 bytes. A hermetic 18 MiB aiohttp request passed with the boundary
+disabled, but the read/parse/reserialize fixture recorded about 76.5 MiB of peak
+Python allocations, excluding the engine. Removing every resource bound is
+therefore not the immediate remedy.
+
+The product should accept legitimate multi-image requests, preserve explicit
+model intent, and never equate absent capability knowledge with demonstrated
+non-support. Resource ownership, authentication, cancellation, routing, and
+persisted identity remain real constraints.
+
+## Shared invariants
+
+1. **Request envelope.** The common authenticated gateway accepts valid request
+   bodies through 128 MiB for Messages, Responses, and Chat Completions, with
+   consistent byte semantics for Content-Length and chunked bodies. Oversize
+   input returns a structured, non-secret 413 describing the local boundary,
+   before upstream admission. It does not mark a provider unhealthy, consume an
+   alternative provider, or silently truncate history. Do not add image-count,
+   turn-count, output-length, or normal-inference-duration caps.
+2. **Capabilities.** An absent override remains distinct from an explicit
+   negative or an explicit user selection. Custom model projection must not
+   silently strip supplied images or force reasoning to `none` solely because
+   catalog metadata is absent. Do not inherit a different model's provider-only
+   features, context size, tools, or expensive defaults. Preserve native known
+   rows, explicit negatives, persisted shapes, and model-selection ownership.
+3. **Limit authority.** Catalog context/output metadata assists planning; it
+   must not silently replace explicit user configuration with a stale default.
+   Preserve useful automatic compaction and backend schema requirements.
+   Determine authority from existing fields/owners where possible. A new
+   persisted provenance model requires an orchestrator decision before editing.
+4. **Model identity.** Reassess the 256-character admission bound across manual
+   input, discovery, routing, UI/API, metering, and load. Do not replace it with
+   another arbitrary number or remove it without checking downstream identity
+   and usage-key behavior. No truncation, identity merging, secret admission,
+   startup breakage, or silent loss of historical usage is permitted. The lane
+   reports its smallest complete proposal before implementation.
+5. **Engine intent.** Inspect the exact pinned CLIProxyAPI v7.2.149 source
+   `2a6b87aca083a5bf498ac1f68a1b636c500d7aaa`. Same-protocol explicit reasoning
+   intent must not be removed or downgraded solely by incomplete capability
+   metadata. Preserve required cross-protocol translation, OAuth lifetimes,
+   credential replacement, Source/model identity, and all routing policy.
+   Do not remove registration metadata as a shortcut: it can worsen stripping.
+   Report the source/build/release plan before implementing engine policy.
+   Never point a shipped manifest at missing assets or claim wire preservation
+   from a fake-adapter-only test.
+6. **Non-goals.** Keep bounded observation copies, temporary-file spill
+   thresholds, chunk sizes, authentication, cancellation cleanup, real upstream
+   failures, and existing retry ownership. Do not weaken CI, migrate unrelated
+   state, add a detection save gate, replay live credentials, or change unrelated
+   pending PRs.
+
+## Boundary ownership
+
+| Boundary | Producer | Consumer | Contract owner |
+| --- | --- | --- | --- |
+| Native model request | Claude/Codex/OpenCode | authenticated turn gateway | gateway lane |
+| Request model/protocol/header envelope | gateway | resolver and managed adapter | existing shared request owner, unchanged |
+| Backend model capability/limit projection | selected backend model catalog | CLI launch/catalog consumers | capability lane |
+| Model ID admission and durable usage identity | setup/discovery | config, routes, ledger, UI | identity lane, orchestrator approval |
+| Reasoning wire conversion | managed engine | exact selected mock upstream | engine lane, orchestrator approval |
+| Integration, authority/scenario inventory, PR gates | all lanes | owner | orchestrator |
+
+No new signature or credential field is introduced. Existing local bearer
+authentication and exact Source/model binding must remain unchanged.
+
+## Parallel delivery
+
+- **Gateway lane:** owns gateway request-size/error handling and focused tests
+  plus only the locale/catalog entries required for its new error surface.
+- **Capability lane:** owns backend catalog projection, CLI limit precedence,
+  and their consuming tests. Report cross-lane changes rather than editing
+  gateway/engine/identity code.
+- **Identity lane:** owns the complete identifier/ledger boundary diagnosis
+  first; implementation is gated on the orchestrator's recorded decision.
+- **Engine lane:** owns exact-pinned-source diagnosis and a reproducible
+  hermetic wire/build proposal first; policy edits, publication, and a manifest
+  change are separate decisions.
+- **Orchestrator:** owns this plan, integration branch, final review, combined
+  validation, PR submission, durable PR/CI observation, and close-out.
+
+Lane commits remain local until integrated. Lanes must not push, open PRs,
+merge, create release tags/assets, deploy, or edit a peer's worktree. Each lane
+returns a stable Session/Run ID, commit SHA, tests actually run, known gaps, and
+any contract decision required. A callback is evidence to inspect, not approval.
+
+## Acceptance
+
+- Exercise real hermetic HTTP ingress with a multi-image-size payload exceeding
+  16 MiB; compare exact input reaching the fake upstream/adapter, including
+  non-ASCII text and image data. Check both body framing shapes, threshold
+  boundaries, bad credentials, malformed JSON, cancellation, and no provider
+  health mutation for a local 413.
+- Cover unknown custom models, known built-ins, explicit supported/unsupported
+  choices, aliases, user-selected reasoning, and context/output precedence in
+  consuming launch/catalog paths.
+- For any identifier change, cover every admission surface and legacy persisted
+  IDs, non-ASCII names, collision-shaped names, reload and usage stability.
+- For engine policy, require actual pinned engine-to-mock-upstream wire evidence
+  for applicable same- and cross-protocol paths; distinguish source proof,
+  built artifacts, published availability, and installed behavior.
+- Run focused Python checks and pinned Ruff, then relevant Model Hub suites,
+  authority closure and scenario/catalog checks. UI changes require UI tests,
+  TypeScript and build. Use only isolated fixtures/local regression targets.
+- Require current-head Codex pass, all expected CI jobs, and zero unresolved
+  paginated threads. Record findings-bearing heads/root causes before edits;
+  enforce the review circuit breaker. No automatic merge authorization exists.
+
+## Decisions and status
+
+- Initial decision: implement the 128 MiB compatibility boundary, not unlimited
+  buffering; investigate the identifier and engine seams before choosing edits.
+- Initial findings-bearing review heads: zero. No PR has been submitted yet.
