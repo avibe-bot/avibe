@@ -1077,7 +1077,8 @@ def test_joint_numeric_evaluation_has_a_finite_budget():
     with sqlite3.connect(":memory:") as connection:
         connection.set_trace_callback(statements.append)
         assert guard.shape_proposals(connection, expression, required, values) == []
-    assert len(statements) == guard.SEED_ATTEMPTS
+    evaluations = [statement for statement in statements if statement.startswith("select coalesce(cast(")]
+    assert len(evaluations) == guard.SEED_ATTEMPTS
 
 
 @pytest.mark.parametrize("changed", range(6))
@@ -1124,7 +1125,8 @@ def test_glob_classes_follow_sqlite_token_semantics(tmp_path, pattern):
         assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
-def test_glob_intersection_matches_sqlite_over_a_finite_domain():
+@pytest.mark.parametrize("negate_left,negate_right", itertools.product([False, True], repeat=2))
+def test_glob_intersection_matches_sqlite_over_a_finite_domain(negate_left, negate_right):
     alphabet = "ab[]-"
     patterns = ("*", "a*", "*b", "?a", "[ab]", "[]]", "[^]]", "[[]", "[-a]", "a**b", "[a-]", "[", "[]", "[^]")
     with sqlite3.connect(":memory:") as connection:
@@ -1134,20 +1136,26 @@ def test_glob_intersection_matches_sqlite_over_a_finite_domain():
         ])
         for left, right, width in itertools.product(patterns, patterns, range(4)):
             expected = connection.execute(
-                "select value from domain where width = ? and value glob ? and value glob ? limit 1",
+                f"select value from domain where width = ? and value {'not ' if negate_left else ''}glob ? and value {'not ' if negate_right else ''}glob ? limit 1",
                 (width, left, right),
             ).fetchone()
-            witness = guard.glob_witness(connection, (left, right), width=width, alphabet=alphabet)
+            patterns = tuple(pattern for pattern, negated in [(left, negate_left), (right, negate_right)] if not negated)
+            excluded = tuple(pattern for pattern, negated in [(left, negate_left), (right, negate_right)] if negated)
+            witness = guard.glob_witness(connection, patterns, excluded=excluded, width=width, alphabet=alphabet)
             assert (witness is None) == (expected is None), (left, right, width, witness)
             if witness is not None:
                 assert len(witness) == width
-                assert connection.execute("select ? glob ? and ? glob ?", (witness, left, witness, right)).fetchone()[0]
+                assert connection.execute(
+                    f"select ? {'not ' if negate_left else ''}glob ? and ? {'not ' if negate_right else ''}glob ?",
+                    (witness, left, witness, right),
+                ).fetchone()[0]
 
 
 def test_glob_search_has_explicit_width_pattern_and_state_limits(monkeypatch):
     with sqlite3.connect(":memory:") as connection:
         assert guard.glob_witness(connection, ("*",), width=guard.SEED_TEXT_LIMIT + 1) is None
         assert guard.glob_witness(connection, ("a" * (guard.SEED_TEXT_LIMIT + 1),)) is None
+        assert guard.glob_witness(connection, (), excluded=("a" * (guard.SEED_TEXT_LIMIT + 1),)) is None
         monkeypatch.setattr(guard, "SEED_GLOB_STATES", 3)
         assert guard.glob_witness(connection, ("????",)) is None
 
@@ -1208,6 +1216,121 @@ def test_numeric_check_context_includes_omitted_columns(column, check, expected,
         objection, settled = guard.insert_seed_row(connection, "shaped", ddl, [("n", "INTEGER")], {"n": 0})
         assert (objection, settled) == ("", True)
         assert connection.execute("select n, tag from shaped").fetchall() == [(1, expected)]
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("declared", ["INTEGER", "NUMERIC", "BOOLEAN", "DECIMAL(10,2)", "REAL", "TEXT", "BLOB", ""])
+@pytest.mark.parametrize("default", ["'abc'", "' 001 '", "'3.0e+5'", "'12x'", "x'6162'", "NULL", "1.5", "'9223372036854775808'"])
+def test_numeric_context_matches_real_default_storage(declared, default):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(f"create table sample(tag {declared} default {default})")
+        connection.execute("insert into sample default values")
+        expected = connection.execute("select tag, typeof(tag) from sample").fetchone()
+        value_sql, type_sql = connection.execute("select quote(tag), quote(typeof(tag)) from sample").fetchone()
+        ddl = f"create table shaped(n integer not null, tag {declared} default {default}, constraint ck check(typeof(n) = 'integer' and n > 0 and tag is {value_sql} and typeof(tag) = {type_sql}))"
+        connection.execute(ddl)
+        assert guard.insert_seed_row(connection, "shaped", ddl, [("n", "INTEGER")], {"n": 0}) == ("", True)
+        assert connection.execute("select tag, typeof(tag) from shaped").fetchone() == expected
+        assert connection.execute("select name from sqlite_temp_master").fetchall() == []
+
+
+@pytest.mark.parametrize("declared", ["INTEGER", "NUMERIC", "BOOLEAN", "DECIMAL(10,2)", "REAL", "TEXT", "BLOB", "", "CHARINT", "FLOATING POINT", "STRING"])
+@pytest.mark.parametrize("offered", ["abc", " 001 ", "3.0e+5", "12x", b"ab", None, 1.5, "9223372036854775808"])
+def test_numeric_context_matches_real_supplied_storage(declared, offered):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(f"create table sample(tag {declared})")
+        connection.execute("insert into sample values (?)", (offered,))
+        value_sql, type_sql = connection.execute("select quote(tag), quote(typeof(tag)) from sample").fetchone()
+        expression = f"n > 0 and tag is {value_sql} and typeof(tag) = {type_sql}"
+        proposals = guard.shape_proposals(connection, expression, [("n", "INTEGER"), ("tag", declared)], {"n": 0, "tag": offered})
+        assert ("n", 1) in proposals
+        assert not any(name == "tag" for name, _ in proposals)
+        assert connection.execute("select name from sqlite_temp_master").fetchall() == []
+
+
+@pytest.mark.parametrize("expression", ["n > 0", "n > 0 and n < 0", "n > 0 and missing(n)"])
+def test_candidate_evaluation_preserves_connection_schema_and_data(expression):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("create table source(n integer)")
+        connection.execute("insert into source values (37)")
+        connection.execute("create temp table keep(n text)")
+        connection.execute("insert into keep values ('preserved')")
+        schema = connection.execute("select * from sqlite_master").fetchall()
+        temp_schema = connection.execute("select * from sqlite_temp_master").fetchall()
+        guard.shape_proposals(connection, expression, [("n", "INTEGER")], {"n": 0})
+        assert connection.execute("select * from sqlite_master").fetchall() == schema
+        assert connection.execute("select * from sqlite_temp_master").fetchall() == temp_schema
+        assert connection.execute("select * from source").fetchall() == [(37,)]
+        assert connection.execute("select * from keep").fetchall() == [("preserved",)]
+
+
+@pytest.mark.parametrize("count", [2, 6, 16])
+@pytest.mark.parametrize("reverse_columns,reverse_clauses,reverse_operands", itertools.product([False, True], repeat=3))
+@pytest.mark.parametrize("comparison", ["=", "==", ">=", "<", "!="])
+def test_predicate_ranked_numeric_domains_seed_nonuniform_rows(tmp_path, count, reverse_columns, reverse_clauses, reverse_operands, comparison):
+    names = [f"n{index}" for index in range(1, count + 1)]
+    clauses = [f"{index} {comparison} {name}" if reverse_operands else f"{name} {comparison} {index}" for index, name in enumerate(names, 1)]
+    if reverse_columns:
+        names.reverse()
+    if reverse_clauses:
+        clauses.reverse()
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (id integer primary key, {', '.join(name + ' integer not null' for name in names)}, constraint ck check ({' and '.join(clauses)}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("declared,storage", [("INTEGER", "integer"), ("NUMERIC", "integer"), ("BOOLEAN", "integer"), ("DECIMAL(10,2)", "integer"), ("FLOATING POINT", "integer"), ("REAL", "real"), ("DOUBLE PRECISION", "real"), ("STRING", "integer")])
+def test_numeric_repair_uses_sqlite_affinity_classification(tmp_path, declared, storage):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(n {declared} not null, constraint ck check(typeof(n)='{storage}' and n > 0))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("equality", ["=", "==", "IS"])
+@pytest.mark.parametrize("reverse_operands,reverse_checks", itertools.product([False, True], repeat=2))
+@pytest.mark.parametrize("source", ["a glob 'R-[A-C][0-9]'", "a in ('R-A0')"])
+def test_substring_dependencies_use_normalized_equality(tmp_path, equality, reverse_operands, reverse_checks, source):
+    left, right = ('substr("C", 1, 4)', '"A"')
+    if reverse_operands:
+        left, right = right, left
+    checks = [f"constraint ck_a check({source})", f"constraint ck_c check(length(c)=9 and {left} {equality} {right})"]
+    if reverse_checks:
+        checks.reverse()
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(id integer primary key, a text not null, c text not null, {', '.join(checks)})")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+@pytest.mark.parametrize("separate", [False, True])
+def test_positive_and_negative_globs_share_one_witness(tmp_path, order, separate):
+    requirements = ["length(code)=2", "code glob '[A-Z][0-9]'", "code not glob '[A-Z]0'"]
+    expressions = [requirements[index] for index in order]
+    if not separate:
+        expressions = [" and ".join(expressions)]
+    checks = ", ".join(f"constraint ck_{index} check({expression})" for index, expression in enumerate(expressions))
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(id integer primary key, code text not null, {checks})")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
         assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 

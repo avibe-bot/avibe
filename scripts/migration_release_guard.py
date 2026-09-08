@@ -70,6 +70,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -821,10 +822,8 @@ JSON_REQUIREMENT = re.compile(
     r"('[^']*'|-?[0-9]+(?:\.[0-9]+)?)",
     re.IGNORECASE,
 )
-SUBSTRING_REQUIREMENT = re.compile(
-    r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*"?(\w+)"?',
-    re.IGNORECASE,
-)
+SUBSTRING_TERM = r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
+EQUALITY = r'\s*(?:==|=(?!=)|\bis\b(?!\s+not\b))\s*'
 
 # Every name SQLite's `json_type` can return, against the emptiest document member of that
 # type. A `json_type` clause states the type where the `json_extract` form states the
@@ -853,6 +852,28 @@ SEED_ROWS = 2
 RESTORE_STEP = SEED_ATTEMPTS
 
 
+def sqlite_affinity(declared_type: str) -> str:
+    """SQLite's ordered declared-type rules, shared by seed and repair candidates."""
+    kind = declared_type.upper()
+    if "INT" in kind:
+        return "INTEGER"
+    if any(marker in kind for marker in ("CHAR", "CLOB", "TEXT")):
+        return "TEXT"
+    if not kind or "BLOB" in kind:
+        return "BLOB"
+    if any(marker in kind for marker in ("REAL", "FLOA", "DOUB")):
+        return "REAL"
+    return "NUMERIC"
+
+
+def substring_requirements(expression: str) -> Iterable[tuple[str, str, str, str]]:
+    """Normalize either operand order into (target, start, width, source)."""
+    identifier = r'"?(\w+)"?'
+    yield from re.findall(SUBSTRING_TERM + EQUALITY + identifier, expression, re.IGNORECASE)
+    for source, target, start, width in re.findall(identifier + EQUALITY + SUBSTRING_TERM, expression, re.IGNORECASE):
+        yield target, start, width, source
+
+
 def representative_value(column: str, declared_type: str) -> object:
     """A value of ``declared_type`` that SQLite will store in ``column``.
 
@@ -863,10 +884,10 @@ def representative_value(column: str, declared_type: str) -> object:
     migration that parses a timestamp, an address, or a JSON document gets something
     parseable rather than ``'x'``.
     """
-    kind = declared_type.upper()
-    if any(marker in kind for marker in ("INT", "REAL", "NUM", "DOUB", "FLOA", "BOOL")):
+    kind = sqlite_affinity(declared_type)
+    if kind in {"INTEGER", "REAL", "NUMERIC"}:
         return 0
-    if "BLOB" in kind:
+    if kind == "BLOB":
         return b""
     if column.endswith(("_at", "_time")):
         return "1970-01-01T00:00:00+00:00"
@@ -973,6 +994,7 @@ def glob_witness(
     connection: sqlite3.Connection,
     patterns: tuple[str, ...],
     *,
+    excluded: tuple[str, ...] = (),
     width: int | None = None,
     alphabet: str = string.printable,
 ) -> str | None:
@@ -981,10 +1003,11 @@ def glob_witness(
     A state retains every possible token position after the current prefix. Stars
     both consume characters and admit an empty transition to the next token.
     """
-    if (width is not None and not 0 <= width <= SEED_TEXT_LIMIT) or sum(map(len, patterns)) > SEED_TEXT_LIMIT:
+    all_patterns = (*patterns, *excluded)
+    if (width is not None and not 0 <= width <= SEED_TEXT_LIMIT) or sum(map(len, all_patterns)) > SEED_TEXT_LIMIT:
         return None
     machines: list[list[str]] = []
-    for pattern in patterns:
+    for pattern in all_patterns:
         tokens = []
         index = 0
         while index < len(pattern):
@@ -997,7 +1020,9 @@ def glob_witness(
                     end += 1
                 closing = pattern.find("]", end)
                 if closing < 0:
-                    return None
+                    # An unterminated SQLite class matches nothing, also when negated.
+                    tokens.append(pattern[index:])
+                    break
                 end = closing + 1
             tokens.append(pattern[index:end])
             index = end
@@ -1033,7 +1058,8 @@ def glob_witness(
         key, depth = queue.popleft()
         states, _ = key
         if (width is None or depth == width) and all(
-            len(tokens) in state for tokens, state in zip(machines, states)
+            (len(tokens) in state) == (index < len(patterns))
+            for index, (tokens, state) in enumerate(zip(machines, states))
         ):
             parts = []
             cursor = key
@@ -1041,7 +1067,10 @@ def glob_witness(
                 cursor, char = parents[cursor]
                 parts.append(char)
             witness = "".join(reversed(parts))
-            if all(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] for pattern in patterns):
+            if all(
+                bool(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0]) == (index < len(patterns))
+                for index, pattern in enumerate(all_patterns)
+            ):
                 return witness
         if depth >= (SEED_TEXT_LIMIT if width is None else width):
             continue
@@ -1054,7 +1083,7 @@ def glob_witness(
                 ))
                 for tokens, state in zip(machines, states)
             )
-            if not all(next_states):
+            if not all(next_states[:len(patterns)]):
                 continue
             next_key = (next_states, depth + 1 if width is not None else 0)
             if next_key in parents:
@@ -1097,38 +1126,25 @@ def shape_proposals(
         re.IGNORECASE,
     )
     positive: dict[str, list[str]] = defaultdict(list)
+    negative: dict[str, list[str]] = defaultdict(list)
     alphabets = {name: string.printable for name in text}
     for name, negated, quoted in globs:
         name = names.get(identifier_key(name), name)
         if name in text:
             pattern = quoted.replace("''", "'")
             alphabets[name] += pattern
-            if not negated:
-                positive[name].append(pattern)
+            (negative if negated else positive)[name].append(pattern)
     alphabets = {name: "".join(dict.fromkeys(alphabet)) for name, alphabet in alphabets.items()}
-    # Restrict the alphabet before generating a witness so later CHECK order cannot
-    # erase a required width or introduce characters forbidden by another CHECK.
-    for name, negated, quoted in globs:
-        name = names.get(identifier_key(name), name)
-        if name not in text:
+    for name in dict.fromkeys([*positive, *negative]):
+        patterns, excluded = positive[name], negative[name]
+        if all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns) and not any(
+            connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in excluded
+        ):
             continue
-        pattern = quoted.replace("''", "'")
-        if negated and pattern.startswith("*[^") and pattern.endswith("]*"):
-            allowed = "".join(
-                char
-                for char in alphabets[name]
-                if not connection.execute("select ? glob ?", (char, pattern)).fetchone()[0]
-            )
-            alphabets[name] = allowed
-            if allowed:
-                text[name] = "".join(char if char in allowed else allowed[0] for char in text[name])
-    for name, patterns in positive.items():
-        if all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns):
-            continue
-        witness = glob_witness(connection, tuple(patterns), width=widths.get(name), alphabet=alphabets[name])
+        witness = glob_witness(connection, tuple(patterns), excluded=tuple(excluded), width=widths.get(name), alphabet=alphabets[name])
         if witness is not None:
             text[name] = witness
-    for name, start, width, other in SUBSTRING_REQUIREMENT.findall(shapes):
+    for name, start, width, other in substring_requirements(shapes):
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
@@ -1143,18 +1159,10 @@ def shape_proposals(
         for token in re.findall(r"(?<![\w.])-?[0-9]+(?![\w.])", expression)
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None
     }
-    projection = ", ".join(
-        f'cast(? as {declared}) as "{name}"' if declared else f'? as "{name}"'
-        for name, declared in required
-    )
-    for name, declared, default in omitted:
-        term = f"({default})" if default is not None else "NULL"
-        if declared:
-            term = f"cast({term} as {declared})"
-        projection += f', {term} as "{name}"'
     numeric = [
         name for name, declared in required
-        if "INT" in declared.upper() and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
+        if sqlite_affinity(declared) in {"INTEGER", "REAL", "NUMERIC"}
+        and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
     ]
     candidates = list(dict.fromkeys(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
@@ -1163,35 +1171,80 @@ def shape_proposals(
     fallback = [(name, candidate) for candidate in candidates for name in numeric if candidate != values[name]]
     if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)) for name in unavailable):
         return [*proposals, *fallback]
-    # Reserve half the budget for whole-row boundary assignments before a large
-    # single-column search or Cartesian prefix can starve coordinated moves.
-    domains = [list(dict.fromkeys([values[name], *candidates])) for name in numeric]
-    single_changes = (
-        tuple(candidate if name == changed else values[name] for name in numeric)
-        for changed in numeric for candidate in candidates if candidate != values[changed]
-    )
+    if not numeric or not candidates:
+        return proposals
+    domains = numeric_domains(expression, numeric, values, candidates)
+    products = itertools.product(*domains)
     assignments = itertools.chain(
-        itertools.islice(single_changes, SEED_ATTEMPTS // 2),
+        itertools.islice(products, 1),
         (tuple(candidate for _ in numeric) for candidate in candidates),
-        single_changes,
-        itertools.product(*domains),
-    ) if numeric else ()
-    for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
-        changes = dict(zip(numeric, assignment))
-        parameters = [changes.get(column, values[column]) for column, _ in required]
-        try:
+        products,
+    )
+    # CAST is not insertion affinity. A private typed table lets SQLite supply
+    # real defaults and storage classes without altering the fixture's schema.
+    table = f'"seed_candidate_{uuid4().hex}"'
+    def quote(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    def declaration(name: str, declared: str) -> str:
+        return quote(name) + (f' {quote(declared)}' if declared else '')
+
+    declarations = [declaration(name, declared) for name, declared in required]
+    declarations.extend(
+        declaration(name, declared) + (f' default ({default})' if default is not None else '')
+        for name, declared, default in omitted
+    )
+    columns = ', '.join(quote(name) for name, _ in required)
+    placeholders = ', '.join('?' for _ in required)
+    try:
+        connection.execute(f"create temp table {table} ({', '.join(declarations)})")
+        for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
+            changes = dict(zip(numeric, assignment))
+            parameters = [changes.get(column, values[column]) for column, _ in required]
+            connection.execute(f"delete from {table}")
+            connection.execute(f"insert into {table} ({columns}) values ({placeholders})", parameters)
             accepted = connection.execute(
-                f"select coalesce(cast(({expression}) as numeric), 1) != 0 from (select {projection})", parameters
+                f"select coalesce(cast(({expression}) as numeric), 1) != 0 from {table}"
             ).fetchone()[0]
-        except sqlite3.OperationalError:
-            # Generated columns or unsupported context cannot reject a candidate.
-            # Offer the bounded values to the real INSERT, which supplies that context.
-            proposals.extend(fallback)
-            break
-        if accepted:
-            proposals.extend((name, value) for name, value in changes.items() if value != values[name])
-            break
+            if accepted:
+                proposals.extend((name, value) for name, value in changes.items() if value != values[name])
+                break
+    except sqlite3.OperationalError:
+        # Unrepresentable context cannot reject a candidate; actual INSERT decides.
+        proposals.extend(fallback)
+    finally:
+        connection.execute(f"drop table if exists {table}")
     return proposals
+
+
+def numeric_domains(
+    expression: str, numeric: list[str], values: dict[str, object], candidates: list[int]
+) -> list[list[object]]:
+    """Rank finite domains by local predicates; the complete CHECK still decides."""
+    identifier = r'"?(\w+)"?'
+    literal = r"(-?[0-9]+)(?![\w.])"
+    operator = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
+    predicates: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    clauses = re.findall(identifier + operator + literal, expression)
+    reverse = {"<": ">", ">": "<", "<=": ">=", ">=": "<=", "=": "=", "==": "==", "!=": "!=", "<>": "<>"}
+    clauses.extend((name, reverse[op], token) for token, op, name in re.findall(literal + operator + identifier, expression))
+    for name, op, token in clauses:
+        if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None:
+            predicates[identifier_key(name)].append((op, bound))
+
+    def score(name: str, value: object) -> int:
+        if not isinstance(value, (int, float)):
+            return -len(predicates[identifier_key(name)])
+        return sum(
+            {"=": value == bound, "==": value == bound, "!=": value != bound, "<>": value != bound,
+             "<": value < bound, ">": value > bound, "<=": value <= bound, ">=": value >= bound}[op]
+            for op, bound in predicates[identifier_key(name)]
+        )
+
+    return [
+        sorted(dict.fromkeys([values[name], *candidates]), key=lambda value: -score(name, value))
+        for name in numeric
+    ]
 
 
 def moved_row(base: dict[str, object], step: int, *, held: str | None) -> dict[str, object]:
@@ -1485,7 +1538,7 @@ def insert_seed_row(
             unavailable.append(str(info[1]))
         else:
             omitted.append((str(info[1]), str(info[2]), info[4]))
-    prefix_sources = {identifier_key(other) for _, _, _, other in SUBSTRING_REQUIREMENT.findall(text_constraints)}
+    prefix_sources = {identifier_key(other) for _, _, _, other in substring_requirements(text_constraints)}
     proposed: set[tuple[str, object]] = set()
     objection = ""
     for _ in range(SEED_ATTEMPTS):
