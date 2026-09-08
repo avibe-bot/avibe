@@ -1069,6 +1069,7 @@ SeedAssignment = tuple[tuple[str, object], ...]
 def json_proposals(
     connection: sqlite3.Connection, expression: str, columns: Iterable[str],
     *, text_constraints: str | None = None, context_columns: Iterable[str] = (),
+    not_null: Iterable[str] = (),
 ) -> list[SeedAssignment]:
     """Whole assignments retaining the documents behind JSON member candidates.
 
@@ -1127,7 +1128,14 @@ def json_proposals(
         proposals.extend(json_member_assignments(connection, documents, terms, shapes, wanted, context_columns))
         missing.extend(((column, "{}"),) for column, document in documents.items() if document != "{}")
     # Populated documents/dependents precede missing-path alternatives in every scope.
-    return list(dict.fromkeys([*proposals, *missing]))
+    # A missing member can leave a CHECK comparison NULL without requiring a
+    # NULL stored column. Keep the document and other useful dependent cells;
+    # do not turn that speculative guess into a terminal NOT NULL refusal.
+    not_null = set(not_null)
+    return list(dict.fromkeys(
+        tuple((name, value) for name, value in assignment if value is not None or name not in not_null)
+        for assignment in [*proposals, *missing]
+    ))
 
 
 def json_member_assignments(
@@ -1382,7 +1390,7 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
                 boolean_suffix = re.fullmatch(
                     rf'(?:{is_true}{not_false}|{nonzero})', suffix, SQL_FLAGS,
                 )
-                whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood", "cast"}
+                whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood", "cast", "coalesce", "ifnull"}
                 if whole_operand and negations % 2 == 0 and (not suffix or (
                     not negations and ("-" not in unary.group() or boolean_suffix)
                 )):
@@ -1399,6 +1407,17 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
                     probability = sql_projection(term[commas[0] + 1:outer_end - 1]).strip(SQL_WHITESPACE)
                     if re.fullmatch(r'(?:0(?:\.\d*)?|1(?:\.0*)?|\.\d+)', probability, SQL_FLAGS):
                         inner = (outer_start + 1, commas[0])
+                elif (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)) and (
+                    null_function := re.fullmatch(rf'(?:{reverse_truth})?({SQL_IDENTIFIER})', prefix, SQL_FLAGS)
+                ) and (
+                    (identifier_key(unquote_identifier(null_function.group(1))) == "coalesce" and commas)
+                    or (identifier_key(unquote_identifier(null_function.group(1))) == "ifnull" and len(commas) == 1)
+                ):
+                    # Only the first argument is unconditional. Preserve the
+                    # complete wrapper for native truth/affinity validation;
+                    # fallback arguments never become required CHECK terms.
+                    inner = (outer_start + 1, commas[0])
+                    verify = True
                 elif cast_as is not None and (
                     (prefix.lower() == "cast" and (not suffix or re.fullmatch(
                         positive_suffix, suffix, SQL_FLAGS
@@ -1547,7 +1566,25 @@ def shape_proposals(
             for name in members:
                 aliases[name] = [name]
                 pending_groups.append([name])
-    for name, start, width, other in substring_requirements(shapes, context_columns):
+    substrings = list(substring_requirements(shapes, context_columns))
+    # Retain the containing values' shaped witnesses before the opposite
+    # direction splices their old targets into them. Native slices can flow
+    # through a chain; one scan per relationship bounds even conflicting cycles.
+    sliced = dict(text)
+    for _ in substrings:
+        previous = dict(sliced)
+        for name, start, width, other in substrings:
+            name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
+            position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
+            size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
+            if name in sliced and other in text_eligible and position is not None and size is not None:
+                value = connection.execute("select substr(?, ?, ?)", (sliced[name], position, size)).fetchone()[0]
+                sliced.update((member, value) for member in aliases[other])
+        if sliced == previous:
+            break
+    if sliced != text:
+        semantic_fallback.append(tuple(sliced.items()))
+    for name, start, width, other in substrings:
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
@@ -2027,7 +2064,10 @@ def insert_seed_row(
     text_constraints = " AND ".join(f"({constraint}\n)" for constraint in constraints)
     omitted = []
     unavailable = []
+    not_null = set()
     for info in connection.execute(f'pragma table_xinfo({quote_identifier(table)})'):
+        if info[3]:
+            not_null.add(str(info[1]))
         if str(info[1]) in values:
             continue
         if info[6] or (info[5] and str(info[2]).upper() == "INTEGER" and info[4] is None):
@@ -2074,6 +2114,7 @@ def insert_seed_row(
             derived = tuple(shaped.derived)
             documents = json_proposals(
                 connection, expression, names, text_constraints=text_constraints, context_columns=context_columns,
+                not_null=not_null,
             )
             # Only malformed inputs need priority over candidates that can enable
             # their evaluation. Valid documents retain the semantic source order:
