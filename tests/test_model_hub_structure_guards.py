@@ -185,6 +185,13 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
     ),
     (
         "openai_responses",
+        "response.reasoning_text.delta",
+        ("type",),
+        "response.reasoning_text.delta",
+        False,
+    ),
+    (
+        "openai_responses",
         "response.function_call_arguments.delta",
         ("type",),
         "response.function_call_arguments.delta",
@@ -198,6 +205,7 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
         False,
     ),
     ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
+    ("openai_chat", None, ("choices", "*", "delta", "reasoning_content"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "refusal"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "tool_calls"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "function_call"), None, True),
@@ -1432,6 +1440,20 @@ def test_chat_role_metadata_does_not_cross_the_model_output_boundary() -> None:
     state = ProtocolSSEState("openai_chat")
     state.observe(b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n')
     assert state.model_output_started is False
+
+
+@pytest.mark.parametrize(
+    ("protocol", "payload"),
+    [
+        ("openai_responses", {"type": "response.reasoning_text.delta", "delta": "thinking"}),
+        ("openai_chat", {"choices": [{"delta": {"reasoning_content": "thinking"}}]}),
+    ],
+)
+def test_reasoning_is_model_output_before_any_answer_text(protocol: str, payload: dict) -> None:
+    state = ProtocolSSEState(protocol)
+    event = f"event: {payload['type']}\n".encode() if "type" in payload else b""
+    state.observe(event + b"data: " + json.dumps(payload).encode() + b"\n\n")
+    assert state.model_output_started is True
 
 
 def test_chat_any_nonempty_choice_crosses_the_model_output_boundary() -> None:

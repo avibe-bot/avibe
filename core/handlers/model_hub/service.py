@@ -53,6 +53,7 @@ from .adapter import (
     EngineEnsureResult,
     EngineHealth,
     EngineStatus,
+    InvokeCancelledError,
     InvokeHandle,
     OAuthFlowState,
     OriginNotAllowedError,
@@ -122,6 +123,7 @@ from .resolver import (
     effective_model_route,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
+    parse_model_hub_timestamp,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -496,21 +498,6 @@ def load_opencode_public_models(
 
 def _source_id() -> str:
     return f"src_{uuid.uuid4().hex[:12]}"
-
-
-def _parse_datetime(value: str) -> datetime:
-    """Parse a timestamp into something comparable with this service's clock.
-
-    Every parsed value is compared against ``self.now()``, which is UTC-aware.
-    A provider or an older persisted record may still carry a naive ISO string,
-    and comparing the two raises ``TypeError`` rather than answering the
-    question — so read a naive timestamp as the UTC it was written as.
-    """
-
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 def _mask_credential(value: str) -> str:
@@ -1674,7 +1661,7 @@ class ModelHubService:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
             return
         try:
-            expired = _parse_datetime(flow.expires_at_iso) <= self.now()
+            expired = parse_model_hub_timestamp(flow.expires_at_iso) <= self.now()
         except ValueError:
             return
         if expired:
@@ -5373,6 +5360,7 @@ class ModelHubService:
                     for item in chain_payload["chain"]
                     if item["retry_at"]
                 ),
+                key=parse_model_hub_timestamp,
                 default=None,
             )
             raise ModelHubError(
@@ -6183,7 +6171,7 @@ class ModelHubService:
         if (
             source.state.status == "cooldown"
             and source.state.retry_at is not None
-            and _parse_datetime(source.state.retry_at) >= retry_at
+            and parse_model_hub_timestamp(source.state.retry_at) >= retry_at
         ):
             return False
         previous = self._clone_config(config)
@@ -6624,23 +6612,17 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[], None] | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
-        transport_admitted = False
+        acquired_handle: InvokeHandle | None = None
 
-        def admitted() -> None:
-            nonlocal transport_admitted
-            transport_admitted = True
-            if on_admitted is not None:
-                on_admitted()
-
-        async def meter_handle(
-            handle: InvokeHandle,
+        async def meter_observed(
+            observed: ProtocolSSEState | None,
             outcome: RawCallOutcome | None,
         ) -> None:
             await self._meter_call(
                 source_id=source.id,
                 model_id=model_id,
                 outcome=outcome,
-                observed=handle.observed,
+                observed=observed,
             )
 
         async def meter_available_outcome(
@@ -6649,22 +6631,28 @@ class ModelHubService:
             if handle.stream is not None and not handle.outcome_available:
                 return None
             outcome = await self._engine_call(handle.outcome())
-            await meter_handle(handle, outcome)
+            await meter_observed(handle.observed, outcome)
             return outcome
 
         async def invoke_and_meter_bodyless() -> tuple[InvokeHandle, Optional[RawCallOutcome]]:
-            handle = await self._invoke_admitted(
-                source=source,
-                model_id=model_id,
-                requested_model_id=requested_model_id,
-                request=request,
-                stream=stream,
-                backend=cast(BackendName, backend),
-                excluded_source_ids=excluded_source_ids,
-                supply_channel=supply_channel,
-                exact_retry=exact_retry,
-                on_admitted=admitted,
-            )
+            nonlocal acquired_handle
+            try:
+                handle = await self._invoke_admitted(
+                    source=source,
+                    model_id=model_id,
+                    requested_model_id=requested_model_id,
+                    request=request,
+                    stream=stream,
+                    backend=cast(BackendName, backend),
+                    excluded_source_ids=excluded_source_ids,
+                    supply_channel=supply_channel,
+                    exact_retry=exact_retry,
+                    on_admitted=on_admitted,
+                )
+            except InvokeCancelledError as cancelled:
+                await meter_observed(cancelled.observed, None)
+                raise
+            acquired_handle = handle
             if handle.stream is not None:
                 # The body is the gateway's to forward, so the tokens in it are the
                 # gateway's to meter.
@@ -6679,7 +6667,9 @@ class ModelHubService:
             handle, outcome = await asyncio.shield(attempt_task)
         except asyncio.CancelledError as caught:
             cancelled = caught
-            if not transport_admitted:
+            # Upstream inference is cancellable even after transport admission.
+            # Only an acquired handle's finite settlement must outlive its caller.
+            if acquired_handle is None:
                 attempt_task.cancel()
             try:
                 handle, outcome = await await_owned_task(attempt_task)
@@ -6691,7 +6681,7 @@ class ModelHubService:
                 await handle.close_stream()
                 outcome = await meter_available_outcome(handle)
                 if outcome is None:
-                    await meter_handle(handle, None)
+                    await meter_observed(handle.observed, None)
                 return outcome
 
             cleanup_task = asyncio.create_task(close_and_meter_observed_stream())

@@ -606,6 +606,12 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 "response.reasoning_summary_text.delta",
             ),
             ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/reasoning-text/delta
+                "response.reasoning_text.delta",
+                ("type",),
+                "response.reasoning_text.delta",
+            ),
+            ProtocolModelOutputEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/response/function-call-arguments/delta
                 "response.function_call_arguments.delta",
                 ("type",),
@@ -653,6 +659,13 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
                 None,
                 ("choices", "*", "delta", "content"),
+                None,
+                require_nonempty=True,
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://api-docs.deepseek.com/guides/reasoning_model
+                None,
+                ("choices", "*", "delta", "reasoning_content"),
                 None,
                 require_nonempty=True,
             ),

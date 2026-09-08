@@ -10,6 +10,7 @@ orchestrator and land with every affected consumer on the same tested head.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
@@ -87,6 +88,14 @@ class OriginNotAllowedError(Exception):
     """Raised by the adapter when ``invoke(origin=...)`` violates the source's
     ``allowed_origins``. A programming/policy error — never converted into a
     ``RawCallOutcome`` and never triggers fallback."""
+
+
+class InvokeCancelledError(asyncio.CancelledError):
+    """Owner cancellation carrying wire facts observed before transport cleanup."""
+
+    def __init__(self, observed: ProtocolSSEState) -> None:
+        super().__init__()
+        self.observed = observed
 
 
 class RawOutcomeKind(str, Enum):
@@ -553,5 +562,7 @@ class EngineAdapter(Protocol):
         ``on_admitted`` exactly once before any network wait. Callback failure
         releases the lease without invoking upstream. Transport completion,
         close, or cancellation releases the lease independently of settlement.
+        Cancellation before handle return raises ``InvokeCancelledError`` when
+        wire facts were observed, so L2 can meter them without inventing failure.
         """
         ...

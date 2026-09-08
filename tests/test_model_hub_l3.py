@@ -1408,6 +1408,72 @@ def test_stopped_settlement_cannot_erase_committed_served_history(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+@pytest.mark.parametrize(
+    ("previous_decision", "variant"),
+    [
+        (decision, variant)
+        for decision, rule in TURN_OUTCOME_RENDERING_AUTHORITY.items()
+        if rule.outcome in {"no_candidate", "exhausted"}
+        for variant, _key in rule.copy_keys
+    ],
+)
+@pytest.mark.parametrize("ending", ["served", "exhausted", "failed_terminal", "canceled"])
+def test_admitted_retry_supersedes_earlier_supply_failure(tmp_path, previous_decision, variant, ending):
+    store = BoundedProvenanceStore(tmp_path / "records.json")
+    registry = TurnCorrelationRegistry(store)
+    turn_id = _begin_hub_attempt(registry, turn_id="turn-retry")
+    previous_failure = _outcome(RawOutcomeKind.HTTP_ERROR, status=503)
+    registry.finish_attempt(turn_id, outcome=previous_failure, decision=classify_outcome(previous_failure))
+    source = _source(
+        "src_recovered01", "Recovering",
+        status="cooldown" if variant == "waiting" else "standby",
+        retry_at=(NOW + timedelta(seconds=30)).isoformat() if variant == "waiting" else None,
+    )
+    config = _config([] if previous_decision == "turn.no_candidate.unconfigured" else [source])
+    projection = produce_turn_outcome(
+        previous_decision,
+        config=config,
+        resolution=_terminal_resolution_facts(
+            config,
+            supply_status="degraded" if variant == "waiting_without_retry" else variant,
+            structural_reason="route_unconfigured" if previous_decision == "turn.no_candidate.unconfigured" else None,
+            next_hop=(source.id, "shared-model") if variant == "waiting_without_retry" else None,
+        ),
+    )
+    if projection.outcome == "no_candidate":
+        registry.mark_gateway_no_candidate(
+            turn_id, projection.supply_facts.supply_state,
+            blockers=(ExactHopBlocker(source.id, "shared-model", "server_error"),),
+        )
+    registry.record_turn_outcome(turn_id, projection)
+    registry.begin_attempt(
+        turn_id, source_id=source.id, resolved_model_id="shared-model", channel="hub", via_mapping=False,
+        request_id="recovered-request",
+    )
+    if ending != "canceled":
+        outcome = _outcome(
+            RawOutcomeKind.SUCCESS if ending == "served" else RawOutcomeKind.HTTP_ERROR,
+            status={"served": 200, "exhausted": 503, "failed_terminal": 400}[ending],
+            code="invalid_parameter" if ending == "failed_terminal" else None,
+            source_id=source.id,
+        )
+        registry.finish_attempt(
+            turn_id, outcome=outcome, decision=classify_outcome(outcome), request_id="recovered-request",
+        )
+    settled_by = SETTLED_BY_STOPPED if ending == "canceled" else SETTLED_BY_TERMINAL_RESULT
+    registry.close_turn_admission(turn_id, settled_by=settled_by)
+    registry.settle(turn_id, settled_by=settled_by)
+    record = store.get(turn_id)
+    assert record["outcome"] == ending
+    assert record["model_supply_state"] is None
+    assert record["blockers"] == []
+    assert record["failed_attempts"][0]["source_id"] == previous_failure.source_id
+    assert len(record["failed_attempts"]) == (2 if ending == "exhausted" else 1)
+    if ending == "canceled":
+        assert record["canceled_attempt"]["source_id"] == source.id
+    _assert_valid("turn-provenance.schema.json", record)
+
+
 def test_stopped_settlement_cannot_erase_committed_protocol_failure(
     tmp_path: Path,
 ) -> None:
@@ -2885,6 +2951,262 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("already_cooling", [False, True])
+@pytest.mark.parametrize("ending", ["recover", "fail", "config_change", "cancel", "extend_recover", "admitted_cancel"])
+@pytest.mark.parametrize(
+    ("backend", "endpoint", "protocol"),
+    [
+        ("codex", "responses", "openai_responses"),
+        ("claude", "messages", "anthropic"),
+        ("opencode", "chat/completions", "openai_chat"),
+    ],
+)
+def test_gateway_cooldown_is_one_cancellable_retry(
+    tmp_path: Path,
+    already_cooling: bool,
+    ending: str,
+    backend: str,
+    endpoint: str,
+    protocol: str,
+) -> None:
+    """MH-RUNTIME-009: known recovery, not caller retry speed, owns cooldown waiting."""
+
+    async def exercise() -> None:
+        source = _source(
+            "src_retrycool01",
+            "Recovering",
+            status="cooldown" if already_cooling else "standby",
+            retry_at=(NOW + timedelta(seconds=30)).isoformat().replace("+00:00", "Z") if already_cooling else None,
+            vendor="anthropic" if backend == "claude" else "openai",
+            protocol=protocol,
+        )
+        failure = _outcome(RawOutcomeKind.HTTP_ERROR, status=503, source_id=source.id)
+        final = failure if ending == "fail" else _outcome(RawOutcomeKind.SUCCESS, source_id=source.id)
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=([failure] if not already_cooling else []) + [final],
+        )
+        fixed = _canonicalize_fixed_test_routes(service)
+        model = fixed[backend] if backend in fixed else "shared-model"
+        payload = {"model": "shared-model", "stream": False}
+        if endpoint == "responses":
+            payload["input"] = "ping"
+        else:
+            payload["messages"] = [{"role": "user", "content": "ping"}]
+        clock = {"now": NOW}
+        service.now = lambda: clock["now"]
+        gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
+        waiting = asyncio.Event()
+        release = asyncio.Event()
+        wait_ended = asyncio.Event()
+        admitted = asyncio.Event()
+        upstream_canceled = asyncio.Event()
+        delays = []
+
+        async def wait_for_recovery(delay: float) -> None:
+            delays.append(delay)
+            waiting.set()
+            try:
+                await release.wait()
+                clock["now"] += timedelta(seconds=delay)
+            finally:
+                wait_ended.set()
+
+        async def invoke_until_stopped(source_id, model_id, request, stream, origin, *, on_admitted=None):
+            on_admitted()
+            service.adapter.invocations.append((source_id, model_id, origin))
+            admitted.set()
+            try:
+                await asyncio.Future()
+            finally:
+                upstream_canceled.set()
+
+        base_url, token = await gateway.endpoint(
+            backend,
+            process_scope="/repo",
+            turn_id="turn_cooldown_retry",
+            requested_model_id=model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+                async with aiohttp.ClientSession(trust_env=False) as client:
+                    if not already_cooling:
+                        first = await client.post(
+                            f"{base_url}/v1/{endpoint}",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                        await first.read()
+                        assert first.status == 503
+                        assert first.headers["Retry-After"] == "30"
+                    if ending == "admitted_cancel":
+                        service.adapter.invoke = invoke_until_stopped
+                    request = asyncio.create_task(client.post(
+                        f"{base_url}/v1/{endpoint}",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {token}"},
+                    ))
+                    try:
+                        await asyncio.wait_for(waiting.wait(), timeout=2)
+                        assert not request.done()
+                        assert len(service.adapter.invocations) == (0 if already_cooling else 1)
+                        if ending == "cancel":
+                            request.cancel()
+                            with pytest.raises(asyncio.CancelledError):
+                                await request
+                            await asyncio.wait_for(wait_ended.wait(), timeout=2)
+                        elif ending == "admitted_cancel":
+                            release.set()
+                            await asyncio.wait_for(admitted.wait(), timeout=2)
+                            gateway.correlation.close_turn_admission(
+                                "turn_cooldown_retry", settled_by=SETTLED_BY_STOPPED,
+                            )
+                            request.cancel()
+                            with pytest.raises(asyncio.CancelledError):
+                                await request
+                            await asyncio.wait_for(upstream_canceled.wait(), timeout=2)
+                        else:
+                            if ending == "config_change":
+                                service.store.config.sources[0].state = ModelHubSourceStateConfig(
+                                    status="needs_action",
+                                    detail_key="models.source.needs_action.credential_revoked",
+                                )
+                            elif ending == "extend_recover":
+                                service.store.config.sources[0].state.retry_at = (
+                                    NOW + timedelta(seconds=60)
+                                ).isoformat().replace("+00:00", "Z")
+                            release.set()
+                            response = await asyncio.wait_for(request, timeout=2)
+                            await response.read()
+                            assert response.status == {
+                                "recover": 200, "fail": 503, "config_change": 409, "extend_recover": 503,
+                            }[ending]
+                            if ending in {"fail", "extend_recover"}:
+                                assert response.headers["Retry-After"] == "30"
+                            else:
+                                assert "Retry-After" not in response.headers
+                            if ending == "extend_recover":
+                                clock["now"] += timedelta(seconds=30)
+                                recovered = await client.post(
+                                    f"{base_url}/v1/{endpoint}",
+                                    json=payload,
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
+                                await recovered.read()
+                                assert recovered.status == 200
+                        assert delays == [30.0]
+                        expected = (0 if already_cooling else 1) + (
+                            ending in {"recover", "fail", "extend_recover", "admitted_cancel"}
+                        )
+                        assert len(service.adapter.invocations) == expected
+                    finally:
+                        if not request.done():
+                            request.cancel()
+                        await asyncio.gather(request, return_exceptions=True)
+        finally:
+            release.set()
+            await gateway.close()
+        if ending in {"extend_recover", "admitted_cancel"} and backend != "opencode":
+            gateway.correlation.settle(
+                "turn_cooldown_retry",
+                settled_by=SETTLED_BY_STOPPED if ending == "admitted_cancel" else SETTLED_BY_TERMINAL_RESULT,
+            )
+            record = service.provenance.get("turn_cooldown_retry")
+            assert record["outcome"] == ("canceled" if ending == "admitted_cancel" else "served")
+            assert record["model_supply_state"] is None
+            assert record["blockers"] == []
+            assert len(record["failed_attempts"]) == (0 if already_cooling else 1)
+            if ending == "admitted_cancel":
+                assert record["canceled_attempt"]["source_id"] == source.id
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("suffix", ["Z", "+00:00", ""])
+def test_gateway_parses_supported_cooldown_timestamps_on_python310(tmp_path, suffix):
+    class Python310Datetime(datetime):
+        @classmethod
+        def fromisoformat(cls, value):
+            if value.endswith("Z"):
+                raise ValueError("Python 3.10 requires a numeric UTC offset")
+            return super().fromisoformat(value)
+
+    retry_at = (NOW + timedelta(seconds=30)).replace(tzinfo=None).isoformat() + suffix
+    source = _source(
+        "src_timestamp01", "Cooling", status="cooldown", retry_at=retry_at,
+    )
+    service = _service(tmp_path, sources=[source])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    gateway = ModelHubTurnGateway(service, now=lambda: NOW)
+    with patch("core.handlers.model_hub.resolver.datetime", Python310Datetime):
+        with pytest.raises(ModelHubError) as failed:
+            asyncio.run(service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub"))
+        assert gateway._cooldown_retry_delay(failed.value.turn_outcome) == 30
+
+
+@pytest.mark.parametrize("reverse_route", [False, True])
+@pytest.mark.parametrize(
+    ("early", "late", "delay"),
+    [
+        ("2026-07-29T17:00:30.125+05:00", "2026-07-29T12:01:00Z", 30.125),
+        ("2026-07-29T12:00:30Z", "2026-07-29T05:01:00-07:00", 30),
+        ("2026-07-29T12:00:30Z", "2026-07-29T12:00:30.125Z", 30),
+    ],
+)
+def test_cooldown_selection_uses_instants_through_probe_and_gateway(tmp_path, reverse_route, early, late, delay):
+    async def exercise():
+        first = _source("src_earliest01", "First recovery", status="cooldown", retry_at=early)
+        second = _source("src_later0001", "Later recovery", status="cooldown", retry_at=late)
+        service = _service(
+            tmp_path,
+            sources=[second, first] if reverse_route else [first, second],
+            outcomes=[_outcome(RawOutcomeKind.SUCCESS, source_id=first.id)],
+        )
+        model = _canonicalize_fixed_test_routes(service)["codex"]
+        clock = {"now": NOW}
+        service.now = lambda: clock["now"]
+        with pytest.raises(ModelHubError) as probe:
+            await service.probe_agent("codex", model)
+        assert probe.value.code == "probe_no_candidate"
+        assert probe.value.data["supply"]["retry_at"] == early
+        with pytest.raises(ModelHubError) as failed:
+            await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
+        assert failed.value.turn_outcome.supply_facts.retry_at == early
+
+        gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
+        assert gateway._cooldown_retry_delay(failed.value.turn_outcome) == delay
+        delays = []
+
+        async def wait_for_recovery(seconds):
+            delays.append(seconds)
+            clock["now"] += timedelta(seconds=seconds)
+
+        base_url, token = await gateway.endpoint(
+            "codex", process_scope="/repo", turn_id="turn_earliest_recovery",
+            requested_model_id=model, resolved_model_id="shared-model", source_id=first.id,
+        )
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+                async with aiohttp.ClientSession(trust_env=False) as client:
+                    response = await client.post(
+                        f"{base_url}/v1/responses",
+                        json={"model": "shared-model", "input": "ping", "stream": False},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    await response.read()
+                    assert response.status == 200
+            assert delays == [delay]
+            assert service.adapter.invocations == [(first.id, "shared-model", "codex")]
+            assert service.store.load().sources[0 if reverse_route else 1].state.retry_at == late
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_exhaustion_uses_no_time_copy_when_an_earlier_hop_recovers(
     tmp_path: Path,
 ) -> None:
@@ -4090,13 +4412,16 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         invoke_started = asyncio.Event()
         release_invoke = asyncio.Event()
+        handle_ready = asyncio.Event()
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
             kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
-            return await invoke(*args, **kwargs)
+            handle = await invoke(*args, **kwargs)
+            handle_ready.set()
+            return handle
 
         service.adapter.invoke = blocked_invoke
         task = asyncio.create_task(
@@ -4109,8 +4434,9 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
             )
         )
         await asyncio.wait_for(invoke_started.wait(), timeout=1)
-        task.cancel()
         release_invoke.set()
+        await asyncio.wait_for(handle_ready.wait(), timeout=1)
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
@@ -4142,13 +4468,16 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         invoke_started = asyncio.Event()
         release_invoke = asyncio.Event()
+        handle_ready = asyncio.Event()
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
             kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
-            return await invoke(*args, **kwargs)
+            result = await invoke(*args, **kwargs)
+            handle_ready.set()
+            return result
 
         service.adapter.invoke = blocked_invoke
         task = asyncio.create_task(
@@ -4161,8 +4490,9 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
             )
         )
         await asyncio.wait_for(invoke_started.wait(), timeout=1)
-        task.cancel()
         release_invoke.set()
+        await asyncio.wait_for(handle_ready.wait(), timeout=1)
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 

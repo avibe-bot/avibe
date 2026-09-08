@@ -178,47 +178,14 @@ DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS = 1800
 # three: a session actively recovering its queue keeps touching the row.
 DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS = 3600
 
-# Absolute-time backstop for evicting a Codex transport whose turn is stuck
-# "active" forever (e.g. the ``codex app-server`` wedged or silently
-# disconnected after ``turn/start`` but before ``turn/completed``, so
-# ``_active_turns`` is never cleared). Without this, ``evict_idle_transports``
-# treats an active turn as an ABSOLUTE veto and the wedged app-server process
-# leaks until service restart (mirrors the Claude leak in #622/#623).
-#
-# A transport with an active turn is force-evicted once it has been idle for
-# ``max(idle_timeout * MULTIPLIER, FLOOR_SECONDS)``. Set the multiplier <= 0 to
-# disable the backstop entirely.
-#
-# TRADE-OFF: this cap is driven purely by ``last_activity`` (refreshed on every
-# Codex notification), so it CANNOT distinguish a genuinely wedged turn from a
-# legitimately long, fully-silent one. A single tool/MCP run or model "thinking"
-# phase that emits no notifications for longer than the cap will be misjudged as
-# stuck and have its transport torn down. The multiplier defaults higher than a
-# typical tool-run assumption, and the floor guarantees a >= 30 min window even
-# when ``idle_timeout`` is configured small, to keep that false-positive rare.
+# Repair stale Codex adapter-local active flags only after durable ownership
+# allows reclamation. Silence never overrides an owned Turn or Activity.
+# The repair threshold is max(idle_timeout * multiplier, floor); a nonpositive
+# multiplier disables stale-flag repair.
 DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 
-# Absolute-age backstop for idle eviction. A Claude session that is still
-# flagged ``active`` (its per-turn receiver never released the flag, e.g. a
-# long-lived receiver blocked on ``receive_messages`` with no stream EOF) is
-# force-evicted once its ``last_activity`` is older than
-# ``max(idle_timeout * STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER, FLOOR_SECONDS)``.
-# This decouples eviction from the receiver's flag-release logic, so a
-# stuck-active session can no longer pin its ~220MB ``claude`` subprocess until
-# the next service restart. A genuine in-flight turn keeps touching
-# ``last_activity`` (assistant/tool messages), so it normally stays well under
-# this cap. Set the multiplier to 0 to disable the backstop.
-#
-# Trade-off: ``last_activity`` is only refreshed when an SDK message arrives.
-# Because a stuck (blocked-receiver) session and a session running a single
-# silent tool call are indistinguishable from ``last_activity`` alone, a real
-# turn whose ONE tool invocation runs silently for longer than
-# the cap would be force-evicted mid-turn. The default cap is at least 30min
-# because Claude Code's Bash tool caps at 10min, so a single 30min-silent turn
-# is not expected in practice; raise the multiplier if your deployment runs
-# longer silent tools (e.g. long builds via custom/MCP tools that emit no
-# intermediate messages).
+# Claude uses the same ownership-first policy for its receiver's active flag.
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
