@@ -19,6 +19,7 @@ capability:
     - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
     - ui/src/components/settings/models/RouteChainDialog.test.tsx
     - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
+    - ui/src/components/settings/models/AgentCard.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
@@ -137,6 +138,15 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::finds an already-added model by its supplier and shows it as already added
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::asks which row a typed ID names as the ID it would be saved as
+  - id: MH-GATEWAY-STATUS-001
+    name: Gateway route coverage stays independent of Agent selections and attributes Agent issues below the catalog
+    status: covered
+    kind: presentation
+    layer: unit
+    test: "ui/src/components/settings/models/AgentCard.test.tsx::MH-GATEWAY-STATUS-001: keeps Agent issues in an expandable footer, outside the mode trigger in en"
+    related_tests:
+      - ui/src/components/settings/models/supply.test.ts
+      - ui/e2e/model-catalog/gateway-status.spec.ts
   - id: MH-SRC-DELETE-001
     name: Source deletion removes every reference while preserving survivor order
     status: covered

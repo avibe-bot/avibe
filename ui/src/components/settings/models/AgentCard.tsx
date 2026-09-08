@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Power, RefreshCw, Route } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Power, RefreshCw, Route, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils';
 import { catalogModelIds } from './backendCatalog';
 import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead } from './regionRead';
-import { agentGroupStatus } from './supply';
+import { gatewayRouteStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
@@ -118,6 +118,46 @@ const ModelRow: React.FC<{
   );
 };
 
+const AgentSupplyIssues: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = React.useState(false);
+  const detailsId = React.useId();
+  const issues = (agent.named_agents ?? []).filter((named) =>
+    named.effective_model_id === null || named.route_reason === 'route_unconfigured'
+    || (named.supply_status !== null && named.supply_status !== 'ok')
+  );
+  if (issues.length === 0) return null;
+  return (
+    <div className="min-w-0 border-t border-border px-3.5 py-2" data-agent-supply-issues>
+      <button
+        type="button"
+        className="model-hub-ink-gold flex min-h-7 w-full min-w-0 items-center gap-2 text-left text-[11px] font-semibold"
+        aria-expanded={open}
+        aria-controls={detailsId}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1 break-words">{t('settings.models.gateway.agentIssues.summary', { count: issues.length })}</span>
+        <ChevronDown className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-180')} aria-hidden="true" />
+      </button>
+      <ul id={detailsId} hidden={!open} className="min-w-0 space-y-3 pb-1 pt-2">
+        {issues.map((named) => {
+          const reason = named.effective_model_id === null ? 'modelMissing'
+            : named.route_reason === 'route_unconfigured' ? 'routeMissing'
+              : named.supply_status;
+          return (
+            <li key={named.name} className="min-w-0 text-[11px] leading-4" data-agent-supply-issue>
+              <p className="min-w-0 font-semibold text-foreground [overflow-wrap:anywhere]">{named.name}</p>
+              {named.effective_model_id !== null && <p className="min-w-0 font-mono text-muted [overflow-wrap:anywhere]">{named.effective_model_id}</p>}
+              <p className="model-hub-ink-gold mt-1 [overflow-wrap:anywhere]">{t(`settings.models.gateway.agentIssues.${reason}`)}</p>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+};
+
 const AgentModelCard: React.FC<{
   agent: AgentSupply;
   runtime: FreshRuntimeProjection | null;
@@ -161,10 +201,10 @@ const AgentModelCard: React.FC<{
   const hasTakeover = chainProjectionLive
     && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
   const modeWord = t(`settings.models.gateway.group.mode.${agent.mode === 'hub' ? 'gateway' : 'direct'}`) as string;
-  const health = agent.mode === 'hub' ? agentGroupStatus(agent.named_agents ?? []) : 'unused';
+  const health = gatewayRouteStatus(agent);
   const subtitle = agent.mode === 'direct'
     ? t('settings.models.gateway.group.subtitle.direct', { mode: modeWord }) as string
-    : t('settings.models.gateway.group.subtitle.gateway', { mode: modeWord, health: t(`settings.models.gateway.group.status.${health}`) }) as string;
+    : t('settings.models.gateway.group.subtitle.gateway', { mode: modeWord, health: t(`settings.models.gateway.routeStatus.${health}`) }) as string;
   const toggleCollapsed = () => {
     setExpanded((value) => !value);
     onProbeSettled(agent);
@@ -173,16 +213,16 @@ const AgentModelCard: React.FC<{
   const noUsableSource = agent.mode === 'hub'
     && Boolean(agent.model_supply?.length)
     && agent.model_supply?.every((entry) => entry.chain_length > 0 && !entry.has_runnable_hop);
-  const statusClass = switchFailed || health === 'interrupted'
+  const statusClass = switchFailed || health === 'unavailable'
     ? 'text-destructive-ink'
-    : hasTakeover || health === 'degraded' || health === 'waiting'
+    : hasTakeover || health === 'partial'
       ? 'model-hub-ink-gold'
       : 'text-muted';
-  const statusDot = switchFailed || health === 'interrupted'
+  const statusDot = switchFailed || health === 'unavailable'
     ? 'bg-destructive'
-    : hasTakeover || health === 'degraded' || health === 'waiting'
+    : hasTakeover || health === 'partial'
       ? 'bg-gold'
-      : health === 'ok' && agent.mode === 'hub'
+      : health === 'available' && agent.mode === 'hub'
         ? 'bg-mint'
         : 'bg-muted';
   const modeStatus = switchFailed
@@ -219,7 +259,7 @@ const AgentModelCard: React.FC<{
                     type="button"
                     disabled={pending}
                     aria-label={`${t('settings.models.gateway.modeMenu.title')}: ${modeStatus}`}
-                    className={cn('model-hub-agent-mode-trigger flex min-w-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-semibold transition-colors hover:text-foreground disabled:opacity-50', statusClass)}
+                    className={cn('model-hub-agent-mode-trigger flex max-w-full min-w-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-semibold transition-colors hover:text-foreground disabled:opacity-50', statusClass)}
                   >
                     <span className={cn('size-[5px] shrink-0 rounded-full', statusDot)} />
                     <span className="truncate">{modeStatus}</span>
@@ -262,6 +302,7 @@ const AgentModelCard: React.FC<{
         </div>
       </div>
       {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><ManageModelsButton disabled={pending} onClick={() => onOpenModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
+      {agent.mode === 'hub' && <AgentSupplyIssues agent={agent} />}
     </section>
   );
 };

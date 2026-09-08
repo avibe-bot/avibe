@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
-  agentGroupStatus,
+  gatewayRouteStatus,
   attribution,
   hasAttribution,
   healthyButUnrunnable,
@@ -85,56 +85,41 @@ const cannotLaunch = (...ids: string[]) =>
     process_availability_reason: 'native_cli_unavailable' as const,
   }));
 
-describe('agentGroupStatus', () => {
-  const statuses = (...values: Array<'ok' | 'degraded' | 'waiting' | 'interrupted' | null>) =>
-    values.map((supplyStatus, index) => ({
-      name: `agent-${index}`,
-      effective_model_id: supplyStatus === null ? null : `model-${index}`,
-      supply_status: supplyStatus,
-    }));
-
-  it('reports an unused backend only when no enabled Agent uses it', () => {
-    expect(agentGroupStatus([])).toBe('unused');
+describe('gatewayRouteStatus', () => {
+  const model = (model_id: string, chain_length: number, has_runnable_hop: boolean) => ({
+    model_id, chain_length, has_runnable_hop, route_origin: 'automatic' as const,
   });
+  const covered = hubAgent({ selected_model_id: null, model_supply: [model('listed', 1, true)] });
 
-  it('reports a configuration gap separately from unavailable configured sources', () => {
-    expect(agentGroupStatus([
-      {
-        name: 'opencode',
-        effective_model_id: 'gpt-5.6-terra',
-        supply_status: 'interrupted',
+  it('is independent of named Agent selections and statuses', () => {
+    for (const status of ['ok', 'degraded', 'waiting', 'interrupted', null] as const) {
+      expect(gatewayRouteStatus({ ...covered, named_agents: [{
+        name: 'opencode', effective_model_id: 'grok/grok-4.6', supply_status: status,
         route_reason: 'route_unconfigured',
-      },
-    ])).toBe('unconfigured');
-    expect(agentGroupStatus([
-      {
-        name: 'opencode',
-        effective_model_id: 'gpt-5.6-terra',
-        supply_status: 'interrupted',
-        route_reason: null,
-      },
-    ])).toBe('interrupted');
+      }] })).toBe('available');
+    }
+    expect(gatewayRouteStatus({ ...covered, named_agents: [] })).toBe('available');
   });
 
-  it('reports an Agent without a model as unconfigured', () => {
-    expect(agentGroupStatus(statuses(null))).toBe('unconfigured');
+  it.each([
+    [[], 'empty'],
+    [[model('one', 0, false)], 'unconfigured'],
+    [[model('one', 1, true), model('two', 2, true)], 'available'],
+    [[model('one', 1, true), model('two', 0, false)], 'partial'],
+    [[model('one', 1, true), model('two', 2, false)], 'partial'],
+    [[model('one', 1, false), model('two', 0, false)], 'unavailable'],
+  ] as const)('summarizes complete catalog supply %j as %s', (supply, expected) => {
+    expect(gatewayRouteStatus(hubAgent({ selected_model_id: null, model_supply: [...supply] }))).toBe(expected);
   });
 
-  it('reports healthy only when every enabled Agent is healthy', () => {
-    expect(agentGroupStatus(statuses('ok', 'ok'))).toBe('ok');
+  it('does not mistake an incomplete supply read for missing routes or success', () => {
+    for (const model_supply of [null, [], [model('other', 1, true)]]) {
+      expect(gatewayRouteStatus(hubAgent({ builtin_models: ['unread'], model_supply }))).toBe('unknown');
+    }
   });
 
-  it('reports degraded while at least one Agent remains usable but the group is not fully healthy', () => {
-    expect(agentGroupStatus(statuses('ok', 'interrupted'))).toBe('degraded');
-    expect(agentGroupStatus(statuses('degraded', 'waiting'))).toBe('degraded');
-  });
-
-  it('reports waiting when no Agent is usable and at least one can recover without action', () => {
-    expect(agentGroupStatus(statuses('waiting', 'interrupted'))).toBe('waiting');
-  });
-
-  it('reports interrupted when no Agent is usable or self-healing', () => {
-    expect(agentGroupStatus(statuses('interrupted', null))).toBe('interrupted');
+  it('ignores supply entries outside an authoritative catalog', () => {
+    expect(gatewayRouteStatus({ ...covered, catalog_models: [] })).toBe('empty');
   });
 });
 

@@ -229,7 +229,7 @@ describe('AgentCard', () => {
     };
     render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
-    expect(screen.getByText('网关 · 未配置模型路由')).toBeTruthy();
+    expect(screen.getByText('网关 · 未配置模型')).toBeTruthy();
     expect(screen.getByText('0 个模型')).toBeTruthy();
     // The card offers the catalog instead of reporting missing supply: an empty
     // list is something the user can fix from here, not a broken backend.
@@ -292,18 +292,18 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Supply unavailable for now'],
-    ['zh', '网关 · 等待供应商恢复'],
-  ] as const)('renders the waiting umbrella in %s', (lng, copy) => {
-    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    ['en', 'Gateway · Unavailable'],
+    ['zh', '网关 · 路由不可用'],
+  ] as const)('summarizes unavailable model routes in %s', (lng, copy) => {
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, model_supply: hubAgent.model_supply!.map((row) => ({ ...row, has_runnable_hop: false })), named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText(copy)).toBeTruthy();
   });
 
   it.each([
-    ['en', 'Gateway · Healthy'],
-    ['zh', '网关 · 正常'],
-  ] as const)('summarizes the backend Agents instead of the unrelated default-Agent selection in %s', (lng, copy) => {
+    ['en', 'Gateway · Ready'],
+    ['zh', '网关 · 路由可用'],
+  ] as const)('summarizes catalog routes without requiring a selected Agent model in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{
       ...hubAgent,
       selected_model_id: null,
@@ -316,12 +316,38 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · No Agent uses this backend'],
-    ['zh', '网关 · 暂无 Agent 使用'],
-  ] as const)('states when no enabled Agent uses the backend in %s', (lng, copy) => {
+    ['en', 'Gateway · Ready'],
+    ['zh', '网关 · 路由可用'],
+  ] as const)('keeps available routes independent of Agent usage in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText(copy)).toBeTruthy();
+  });
+
+  it.each(['en', 'zh'] as const)('MH-GATEWAY-STATUS-001: keeps Agent issues in an expandable footer, outside the mode trigger in %s', async (lng) => {
+    const instance = localeInstance(lng);
+    const agent = {
+      ...openCodeAgent,
+      menu: { view: 'featured' as const, checked: ['listed-model'] },
+      model_supply: [{ model_id: 'listed-model', route_origin: 'automatic' as const, chain_length: 1, has_runnable_hop: true }],
+      named_agents: [{ name: 'opencode', effective_model_id: 'grok/grok-4.6', supply_status: 'interrupted' as const, route_reason: 'route_unconfigured' as const }],
+    };
+    const view = render(<I18nextProvider i18n={instance}><AgentCard agents={[agent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    const mode = view.container.querySelector('.model-hub-agent-mode-trigger')!;
+    expect(mode.textContent).toContain(instance.t('settings.models.gateway.routeStatus.available'));
+    expect(mode.textContent).not.toContain('grok');
+    const toggle = screen.getByRole('button', { name: instance.t('settings.models.gateway.agentIssues.summary', { count: 1 }) });
+    const details = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    expect(details.hidden).toBe(true);
+    expect(details.closest('[data-agent-group-head]')).toBeNull();
+    await userEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(details.hidden).toBe(false);
+    expect(within(details).getByText('opencode')).toBeTruthy();
+    expect(within(details).getByText('grok/grok-4.6')).toBeTruthy();
+    expect(within(details).getByText(instance.t('settings.models.gateway.agentIssues.routeMissing'))).toBeTruthy();
+    await userEvent.click(toggle);
+    expect(details.hidden).toBe(true);
   });
 
   it.each([
