@@ -104,6 +104,10 @@ host binary, not a production release artifact or an upstream-labeled binary.
 
 ## What the tests prove
 
+These are supplementary engine-source consumers for `MH-EFFORT-001`.
+The existing registered Avibe scenario still owns gateway/resolver evidence;
+no new shared scenario identifier or shipped-engine claim is introduced.
+
 - Shared policy covers unresolved/user-defined, configured unknown, static
   nil, supported, narrow and empty metadata; budget/level/future/none/absence;
   prepared-target authority; source-aware conversion; aliases and suffixes.

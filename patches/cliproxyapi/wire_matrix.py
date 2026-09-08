@@ -1,5 +1,9 @@
 """Patched engine HTTP -> existing loopback mock, with actual Avibe registrations.
 
+MH-EFFORT-001 supplementary engine acceptance: the registered Avibe scenario
+still owns gateway/resolver evidence; these inactive-source consumers close
+its downstream engine seam without claiming shipped behavior.
+
 Run through verify.py. All credentials, Source records, processes and writes
 belong to the explicit evidence directory; this never launches an installed
 engine or reads an installed engine's state.
