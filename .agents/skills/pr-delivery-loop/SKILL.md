@@ -349,9 +349,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
    on which each thread was opened;
 4. Post the final report: PR URL, what shipped, evidence layers, residual
    manual checks (state what end-to-end verification is deferred to the
-   orchestrator's integration pass). Include the applicable user-facing
-   next-action buttons from §5a. Deliver it by §4's delivery rule, or
-   finish the run the orchestrator dispatched with it as the result; ending a
+   orchestrator's integration pass). Only the orchestrator's final user-facing
+   response includes the applicable next-action buttons from §5a; internal
+   lane reports never include a button block. Deliver it by §4's delivery rule,
+   or finish the run the orchestrator dispatched with it as the result; ending a
    watch-triggered round without that send means the orchestrator never learns
    you finished.
    **Tripwire:** the round where the clean pass finally lands is exactly the
@@ -380,23 +381,44 @@ turn ends because you armed a watch and are waiting, say exactly that.
 
 ## 5a. User-facing next-action buttons
 
-Offer the next authorized choice as a real quick-reply button, not merely a
-sentence suggesting it. In Avibe replies, use the existing trailing `---` and
-`[label]` syntax from `core/prompts/quick-replies.md`. Put the block at the very
-end of the final user-facing message, outside code fences; do not append it to
-GitHub comments or internal lane reports. Name the target PR and reviewed head
-in the preceding report so the choice is unambiguous. If several PRs are in the
-conversation, identify exactly which one the following button concerns.
+In the orchestrator's final user-facing response, offer the next choice as a
+real quick-reply button. Use Avibe's existing trailing `---` and `[label]`
+syntax from `core/prompts/quick-replies.md`, at the very end of the message and
+outside code fences. Never append this block to GitHub comments or internal
+lane reports. Name the repository, target PR, and reviewed head in the report.
+
+Use the user's conversation language, defaulting to English when unknown, and
+honor explicitly requested labels. These are the exact Chinese labels; English
+labels remain within the same 20-character button limit:
+
+| Action | Chinese | English |
+| --- | --- | --- |
+| Merge the reported PR | 合并PR | Merge PR |
+| Update local master regression | 更新master到回归环境 | Update master |
+| Update and verify end to end | 更新回归环境并进行端到端验证 | Update + E2E |
+
+**Bind the target before acting, for every button below.** The current format
+submits the label, not a target payload; Markdown links cannot add a hidden
+payload. Adjacent prose does not bind a click to that report. Resolve the source
+report from source-message metadata only when it is actually available to the
+agent. If it is unavailable or the report does not identify one repository/PR,
+ask the user for the PR URL before any merge or regression mutation. Never pick
+the latest-mentioned PR, the current worktree, or the only PR still open: an
+older button may refer to a different or already-closed PR. A label-only reply
+expresses action intent, not authority over an inferred target. An explicit
+target supplied by the user resolves this ambiguity; explicit merge requests
+then follow §5.6 without an extra confirmation. Do not invent payload syntax
+or change the requested labels to work around this transport limitation.
 
 - **Ready, awaiting merge authorization:** only after verifying §5.1–§5.3 on
   the current head and `mergeStateStatus == CLEAN` for an open, non-draft PR,
-  append the exact button `合并PR`. Do not show it while review/CI is pending,
-  findings remain unresolved, or the PR is conflicted, closed, or already merged.
-  Offering the button is not merge authorization; the user's click is the
-  scoped merge request. Re-fetch the PR/head and all merge gates when handling
-  that reply. If the head changed or readiness was lost, report the change and
-  refresh the offer instead of executing a stale approval. Existing explicit
-  merge authorization still follows §5.6 without an extra confirmation.
+  append the merge button from the language table. Do not show it while
+  review/CI is pending, findings remain unresolved, or the PR is conflicted,
+  closed, or already merged.
+  Offering the button is not merge authorization. After binding a click to its
+  report, re-fetch the PR/head and all merge gates. If the head differs from the
+  offered head or readiness was lost, report the change and refresh the offer
+  instead of executing a stale approval. Chinese example:
 
   ```text
   ---
@@ -404,23 +426,41 @@ conversation, identify exactly which one the following button concerns.
   ```
 
 - **Merged, next local regression action:** for Avibe, after GitHub confirms
-  the named PR is `MERGED`, replace the merge offer with both exact choices
-  below. The first updates the local regression environment from `master`;
-  the second performs that same update and then the relevant end-to-end
-  verification. Do not present a closed-but-unmerged PR as merged.
+  the named PR is `MERGED`, replace the merge offer with both regression choices
+  from the language table. The first updates local master regression from
+  `master`; the second performs that same update and then the relevant end-to-end
+  verification. Name the local target in the report. Do not present a
+  closed-but-unmerged PR as merged. Chinese example:
 
   ```text
   ---
   [更新master到回归环境] | [更新回归环境并进行端到端验证]
   ```
 
-  These are separate opt-in actions, not implied by a merge request. On a click,
-  fetch current `master`, preserve local changes, and use the repository's
-  established local Incus regression workflow. Identify the environment and
-  deployed commit in the result. Never reinterpret either choice as permission
-  to update production, a remote tenant, or the running local Avibe. Other
-  repositories offer regression actions only when their own documented local
-  workflow applies; do not invent a deployment target to make a button work.
+  These are separate opt-in actions, not implied by a merge request. After
+  binding the click and rechecking `MERGED`, follow `docs/regression/README.md`:
+  fetch `origin`, fast-forward the **primary default-branch checkout** with
+  `--ff-only`, and verify it is on `master` at the fetched `origin/master` SHA.
+  Its tracked and untracked source files must be clean before deployment. Never
+  discard, stash, or commit unrelated user edits to achieve this; report the
+  blocker instead. Fetching alone does not update a task worktree, and the
+  runner synchronizes its invoking checkout, including dirty source files.
+
+  Run `python3 scripts/incus_regression.py up --target master --reset-mode none`
+  with the working directory set to that verified primary checkout, targeting
+  the persistent **local** master environment (`avr-master` / `avibe-master`
+  by default), not a temporary worktree environment. Use the documented local
+  Lima route on macOS. Preserve the environment's product state, credentials,
+  pairing, and sessions; neither button authorizes a state reset. Verify the
+  deployment receipt and served source commit match the intended master SHA
+  before reporting success or starting the second choice's end-to-end checks.
+  Report the environment, deployed commit, and actual verification results;
+  a healthy service alone is not an end-to-end pass.
+
+  Never reinterpret either choice as permission to update production, a remote
+  tenant, or the running local Avibe. Other repositories offer regression
+  actions only when their own documented local workflow applies; do not invent
+  a deployment target to make a button work.
 
 ## 6. While waiting, don't idle
 
