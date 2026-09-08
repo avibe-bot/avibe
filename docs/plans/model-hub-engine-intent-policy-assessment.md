@@ -382,10 +382,10 @@ After approval, promote the diagnostic matrix into maintained engine tests:
   Avibe integration subsequently uses generated Source registrations rather
   than a manually inflated capability fixture.
 
-Resources measured so far: approximately 1.6 GiB of task-owned source,
+Resources measured after the additional conversion tests: approximately 1.9 GiB of task-owned source,
 toolchain, dependencies, and cache; an 81 MiB unstripped diagnostic binary.
 Build/test concurrency was `GOMAXPROCS=2`, `-p=1`, with a 1536 MiB soft Go
-memory limit. The wire child used two Go threads and a 512 MiB soft limit.
+memory limit. The wire child used `GOMAXPROCS=2` and a 512 MiB soft limit.
 The Go limits are not OS memory caps. Build all four release targets
 sequentially or on bounded native runners, not concurrent local full builds.
 
