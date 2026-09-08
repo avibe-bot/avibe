@@ -2,7 +2,7 @@
   "//": "Standalone on purpose. `npm run build` runs `tsc -b`, which resolves the app and vite configs only — the browser bundle must not grow a dependency on a Playwright suite that never ships. Typecheck this project directly: `npx tsc -p e2e/tsconfig.json --noEmit`.",
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023", "DOM"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "types": ["node"],
     "skipLibCheck": true,

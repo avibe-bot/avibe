@@ -1455,8 +1455,11 @@ must not reject empty PUT/preview inputs or supported old config before normaliz
 Reads are pure; the next ordinary save writes the normalized sparse map.
 
 Restore automatic or removing the final manual hop changes the draft to inherited and
-previews its actual target/origin. Undo restores the previous unsaved manual draft;
-Cancel writes nothing. Save sends DELETE for inherited intent or PUT for nonempty manual,
+previews its actual target/origin. Undo restores the previous unsaved draft and intent.
+The dialog opens directly editable without pinning inheritance. Actual edits or
+explicit Pin current route stage manual intent. Cancel changes writes nothing,
+keeps the dialog mounted and rereads saved authority; Close dismisses. Unchanged
+normalized intent cannot Save. Save sends DELETE for inherited intent or PUT for nonempty manual,
 consumes the authoritative mutation envelope, retains failed drafts and follows the
 existing exact-plan guard/reconciliation protocol. Sources PUT and compatibility
 chains/reorder update defaults only, preserving manual arrays and using effective

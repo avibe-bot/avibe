@@ -13,7 +13,7 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
     await requireMockUpstream(mock);
   });
 
-  test('D: inherited inspection stays read-only until Edit route', async ({ api, hub, gateway, page }) => {
+  test('D: inherited routes are directly editable without pinning from inspection', async ({ api, hub, gateway, page }) => {
     const original = await captureAgentChain(api, gateway);
     try {
       expect(await api.deleteAgentChain(gateway.backend, gateway.model)).toBe(true);
@@ -21,8 +21,9 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await hub.openRoute(gateway.backend, gateway.model);
       const dialog = hub.routeDialog;
       await expect(dialog).toBeVisible();
-      await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toHaveCount(0);
-      await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toBeVisible();
+      await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true }).first()).toBeVisible();
+      await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
       await labelledButton(dialog, copy('routing.close')).click();
       await expect(dialog).toHaveCount(0);
 
@@ -57,12 +58,15 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
         y: labelBox!.y + labelBox!.height / 2 - openerBox!.y,
       } });
       await expect(dialog).toBeVisible();
-      await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toHaveCount(0);
-      await labelledButton(dialog, copy('routing.editRoute')).click();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true }).first()).toBeVisible();
       expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toBeNull();
-      await labelledButton(dialog, copy('routeDialog.cancel')).click();
+      await labelledButton(dialog, copy('routing.pinRoute')).click();
+      await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeEnabled();
+      await labelledButton(dialog, copy('routing.cancelChanges')).click();
+      await expect(dialog).toBeVisible();
+      await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
+      await labelledButton(dialog, copy('routing.close')).click();
       await expect(dialog).toHaveCount(0);
       expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toBeNull();
     } finally {
@@ -129,7 +133,10 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await remove.focus();
       await remove.press('Enter');
       await expect(hops).toHaveCount(1);
-      await labelledButton(dialog, copy('routeDialog.cancel')).click();
+      await labelledButton(dialog, copy('routing.cancelChanges')).click();
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText(arranged.map((hop) => hop.model_id));
+      await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
       expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual({ hops: arranged });
     } finally {
       await restoreAgentChain(api, gateway, original);
@@ -156,7 +163,7 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual({ hops: manual });
       await hub.openRoute(gateway.backend, gateway.model);
       await expect(hub.routeDialog.locator('.model-hub-route-hop-name')).toHaveText(gateway.sources.map((source) => source.display_name));
-      await labelledButton(hub.routeDialog, copy('routeDialog.cancel')).click();
+      await labelledButton(hub.routeDialog, copy('routing.close')).click();
     } finally {
       try {
         await api.setDefaultSourceOrder(gateway.backend, originalOrder);

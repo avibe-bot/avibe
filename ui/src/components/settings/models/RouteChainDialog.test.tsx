@@ -235,15 +235,15 @@ describe("RouteChainDialog", () => {
         }
       });
       const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
-      const labels = state === 'inherited' ? ['Close', 'Edit route']
-        : [state === 'preview' ? 'Undo restore' : 'Restore automatic', 'Cancel', 'Save'];
+      const labels = state === 'inherited' ? ['Pin current route', 'Close', 'Save']
+        : [state === 'preview' ? 'Undo restore' : 'Restore automatic', state === 'preview' ? 'Cancel changes' : 'Close', 'Save'];
       expect(footer.getAllByRole('button').map((button) => button.textContent)).toEqual(labels);
       for (const label of labels) expect(footer.getByRole('button', { name: label }).hasAttribute('hidden')).toBe(false);
       expect(screen.getByRole('dialog').classList.contains('overflow-hidden')).toBe(true);
     },
   );
 
-  it('closes inherited inspection with visible Close, not the icon-only Cancel command', async () => {
+  it('closes an unchanged inherited editor without creating manual intent', async () => {
     const user = userEvent.setup();
     const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
     vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(inherited);
@@ -255,20 +255,20 @@ describe("RouteChainDialog", () => {
       sources={sources} onClose={close} readAgents={vi.fn()} readSources={vi.fn()}
     /></I18nextProvider>);
 
-    await screen.findByRole('button', { name: 'Edit route' });
+    await screen.findAllByRole('button', { name: 'Edit hop' });
     const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
     const dismiss = footer.getByRole('button', { name: 'Close' });
     expect(dismiss.textContent).toBe('Close');
     expect(footer.queryByRole('button', { name: 'Cancel' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Cancel' }).textContent).toBe('');
-    expect(screen.queryByRole('button', { name: 'Add a hop' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel changes' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add a hop' })).toBeTruthy();
     await user.click(dismiss);
     expect(close).toHaveBeenCalledTimes(1);
     expect(put).not.toHaveBeenCalled();
     expect(restore).not.toHaveBeenCalled();
   });
 
-  it('uses visible Cancel after Edit and throughout restore preview and undo without writing', async () => {
+  it('cancels explicit pinning, restore preview and undo in place without writing', async () => {
     const user = userEvent.setup();
     const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
     vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(inherited);
@@ -281,25 +281,26 @@ describe("RouteChainDialog", () => {
       sources={sources} onClose={close} readAgents={vi.fn()} readSources={vi.fn()}
     /></I18nextProvider>);
 
-    await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+    await user.click(await screen.findByRole('button', { name: 'Pin current route' }));
     const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
-    expect(footer.getByRole('button', { name: 'Cancel' }).textContent).toBe('Cancel');
+    expect(footer.getByRole('button', { name: 'Cancel changes' }).textContent).toBe('Cancel changes');
     expect(footer.queryByRole('button', { name: 'Close' })).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(2);
 
     await user.click(screen.getByRole('button', { name: 'Restore automatic' }));
     await screen.findByRole('button', { name: 'Undo restore' });
     expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
-    expect(footer.getByRole('button', { name: 'Cancel' }).textContent).toBe('Cancel');
-    expect(footer.queryByRole('button', { name: 'Close' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Remove hop' })).toBeNull();
-
-    await user.click(screen.getByRole('button', { name: 'Undo restore' }));
-    expect(footer.getByRole('button', { name: 'Cancel' }).textContent).toBe('Cancel');
+    expect(footer.getByRole('button', { name: 'Cancel changes' }).textContent).toBe('Cancel changes');
     expect(footer.queryByRole('button', { name: 'Close' })).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(2);
-    await user.click(footer.getByRole('button', { name: 'Cancel' }));
-    expect(close).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Undo restore' }));
+    expect(footer.getByRole('button', { name: 'Cancel changes' }).textContent).toBe('Cancel changes');
+    expect(footer.queryByRole('button', { name: 'Close' })).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(2);
+    await user.click(footer.getByRole('button', { name: 'Cancel changes' }));
+    await screen.findByRole('button', { name: 'Pin current route' });
+    expect(close).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
     expect(restore).not.toHaveBeenCalled();
   });
@@ -339,8 +340,7 @@ describe("RouteChainDialog", () => {
         order: [alternateSubscription.id], eligibility: [{ source_id: alternateSubscription.id, eligible: true }],
       } }, [alternateSubscription]);
 
-      await user.click(await screen.findByRole('button', { name: 'Edit route' }));
-      await user.click(screen.getByRole('button', { name: 'Add a hop' }));
+      await user.click(await screen.findByRole('button', { name: 'Add a hop' }));
       await user.click(screen.getByRole('option', { name: /sonnet-5/ }));
       await user.click(screen.getByRole('button', { name: 'Add' }));
       await user.click(screen.getByRole('button', { name: 'Save' }));
@@ -359,8 +359,7 @@ describe("RouteChainDialog", () => {
         order: [], eligibility: [{ source_id: sources[0].id, eligible: true }],
       } }, [sources[0]]);
 
-      await user.click(await screen.findByRole('button', { name: 'Edit route' }));
-      await user.click(screen.getByRole('button', { name: 'Add a hop' }));
+      await user.click(await screen.findByRole('button', { name: 'Add a hop' }));
       await user.type(screen.getByLabelText('Exact model ID'), hop.model_id);
       await user.click(screen.getByRole('button', { name: 'Add' }));
       await user.click(screen.getByRole('button', { name: 'Save' }));
@@ -381,7 +380,8 @@ describe("RouteChainDialog", () => {
 
       await screen.findByRole('button', { name: 'Configure default routing' });
       expect(screen.queryByRole('button', { name: 'Edit route' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+      expect(screen.queryByRole('button', { name: 'Add a hop' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Restore automatic' })).toBeNull();
     });
 
@@ -390,16 +390,15 @@ describe("RouteChainDialog", () => {
       await screen.findByRole('button', { name: 'Configure default routing' });
       expect(screen.getByText('Unconfigured')).toBeTruthy();
       expect(screen.queryByRole('button', { name: 'Restore automatic' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
       expect(screen.queryByText(/saved route is empty/)).toBeNull();
     });
 
     it('cannot save an empty newly opened editor as Manual', async () => {
-      const user = userEvent.setup();
       renderEmptyRoute({ ...agent, sources: {
         order: [], eligibility: [{ source_id: sources[0].id, eligible: true }],
       } }, [sources[0]]);
-      await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+      await screen.findByRole('button', { name: 'Add a hop' });
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
       expect(screen.queryByText(/saved route is empty/)).toBeNull();
     });
@@ -425,20 +424,21 @@ describe("RouteChainDialog", () => {
         vi.mocked(modelsApi.getAgentChain).mockResolvedValue(inherited);
         cleanup();
         render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={sources} onClose={close} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
-        await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+        await screen.findAllByRole('button', { name: 'Edit hop' });
       }
       await clear(user);
       await screen.findByText('After restore: automatic matching');
       expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
-      expect(screen.queryByRole('button', { name: 'Remove hop' })).toBeNull();
-      expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(2);
+      expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(origin === 'automatic');
       await user.click(screen.getByRole('button', { name: 'Undo restore' }));
       expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(1);
       expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('opus-5');
       await user.click(screen.getByRole('button', { name: 'Remove hop' }));
       await screen.findByText('After restore: automatic matching');
-      await user.click(within(document.querySelector<HTMLElement>('.model-hub-route-foot')!).getByRole('button', { name: 'Cancel' }));
-      expect(close).toHaveBeenCalledOnce();
+      await user.click(within(document.querySelector<HTMLElement>('.model-hub-route-foot')!).getByRole('button', { name: 'Cancel changes' }));
+      await screen.findAllByRole('button', { name: 'Remove hop' });
+      expect(close).not.toHaveBeenCalled();
       expect(put).not.toHaveBeenCalled();
       expect(restore).not.toHaveBeenCalled();
       expect(chain.manual_override?.hops).toHaveLength(2);
@@ -504,7 +504,9 @@ describe("RouteChainDialog", () => {
       await clear(user);
       const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
       expect((footer.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
-      await user.click(footer.getByRole('button', { name: action === 'undo' ? 'Undo restore' : 'Cancel' }));
+      await user.click(action === 'undo'
+        ? footer.getByRole('button', { name: 'Undo restore' })
+        : screen.getByRole('button', { name: 'Close' }));
       await act(async () => pending.resolve(inherited));
       expect(screen.queryByText('After restore: automatic matching')).toBeNull();
       if (action === 'undo') {
@@ -553,7 +555,7 @@ describe("RouteChainDialog", () => {
       await user.click(screen.getByRole('button', { name: copy.routeDialog.removeHop }));
       expect(screen.getByText(copy.routing.previewLoading)).toBeTruthy();
       const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
-      expect(footer.getAllByRole('button').map((button) => button.textContent)).toEqual([copy.routing.undoRestore, copy.routeDialog.cancel, copy.routeDialog.save]);
+      expect(footer.getAllByRole('button').map((button) => button.textContent)).toEqual([copy.routing.undoRestore, copy.routing.cancelChanges, copy.routeDialog.save]);
       expect((footer.getByRole('button', { name: copy.routeDialog.save }) as HTMLButtonElement).disabled).toBe(true);
       await act(async () => pending.reject(new Error('offline')));
       expect(screen.getByRole('alert').textContent).toContain(copy.routing.previewFailed);
@@ -593,7 +595,7 @@ describe("RouteChainDialog", () => {
     const props = { selection: { agent, modelId: 'opus-5', read: readyRegion(inherited) }, sources, onClose: vi.fn(), readAgents: vi.fn(), readSources: vi.fn() };
     const view = (covered: boolean) => <I18nextProvider i18n={i18n}><RouteChainDialog {...props} covered={covered} /></I18nextProvider>;
     const { rerender } = render(view(false));
-    await screen.findByRole('button', { name: 'Edit route' });
+    await screen.findByRole('button', { name: 'Pin current route' });
     rerender(view(true));
     rerender(view(false));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
@@ -635,12 +637,13 @@ describe("RouteChainDialog", () => {
     await user.click(screen.getByRole('button', { name: 'Restore automatic' }));
     await screen.findByText('After restore: original-name passthrough');
     expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
-    expect(screen.queryByRole('button', { name: 'Remove hop' })).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(2);
     await user.click(screen.getByRole('button', { name: 'Undo restore' }));
     expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(1);
     expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('opus-5');
-    await user.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!);
-    expect(close).toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Cancel changes' }));
+    await screen.findAllByRole('button', { name: 'Remove hop' });
+    expect(close).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
     expect(restore).not.toHaveBeenCalled();
   });
@@ -659,7 +662,7 @@ describe("RouteChainDialog", () => {
     expect(put).not.toHaveBeenCalled();
   });
 
-  it('saving an explicit edit of identical inherited hops creates manual intent', async () => {
+  it('saving explicit pinning of identical inherited hops creates manual intent', async () => {
     const user = userEvent.setup();
     const inherited: AgentChain = { ...chain, manual_override: null, route_origin: 'automatic' };
     renderDialog();
@@ -668,7 +671,7 @@ describe("RouteChainDialog", () => {
     cleanup();
     const put = vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue(mutation(chain));
     render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={[]} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
-    await user.click(await screen.findByRole('button', { name: 'Edit route' }));
+    await user.click(await screen.findByRole('button', { name: 'Pin current route' }));
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(put).toHaveBeenCalledWith('claude', 'opus-5', { hops: chain.manual_override!.hops }));
   });

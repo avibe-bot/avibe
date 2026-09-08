@@ -147,7 +147,7 @@ test('MH-ROUTING-011 recorded request error is independent of current route and 
     expect(JSON.parse(await details.locator('pre').innerText())).toEqual(recorded);
     await details.press('Escape');
     await expect(details).toHaveCount(0);
-    await labelledButton(dialog, copy('routeDialog.cancel')).click();
+    await labelledButton(dialog, copy('routing.close')).click();
 
     expect(await api.deleteAgentChain(backend, model)).toBe(true);
     await mock.configure({ model_errors: {} });

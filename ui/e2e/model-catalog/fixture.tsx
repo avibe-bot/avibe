@@ -11,6 +11,7 @@ import { blankBackendModel } from '../../src/components/settings/models/backendC
 import { modelsApi } from '../../src/components/settings/models/modelsApi';
 import type { AgentBackend, AgentSupply, BackendModel, BackendModelsPut } from '../../src/components/settings/models/types';
 import { GatewayFixture } from './gatewayFixture';
+import { RouteFixture } from './routeFixture';
 
 const params = new URLSearchParams(location.search);
 const backend = params.get('backend') as AgentBackend;
@@ -55,4 +56,6 @@ export function Fixture() {
 
 createRoot(document.getElementById('root')!).render(params.get('view') === 'gateway'
   ? <I18nextProvider i18n={language}><GatewayFixture /></I18nextProvider>
+  : params.get('view') === 'route'
+  ? <I18nextProvider i18n={language}><RouteFixture /></I18nextProvider>
   : <Fixture />);

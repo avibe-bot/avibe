@@ -1032,11 +1032,13 @@
   border-color: var(--model-hub-wash-24);
   box-shadow: var(--model-hub-dialog-shadow);
 }
-.model-hub-route-head { height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
+.model-hub-route-head { min-height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
 .model-hub-route-close { width: 26px; height: 26px; margin: -5px -5px -5px 0; color: var(--model-hub-ink-59); }
 .model-hub-route-close > svg { width: 15px; height: 15px; }
 .model-hub-route-title {
   --model-hub-route-title-size: 15px;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: var(--model-hub-route-title-size);
 }
 .model-hub-route-subtitle {

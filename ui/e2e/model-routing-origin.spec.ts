@@ -78,7 +78,11 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
     await expect(dialog.locator('.model-hub-route-hop-name')).toHaveText([gateway.sources[0].display_name]);
     await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText([unsavedModel]);
     await removeLast();
-    await labelledButton(dialog, copy('routeDialog.cancel')).click();
+    await labelledButton(dialog, copy('routing.cancelChanges')).click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText([manual.hops[0].model_id]);
+    await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
+    await labelledButton(dialog, copy('routing.close')).click();
     await expect(dialog).not.toBeVisible();
     expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual(manual);
     expect(mutations).toEqual([]);
@@ -120,7 +124,9 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
     expect(identities(reloaded)).toEqual(identities(inherited));
     await expect(hub.routeRow(gateway.backend, gateway.model).locator('button.model-hub-route-origin')).toHaveText(copy(`routing.origin.${reloaded.route_origin}`));
     await hub.openRoute(gateway.backend, gateway.model);
-    await expect(labelledButton(dialog, copy('routing.editRoute'))).toBeVisible();
+    await expect(labelledButton(dialog, copy('routing.pinRoute'))).toBeVisible();
+    await expect(dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first()).toBeVisible();
+    await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
     await labelledButton(dialog, copy('routing.close')).click();
   } finally {
     try {

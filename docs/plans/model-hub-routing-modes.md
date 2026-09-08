@@ -186,11 +186,15 @@ Approved design: `avibe-docs/design.pen`, frames `bmi25` (dark), `ziils` (light)
 - Rename Adjust priority to Default routing. It edits one backend's default
   membership/order; manual routes are independent. Show affected inherited/manual
   counts without implying historical authorship or runtime health.
-- Route dialog opens inherited state with Edit route. Manual editing preserves
-  add/edit/remove/reorder and allows exact model ids missing from the source list.
+- Owner amendment 2026-09-08: route dialogs open directly editable. Only actual
+  edits or explicit Pin current route stage manual intent; opening/picker dismissal
+  and no-op edits preserve inheritance. Keep add/edit/remove/reorder and exact
+  API-key targets absent from inventory. No persistence occurs before Save.
 - Restore automatic lives in the dialog footer and changes draft only. Call preview
   with null override, show its actual target and origin, which may be Passthrough.
-  Undo restore reinstates the prior manual draft. Cancel/close never writes.
+  Undo restore reinstates the prior draft and intent. Cancel changes keeps the
+  dialog open and rereads saved authority; Close dismisses. Neither writes.
+  Ready preview rows remain editable, and stale previews cannot replace edits.
   Save uses DELETE for restored automatic, PUT for manual draft, consumes the full
   canonical mutation result, and preserves existing guarded confirmation handling.
 - Preserve the draft on failed Save, avoid stale preview overwriting newer edits,
@@ -415,7 +419,7 @@ Route details expose the complete source identity and exact model id as visible
 text, including stale/missing source fallback identities. These detail fields
 wrap at constrained widths, with long unbroken identifiers allowed to break;
 hop rows retain their existing minimum height and grow with their content.
-This applies to editable, inherited read-only and restore-preview rows, including
+This applies to manual, inherited and restore-preview editable rows, including
 manual sources outside defaults. It does not replace the approved compact
 ellipsis behavior in overview/provider cards. Two values sharing a long prefix
 must remain distinguishable without requiring hover, title text, or editing.
