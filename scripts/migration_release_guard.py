@@ -823,6 +823,7 @@ EQUALITY = r'\s*(?:==|=(?!=)|\bis\b(?!\s+not\b))\s*'
 SQL_STRING = r"'(?:[^']|'')*'"
 JSON_TERM = rf"\bjson_(extract|type)\s*\(\s*({SQL_IDENTIFIER})\s*,\s*'((?:[^']|'')*)'\s*\)"
 JSON_REQUIREMENT = re.compile(JSON_TERM + EQUALITY + rf"({SQL_STRING}|-?[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+GLOB_REQUIREMENT = rf"({SQL_IDENTIFIER})\s+(not\s+)?glob\s*'((?:[^']|'')*)'"
 SQL_OPAQUE = re.compile(
     SQL_STRING + '|' + SQL_QUOTED_IDENTIFIER + r'|--[^\n]*|/\*[\s\S]*?(?:\*/|$)'
 )
@@ -1007,10 +1008,10 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     whether the resulting row is admissible, so a bad proposal costs an attempt rather
     than producing a row the schema would have refused.
     """
-    # Paths and member values already belong to semantic JSON proposals; offering
-    # them to ordinary columns can overwrite an otherwise successful repair.
+    # Semantic operands already belong to their shape/JSON owners; offering them
+    # to ordinary columns can overwrite an otherwise successful repair.
     parts = list(sql_projection(expression, literals=True, identifiers=True))
-    for pattern in (JSON_REQUIREMENT, JSON_TERM):
+    for pattern in (JSON_REQUIREMENT, JSON_TERM, GLOB_REQUIREMENT):
         for match in sql_matches(pattern, expression):
             parts[match.start():match.end()] = " " * (match.end() - match.start())
     expression = "".join(parts)
@@ -1178,10 +1179,13 @@ def glob_witness(
     return None
 
 
+SeedAssignment = tuple[tuple[str, object], ...]
+
+
 @dataclass
 class ShapeProposals:
     derived: list[tuple[str, object]]
-    numeric_fallback: list[tuple[str, object]]
+    numeric_fallback: list[SeedAssignment]
 
 
 def shape_proposals(
@@ -1213,10 +1217,7 @@ def shape_proposals(
             text.setdefault(name, "x")
             widths[name] = size
             text[name] = text[name][:size].ljust(size, "0")
-    globs = (match.groups() for match in sql_matches(
-        rf"({SQL_IDENTIFIER})\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
-        shapes,
-    ))
+    globs = (match.groups() for match in sql_matches(GLOB_REQUIREMENT, shapes))
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
     alphabets: dict[str, str] = defaultdict(lambda: string.printable)
@@ -1269,18 +1270,16 @@ def shape_proposals(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
         if SQLITE_INT_MIN <= value <= SQLITE_INT_MAX
     ))
-    fallback = [
-        (name, candidate) for candidate in candidates for name in numeric if candidate != values[name]
-    ]
+    if not numeric or not candidates:
+        return ShapeProposals(proposals, [])
+    domains = numeric_domains(expression, numeric, values, candidates)
+    assignments = numeric_assignments(domains, tuple(values[name] for name in numeric), candidates)
+    fallback = [tuple(zip(numeric, assignment)) for assignment in itertools.islice(assignments, SEED_ATTEMPTS)]
     omitted, unavailable = tuple(omitted), tuple(unavailable)
     declared_names = {identifier_key(name) for name, _ in required} | {identifier_key(name) for name, _, _ in omitted} | {identifier_key(name) for name in unavailable}
     implicit = {"rowid", "_rowid_", "oid"} - declared_names
     if any(identifier_key(name) in mentioned for name in (*unavailable, *implicit)):
         return ShapeProposals(proposals, fallback)
-    if not numeric or not candidates:
-        return ShapeProposals(proposals, [])
-    domains = numeric_domains(expression, numeric, values, candidates)
-    assignments = numeric_assignments(domains, tuple(values[name] for name in numeric), candidates)
     # Native typed insertion models affinity, but scratch DML must never change
     # the fixture connection's changes()/last_insert_rowid()/total_changes().
     evaluation = sqlite3.connect(":memory:")
@@ -1312,8 +1311,8 @@ def shape_proposals(
             if default is not None:
                 evaluation.execute(f"explain select ({default})").fetchall()
         evaluation.execute(f"create table {table} ({', '.join(declarations)})" + (" STRICT" if strict else ""))
-        for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
-            changes = dict(zip(numeric, assignment))
+        for assignment in fallback:
+            changes = dict(assignment)
             parameters = [changes.get(column, values[column]) for column, _ in required]
             evaluation.execute(f"delete from {table}")
             try:
@@ -1354,9 +1353,9 @@ def numeric_assignments(
     seen = {ranked}
     yield ranked
     local = sparse(current)
-    # Every candidate-bearing column gets its initial sparse opportunity before
-    # family mixing can dilute it. Larger domains still obey the same total cap.
-    for assignment in itertools.islice(local, len(domains)):
+    # Reserve half the budget for later local alternatives as well as the first
+    # opportunity per column. Larger domains still obey the same total cap.
+    for assignment in itertools.islice(local, max(len(domains), SEED_ATTEMPTS // 2)):
         if assignment not in seen:
             seen.add(assignment)
             yield assignment
@@ -1703,10 +1702,19 @@ def insert_seed_row(
             omitted.append((str(info[1]), str(info[2]), info[4]))
     prefix_sources = {identifier_key(other) for _, _, _, other in substring_requirements(text_constraints)}
     strict = is_strict_table(connection, table)
-    proposed: set[tuple[str, object]] = set()
+    def row_identity(row: dict[str, object]) -> tuple:
+        return tuple((name, type(row[name]), row[name]) for name in names)
+
+    proposed: set[tuple] = set()
+
+    def unseen(assignment: SeedAssignment) -> bool:
+        return row_identity({**values, **dict(assignment)}) not in proposed
+
     next_source = 0
+    source_positions = [0, 0]
     objection = ""
     for _ in range(SEED_ATTEMPTS):
+        proposed.add(row_identity(values))
         try:
             connection.execute(statement, [values[column] for column in names])
         except sqlite3.Error as exc:
@@ -1723,17 +1731,23 @@ def insert_seed_row(
                 text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
                 strict=strict,
             )
-            untried = [pair for pair in shaped.derived if pair not in proposed and values[pair[0]] != pair[1]]
+            untried = [(pair,) for pair in shaped.derived if unseen((pair,))]
             if not untried:
                 sources = [
                     shaped.numeric_fallback,
-                    [*check_proposals(expression, names), *json_proposals(connection, expression, names)],
+                    [(pair,) for pair in [*check_proposals(expression, names), *json_proposals(connection, expression, names)]],
                 ]
                 # Derived repairs precede guesses. Both guess sources remain live
                 # throughout the INSERT budget, with JSON after generic literals.
                 for offset in range(len(sources)):
                     source = (next_source + offset) % len(sources)
-                    untried = [pair for pair in sources[source] if pair not in proposed and values[pair[0]] != pair[1]]
+                    options = sources[source]
+                    for step in range(len(options)):
+                        index = (source_positions[source] + step) % len(options)
+                        if unseen(options[index]):
+                            untried = [options[index]]
+                            source_positions[source] = (index + 1) % len(options)
+                            break
                     if untried:
                         next_source = (source + 1) % len(sources)
                         break
@@ -1741,16 +1755,14 @@ def insert_seed_row(
                 # Follow only prefix-source dependencies into other CHECKs. Unrelated
                 # literals must not overwrite columns that already satisfy their checks.
                 untried = [
-                    pair
+                    (pair,)
                     for related in constraints
                     for pair in [*check_proposals(related, names), *json_proposals(connection, related, names)]
-                    if identifier_key(pair[0]) in prefix_sources and pair not in proposed and values[pair[0]] != pair[1]
+                    if identifier_key(pair[0]) in prefix_sources and unseen((pair,))
                 ]
             if not untried:
                 return objection, True
-            column, literal = untried[0]
-            proposed.add((column, literal))
-            values[column] = literal
+            values.update(untried[0])
         else:
             return "", True
     return f"{SEED_ATTEMPTS} attempts did not produce a row the schema accepts; last was {objection}", False
