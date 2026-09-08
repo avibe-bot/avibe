@@ -194,8 +194,8 @@ Use the conversation language, English when unknown, and honor explicit labels:
 | Action | Chinese | English |
 | --- | --- | --- |
 | Merge | 合并PR | Merge PR |
-| Update local master regression | 更新master到回归环境 | Update master |
-| Update and verify end to end | 更新回归环境并进行端到端验证 | Update + E2E |
+| Update local master regression | 更新回归 | Update master |
+| Update and verify end to end | 更新并验证 | Update + E2E |
 
 **Bind every action to its target before mutation.** The callback submits only
 the label; adjacent prose and Markdown links add no hidden payload. Recover the
@@ -211,12 +211,13 @@ or invent a payload format.
   was lost, report that change and refresh the offer instead of using stale approval.
 - After GitHub confirms the named PR is **MERGED**, replace Merge with both
   regression choices and name the local target. Closed/unmerged is not merged.
+  State in the report that both choices update from master; keep labels short.
   Update + E2E performs the same update, then relevant end-to-end verification.
   Both are separate opt-ins, not implied by merge. For Chinese reports:
 
   ```text
   ---
-  [更新master到回归环境] | [更新回归环境并进行端到端验证]
+  [更新回归] | [更新并验证]
   ```
 
 ### Authorized local regression updates
