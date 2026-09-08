@@ -38,6 +38,26 @@ WIRE_CASES = (
 )
 
 
+@pytest.mark.parametrize(("version", "expected_limit"), [
+    ("3.8.0", 4097),
+    ("3.13.3", 4097),
+    ("3.13.5", 4097),
+    ("3.14.0", 4096),
+    ("3.14.3", 4096),
+])
+async def test_aiohttp_request_limit_compatibility(tmp_path, monkeypatch, version, expected_limit):
+    """Map the inclusive budget to each aiohttp reader's comparison semantics."""
+    monkeypatch.setattr(aiohttp, "__version__", version)
+    monkeypatch.setattr(turn_gateway, "_MAX_REQUEST_BYTES", 4096)
+    paths.get_state_dir().relative_to(tmp_path)
+    gateway = turn_gateway.ModelHubTurnGateway(SimpleNamespace())
+    try:
+        await gateway._ensure_started()
+        assert gateway._runner.app._client_max_size == expected_limit
+    finally:
+        await gateway.close()
+
+
 @pytest.fixture
 def budget():
     return None

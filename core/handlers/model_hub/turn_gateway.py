@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
 
+import aiohttp
 from aiohttp import web
+from packaging.version import Version
 
 from config import paths
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
@@ -490,8 +492,12 @@ class ModelHubTurnGateway:
         async with self._start_lock:
             if self._runner is not None:
                 return
-            # aiohttp rejects at >= client_max_size; our byte budget is inclusive.
-            app = web.Application(client_max_size=_MAX_REQUEST_BYTES + 1)
+            # Before 3.14, aiohttp's reader rejects at >= instead of >.
+            # Compensate only there so our byte budget stays inclusive.
+            client_max_size = _MAX_REQUEST_BYTES
+            if Version(aiohttp.__version__).release < (3, 14):
+                client_max_size += 1
+            app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
             runner = web.AppRunner(
