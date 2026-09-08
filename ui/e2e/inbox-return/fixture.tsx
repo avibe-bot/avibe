@@ -1,8 +1,9 @@
 import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { HashRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { createHashRouter, Route, RouterProvider, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { InboxPage } from '../../src/components/workbench/InboxPage';
+import { SearchPage } from '../../src/components/workbench/SearchPage';
 import { ApiProvider, type InboxSession } from '../../src/context/ApiContext';
 import { WorkbenchInboxContext } from '../../src/context/WorkbenchInboxContext';
 import { InstanceAuthorizationContext } from '../../src/context/InstanceAuthorizationContext';
@@ -40,14 +41,8 @@ function Chat({ markRead, addActivity }: { markRead: (id: string) => Promise<voi
   </div>;
 }
 
-function Search() {
-  const navigate = useNavigate();
-  return <div data-testid="search-detail">
-    <button type="button" aria-label="Back" onClick={() => navigate(-1)}><ArrowLeft /></button>
-  </div>;
-}
-
 export function Fixture() {
+  const navigate = useNavigate();
   const location = useLocation();
   const chat = location.pathname.startsWith('/chat/');
   const [sessions, setSessions] = useState(history.slice(0, 60));
@@ -78,9 +73,9 @@ export function Fixture() {
         : 'min-h-0 flex-1 overflow-y-auto pb-[88px] md:overflow-visible md:pb-0'}>
         <div className={chat ? 'h-full' : 'px-4 py-5 md:px-10 md:py-8'}>
           <Routes>
-            <Route path="/inbox" element={<InboxPage />} />
+            <Route path="/inbox" element={<InboxPage onOpenSearch={() => { void navigate('/search', { flushSync: true }); }} />} />
             <Route path="/chat/:sessionId" element={<Chat markRead={markRead} addActivity={addActivity} />} />
-            <Route path="/search" element={<Search />} />
+            <Route path="/search" element={<SearchPage />} />
           </Routes>
         </div>
       </main>
@@ -88,17 +83,20 @@ export function Fixture() {
   </WorkbenchInboxContext.Provider>;
 }
 
+// Match production: a data router hosting descendant declarative routes.
+const router = createHashRouter([{ path: '*', element: <Fixture /> }]);
+
 createRoot(document.getElementById('root')!).render(
-  <StrictMode><HashRouter>
+  <StrictMode>
     <InstanceAuthorizationContext.Provider value={{
       remote: false, instanceKind: null, instanceRole: 'owner',
       capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_read_instance: false },
     }}>
       <ToastContext.Provider value={{ showToast: noop }}><ApiProvider>
         <WindowManagerContext.Provider value={{ focusedId: null, focusCanvas: noop } as WindowManagerValue}>
-          <Fixture />
+          <RouterProvider router={router} />
         </WindowManagerContext.Provider>
       </ApiProvider></ToastContext.Provider>
     </InstanceAuthorizationContext.Provider>
-  </HashRouter></StrictMode>,
+  </StrictMode>,
 );
