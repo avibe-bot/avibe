@@ -1641,6 +1641,116 @@ def test_json_literals_keep_sql_comment_markers_and_expression_text(path):
         assert connection.execute("select json_extract(?,?)", (proposals["doc"], path)).fetchone()[0] == value
 
 
+@pytest.mark.parametrize("required,optional,witness", [
+    ("json_extract(doc,'$.x')=1", "json_extract(doc,'$.x')=2", '{"x":1}'),
+    ("json_type(doc,'$.x')='integer'", "json_type(doc,'$.x')='text'", '{"x":0}'),
+])
+@pytest.mark.parametrize("wrapper", [
+    "{} OR 1", "1 OR {}", "NOT ({}) OR 1", "CASE WHEN 1 THEN 1 ELSE {} END",
+    "({})=0 OR 1", "coalesce(({}),1)=0 OR 1", "json_valid(doc) AND likely(({}) OR 1)",
+])
+@pytest.mark.parametrize("reverse,separate", itertools.product([False, True], repeat=2))
+def test_optional_json_clauses_cannot_replace_required_documents(tmp_path, required, optional, witness, wrapper, reverse, separate):
+    mandatory = f"(json_valid(doc) AND {required}) IS TRUE"
+    terms = [mandatory, wrapper.format(optional)]
+    if reverse:
+        terms.reverse()
+    checks = ",".join(f"constraint ck{i} check({term})" for i, term in enumerate(terms)) if separate else f"constraint ck check({' AND '.join(f'({term})' for term in terms)})"
+    ddl = f"create table shaped(doc text not null,{checks})"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values(?)", (witness,))
+        assignments = guard.json_proposals(connection, " AND ".join(f"({term})" for term in terms), ["doc"])
+        first = dict(assignments[0])["doc"]
+        assert connection.execute(f"select {mandatory} from (select ? as doc)", (first,)).fetchone()[0] == 1
+    db_path = tmp_path / "required-json.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"select count(*) from shaped where {mandatory}").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("optional", [
+    "json_extract(doc,'invalid')=2",
+    "state IS lower(json_extract(doc,'invalid'))",
+    "state IS json_type(doc,'invalid')",
+])
+@pytest.mark.parametrize("reverse,separate", itertools.product([False, True], repeat=2))
+def test_dead_json_paths_cannot_abort_other_repairs(tmp_path, optional, reverse, separate):
+    terms = [
+        "(json_valid(doc) AND json_extract(doc,'$.x')=1) IS TRUE",
+        f"CASE WHEN 1 THEN 1 ELSE {optional} END AND state='ready'",
+    ]
+    if reverse:
+        terms.reverse()
+    checks = ",".join(f"constraint ck{i} check({term})" for i, term in enumerate(terms)) if separate else f"constraint ck check({' AND '.join(f'({term})' for term in terms)})"
+    ddl = f"create table shaped(doc text not null,state text not null,{checks})"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values(?,?)", ('{"x":1}', "ready"))
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+    db_path = tmp_path / "dead-json-path.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("select json_extract(doc,'$.x'),state from shaped").fetchall()
+        assert len(rows) >= guard.SEED_ROWS and set(rows) == {(1, "ready")}
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("branch", [
+    "(json_extract(doc,'$.x')=1 OR state='ready')",
+    "CASE WHEN state='x' THEN json_extract(doc,'$.x')=1 ELSE 1 END",
+])
+def test_local_optional_json_comparisons_remain_speculative_candidates(tmp_path, branch):
+    expression = "json_valid(doc) AND " + branch
+    db_path = tmp_path / "optional-json-alternatives.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(doc text not null,state text not null,constraint ck check({expression}))")
+        assignments = guard.json_proposals(connection, expression, ["doc", "state"])
+        assert any(dict(assignment).get("doc") == '{"x":1}' for assignment in assignments)
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"select count(*) from shaped where {expression}").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("path", ["invalid", "$["])
+def test_invalid_json_candidate_paths_preserve_native_refusal(tmp_path, path):
+    expression = f"(json_valid(doc) AND json_extract(doc,'{path}')=1) IS TRUE"
+    ddl = f"create table shaped(doc text not null,constraint ck check({expression}))"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        with pytest.raises(sqlite3.Error) as native:
+            connection.execute("insert into shaped values('{}')")
+        objection, settled = guard.insert_seed_row(connection, "shaped", ddl, [("doc", "TEXT")], {"doc": "{}"})
+        assert settled and objection == str(native.value)
+        assert connection.execute("select count(*) from shaped").fetchone()[0] == 0
+    db_path = tmp_path / "invalid-json-path.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] == 0
+
+
+def test_dead_invalid_json_candidate_does_not_change_opaque_document():
+    expression = "CASE WHEN 1 THEN 1 ELSE json_extract(doc,'invalid')=2 END AND state='ready'"
+    ddl = f"create table shaped(doc text not null,state text not null,constraint ck check({expression}))"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        assert guard.insert_seed_row(connection, "shaped", ddl, [("doc", "TEXT"), ("state", "TEXT")],
+                                     {"doc": "opaque", "state": "x"}) == ("", True)
+        assert connection.execute("select * from shaped").fetchall() == [("opaque", "ready")]
+
+
 @pytest.mark.parametrize("wrapper", [
     "(({}))", "({}) IS TRUE", "({})=1", "1=({})", "({}) == TRUE",
     "({}) IS NOT FALSE", "NOT NOT ({})", "likely({})", '\"likely\"({})',
@@ -2321,6 +2431,43 @@ def test_open_storage_columns_retain_semantic_seeds(tmp_path, declared, name, ch
 def test_explicit_storage_defaults_still_take_precedence(declared, expected):
     for name in ["payload_json", "created_at", "elapsed_time", "email_address", "label"]:
         assert guard.representative_value(name, declared) == expected
+
+
+@pytest.mark.parametrize("keyword", ["and", "or", "between", "case", "end"])
+@pytest.mark.parametrize("placement", ["value${}", "{}$value", "value${}$tail"])
+@pytest.mark.parametrize("kind", ["glob", "length", "substring", "equality", "json", "literal", "numeric"])
+def test_complete_unquoted_identifiers_survive_every_candidate_owner(tmp_path, keyword, placement, kind):
+    name = placement.format(keyword)
+    expressions = {
+        "glob": f"{name} GLOB 'ready'",
+        "length": f"length({name})=5",
+        "substring": f"substr({name},1,5)=peer",
+        "equality": f"{name}=peer",
+        "json": f"json_valid({name}) AND json_extract({name},'$.x')='ready'",
+        "literal": f"{name}='ready'",
+        "numeric": f"{name}=2",
+    }
+    # Real control tokens still have their meaning beside complete identifiers.
+    conjunction = f"n BETWEEN 0 AND 2 AND {name} GLOB 'A' AND CASE WHEN n=0 THEN 1 ELSE 0 END"
+    assert list(guard.conjunctive_terms(conjunction)) == [
+        "n BETWEEN 0 AND 2", f"{name} GLOB 'A'", "CASE WHEN n=0 THEN 1 ELSE 0 END",
+    ]
+    predicate = expressions[kind]
+    declared = "INTEGER" if kind == "numeric" else "TEXT"
+    witness = 2 if kind == "numeric" else '{"x":"ready"}' if kind == "json" else "ready"
+    ddl = f"create table shaped({name} {declared} not null,peer text not null,state text not null,constraint ck check({predicate}),constraint p check(peer='ready'),constraint s check(state='ready'))"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values(?,?,?)", (witness, "ready", "ready"))
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+    db_path = tmp_path / "complete-identifier.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"select count(*) from shaped where {predicate} AND peer='ready' AND state='ready'").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
 @pytest.mark.parametrize("quote", ['"', '`', '['])

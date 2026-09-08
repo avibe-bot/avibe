@@ -1051,52 +1051,76 @@ def json_proposals(
     """Whole assignments retaining the documents behind JSON member candidates.
 
     The document is built by SQLite's own ``json_set`` rather than assembled here, so the
-    path syntax is whatever SQLite accepts and not a second reading of it. All clauses for
-    one column are folded into a single document, because a constraint requiring two paths
-    is not satisfied by a document carrying either one. Missing paths remain an
-    alternative: SQLite can accept NULL comparisons without requiring a member.
+    path syntax is whatever SQLite accepts and not a second reading of it. Required whole
+    clauses across CHECKs share a document; speculative clauses from the failing CHECK
+    form a separate alternative. Missing paths remain an alternative too: SQLite can
+    accept NULL comparisons without requiring a member.
     """
     wanted = {identifier_key(column): column for column in columns}
     shapes = text_constraints if text_constraints is not None else expression
-    required: dict[str, list[tuple[str, str, object]]] = {}
-    for match in sql_matches(JSON_REQUIREMENT, shapes):
-        function, column, path, literal = match.groups()
-        path = path.replace("''", "'")
-        column = wanted.get(identifier_key(unquote_identifier(column)))
-        if column is None:
-            continue
-        if function.lower() == "type":
-            named = literal.strip("'").lower()
-            if named not in JSON_TYPE_MEMBERS:
+    context_columns = tuple(context_columns)
+    terms = [sql_projection(term, literals=True, identifiers=True).strip()
+             for term in conjunctive_terms(shapes, (*wanted.values(), *context_columns))]
+    scopes = [
+        tuple(match.groups() for term in terms if (match := JSON_REQUIREMENT.fullmatch(term))),
+        tuple(match.groups() for match in sql_matches(JSON_REQUIREMENT, expression)),
+    ]
+    proposals = []
+    missing = []
+    for scope in dict.fromkeys(scopes):
+        required: dict[str, list[tuple[str, str, object]]] = {}
+        for function, column, path, literal in scope:
+            path = path.replace("''", "'")
+            column = wanted.get(identifier_key(unquote_identifier(column)))
+            if column is None:
                 continue
-            member = JSON_TYPE_MEMBERS[named]
-            # JSON composites and booleans need their JSON type, not SQL text/integers.
-            term = "json(?)" if named in {"array", "object", "true", "false"} else "?"
-            required.setdefault(column, []).append((path, term, member))
-        elif literal.startswith("'"):
-            required.setdefault(column, []).append((path, "?", literal[1:-1].replace("''", "'")))
-        else:
-            required.setdefault(column, []).append((path, "json(?)", str(Decimal(literal))))
+            if function.lower() == "type":
+                named = literal.strip("'").lower()
+                if named not in JSON_TYPE_MEMBERS:
+                    continue
+                member = JSON_TYPE_MEMBERS[named]
+                # Composites and booleans need JSON types, not SQL text/integers.
+                value_term = "json(?)" if named in {"array", "object", "true", "false"} else "?"
+                required.setdefault(column, []).append((path, value_term, member))
+            elif literal.startswith("'"):
+                required.setdefault(column, []).append((path, "?", literal[1:-1].replace("''", "'")))
+            else:
+                required.setdefault(column, []).append((path, "json(?)", str(Decimal(literal))))
 
-    documents = {}
-    for column, clauses in required.items():
-        document = "'{}'"
-        parameters: list[object] = []
-        for path, term, value in clauses:
-            document = f"json_set({document}, ?, {term})"
-            parameters.extend([path, value])
-        documents[column] = str(connection.execute(f"select {document}", parameters).fetchone()[0])
-    if not documents:
-        return []
+        documents = {}
+        for column, clauses in required.items():
+            document = "'{}'"
+            parameters: list[object] = []
+            for path, value_term, value in clauses:
+                document = f"json_set({document}, ?, {value_term})"
+                parameters.extend([path, value])
+            try:
+                documents[column] = str(connection.execute(f"select {document}", parameters).fetchone()[0])
+            except sqlite3.Error:
+                # A speculative clause may be unreachable in the real CHECK.
+                # Reject its document, not the seeding process or native refusal.
+                continue
+        if not documents:
+            continue
+        proposals.extend(json_member_assignments(connection, documents, terms, shapes, wanted, context_columns))
+        missing.extend(((column, "{}"),) for column, document in documents.items() if document != "{}")
+    # Populated documents/dependents precede missing-path alternatives in every scope.
+    return list(dict.fromkeys([*proposals, *missing]))
+
+
+def json_member_assignments(
+    connection: sqlite3.Connection, documents: dict[str, str], terms: list[str],
+    shapes: str, wanted: dict[str, str], context_columns: Iterable[str],
+) -> list[SeedAssignment]:
+    """Keep native dependent candidates attached to one constructed document scope."""
     preferred = dict(documents)
     recipients = semantic_recipients(shapes, wanted.values(), context_columns=context_columns)
     identifier = f'({SQL_IDENTIFIER})'
     alternatives = []
-    for term in conjunctive_terms(shapes, (*wanted.values(), *context_columns)):
-        active = sql_projection(term, literals=True, identifiers=True)
+    for term in terms:
         for reverse in (False, True):
             operands = (identifier, JSON_TERM) if reverse else (JSON_TERM, identifier)
-            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', active, re.IGNORECASE)
+            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', term, re.IGNORECASE)
             if match is None:
                 continue
             if reverse:
@@ -1105,9 +1129,12 @@ def json_proposals(
                 function, source, path, target = match.groups()
             source, target = wanted.get(identifier_key(unquote_identifier(source))), wanted.get(identifier_key(unquote_identifier(target)))
             if source in documents and target is not None and target not in documents:
-                preferred[target] = connection.execute(
-                    f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))
-                ).fetchone()[0]
+                try:
+                    preferred[target] = connection.execute(
+                        f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))
+                    ).fetchone()[0]
+                except sqlite3.Error:
+                    continue
         # A functional operand is not an alias. Retain the native member as a
         # guess for that term's dependents, always together with its document.
         for match in sql_matches(JSON_TERM, term):
@@ -1118,16 +1145,16 @@ def json_proposals(
             targets = [name for name in wanted.values() if name in recipients[source] and name not in documents]
             if not targets:
                 continue
-            value = connection.execute(
-                f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))
-            ).fetchone()[0]
+            try:
+                value = connection.execute(
+                    f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))
+                ).fetchone()[0]
+            except sqlite3.Error:
+                # Dead/optional paths cannot abort an otherwise usable document.
+                continue
             alternatives.append(tuple({**documents, **dict.fromkeys(targets, value)}.items()))
             alternatives.extend(tuple({**documents, target: value}.items()) for target in targets)
-    proposals = [tuple(preferred.items()), tuple(documents.items()), *alternatives]
-    # Keep populated members and their dependents first; omission is a fallback,
-    # not permission to replace a document that already satisfies the CHECK.
-    proposals.extend(((column, "{}"),) for column, document in documents.items() if document != "{}")
-    return list(dict.fromkeys(proposals))
+    return [tuple(preferred.items()), tuple(documents.items()), *alternatives]
 
 
 def glob_witness(
@@ -1256,7 +1283,7 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
         between = False
         outer_start = outer_end = None
         commas = []
-        for token in re.finditer(r'\(|\)|,|\b(?:and|or|between|case|end)\b', active, re.IGNORECASE):
+        for token in re.finditer(rf'\(|\)|,|{SQL_IDENTIFIER}', active, re.IGNORECASE):
             kind = token.group().lower()
             if kind == '(':
                 if depth == 0 and outer_start is None:
@@ -1273,7 +1300,7 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
             elif kind == ',':
                 if depth == 1 and case_depth == 0:
                     commas.append(token.start())
-            elif depth == 0 and case_depth == 0:
+            elif kind in {"and", "or", "between"} and depth == 0 and case_depth == 0:
                 if kind == 'or':
                     cuts = []
                     break  # OR has lower precedence than AND.
