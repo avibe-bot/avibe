@@ -1381,6 +1381,14 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
             if outer_start is not None and outer_end is not None:
                 prefix = sql_projection(term[:outer_start], identifiers=True).strip(SQL_WHITESPACE)
                 suffix = sql_projection(term[outer_end:], literals=True, identifiers=True).strip(SQL_WHITESPACE)
+                if suffix[:7].lower() == "collate" and (
+                    collations := re.match(rf'(?:collate\s+(?:{SQL_IDENTIFIER}|{SQL_STRING})\s*)+', suffix, SQL_FLAGS)
+                ):
+                    # Only postfixes on this complete operand are transparent.
+                    # Keep comparison-operand collations and the original SQL
+                    # in the native probe of the complete wrapper composition.
+                    suffix = suffix[collations.end():]
+                    verify = True
                 body = (outer_start + 1, outer_end - 1)
                 # These operators wrap the whole parenthesized operand (or hint).
                 # Never strip '+' from an operand of an equality: it removes affinity.

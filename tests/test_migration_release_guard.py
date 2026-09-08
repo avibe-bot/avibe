@@ -1851,6 +1851,111 @@ def test_native_truth_wrappers_preserve_required_consumers(tmp_path, wrapper, pr
 
 
 @pytest.mark.parametrize("wrapper", [
+    "({}) COLLATE BINARY", "({}) COLLATE NOCASE", "({}) COLLATE RTRIM",
+    '({}) COLLATE "BINARY"', "({}) COLLATE 'BINARY'",
+    "({}) COLLATE [BINARY] COLLATE `NOCASE`", "({}) /* suffix */ COLLATE/**/BINARY",
+    "-({}) COLLATE BINARY", "NOT NOT ({}) COLLATE BINARY",
+    '"likely"({}) COLLATE NOCASE', "likelihood({},.5) COLLATE BINARY",
+    "CAST({} AS TEXT) COLLATE NOCASE", "ifnull({},1) COLLATE BINARY",
+    "({}) COLLATE BINARY IS TRUE", "0<>(({}) COLLATE BINARY)",
+])
+@pytest.mark.parametrize("predicate", [
+    "length(a)=2", "a GLOB 'AB'", "substr(a,1,2)=b", "a=b",
+    "a='AB'", "json_extract(payload_json,'$.x') IS 'AB'",
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_postfix_collations_preserve_required_consumers(tmp_path, wrapper, predicate, reverse):
+    expression = wrapper.format(predicate)
+    assert [guard.sql_projection(term, literals=True, identifiers=True).strip()
+            for term in guard.conjunctive_terms(expression)] == [predicate]
+    checks = [expression, "b='AB'", "state='ready'"]
+    if reverse:
+        checks.reverse()
+    ddl = "create table shaped(a text not null,b text not null,state text not null,payload_json text not null," + (
+        f"constraint ck check({' AND '.join(checks)}))"
+    )
+    db_path = tmp_path / "collated-truth.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values('AB','AB','ready','{\"x\":\"AB\"}')")
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+        connection.rollback()
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"select count(*) from shaped where {expression} and b='AB' and state='ready'").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("wrapper", [
+    "({}) COLLATE NOCASE", "likely(({}) COLLATE BINARY)",
+    "CAST(({}) COLLATE BINARY AS BLOB)", "coalesce(({}) COLLATE RTRIM,1)",
+])
+@pytest.mark.parametrize("reverse,separate", itertools.product([False, True], repeat=2))
+def test_collated_conjunctions_preserve_required_terms_and_check_order(tmp_path, wrapper, reverse, separate):
+    terms = ["length(a)=2", "a GLOB 'A*'"]
+    if reverse:
+        terms.reverse()
+    wrapped = [wrapper.format(term) for term in terms] if separate else [wrapper.format(" AND ".join(terms))]
+    checks = [*wrapped, "state='ready'"]
+    if reverse:
+        checks.reverse()
+    ddl = "create table shaped(a text not null,state text not null," + ",".join(
+        f"constraint ck{i} check({check})" for i, check in enumerate(checks)
+    ) + ")"
+    db_path = tmp_path / "collated-conjunction.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values('AB','ready')")
+        connection.rollback()
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where length(a)=2 and a GLOB 'A*' and state='ready'").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("wrapper", [
+    "NOT ({}) COLLATE BINARY", "({}) COLLATE NOCASE=0",
+    "(({}) OR 1) COLLATE RTRIM", "(CASE WHEN 1 THEN 1 ELSE {} END) COLLATE BINARY",
+    "CAST({} AS BLOB) COLLATE BINARY<>0", "+CAST({} AS TEXT) COLLATE NOCASE<>0",
+    "coalesce(1,({}) COLLATE BINARY)", "ifnull(({}) COLLATE BINARY,1)=0",
+])
+@pytest.mark.parametrize("predicate", ["length(a)=2", "a GLOB 'B'", "substr(a,1,1)=b", "a=b"])
+def test_collations_do_not_expose_optional_or_nontransparent_predicates(wrapper, predicate):
+    expression = wrapper.format(predicate)
+    assert guard.column_equality_groups(expression, ["a", "b"]) == [["a"], ["b"]]
+    ddl = f"create table shaped(a text,b text,state text,constraint ck check({expression}),constraint ready check(state='ready'))"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values('A','R','ready')")
+        assert guard.insert_seed_row(connection, "shaped", ddl,
+                                     [("a", "TEXT"), ("b", "TEXT"), ("state", "TEXT")],
+                                     {"a": "A", "b": "R", "state": "x"}) == ("", True)
+        assert connection.execute("select a,b from shaped").fetchall() == [("A", "R"), ("A", "R")]
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("collation,left,right", [("NOCASE", "A", "a"), ("RTRIM", "A", "A ")])
+@pytest.mark.parametrize("comparison", [
+    "a COLLATE {}=b", "(a) COLLATE {}=b", "a=b COLLATE {}", "a=(b) COLLATE {}",
+    "((a) COLLATE {}=b) COLLATE BINARY", "(a=b COLLATE {}) COLLATE BINARY",
+])
+def test_operand_collations_keep_native_comparison_values(collation, left, right, comparison):
+    expression = comparison.format(collation)
+    assert guard.column_equality_groups(expression, ["a", "b"]) == [["a"], ["b"]]
+    ddl = f"create table shaped(a text,b text,state text,constraint ck check({expression}),constraint ready check(state='ready'))"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values(?,?,'ready')", (left, right))
+        assert guard.insert_seed_row(connection, "shaped", ddl,
+                                     [("a", "TEXT"), ("b", "TEXT"), ("state", "TEXT")],
+                                     {"a": left, "b": right, "state": "x"}) == ("", True)
+        assert connection.execute("select a,b from shaped").fetchall() == [(left, right), (left, right)]
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("wrapper", [
     "coalesce({},1)", "ifnull({},1)", 'coalesce({},NULL,1)', '"ifnull"({},1)',
     "-coalesce({},1)", "NOT NOT ifnull({},1)", "coalesce({},1)<>0",
     "0<>ifnull({},1)", "1=coalesce({},1)", "CAST(ifnull({},1) AS BLOB)",
