@@ -1,10 +1,19 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: diagnosis and implementation proposal; engine policy and publication
-await the orchestrator's decision. No product config or manifest is changed.
+Status: maintained inactive source/test candidate implemented and locally
+validated. Shipping is blocked on separate source/provenance and publication
+authority. No Avibe runtime code, config, manifest, guard, or workflow changed;
+the currently pinned/installed engine behavior is unchanged.
 
-Owner: lane D, Session `sesm5hv4yk5c8`, delegated Run `55eef726163d`;
+Owner: lane D, Session `sesm5hv4yk5c8`;
 orchestrator: Session `sesvmgbdub2gp`.
+
+Delivery: the owner's independent-PR decision at `752c1def8` supersedes the
+earlier no-lane-push/combined-PR plan. This lane submits one Avibe PR containing
+only its inactive source/test candidate and assessment, plus the shared
+root-owned contract. The orchestrator independently verifies exact-head review,
+CI and source acceptance, and alone executes any gated merge. An Avibe PR merge
+does not ship the engine change or authorize engine publication.
 
 ## Recommendation
 
@@ -27,6 +36,117 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
+## Completed source-only implementation
+
+The source-only decision was recorded at integration `a3065a7d1`; the later
+xAI and Kimi clarifications were read from integration heads
+`3d0cba9e622fe3e4af706bb9073684e0b3d9b038` and
+`871ce9d94f9f9c02e9cf6c8d8b5e205949bf8727`. The lane does not author edits to
+the shared plan; the independent-delivery directive authorizes replaying the
+six specified root-owned documentation commits into this Avibe branch.
+
+The maintained home is `patches/cliproxyapi/`. Its patch includes the Go tests;
+the small apply/test recipe validates the exact base, frozen catalogs, locked
+modules, Go version, changed-file inventory and file hashes. A build receipt
+binds the wire-tested binary to those inputs and the patch digest. It refuses
+dirty source on apply, unrelated candidate edits, stale binaries, and hosts
+without the verified egress-isolation mechanism.
+
+Implemented ownership:
+
+- Shared native-representation passthrough preserves the prepared target,
+  without suffix, for Messages, Chat and verified Responses aliases.
+- Kimi native fields inside a Chat envelope are detected from original
+  `thinking.type`/`thinking.effort`; only the legacy effort alias is removed.
+  Future values, type-only input and prepared-target normalization survive.
+  Keep-only/legacy-only input still uses conversion, and suffix wins.
+- Explicit disable is applied before capability gating/summary activation.
+  Unknown/user-defined and configured missing-metadata conversions receive
+  the original source payload. Known positive conversions still validate.
+- xAI's post-translation catalog-only effort deletion is removed, along with
+  its single-use helper. `stop` removal, payload overrides/filters, tool choice,
+  schemas, replay and image handling remain. A focused final-egress scan of
+  Claude/Codex/OpenAI-compatible/Kimi found no equivalent additional catalog
+  gate; Claude's forced-tool-choice removal remains a tested protocol rule.
+- Exact selected-credential model snapshots and every registration producer
+  are unchanged, including the existing Chat conversion hint. No capability
+  or `UserDefined` claim is fabricated.
+
+### Patched three-protocol positive-intent matrix
+
+The K/KN/U/L/E profiles and notation are defined in the baseline section
+below. Both stream modes agree in all cells. E is a supplementary engine-only
+empty-object registration, not a shape fabricated by Avibe's writer.
+
+| Ingress -> upstream | K | KN | U | L | E |
+| --- | --- | --- | --- | --- | --- |
+| Messages -> Messages | A(max) | A(max) | A(max) | A(max) | A(max) |
+| Responses -> Responses | R(xhigh) | R(xhigh) | R(xhigh) | R(xhigh) | R(xhigh) |
+| Chat -> Chat | C(xhigh) | C(xhigh) | C(xhigh) | C(xhigh) | C(xhigh) |
+| Messages -> Responses | R(xhigh) | R(max) | R(max) | R(high) | R(max) |
+| Messages -> Chat | C(high) | C(high) | C(high) | C(high) | C(max) |
+| Responses -> Messages | A(max) | A(xhigh) | A(xhigh) | A(high) | B(31999) |
+| Responses -> Chat | C(high) | C(high) | C(high) | C(high) | C(xhigh) |
+| Chat -> Messages | A(max) | A(xhigh) | A(xhigh) | A(high) | B(31999) |
+| Chat -> Responses | R(xhigh) | R(xhigh) | R(xhigh) | R(high) | R(xhigh) |
+
+Explicit disable now reaches D, R(none), or C(none), respectively, in every
+cell of all nine directions and five profiles. Native absent reasoning
+remains absent; native future levels, auto, summaries and budgets preserve
+their prepared representation. Cross-protocol defaults remain conversion
+ownership: Messages/Chat -> Responses inject `medium`; the narrow profile
+maps Messages-origin default to `low` and still rejects the Chat-origin
+default. Missing catalog metadata no longer strips the translated default.
+There is no new native default or upstream capability promise.
+
+Unresolved model info and actual `UserDefined=true` also preserve native
+prepared payloads, as directly asserted in policy tests. Their genuine
+conversions retain capability-free conversion, now source-aware. Configured
+unknown rows remain `UserDefined=false`: the missing-metadata branch is an
+explicit boundary policy, not a changed registration claim.
+
+### Local acceptance evidence
+
+- The maintained Go recipe passes shared thinking/provider tests,
+  `internal/modelconfig`, selected-model helpers, `sdk/cliproxy/auth`, existing
+  thinking/summary conversion cases, and the full executor package.
+  Superseded strip/clamp/native-rejection assertions were replaced explicitly;
+  genuine positive conversions, Gemini-family constraints and suffix tests
+  remain. No tests were skipped to get this result.
+- The real HTTP matrix has 380 cases: 378 successful one-capture requests and
+  two expected conversion-only 400s with zero upstream requests. Full endpoint,
+  upstream model, selected fake key, non-ASCII content, reasoning fields and
+  cross-Source exclusion are checked. Generated Avibe registration, origin/key
+  replacement via the config watcher, streaming, cancellation and reuse pass.
+- Actual manager + Claude HTTP tests distinguish two Sources with the same
+  alias/upstream name but different metadata, then replace one key/snapshot.
+  Fake subscription tests cover Claude/Codex HTTP, Codex WebSocket, Kimi
+  Messages delegation, Kimi native/legacy Chat and xAI Responses. xAI's final
+  egress matrix has 80 cases; Kimi's native/legacy matrix has 40. They use
+  rejecting transports plus OS egress rejection, not provider accounts.
+- 24 additional actual-engine requests preserve full long UTF-8 identities
+  beyond 16 KiB, including identical long heads with distinct tails and a
+  route-only model, on all three API-key protocols and both stream modes.
+  Registration and egress assertions compare the full strings/UTF-8 bytes.
+- Three sequential ~42 MiB native requests, each containing four distinct
+  valid synthetic RGB PNGs, preserve every base64 image and the non-ASCII
+  text. Only the existing mock's receive budget is raised to 48 MiB during
+  these tests. Normal envelope/cache transformations remain allowed; exact
+  image/text data is compared independently. This closes the engine seam,
+  not a duplicate gateway-framing test.
+- The patch applies cleanly to a second exact-base local checkout. A second
+  diagnostic build there produces the same binary digest; both builds use the
+  same isolated caches, so this is not a cold-cache or production release proof.
+  All test
+  engines and mock threads are stopped/reaped; no installed engine or backend
+  was started. The source-only PR/CI/review delivery gates and production
+  release builds are not claimed here.
+
+Maintained commands are the `apply`, `test`, `build`, and `wire` phases in
+`patches/cliproxyapi/README.md`. Evidence stays in task-owned scratch, not
+committed developer-machine paths. A successful mock capture proves
+preservation/routing, not that a real provider accepts a future effort value.
+
 ## Exact inputs and evidence limits
 
 | Input | Identity |
@@ -38,13 +158,17 @@ required assets are published and verified.
 | Go toolchain actually used | `go1.26.4`, matching the pinned release workflow |
 | Local build target | `darwin/arm64`, `CGO_ENABLED=0`; diagnostic binary, not a release reproduction |
 | Diagnostic binary SHA-256 | `f8b3a7bfe5f8be7d48a1f60506ae579a9e37877696d9f813bf6143f5ed4b5887` |
+| Inactive candidate patch SHA-256 | `f55a3731e82837ed92d8943e97ef6d6521d21a78d3026a65c97b0950c3c494be` |
+| Patched diagnostic binary SHA-256 | `54af78bd25e4bd81cf383e91337c5927506d943ddf0f5458b3a98a0789d590df` |
+| Patched 380-record HTTP matrix SHA-256 | `71b15e16af5cde8f022bb51dc41507506f6a9d93e8e75830cd927f6e8f26fa15` |
+| Long-ID and multi-image evidence SHA-256 | `cb807fd737c5294cc52c101a5a2805c96b661e0e45f9c8e458b8ef15c25a0ccb` |
 | Embedded `models.json` SHA-256 | `b19b2655a4f294605d3a347be16e67ef6ea776d70cedbd69c36629f3dbb945d9` |
 | Embedded `codex_client_models.json` SHA-256 | `a044aa222836b32091fdf4c9c34030443cb8717dea65db875cf705406c332fd6` |
 | Engine `go.sum` SHA-256 | `b29392b1f713b238d6232af2f8fd09e28b7f5d221847ddccf0fc35682a9b29bd` |
 
-The task-owned checkout is
-`/tmp/avibe-lane-d-engine-TpeDb7/source`. Its Git tree remained clean after
-testing. Existing temporary checkouts were listed and preserved. No installed
+The initial baseline checkout remained clean after diagnosis; the source-only
+candidate is now maintained as an exact-base patch and tested in task-owned
+checkouts. Existing temporary checkouts were preserved. No installed
 engine, engine-internal user state, account credentials, or user Avibe process
 was used.
 
@@ -129,7 +253,7 @@ encode an explicit override and still undergo capability policy. Plugin
 normalizers cannot reliably bypass the later bound-model check; enabling a
 plugin is not a configuration-only repair.
 
-## Complete Model Hub protocol matrix
+## Baseline Model Hub protocol matrix
 
 These tables cover all nine combinations of the three Model Hub wire
 protocols. Each cell was measured through both streaming and non-streaming
@@ -201,8 +325,8 @@ for every profile. Cross-protocol Messages/Chat -> Responses injects the
 translator's `medium` default before thinking policy. K/E retain it; KN/U
 strip it; L maps the Messages-origin default to `low` but rejects the
 Chat-origin default with 400. All other absent-input cross routes remain
-without reasoning controls. Preserve this existing conversion/default
-behavior unless separately authorized to change it.
+without reasoning controls. The patched matrix retains conversion defaults
+while removing the missing-catalog stripping step.
 
 Additional measured native cases:
 
@@ -254,12 +378,13 @@ user-defined rows; their behavior does not prove configured API-key behavior.
   choices. Keep their existing conversion behavior; run their existing
   conversion regression tests for shared-code changes.
 
-No subscription/OAuth wire fixture was run in this assessment. Those tests
-remain required before declaring the source patch complete.
+No subscription/OAuth wire fixture was part of the initial baseline.
+The source-only acceptance above now includes fake-auth actual executor
+HTTP/WebSocket tests; it never exercises real subscription accounts.
 
-## Minimal source and registration plan
+## Approved source and registration boundary
 
-Implement only after the orchestrator records approval of this scope:
+The orchestrator approved and the maintained patch implements this boundary:
 
 1. In the shared thinking entry point, distinguish identical reasoning wire
    representations from provider families. Messages->Messages and Chat->Chat
@@ -289,12 +414,11 @@ Implement only after the orchestrator records approval of this scope:
    representation logic. A native passthrough does not disable executor
    protocol checks or imply that an upstream will accept every request.
 
-Expected engine edit surface: `internal/thinking/apply.go`, the relevant
-provider appliers for explicit disable/missing metadata, and focused tests.
-`validate.go` remains the conversion validator; if disable handling needs
-adjustment there, distinguish explicit disable before generic normalization.
-The later implementation must verify this boundary with tests rather than
-assuming an early return alone closes every consumer.
+Engine edit surface: `internal/thinking/apply.go`, the relevant provider
+appliers, source-payload plumbing in executor helpers, the independently
+approved xAI final-egress gate, and tests. `validate.go` is unchanged.
+Actual executor tests cover both later xAI sanitization and Kimi's native
+representation in a Chat envelope; an early return alone was insufficient.
 
 Registration policy: leave Avibe's real `model_reasoning_efforts`, Source
 prefixes, aliases, routed IDs, and persisted shapes unchanged. Do not synthesize
@@ -322,14 +446,12 @@ Baseline completed on 2026-09-09 +08:
   request reached a different Source mock. Every input included non-ASCII
   text. Raw reasoning fragments were compared across stream modes.
 
-The task-only harness is
-`/tmp/avibe-lane-d-engine-TpeDb7/diagnose_wire.py`; raw results are
-`/tmp/avibe-lane-d-engine-TpeDb7/baseline-wire.json`
+The task-owned baseline harness and raw results are retained in scratch
 (SHA-256 `8d31f89e6cb9167c7056e9acbc5539efc5c978e02ebbb9d524370e1cc96021ad`).
 The harness SHA-256 is
 `2d9855ac52194e7164ef0541b3bd8001f0d8e094cfd4316569efa7afdbdc64d3`.
-Preserve this task-owned evidence for the implementation continuation; it is
-not a maintained test entry point yet.
+The maintained entry point is now `patches/cliproxyapi/verify.py`, using
+`wire_matrix.py` and the repository's existing mock.
 
 Hermetic construction:
 
@@ -360,7 +482,7 @@ Hermetic construction:
    credential replacement, non-ASCII preservation, response streaming, and
    cancellation. Stop and reap the child and all mock threads in `finally`.
 
-After approval, promote the diagnostic matrix into maintained engine tests:
+The promoted maintained engine tests cover:
 
 - Shared policy tests for nil model info, user-defined, known nil support,
   explicit empty/narrow/ranged support, source/target aliases, suffix-vs-body
@@ -377,23 +499,26 @@ After approval, promote the diagnostic matrix into maintained engine tests:
   Include Claude, Codex HTTP/WebSocket, Kimi dialect selection, and xAI; reject
   all non-test destinations. Do not execute login, refresh, browser, or cloud
   account flows.
-- Then build `cmd/server`, run focused translator/conversion tests and
-  registration/auth tests, and repeat the HTTP matrix on the patched binary.
-  Avibe integration subsequently uses generated Source registrations rather
-  than a manually inflated capability fixture.
+- Build `cmd/server`, run conversion/registration/auth/executor tests, and
+  repeat the matrix with actual generated Avibe Source registrations. The
+  empty-object engine-only profile is labeled separately, not claimed as an
+  Avibe-generated capability. Long-ID and ~42 MiB image consumers close the
+  additional engine seams requested during integration.
 
-Resources measured after the additional conversion tests: approximately 1.9 GiB of task-owned source,
-toolchain, dependencies, and cache; an 81 MiB unstripped diagnostic binary.
+Resources after candidate and integration checks: approximately 3.5 GiB of
+task-owned source, Go toolchain/modules/cache and locked Python dependencies;
+an approximately 80 MiB unstripped diagnostic binary.
 Build/test concurrency was `GOMAXPROCS=2`, `-p=1`, with a 1536 MiB soft Go
-memory limit. The wire child used `GOMAXPROCS=2` and a 512 MiB soft limit.
+memory limit. The final wire child uses the same limits; the initial baseline
+used a 512 MiB soft limit.
 The Go limits are not OS memory caps. Build all four release targets
 sequentially or on bounded native runners, not concurrent local full builds.
 
 ## Maintained source, reproducible builds, and publication order
 
 There is no authorized public fork or published patched source today. The
-smallest maintained candidate home is an Avibe-owned source patch series plus
-tests/recipe under a proposed `patches/cliproxyapi/` directory, recording the
+maintained candidate home is the Avibe-owned source/test patch and recipe
+under `patches/cliproxyapi/`, recording the
 exact upstream base, patch digest, dependency lock, and build-input receipt.
 Apply it only to a fresh task-owned upstream checkout. The temporary checkout
 is execution state, not the permanent source of truth. A public upstream

@@ -1,0 +1,1696 @@
+diff --git a/internal/runtime/executor/helps/model_capabilities.go b/internal/runtime/executor/helps/model_capabilities.go
+index fa054fe..e13823b 100644
+--- a/internal/runtime/executor/helps/model_capabilities.go
++++ b/internal/runtime/executor/helps/model_capabilities.go
+@@ -24,5 +24,5 @@ func ApplyRequestThinking(body []byte, req cliproxyexecutor.Request, opts clipro
+ 	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
+ 		return thinking.ApplyThinkingWithModelInfoAndSummary(body, originalSource, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig)
+ 	}
+-	return thinking.ApplyThinkingWithSummary(body, req.Model, fromFormat, toFormat, provider, summaryConfig)
++	return thinking.ApplyThinkingWithSourceAndSummary(body, originalSource, req.Model, fromFormat, toFormat, provider, summaryConfig)
+ }
+diff --git a/internal/runtime/executor/helps/thinking.go b/internal/runtime/executor/helps/thinking.go
+index 9ad7a2e..7884f50 100644
+--- a/internal/runtime/executor/helps/thinking.go
++++ b/internal/runtime/executor/helps/thinking.go
+@@ -13,7 +13,7 @@ import (
+ // originalSourcePayload retains intent removed by an earlier interceptor.
+ func ApplyThinkingWithSourcePayload(body, currentSourcePayload, originalSourcePayload []byte, model, fromFormat, toFormat, providerKey string) ([]byte, error) {
+ 	summary := translatedRequestSummaryConfig(body, currentSourcePayload, originalSourcePayload, model, fromFormat, toFormat)
+-	return thinking.ApplyThinkingWithSummary(body, model, fromFormat, toFormat, providerKey, summary)
++	return thinking.ApplyThinkingWithSourceAndSummary(body, originalSourcePayload, model, fromFormat, toFormat, providerKey, summary)
+ }
+ 
+ // translatedRequestSummaryConfig gives the translated target payload precedence
+diff --git a/internal/runtime/executor/native_intent_test.go b/internal/runtime/executor/native_intent_test.go
+new file mode 100644
+index 0000000..cee3712
+--- /dev/null
++++ b/internal/runtime/executor/native_intent_test.go
+@@ -0,0 +1,512 @@
++package executor
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
++	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
++	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
++	"github.com/tidwall/gjson"
++)
++
++type intentCapture struct {
++	path   string
++	header http.Header
++	body   []byte
++}
++
++const intentClaudeJSON = `{"id":"msg-intent","type":"message","role":"assistant","model":"fixture","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
++const intentResponsesJSON = `{"type":"response.completed","response":{"id":"resp-intent","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
++
++func intentReply(w http.ResponseWriter, path string, body []byte) {
++	if strings.HasSuffix(path, "/responses") {
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = fmt.Fprintf(w, "data: %s\n\n", intentResponsesJSON)
++	} else if strings.HasSuffix(path, "/messages") {
++		if gjson.GetBytes(body, "stream").Bool() {
++			w.Header().Set("Content-Type", "text/event-stream")
++			_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", intentClaudeJSON)
++			_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
++		} else {
++			w.Header().Set("Content-Type", "application/json")
++			_, _ = io.WriteString(w, intentClaudeJSON)
++		}
++	} else {
++		if gjson.GetBytes(body, "stream").Bool() {
++			w.Header().Set("Content-Type", "text/event-stream")
++			_, _ = io.WriteString(w, "data: {\"id\":\"chat-intent\",\"object\":\"chat.completion.chunk\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chat-intent\",\"object\":\"chat.completion.chunk\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = io.WriteString(w, `{"id":"chat-intent","object":"chat.completion","model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
++	}
++}
++
++// Only the fixture listener may receive HTTP. Kimi's fixed production origin is
++// rewritten explicitly, never resolved or dialed. The recipe also rejects
++// non-loopback egress at the OS boundary, including WebSocket dialers.
++func intentContext(t *testing.T, server *httptest.Server, rewriteKimi bool) context.Context {
++	t.Helper()
++	target, _ := url.Parse(server.URL)
++	kimi, _ := url.Parse(kimiauth.KimiAPIBaseURL)
++	transport := server.Client().Transport
++	t.Cleanup(func() { transport.(*http.Transport).CloseIdleConnections() })
++	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
++		req := r.Clone(r.Context())
++		if rewriteKimi && req.URL.Host == kimi.Host {
++			uri := *req.URL
++			uri.Scheme, uri.Host = target.Scheme, target.Host
++			req.URL = &uri
++			req.Host = target.Host
++		}
++		if req.URL.Host != target.Host || req.URL.Scheme != "http" {
++			return nil, fmt.Errorf("fixture rejected outbound host %q", req.URL.Host)
++		}
++		return transport.RoundTrip(req)
++	})
++	return context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(rt))
++}
++
++func intentReceive(t *testing.T, captures <-chan intentCapture) intentCapture {
++	t.Helper()
++	select {
++	case capture := <-captures:
++		return capture
++	case <-time.After(5 * time.Second):
++		t.Fatal("fixture upstream was not reached")
++		return intentCapture{}
++	}
++}
++
++func TestNativeIntentManagerExactSnapshotAndReplacement(t *testing.T) {
++	captures := make(chan intentCapture, 8)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		captures <- intentCapture{r.URL.Path, r.Header.Clone(), bytes.Clone(body)}
++		intentReply(w, r.URL.Path, body)
++	}))
++	defer server.Close()
++	ctx := intentContext(t, server, false)
++	cfg := &config.Config{SDKConfig: config.SDKConfig{ForceModelPrefix: true}, DisableClaudeCloakMode: true}
++	manager := cliproxyauth.NewManager(nil, nil, nil)
++	manager.RegisterExecutor(NewClaudeExecutor(cfg))
++	auths := make([]*cliproxyauth.Auth, 2)
++	reg := registry.GetGlobalRegistry()
++	for i, level := range []string{"high", "max"} {
++		prefix, key := fmt.Sprintf("intent-source-%d", i), fmt.Sprintf("fake-intent-key-%d", i)
++		cfg.ClaudeKey = append(cfg.ClaudeKey, config.ClaudeKey{
++			APIKey: key, Prefix: prefix, BaseURL: server.URL,
++			Models: []config.ClaudeModel{{Name: "shared-intent-upstream", Alias: "public-alias",
++				Thinking: &registry.ThinkingSupport{Levels: []string{level}}}},
++		})
++		auth := &cliproxyauth.Auth{ID: prefix, Provider: "claude", Prefix: prefix, Attributes: map[string]string{
++			"auth_kind": "api_key", "api_key": key, "base_url": server.URL,
++			"source": fmt.Sprintf("config:claude[%d]", i),
++		}}
++		auths[i] = auth
++		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{
++			ID: prefix + "/public-alias", Type: "claude",
++		}})
++		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
++	}
++	manager.SetConfig(cfg)
++	for _, auth := range auths {
++		if _, err := manager.Register(ctx, auth); err != nil {
++			t.Fatal(err)
++		}
++	}
++	// An unrelated aggregate must not replace the selected private snapshot.
++	reg.RegisterClient("intent-unrelated", "claude", []*registry.ModelInfo{{
++		ID: "shared-intent-upstream", Type: "claude", Thinking: &registry.ThinkingSupport{Levels: []string{"low"}},
++	}})
++	t.Cleanup(func() { reg.UnregisterClient("intent-unrelated") })
++	check := func(index int, native, stream bool, want string) {
++		t.Helper()
++		auth := auths[index]
++		model := auth.Prefix + "/public-alias"
++		raw := []byte(`{"model":"` + model + `","input":"hello","reasoning":{"effort":"xhigh"}}`)
++		from := sdktranslator.FormatOpenAIResponse
++		if native {
++			raw = []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello"}],"max_tokens":1000,"thinking":{"type":"adaptive"},"output_config":{"effort":"ultra"}}`)
++			from = sdktranslator.FormatClaude
++		}
++		req := cliproxyexecutor.Request{Model: model, Payload: raw, Format: from}
++		opts := cliproxyexecutor.Options{SourceFormat: from, OriginalRequest: raw, Headers: http.Header{"Authorization": {"Bearer fake-inbound"}}}
++		if stream {
++			result, err := manager.ExecuteStream(ctx, []string{"claude"}, req, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			for chunk := range result.Chunks {
++				if chunk.Err != nil {
++					t.Fatal(chunk.Err)
++				}
++			}
++		} else if _, err := manager.Execute(ctx, []string{"claude"}, req, opts); err != nil {
++			t.Fatal(err)
++		}
++		capture := intentReceive(t, captures)
++		correctKey := capture.header.Get("X-Api-Key") == auth.Attributes["api_key"] ||
++			capture.header.Get("Authorization") == "Bearer "+auth.Attributes["api_key"]
++		if capture.path != "/v1/messages" || !correctKey ||
++			capture.header.Get("Authorization") == "Bearer fake-inbound" ||
++			gjson.GetBytes(capture.body, "model").String() != "shared-intent-upstream" ||
++			gjson.GetBytes(capture.body, "output_config.effort").String() != want {
++			t.Fatalf("selected snapshot, alias, or credential lost: %+v body=%s", capture, capture.body)
++		}
++	}
++	for _, stream := range []bool{false, true} {
++		check(0, false, stream, "high")
++		check(1, false, stream, "max")
++		check(0, true, stream, "ultra")
++	}
++	replacement := *cfg
++	replacement.ClaudeKey = append([]config.ClaudeKey(nil), cfg.ClaudeKey...)
++	replacement.ClaudeKey[0].APIKey = "fake-intent-replacement"
++	replacement.ClaudeKey[0].Models = []config.ClaudeModel{{
++		Name: "shared-intent-upstream", Alias: "public-alias", Thinking: &registry.ThinkingSupport{Levels: []string{"max"}},
++	}}
++	manager.SetConfig(&replacement)
++	auths[0] = auths[0].Clone()
++	auths[0].Attributes["api_key"] = "fake-intent-replacement"
++	if _, err := manager.Update(ctx, auths[0]); err != nil {
++		t.Fatal(err)
++	}
++	for _, stream := range []bool{false, true} {
++		check(0, false, stream, "max")
++		check(1, false, stream, "max")
++	}
++}
++
++func TestNativeIntentOAuthHTTPAndDialects(t *testing.T) {
++	for _, tc := range []struct {
++		name, provider, from, model, controls, path, field, want string
++	}{
++		{"claude-oauth", "claude", "claude", "claude-3-5-haiku-20241022", `"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}`, "/v1/messages", "output_config.effort", "max"},
++		{"codex-oauth", "codex", "openai-response", "gpt-5.4", `"reasoning":{"effort":"none","summary":"auto"}`, "/responses", "reasoning.effort", "none"},
++		{"codex-oauth-unknown-conversion", "codex", "claude", "unknown-oauth", `"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}`, "/responses", "reasoning.effort", "max"},
++		{"kimi-messages", "kimi", "claude", "kimi-k2.5", `"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}`, "/coding/v1/messages", "output_config.effort", "max"},
++		{"kimi-chat-negative", "kimi", "openai", "kimi-k2.5", `"thinking":{"type":"disabled"},"reasoning_effort":"high"`, "/coding/v1/chat/completions", "thinking.type", "disabled"},
++		{"kimi-chat-conversion", "kimi", "openai", "kimi-k2.5", `"reasoning_effort":"high"`, "/coding/v1/chat/completions", "thinking.effort", "high"},
++		{"kimi-native-positive", "kimi", "openai", "kimi-k2.5", `"thinking":{"type":"enabled","effort":"ultra","keep":"all"},"reasoning_effort":"high"`, "/coding/v1/chat/completions", "thinking.effort", "ultra"},
++		{"xai-responses", "xai", "openai-response", "grok-4", `"reasoning":{"effort":"ultra"}`, "/responses", "reasoning.effort", "ultra"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			captures := make(chan intentCapture, 1)
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				captures <- intentCapture{r.URL.Path, r.Header.Clone(), bytes.Clone(body)}
++				intentReply(w, r.URL.Path, body)
++			}))
++			defer server.Close()
++			cfg := &config.Config{DisableClaudeCloakMode: true, SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
++			var executor cliproxyauth.ProviderExecutor
++			switch tc.provider {
++			case "claude":
++				executor = NewClaudeExecutor(cfg)
++			case "codex":
++				executor = NewCodexExecutor(cfg)
++			case "kimi":
++				executor = NewKimiExecutor(cfg)
++			case "xai":
++				executor = NewXAIExecutor(cfg)
++			}
++			token := "fake-oauth-intent"
++			auth := &cliproxyauth.Auth{ID: tc.name, Provider: tc.provider,
++				Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL},
++				Metadata:   map[string]any{"access_token": token, "account_id": "fake-account"}}
++			if tc.provider == "claude" {
++				token = "sk-ant-oat-fake-intent"
++				auth.Attributes["api_key"] = token
++				auth.Metadata["account_uuid"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
++				auth.Metadata[claudeauth.ClaudeDeviceIDsMetadataKey] = []string{strings.Repeat("0", 64)}
++			}
++			if tc.provider == "xai" || tc.provider == "kimi" {
++				auth.Attributes["api_key"] = token
++			}
++			raw := []byte(`{"model":"` + tc.model + `","max_tokens":1000,"messages":[{"role":"user","content":"hello"}],"input":"hello",` + tc.controls + `}`)
++			from := sdktranslator.FromString(tc.from)
++			ctx := intentContext(t, server, tc.provider == "kimi")
++			if _, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{Model: tc.model, Payload: raw},
++				cliproxyexecutor.Options{SourceFormat: from, OriginalRequest: raw}); err != nil {
++				t.Fatal(err)
++			}
++			capture := intentReceive(t, captures)
++			if capture.path != tc.path || gjson.GetBytes(capture.body, tc.field).String() != tc.want {
++				t.Fatalf("dialect changed: path=%s body=%s", capture.path, capture.body)
++			}
++			if capture.header.Get("Authorization") != "Bearer "+token && capture.header.Get("X-Api-Key") != token {
++				t.Fatal("selected fake subscription credential was not used")
++			}
++			if tc.provider == "codex" && capture.header.Get("Chatgpt-Account-Id") != "fake-account" {
++				t.Fatal("Codex OAuth account identity lost")
++			}
++			if tc.from == "openai" && tc.provider == "kimi" && gjson.GetBytes(capture.body, "reasoning_effort").Exists() {
++				t.Fatal("Kimi dialect was conflated with Chat reasoning_effort")
++			}
++		})
++	}
++}
++
++func TestNativeIntentCodexOAuthWebSocket(t *testing.T) {
++	captures := make(chan intentCapture, 2)
++	upgrader := websocket.Upgrader{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		defer conn.Close()
++		_, body, err := conn.ReadMessage()
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		captures <- intentCapture{r.URL.Path, r.Header.Clone(), bytes.Clone(body)}
++		_ = conn.WriteMessage(websocket.TextMessage, []byte(intentResponsesJSON))
++	}))
++	defer server.Close()
++	for _, stream := range []bool{false, true} {
++		executor := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
++		auth := &cliproxyauth.Auth{ID: "intent-ws", Provider: "codex",
++			Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL},
++			Metadata:   map[string]any{"access_token": "fake-ws-subscription", "account_id": "fake-ws-account"}}
++		raw := []byte(`{"model":"gpt-5.4","input":"hello","reasoning":{"effort":"none","summary":"auto"}}`)
++		req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: raw}
++		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: raw}
++		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
++		if stream {
++			result, err := executor.ExecuteStream(ctx, auth, req, opts)
++			if err != nil {
++				cancel()
++				t.Fatal(err)
++			}
++			for chunk := range result.Chunks {
++				if chunk.Err != nil {
++					cancel()
++					t.Fatal(chunk.Err)
++				}
++			}
++		} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
++			cancel()
++			t.Fatal(err)
++		}
++		cancel()
++		capture := intentReceive(t, captures)
++		if capture.header.Get("Authorization") != "Bearer fake-ws-subscription" ||
++			capture.header.Get("Chatgpt-Account-Id") != "fake-ws-account" ||
++			capture.path != "/responses" ||
++			gjson.GetBytes(capture.body, "type").String() != "response.create" ||
++			gjson.GetBytes(capture.body, "reasoning.effort").String() != "none" {
++			t.Fatalf("WebSocket native intent or OAuth identity changed: body=%s", capture.body)
++		}
++	}
++}
++
++func TestNativeIntentXAIFinalEgressMatrix(t *testing.T) {
++	reg := registry.GetGlobalRegistry()
++	for _, profile := range []struct {
++		name, model string
++		info        *registry.ModelInfo
++	}{
++		{"unknown", "intent-unknown-xai", nil},
++		{"known-nil", "grok-4", nil},
++		{"supported", "grok-4.5", nil},
++		{"empty", "intent-empty-xai", &registry.ModelInfo{ID: "intent-empty-xai", Type: "xai", Thinking: &registry.ThinkingSupport{}}},
++		{"narrow", "intent-narrow-xai", &registry.ModelInfo{ID: "intent-narrow-xai", Type: "xai", Thinking: &registry.ThinkingSupport{Levels: []string{"high", "low"}}}},
++	} {
++		t.Run(profile.name, func(t *testing.T) {
++			if profile.info != nil {
++				reg.RegisterClient(profile.name+"-intent", "xai", []*registry.ModelInfo{profile.info})
++				t.Cleanup(func() { reg.UnregisterClient(profile.name + "-intent") })
++			}
++			captures := make(chan intentCapture, 1)
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				captures <- intentCapture{r.URL.Path, r.Header.Clone(), bytes.Clone(body)}
++				intentReply(w, r.URL.Path, body)
++			}))
++			defer server.Close()
++			ctx := intentContext(t, server, false)
++			for _, stream := range []bool{false, true} {
++				for _, intent := range []string{"ultra", "none", "absent", "cross-high", "cross-none", "suffix", "override", "filter"} {
++					cfg := &config.Config{}
++					model, from := profile.model, sdktranslator.FormatOpenAIResponse
++					controls, want := `"reasoning":{"effort":"`+intent+`"}`, intent
++					switch intent {
++					case "absent":
++						controls, want = `"metadata":{"fixture":true}`, ""
++					case "cross-high", "cross-none":
++						from = sdktranslator.FormatClaude
++						controls, want = `"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}`, "high"
++						if intent == "cross-none" {
++							controls, want = `"thinking":{"type":"disabled"}`, "none"
++						}
++					case "suffix":
++						model += "(none)"
++						controls, want = `"reasoning":{"effort":"high","summary":"auto"}`, "none"
++					case "override":
++						controls, want = `"reasoning":{"effort":"ultra"}`, "low"
++						cfg.Payload.Override = []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: profile.model}}, Params: map[string]any{"reasoning.effort": "low"}}}
++					case "filter":
++						controls, want = `"reasoning":{"effort":"ultra"}`, ""
++						cfg.Payload.Filter = []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: profile.model}}, Params: []string{"reasoning"}}}
++					}
++					raw := []byte(`{"model":"` + model + `","stop":["stop"],"max_tokens":1000,"input":[{"role":"user","content":"hello"}],"messages":[{"role":"user","content":"hello"}],` + controls + `}`)
++					auth := &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL},
++						Metadata: map[string]any{"access_token": "fake-xai-intent"}}
++					executor := NewXAIExecutor(cfg)
++					req := cliproxyexecutor.Request{Model: model, Payload: raw}
++					opts := cliproxyexecutor.Options{SourceFormat: from, OriginalRequest: raw}
++					if stream {
++						result, err := executor.ExecuteStream(ctx, auth, req, opts)
++						if err != nil {
++							t.Fatal(err)
++						}
++						for chunk := range result.Chunks {
++							if chunk.Err != nil {
++								t.Fatal(chunk.Err)
++							}
++						}
++					} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
++						t.Fatal(err)
++					}
++					capture := intentReceive(t, captures)
++					if got := gjson.GetBytes(capture.body, "reasoning.effort"); got.String() != want || (want == "" && got.Exists()) {
++						t.Fatalf("intent=%s stream=%v want=%q body=%s", intent, stream, want, capture.body)
++					}
++					if gjson.GetBytes(capture.body, "stop").Exists() || gjson.GetBytes(capture.body, "model").String() != profile.model ||
++						capture.path != "/responses" || capture.header.Get("Authorization") != "Bearer fake-xai-intent" {
++						t.Fatalf("protocol constraint or identity changed: %s", capture.body)
++					}
++				}
++			}
++		})
++	}
++}
++
++func TestNativeIntentKimiNativeAndLegacyWireMatrix(t *testing.T) {
++	for _, model := range []string{"kimi-k2.5", "intent-unknown-kimi"} {
++		for _, stream := range []bool{false, true} {
++			for _, tc := range []struct {
++				name, object, legacy, suffix, want string
++			}{
++				{"future", `{"type":"enabled","effort":"ULTRA","keep":"all"}`, "high", "", `{"type":"enabled","effort":"ULTRA","keep":"all"}`},
++				{"future-type", `{"type":"future-native","other":7}`, "high", "", `{"type":"future-native","other":7}`},
++				{"effort-only", `{"effort":"ultra"}`, "high", "", `{"effort":"ultra"}`},
++				{"type-only", `{"type":"enabled"}`, "high", "", `{"type":"enabled"}`},
++				{"disable", `{"type":"disabled"}`, "high", "", `{"type":"disabled"}`},
++				{"keep-conversion", `{"keep":"all"}`, "high", "", `{"keep":"all","type":"enabled","effort":"high"}`},
++				{"keep-only", `{"keep":"all"}`, "", "", `{"keep":"all"}`},
++				{"suffix", `{"type":"enabled","effort":"ultra"}`, "high", "(none)", `{"type":"disabled"}`},
++				{"override", `{"type":"enabled","effort":"ultra"}`, "high", "", `{"type":"disabled"}`},
++				{"filter", `{"type":"enabled","effort":"ultra"}`, "high", "", ""},
++			} {
++				t.Run(fmt.Sprintf("%s/%v/%s", model, stream, tc.name), func(t *testing.T) {
++					captures := make(chan intentCapture, 1)
++					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++						body, _ := io.ReadAll(r.Body)
++						captures <- intentCapture{r.URL.Path, r.Header.Clone(), bytes.Clone(body)}
++						intentReply(w, r.URL.Path, body)
++					}))
++					defer server.Close()
++					cfg := &config.Config{}
++					if tc.name == "override" {
++						cfg.Payload.Override = []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: model}}, Params: map[string]any{"thinking": map[string]any{"type": "disabled"}}}}
++					}
++					if tc.name == "filter" {
++						cfg.Payload.Filter = []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: model}}, Params: []string{"thinking"}}}
++					}
++					legacy := ""
++					if tc.legacy != "" {
++						legacy = `,"reasoning_effort":"` + tc.legacy + `"`
++					}
++					raw := []byte(fmt.Sprintf(`{"model":%q,"stream":%v,"messages":[{"role":"user","content":"hello"}],"thinking":%s%s}`, model+tc.suffix, stream, tc.object, legacy))
++					auth := &cliproxyauth.Auth{Provider: "kimi", Attributes: map[string]string{"auth_kind": "oauth"},
++						Metadata: map[string]any{"access_token": "fake-kimi-native"}}
++					executor := NewKimiExecutor(cfg)
++					req := cliproxyexecutor.Request{Model: model + tc.suffix, Payload: raw}
++					opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: raw}
++					ctx := intentContext(t, server, true)
++					if stream {
++						result, err := executor.ExecuteStream(ctx, auth, req, opts)
++						if err != nil {
++							t.Fatal(err)
++						}
++						for chunk := range result.Chunks {
++							if chunk.Err != nil {
++								t.Fatal(chunk.Err)
++							}
++						}
++					} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
++						t.Fatal(err)
++					}
++					capture := intentReceive(t, captures)
++					got := gjson.GetBytes(capture.body, "thinking")
++					if !reflect.DeepEqual(got.Value(), gjson.Parse(tc.want).Value()) {
++						t.Fatalf("native/legacy boundary changed: want=%s body=%s", tc.want, capture.body)
++					}
++					if gjson.GetBytes(capture.body, "reasoning_effort").Exists() || capture.path != "/coding/v1/chat/completions" ||
++						capture.header.Get("Authorization") != "Bearer fake-kimi-native" ||
++						gjson.GetBytes(capture.body, "model").String() != normalizeKimiUpstreamModel(model) {
++						t.Fatalf("Kimi wire or identity changed: %s", capture.body)
++					}
++				})
++			}
++		}
++	}
++}
++
++func TestNativeIntentCancellationAndForcedToolChoice(t *testing.T) {
++	captures := make(chan intentCapture, 1)
++	canceled := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		captures <- intentCapture{r.URL.Path, r.Header.Clone(), body}
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":%s}\n\n", intentClaudeJSON)
++		w.(http.Flusher).Flush()
++		<-r.Context().Done()
++		close(canceled)
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithTimeout(intentContext(t, server, false), 5*time.Second)
++	defer cancel()
++	raw := []byte(`{"model":"intent-custom","max_tokens":1000,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"lookup"}}`)
++	executor := NewClaudeExecutor(&config.Config{DisableClaudeCloakMode: true})
++	result, err := executor.ExecuteStream(ctx, &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "fake-intent", "base_url": server.URL}},
++		cliproxyexecutor.Request{Model: "intent-custom", Payload: raw},
++		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: raw})
++	if err != nil {
++		t.Fatal(err)
++	}
++	capture := intentReceive(t, captures)
++	if gjson.GetBytes(capture.body, "thinking").Exists() || gjson.GetBytes(capture.body, "output_config.effort").Exists() {
++		t.Fatalf("forced tool-choice protocol constraint lost: %s", capture.body)
++	}
++	cancel()
++	select {
++	case <-canceled:
++	case <-time.After(2 * time.Second):
++		t.Fatal("upstream cancellation did not propagate")
++	}
++	for range result.Chunks {
++	}
++}
+diff --git a/internal/runtime/executor/xai_executor_request.go b/internal/runtime/executor/xai_executor_request.go
+index e884728..9ae594c 100644
+--- a/internal/runtime/executor/xai_executor_request.go
++++ b/internal/runtime/executor/xai_executor_request.go
+@@ -123,7 +123,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
+ 	body = normalizeXAIInputReasoningItems(body)
+ 	body = sanitizeXAIInputEncryptedContent(body)
+ 	body = normalizeCodexInstructions(body)
+-	body = sanitizeXAIResponsesBody(body, baseModel)
++	body = sanitizeXAIResponsesBody(body)
+ 	body = normalizeXAIImageRefs(body)
+ 
+ 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
+@@ -625,18 +625,9 @@ func xaiCompareGrokVersion(a, b xaiGrokVersion) int {
+ 	return 0
+ }
+ 
+-func sanitizeXAIResponsesBody(body []byte, model string) []byte {
++func sanitizeXAIResponsesBody(body []byte) []byte {
+ 	// stop is supported by Chat Completions but not by xAI's Responses API.
+ 	body, _ = sjson.DeleteBytes(body, "stop")
+-	if !xaiSupportsReasoningEffort(model) {
+-		if gjson.GetBytes(body, "reasoning.effort").Exists() {
+-			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
+-		}
+-		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+-		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
+-			body, _ = sjson.DeleteBytes(body, "reasoning")
+-		}
+-	}
+ 	return body
+ }
+ 
+diff --git a/internal/runtime/executor/xai_executor_response.go b/internal/runtime/executor/xai_executor_response.go
+index 96cfdfe..60e1ffd 100644
+--- a/internal/runtime/executor/xai_executor_response.go
++++ b/internal/runtime/executor/xai_executor_response.go
+@@ -9,10 +9,8 @@ import (
+ 	"strings"
+ 	"time"
+ 
+-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+ 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+ 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ 	"github.com/tidwall/sjson"
+@@ -798,24 +796,6 @@ func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.
+ 	return updated, true
+ }
+ 
+-// xaiSupportsReasoningEffort reports whether the model accepts Responses API
+-// reasoning.effort. Capability comes from model registry thinking metadata
+-// (static models.json and dynamic registrations), not a hard-coded name allowlist.
+-func xaiSupportsReasoningEffort(model string) bool {
+-	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+-	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+-		name = name[idx+1:]
+-	}
+-	if name == "" {
+-		return false
+-	}
+-	info := registry.LookupModelInfo(name, "xai")
+-	if info == nil || info.Thinking == nil {
+-		return false
+-	}
+-	return len(info.Thinking.Levels) > 0
+-}
+-
+ func xaiNormalizeReasoningSummaryEventLine(line []byte, eventName string) []byte {
+ 	if eventName == "" && bytes.HasPrefix(line, xaiEventTag) {
+ 		eventName = strings.TrimSpace(string(line[len(xaiEventTag):]))
+diff --git a/internal/runtime/executor/xai_executor_test.go b/internal/runtime/executor/xai_executor_test.go
+index 711dcee..6e61fe0 100644
+--- a/internal/runtime/executor/xai_executor_test.go
++++ b/internal/runtime/executor/xai_executor_test.go
+@@ -2791,7 +2791,7 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
+ 	}
+ }
+ 
+-func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
++func TestXAIExecutorKeepsNativeReasoningWithoutCatalogSupport(t *testing.T) {
+ 	var gotBody []byte
+ 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		var errRead error
+@@ -2825,36 +2825,8 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
+ 		t.Fatalf("Execute() error = %v", err)
+ 	}
+ 
+-	if gjson.GetBytes(gotBody, "reasoning").Exists() {
+-		t.Fatalf("unsupported xAI model must omit reasoning key: %s", string(gotBody))
+-	}
+-}
+-
+-func TestXAISupportsReasoningEffortUsesModelRegistry(t *testing.T) {
+-	tests := []struct {
+-		name  string
+-		model string
+-		want  bool
+-	}{
+-		{name: "grok-4.5", model: "grok-4.5", want: true},
+-		{name: "grok-4.5 with suffix", model: "grok-4.5(high)", want: true},
+-		{name: "grok-4.3", model: "grok-4.3", want: true},
+-		{name: "grok-3-mini", model: "grok-3-mini", want: true},
+-		{name: "grok-3-mini-fast", model: "grok-3-mini-fast", want: true},
+-		{name: "grok-4.20-multi-agent", model: "grok-4.20-multi-agent-0309", want: true},
+-		{name: "provider-prefixed grok-4.5", model: "xai/grok-4.5", want: true},
+-		{name: "legacy grok-4", model: "grok-4", want: false},
+-		{name: "composer without thinking metadata", model: "grok-composer-2.5-fast", want: false},
+-		{name: "non-reasoning 4.20", model: "grok-4.20-0309-non-reasoning", want: false},
+-		{name: "unknown model", model: "unknown-xai-model", want: false},
+-		{name: "empty model", model: "", want: false},
+-	}
+-	for _, tt := range tests {
+-		t.Run(tt.name, func(t *testing.T) {
+-			if got := xaiSupportsReasoningEffort(tt.model); got != tt.want {
+-				t.Fatalf("xaiSupportsReasoningEffort(%q) = %v, want %v", tt.model, got, tt.want)
+-			}
+-		})
++	if gjson.GetBytes(gotBody, "reasoning.effort").String() != "high" {
++		t.Fatalf("catalog absence must not erase native intent: %s", string(gotBody))
+ 	}
+ }
+ 
+diff --git a/internal/thinking/apply.go b/internal/thinking/apply.go
+index 92e6161..745de37 100644
+--- a/internal/thinking/apply.go
++++ b/internal/thinking/apply.go
+@@ -8,6 +8,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
+ )
+ 
+ type pluginProviderApplier struct {
+@@ -126,9 +127,9 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
+ 
+ // ApplyThinking applies thinking configuration to a request body.
+ //
+-// This is the unified entry point for all providers. It follows the processing
+-// order defined in FR25: route check → model capability query → config extraction
+-// → validation → application.
++// Native reasoning representations without a suffix retain the prepared target
++// payload. Conversion resolves explicit disable before capability policy, then
++// validates known positive intent or converts without incomplete metadata.
+ //
+ // Suffix Priority: When the model name includes a thinking suffix (e.g., "gemini-2.5-pro(8192)"),
+ // the suffix configuration takes priority over any thinking parameters in the request body.
+@@ -149,7 +150,7 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
+ //
+ // Passthrough behavior (returns original body without error):
+ //   - Unknown provider (not in providerAppliers map)
+-//   - modelInfo.Thinking is nil (model doesn't support thinking)
++//   - Native reasoning representation with no model suffix
+ //
+ // Note: Unknown models (modelInfo is nil) are treated as user-defined models: we skip
+ // validation and still apply the thinking config so the upstream can validate it.
+@@ -175,6 +176,12 @@ func ApplyThinkingWithSummary(body []byte, model string, fromFormat string, toFo
+ 	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig)
+ }
+ 
++// ApplyThinkingWithSourceAndSummary retains source intent while using the
++// provider registry for model lookup, including OAuth execution attempts.
++func ApplyThinkingWithSourceAndSummary(body, sourceBody []byte, model, fromFormat, toFormat, providerKey string, summaryConfig SummaryConfig) ([]byte, error) {
++	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig)
++}
++
+ // ApplyThinkingWithModelInfo applies thinking with the exact configured model
+ // definition selected for an API-key execution attempt while preserving summary
+ // visibility from the original source body.
+@@ -195,7 +202,7 @@ func ApplyThinkingWithModelInfoAndSummary(body, sourceBody []byte, model string,
+ 
+ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, resolvedModelInfo *registry.ModelInfo, modelInfoResolved bool, summaryConfig SummaryConfig) ([]byte, error) {
+ 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
+-	if modelInfoResolved && providerFormat == "openai-response" {
++	if providerFormat == "openai-response" {
+ 		providerFormat = "codex"
+ 	}
+ 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
+@@ -222,17 +229,52 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
+ 	// 2. Parse suffix and get modelInfo
+ 	suffixResult := ParseSuffix(model)
+ 	baseModel := suffixResult.ModelName
++	nativeFormat := nativeReasoningFormat(providerFormat)
++	if !suffixResult.HasSuffix && providerFormat == "kimi" && fromFormat == "openai" {
++		original := sourceBody
++		if len(original) == 0 {
++			original = body
++		}
++		if gjson.GetBytes(original, "thinking.type").Exists() || gjson.GetBytes(original, "thinking.effort").Exists() {
++			// A Chat envelope may already carry Kimi's native representation.
++			// Keep prepared fields (including future values and absence) while
++			// dropping only the legacy input alias required by the Kimi wire.
++			return sjson.DeleteBytes(body, "reasoning_effort")
++		}
++	}
++	if !suffixResult.HasSuffix && nativeFormat != "" && nativeFormat == nativeReasoningFormat(fromFormat) {
++		// The target payload is already prepared by translators/normalizers.
++		// Catalog knowledge must not reinterpret explicit native controls, nor
++		// should restoring the source undo deliberate target normalization.
++		return body, nil
++	}
+ 	// Use provider-specific lookup to handle capability differences across providers.
+ 	modelInfo := resolvedModelInfo
+ 	if !modelInfoResolved {
+ 		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
+ 	}
+ 
++	if nativeFormat != "" {
++		// A user's disable is an instruction, not a model capability claim.
++		// Resolve it before support checks; summary activation must not undo it.
++		var explicit ThinkingConfig
++		if suffixResult.HasSuffix {
++			explicit = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
++		} else if len(sourceBody) > 0 {
++			explicit = extractConversionSourceConfig(sourceBody, fromFormat, providerFormat)
++		} else {
++			explicit = extractThinkingConfig(body, providerFormat)
++		}
++		if thinkingIsFullyDisabled(explicit) {
++			return applier.Apply(body, explicit, modelInfo)
++		}
++	}
++
+ 	// 3. Model capability check
+ 	// Unknown models are treated as user-defined so thinking config can still be applied.
+ 	// The upstream service is responsible for validating the configuration.
+-	if IsUserDefinedModel(modelInfo) {
+-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, summaryConfig)
++	if IsUserDefinedModel(modelInfo) || (nativeFormat != "" && modelInfo.Thinking == nil) {
++		return applyUnvalidatedThinking(body, sourceBody, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, summaryConfig)
+ 	}
+ 	if modelInfo.Thinking == nil {
+ 		config := extractThinkingConfig(body, providerFormat)
+@@ -263,7 +305,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
+ 		}).Debug("thinking: config from model suffix |")
+ 	} else {
+ 		if modelInfoResolved && len(sourceBody) > 0 {
+-			config = extractSourceThinkingConfig(sourceBody, fromFormat)
++			config = extractConversionSourceConfig(sourceBody, fromFormat, providerFormat)
+ 		}
+ 		if !hasThinkingConfig(config) {
+ 			config = extractThinkingConfig(body, providerFormat)
+@@ -351,6 +393,20 @@ func thinkingIsFullyDisabled(config ThinkingConfig) bool {
+ 	return config.Mode == ModeNone && config.Budget == 0 && config.Level == ""
+ }
+ 
++// nativeReasoningFormat identifies identical reasoning representations, not
++// provider families. Kimi's thinking object is distinct from Chat effort.
++// Gemini-family conversion policy remains unchanged.
++func nativeReasoningFormat(format string) string {
++	switch format {
++	case "claude", "openai", "kimi":
++		return format
++	case "openai-response", "codex", "xai":
++		return "responses"
++	default:
++		return ""
++	}
++}
++
+ func shouldMapConfiguredHighIntent(fromFormat, toFormat string, modelInfo *registry.ModelInfo) bool {
+ 	fromFormat = strings.ToLower(strings.TrimSpace(fromFormat))
+ 	toFormat = strings.ToLower(strings.TrimSpace(toFormat))
+@@ -394,6 +450,15 @@ func extractSourceThinkingConfig(body []byte, provider string) ThinkingConfig {
+ 	return extractThinkingConfig(body, provider)
+ }
+ 
++func extractConversionSourceConfig(body []byte, fromFormat, toFormat string) ThinkingConfig {
++	// Kimi accepts its native thinking object on a Chat transport. It owns
++	// precedence over the legacy reasoning_effort input, including disable.
++	if toFormat == "kimi" && fromFormat == "openai" {
++		return extractKimiConfig(body)
++	}
++	return extractSourceThinkingConfig(body, fromFormat)
++}
++
+ // parseSuffixToConfig converts a raw suffix string to ThinkingConfig.
+ //
+ // Parsing priority:
+@@ -435,9 +500,10 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
+ 	return ThinkingConfig{}
+ }
+ 
+-// applyUserDefinedModel applies thinking configuration for user-defined models
+-// without ThinkingSupport validation.
+-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat, providerKey string, suffixResult SuffixResult, summaryConfig SummaryConfig) ([]byte, error) {
++// applyUnvalidatedThinking converts thinking when capability metadata is
++// unavailable or the model is explicitly user-defined. It never fabricates
++// registry capabilities or changes the selected model snapshot.
++func applyUnvalidatedThinking(body, sourceBody []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat, providerKey string, suffixResult SuffixResult, summaryConfig SummaryConfig) ([]byte, error) {
+ 	// Get model ID for logging
+ 	modelID := ""
+ 	if modelInfo != nil {
+@@ -458,7 +524,11 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
+ 			"level":    config.Level,
+ 		}).Debug("thinking: config from model suffix |")
+ 	} else {
+-		config = extractThinkingConfig(body, fromFormat)
++		if len(sourceBody) > 0 {
++			config = extractConversionSourceConfig(sourceBody, fromFormat, toFormat)
++		} else {
++			config = extractSourceThinkingConfig(body, fromFormat)
++		}
+ 		if !hasThinkingConfig(config) && fromFormat != toFormat {
+ 			config = extractThinkingConfig(body, toFormat)
+ 		}
+@@ -477,7 +547,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
+ 		log.WithFields(log.Fields{
+ 			"model":    modelID,
+ 			"provider": toFormat,
+-		}).Debug("thinking: user-defined model, passthrough (no config) |")
++		}).Debug("thinking: unvalidated conversion, passthrough (no config) |")
+ 		return applySummaryConfigForProvider(body, toFormat, modelID, providerKey, modelInfo, summaryConfig), nil
+ 	}
+ 
+@@ -486,7 +556,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
+ 		log.WithFields(log.Fields{
+ 			"model":    modelID,
+ 			"provider": toFormat,
+-		}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
++		}).Debug("thinking: unvalidated conversion, passthrough (unknown provider) |")
+ 		return body, nil
+ 	}
+ 
+diff --git a/internal/thinking/apply_configured_api_key_test.go b/internal/thinking/apply_configured_api_key_test.go
+index 9c48c36..71b76bc 100644
+--- a/internal/thinking/apply_configured_api_key_test.go
++++ b/internal/thinking/apply_configured_api_key_test.go
+@@ -45,7 +45,7 @@ func TestApplyThinkingWithModelInfoMapsCrossFamilyHighIntent(t *testing.T) {
+ 	}
+ }
+ 
+-func TestApplyThinkingWithModelInfoMapsOpenAICompatibilityHighIntent(t *testing.T) {
++func TestApplyThinkingWithModelInfoPreservesPreparedOpenAICompatibilityIntent(t *testing.T) {
+ 	modelInfo := &registry.ModelInfo{
+ 		ID:       "compat-upstream",
+ 		Type:     "openai-compatibility",
+@@ -57,12 +57,12 @@ func TestApplyThinkingWithModelInfoMapsOpenAICompatibilityHighIntent(t *testing.
+ 	if err != nil {
+ 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
+ 	}
+-	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "max" {
+-		t.Fatalf("reasoning_effort = %q, want max; body=%s", got, out)
++	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "high" {
++		t.Fatalf("reasoning_effort = %q, want prepared high; body=%s", got, out)
+ 	}
+ }
+ 
+-func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) {
++func TestApplyThinkingWithModelInfoPreservesPreparedResponsesIntent(t *testing.T) {
+ 	modelInfo := &registry.ModelInfo{
+ 		ID:       "codex-upstream",
+ 		Type:     "codex",
+@@ -74,12 +74,12 @@ func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T)
+ 	if err != nil {
+ 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
+ 	}
+-	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "xhigh" {
+-		t.Fatalf("reasoning.effort = %q, want xhigh; body=%s", got, out)
++	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
++		t.Fatalf("reasoning.effort = %q, want prepared high; body=%s", got, out)
+ 	}
+ }
+ 
+-func TestApplyThinkingWithModelInfoKeepsSameFamilyValidationStrict(t *testing.T) {
++func TestApplyThinkingWithModelInfoLeavesNativeValidationToUpstream(t *testing.T) {
+ 	modelInfo := &registry.ModelInfo{
+ 		ID:       "openai-upstream",
+ 		Type:     "openai",
+@@ -87,8 +87,8 @@ func TestApplyThinkingWithModelInfoKeepsSameFamilyValidationStrict(t *testing.T)
+ 	}
+ 	body := []byte(`{"reasoning_effort":"xhigh"}`)
+ 	out, err := thinking.ApplyThinkingWithModelInfo(body, body, "openai-upstream", "openai", "openai", "openai", modelInfo)
+-	if err == nil {
+-		t.Fatalf("ApplyThinkingWithModelInfo() error = nil, want unsupported xhigh error; body=%s", out)
++	if err != nil || string(out) != string(body) {
++		t.Fatalf("native payload changed: error=%v; body=%s", err, out)
+ 	}
+ }
+ 
+diff --git a/internal/thinking/kimi_max_clamp_repro_test.go b/internal/thinking/kimi_max_clamp_repro_test.go
+index d5d3ff6..7ce9267 100644
+--- a/internal/thinking/kimi_max_clamp_repro_test.go
++++ b/internal/thinking/kimi_max_clamp_repro_test.go
+@@ -12,7 +12,7 @@ import (
+ 
+ // Reproduces Claude Code -> Kimi /v1/messages with effort=max.
+ // KimiExecutor delegates to ClaudeExecutor, so ApplyThinking sees claude/claude.
+-func TestKimiClaudeMessagesMaxClampsToHigh(t *testing.T) {
++func TestKimiClaudeMessagesPreservesNativeMax(t *testing.T) {
+ 	models := registry.GetKimiModels()
+ 	reg := registry.GetGlobalRegistry()
+ 	clientID := "test-kimi-max-clamp"
+@@ -27,7 +27,7 @@ func TestKimiClaudeMessagesMaxClampsToHigh(t *testing.T) {
+ 	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+ 		t.Fatalf("thinking.type = %q, want adaptive", got)
+ 	}
+-	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+-		t.Fatalf("output_config.effort = %q, want high", got)
++	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
++		t.Fatalf("output_config.effort = %q, want max", got)
+ 	}
+ }
+diff --git a/internal/thinking/native_intent_test.go b/internal/thinking/native_intent_test.go
+new file mode 100644
+index 0000000..ed8c7d2
+--- /dev/null
++++ b/internal/thinking/native_intent_test.go
+@@ -0,0 +1,191 @@
++package thinking_test
++
++import (
++	"bytes"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
++	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
++	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
++	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"
++	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
++	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/xai"
++	"github.com/tidwall/gjson"
++)
++
++func TestNativeIntentPreservesPreparedPayloadWithoutCapabilityClaims(t *testing.T) {
++	models := map[string]*registry.ModelInfo{
++		"unresolved":             nil,
++		"user-defined":           {ID: "custom", UserDefined: true},
++		"configured-unknown":     modelconfig.ResolveModelInfo("native-intent-custom", "codex", nil),
++		"known-without-thinking": modelconfig.ResolveModelInfo("claude-3-5-haiku-20241022", "claude", nil),
++		"known":                  modelconfig.ResolveModelInfo("gpt-5.4", "codex", nil),
++		"narrow":                 modelconfig.ResolveModelInfo("custom", "codex", &registry.ThinkingSupport{Levels: []string{"high", "low"}}),
++		"empty":                  modelconfig.ResolveModelInfo("custom", "claude", &registry.ThinkingSupport{}),
++	}
++	for _, route := range [][2]string{
++		{"claude", "claude"}, {"openai", "openai"},
++		{"openai-response", "codex"}, {"codex", "openai-response"},
++		{"openai-response", "xai"}, {"codex", "codex"},
++	} {
++		for name, model := range models {
++			t.Run(route[0]+"/"+route[1]+"/"+name, func(t *testing.T) {
++				// Source differs deliberately: a normalizer already owns target.
++				source := []byte(`{"reasoning":{"effort":"high","summary":"auto"}}`)
++				for _, raw := range []string{
++					`{"model":"resolved","messages":[{"role":"user","content":"中文"}]}`,
++					`{"reasoning":{"effort":"xhigh","summary":"auto","future_option":true}}`,
++					`{"reasoning":{"effort":"none","summary":null}}`,
++					`{"reasoning_effort":"ultra","reasoning":{"exclude":true}}`,
++					`{"thinking":{"type":"adaptive","display":"omitted"},"output_config":{"effort":"max","other":7}}`,
++					`{"thinking":{"type":"enabled","budget_tokens":256},"max_tokens":8192}`,
++					`{"thinking":{"type":"enabled"},"max_tokens":8192}`,
++					`{"thinking":{"type":"disabled"}}`,
++				} {
++					body := []byte(raw)
++					before := cloneIntentModel(model)
++					out, err := thinking.ApplyThinkingWithModelInfo(body, source, "resolved", route[0], route[1], route[1], model)
++					if err != nil || !bytes.Equal(out, body) {
++						t.Fatalf("native intent changed: err=%v input=%s output=%s", err, body, out)
++					}
++					if !reflect.DeepEqual(model, before) {
++						t.Fatal("selected model snapshot was changed")
++					}
++				}
++			})
++		}
++	}
++}
++
++func cloneIntentModel(model *registry.ModelInfo) *registry.ModelInfo {
++	if model == nil {
++		return nil
++	}
++	out := *model
++	if model.Thinking != nil {
++		support := *model.Thinking
++		support.Levels = append([]string(nil), support.Levels...)
++		out.Thinking = &support
++	}
++	return &out
++}
++
++func TestNativeIntentDisablePrecedesCapabilitiesAndSummary(t *testing.T) {
++	for _, target := range []string{"claude", "codex", "openai", "xai", "kimi"} {
++		for _, support := range []*registry.ThinkingSupport{nil, {}, {Levels: []string{"high", "low"}}} {
++			model := modelconfig.ResolveModelInfo("intent-disable-custom", target, support)
++			for _, suffix := range []string{"", "(none)", "(0)"} {
++				t.Run(target+"/"+suffix, func(t *testing.T) {
++					body := []byte(`{"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"},"reasoning":{"effort":"high","summary":"auto"},"reasoning_effort":"high"}`)
++					source := []byte(`{"reasoning_effort":"none"}`)
++					out, err := thinking.ApplyThinkingWithModelInfoAndSummary(body, source, "intent-disable-custom"+suffix,
++						"openai", target, target, model, thinking.SummaryConfig{Mode: thinking.SummaryEnabled})
++					if target == "openai" && suffix == "" {
++						// Native target normalization is authoritative; tested above.
++						if err != nil || !bytes.Equal(out, body) {
++							t.Fatalf("native prepared target changed: err=%v body=%s", err, out)
++						}
++						return
++					}
++					if err != nil {
++						t.Fatal(err)
++					}
++					field, want := "reasoning.effort", "none"
++					if target == "claude" || target == "kimi" {
++						field, want = "thinking.type", "disabled"
++					} else if target == "openai" {
++						field = "reasoning_effort"
++					}
++					if got := gjson.GetBytes(out, field).String(); got != want {
++						t.Fatalf("%s=%q, want %q; body=%s", field, got, want, out)
++					}
++					if target == "claude" && (gjson.GetBytes(out, "thinking.display").Exists() || gjson.GetBytes(out, "output_config.effort").Exists()) {
++						t.Fatalf("disabled Claude retained activation fields: %s", out)
++					}
++				})
++			}
++		}
++	}
++}
++
++func TestNativeIntentMissingMetadataUsesOriginalSource(t *testing.T) {
++	for _, model := range []*registry.ModelInfo{
++		nil, {ID: "user", UserDefined: true}, modelconfig.ResolveModelInfo("unknown", "claude", nil),
++	} {
++		out, err := thinking.ApplyThinkingWithModelInfo(
++			[]byte(`{"thinking":{"type":"enabled","budget_tokens":1024}}`),
++			[]byte(`{"reasoning":{"effort":"xhigh"}}`),
++			"unknown", "openai-response", "claude", "claude", model,
++		)
++		if err != nil || gjson.GetBytes(out, "output_config.effort").String() != "xhigh" {
++			t.Fatalf("original source intent lost: err=%v body=%s", err, out)
++		}
++		if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
++			t.Fatalf("inferred translated budget retained: %s", out)
++		}
++	}
++}
++
++func TestNativeIntentKeepsConversionAndSuffixAuthority(t *testing.T) {
++	model := modelconfig.ResolveModelInfo("claude-opus-4-6", "claude", nil)
++	body := []byte(`{"thinking":{"type":"enabled","budget_tokens":1024}}`)
++	source := []byte(`{"reasoning":{"effort":"xhigh"}}`)
++	out, err := thinking.ApplyThinkingWithModelInfo(body, source, model.ID, "openai-response", "claude", "claude", model)
++	if err != nil || gjson.GetBytes(out, "output_config.effort").String() != "max" {
++		t.Fatalf("known cross-protocol conversion changed: err=%v body=%s", err, out)
++	}
++	out, err = thinking.ApplyThinkingWithModelInfo(body, source, model.ID+"(low)", "claude", "claude", "claude", model)
++	if err != nil || gjson.GetBytes(out, "output_config.effort").String() != "low" {
++		t.Fatalf("suffix precedence lost: err=%v body=%s", err, out)
++	}
++}
++
++func TestNativeIntentKimiNativeDisableWinsOverLegacyChatEffort(t *testing.T) {
++	body := []byte(`{"thinking":{"type":"disabled"},"reasoning_effort":"high"}`)
++	model := modelconfig.ResolveModelInfo("kimi-intent-custom", "kimi", &registry.ThinkingSupport{Levels: []string{"high", "low"}})
++	out, err := thinking.ApplyThinkingWithModelInfo(body, body, model.ID, "openai", "kimi", "kimi", model)
++	if err != nil || gjson.GetBytes(out, "thinking.type").String() != "disabled" || gjson.GetBytes(out, "reasoning_effort").Exists() {
++		t.Fatalf("Kimi disable lost: err=%v body=%s", err, out)
++	}
++}
++
++func TestNativeIntentKimiRepresentationUsesOriginalAndKeepsPreparedTarget(t *testing.T) {
++	model := modelconfig.ResolveModelInfo("kimi-k2.5", "kimi", nil)
++	for _, original := range []string{
++		`{"thinking":{"type":"enabled"}}`,
++		`{"thinking":{"type":"future-type","effort":"ULTRA","keep":"all"}}`,
++		`{"thinking":{"type":"disabled"},"reasoning_effort":"high"}`,
++		`{"thinking":{"effort":"ultra"}}`,
++	} {
++		// Target normalization may replace/remove the native object. Native
++		// detection uses original source, preservation uses prepared target.
++		for _, prepared := range []string{
++			`{"model":"resolved","thinking":{"type":"future","effort":"target-only","keep":"all"},"reasoning_effort":"high"}`,
++			`{"model":"resolved","reasoning_effort":"high"}`,
++		} {
++			out, err := thinking.ApplyThinkingWithModelInfo([]byte(prepared), []byte(original), model.ID, "openai", "kimi", "kimi", model)
++			want := strings.Replace(prepared, `,"reasoning_effort":"high"`, "", 1)
++			if err != nil || string(out) != want {
++				t.Fatalf("Kimi original/prepared authority lost: err=%v body=%s want=%s", err, out, want)
++			}
++		}
++	}
++	for _, source := range []string{
++		`{"reasoning_effort":"high"}`,
++		`{"thinking":{"keep":"all"},"reasoning_effort":"high"}`,
++	} {
++		out, err := thinking.ApplyThinkingWithModelInfo([]byte(source), []byte(source), model.ID, "openai", "kimi", "kimi", model)
++		if err != nil || gjson.GetBytes(out, "thinking.type").String() != "enabled" || gjson.GetBytes(out, "thinking.effort").String() != "high" {
++			t.Fatalf("Kimi legacy conversion lost: err=%v body=%s", err, out)
++		}
++	}
++	source := []byte(`{"thinking":{"type":"enabled","effort":"ultra"},"reasoning_effort":"high"}`)
++	out, err := thinking.ApplyThinkingWithModelInfo(source, source, model.ID+"(none)", "openai", "kimi", "kimi", model)
++	if err != nil || gjson.GetBytes(out, "thinking.type").String() != "disabled" || gjson.GetBytes(out, "thinking.effort").Exists() {
++		t.Fatalf("Kimi suffix did not override native object: err=%v body=%s", err, out)
++	}
++}
+diff --git a/internal/thinking/provider/claude/apply.go b/internal/thinking/provider/claude/apply.go
+index 97f0284..3d2d248 100644
+--- a/internal/thinking/provider/claude/apply.go
++++ b/internal/thinking/provider/claude/apply.go
+@@ -70,11 +70,11 @@ func init() {
+ //	  }
+ //	}
+ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+-	if thinking.IsUserDefinedModel(modelInfo) {
++	if config.Mode == thinking.ModeNone && config.Budget == 0 && config.Level == "" {
+ 		return applyCompatibleClaude(body, config)
+ 	}
+-	if modelInfo.Thinking == nil {
+-		return body, nil
++	if thinking.IsUserDefinedModel(modelInfo) || modelInfo.Thinking == nil {
++		return applyCompatibleClaude(body, config)
+ 	}
+ 
+ 	if len(body) == 0 || !gjson.ValidBytes(body) {
+diff --git a/internal/thinking/provider/codex/apply.go b/internal/thinking/provider/codex/apply.go
+index 83f5ae8..37f160a 100644
+--- a/internal/thinking/provider/codex/apply.go
++++ b/internal/thinking/provider/codex/apply.go
+@@ -42,11 +42,11 @@ func init() {
+ //	  }
+ //	}
+ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+-	if thinking.IsUserDefinedModel(modelInfo) {
++	if config.Mode == thinking.ModeNone && config.Budget == 0 && config.Level == "" {
+ 		return applyCompatibleCodex(body, config)
+ 	}
+-	if modelInfo.Thinking == nil {
+-		return body, nil
++	if thinking.IsUserDefinedModel(modelInfo) || modelInfo.Thinking == nil {
++		return applyCompatibleCodex(body, config)
+ 	}
+ 
+ 	// Only handle ModeLevel and ModeNone; other modes pass through unchanged.
+diff --git a/internal/thinking/provider/kimi/apply.go b/internal/thinking/provider/kimi/apply.go
+index 6ed8504..c645c6b 100644
+--- a/internal/thinking/provider/kimi/apply.go
++++ b/internal/thinking/provider/kimi/apply.go
+@@ -53,11 +53,11 @@ func init() {
+ //	  }
+ //	}
+ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+-	if thinking.IsUserDefinedModel(modelInfo) {
++	if config.Mode == thinking.ModeNone && config.Budget == 0 && config.Level == "" {
+ 		return applyCompatibleKimi(body, config)
+ 	}
+-	if modelInfo.Thinking == nil {
+-		return body, nil
++	if thinking.IsUserDefinedModel(modelInfo) || modelInfo.Thinking == nil {
++		return applyCompatibleKimi(body, config)
+ 	}
+ 
+ 	if len(body) == 0 || !gjson.ValidBytes(body) {
+diff --git a/internal/thinking/provider/openai/apply.go b/internal/thinking/provider/openai/apply.go
+index 1e87b72..096f1a7 100644
+--- a/internal/thinking/provider/openai/apply.go
++++ b/internal/thinking/provider/openai/apply.go
+@@ -39,11 +39,11 @@ func init() {
+ //	  "reasoning_effort": "high"
+ //	}
+ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+-	if thinking.IsUserDefinedModel(modelInfo) {
++	if config.Mode == thinking.ModeNone && config.Budget == 0 && config.Level == "" {
+ 		return applyCompatibleOpenAI(body, config)
+ 	}
+-	if modelInfo.Thinking == nil {
+-		return body, nil
++	if thinking.IsUserDefinedModel(modelInfo) || modelInfo.Thinking == nil {
++		return applyCompatibleOpenAI(body, config)
+ 	}
+ 
+ 	// Only handle ModeLevel and ModeNone; other modes pass through unchanged.
+diff --git a/test/thinking_conversion_test.go b/test/thinking_conversion_test.go
+index 72299d8..18dbbdf 100644
+--- a/test/thinking_conversion_test.go
++++ b/test/thinking_conversion_test.go
+@@ -87,7 +87,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			expectField: "",
+ 			expectErr:   true,
+ 		},
+-		// Case 4: Level none → clamped to minimal (ZeroAllowed=false)
++		// Case 4: Explicit disable precedes capability flags
+ 		{
+ 			name:        "4",
+ 			from:        "openai",
+@@ -95,7 +95,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			model:       "level-model(none)",
+ 			inputJSON:   `{"model":"level-model(none)","messages":[{"role":"user","content":"hi"}]}`,
+ 			expectField: "reasoning.effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+ 		// Case 5: Level auto → DynamicAllowed=false → medium (mid-range)
+@@ -142,7 +142,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+-		// Case 9: Budget 0 → clamped to minimal (ZeroAllowed=false)
++		// Case 9: Explicit disable precedes capability flags
+ 		{
+ 			name:        "9",
+ 			from:        "gemini",
+@@ -150,7 +150,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			model:       "level-model(0)",
+ 			inputJSON:   `{"model":"level-model(0)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+ 			expectField: "reasoning.effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+ 		// Case 10: Budget -1 → auto → DynamicAllowed=false → medium (mid-range)
+@@ -196,7 +196,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+-		// Case 14: Budget 0 → clamped to minimal (ZeroAllowed=false)
++		// Case 14: Explicit disable precedes capability flags
+ 		{
+ 			name:        "14",
+ 			from:        "claude",
+@@ -204,7 +204,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			model:       "level-model(0)",
+ 			inputJSON:   `{"model":"level-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+ 			expectField: "reasoning_effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+ 		// Case 15: Budget -1 → auto → DynamicAllowed=false → medium (mid-range)
+@@ -736,34 +736,37 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			expectField: "",
+ 			expectErr:   false,
+ 		},
+-		// Case 59: Budget 8192 → no thinking support → suffix stripped → no configuration
++		// Case 59: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "59",
+ 			from:        "gemini",
+ 			to:          "openai",
+ 			model:       "no-thinking-model(8192)",
+ 			inputJSON:   `{"model":"no-thinking-model(8192)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "medium",
+ 			expectErr:   false,
+ 		},
+-		// Case 60: Budget 0 → suffix stripped → no configuration
++		// Case 60: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "60",
+ 			from:        "gemini",
+ 			to:          "openai",
+ 			model:       "no-thinking-model(0)",
+ 			inputJSON:   `{"model":"no-thinking-model(0)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+-		// Case 61: Budget -1 → suffix stripped → no configuration
++		// Case 61: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "61",
+ 			from:        "gemini",
+ 			to:          "openai",
+ 			model:       "no-thinking-model(-1)",
+ 			inputJSON:   `{"model":"no-thinking-model(-1)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "auto",
+ 			expectErr:   false,
+ 		},
+ 		// Case 62: Claude source no suffix → no configuration
+@@ -776,34 +779,37 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
+ 			expectField: "",
+ 			expectErr:   false,
+ 		},
+-		// Case 63: Budget 8192 → suffix stripped → no configuration
++		// Case 63: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "63",
+ 			from:        "claude",
+ 			to:          "openai",
+ 			model:       "no-thinking-model(8192)",
+ 			inputJSON:   `{"model":"no-thinking-model(8192)","messages":[{"role":"user","content":"hi"}]}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "medium",
+ 			expectErr:   false,
+ 		},
+-		// Case 64: Budget 0 → suffix stripped → no configuration
++		// Case 64: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "64",
+ 			from:        "claude",
+ 			to:          "openai",
+ 			model:       "no-thinking-model(0)",
+ 			inputJSON:   `{"model":"no-thinking-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+-		// Case 65: Budget -1 → suffix stripped → no configuration
++		// Case 65: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "65",
+ 			from:        "claude",
+ 			to:          "openai",
+ 			model:       "no-thinking-model(-1)",
+ 			inputJSON:   `{"model":"no-thinking-model(-1)","messages":[{"role":"user","content":"hi"}]}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "auto",
+ 			expectErr:   false,
+ 		},
+ 
+@@ -1131,7 +1137,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectField: "",
+ 			expectErr:   true,
+ 		},
+-		// Case 4: reasoning_effort=none → clamped to minimal
++		// Case 4: Explicit disable precedes capability flags
+ 		{
+ 			name:        "4",
+ 			from:        "openai",
+@@ -1139,7 +1145,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			model:       "level-model",
+ 			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+ 			expectField: "reasoning.effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+ 		// Case 5: reasoning_effort=auto → medium (DynamicAllowed=false)
+@@ -1186,7 +1192,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+-		// Case 9: thinkingBudget=0 → clamped to minimal
++		// Case 9: Explicit disable precedes capability flags
+ 		{
+ 			name:        "9",
+ 			from:        "gemini",
+@@ -1194,7 +1200,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			model:       "level-model",
+ 			inputJSON:   `{"model":"level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
+ 			expectField: "reasoning.effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+ 		// Case 10: thinkingBudget=-1 → medium (DynamicAllowed=false)
+@@ -1240,7 +1246,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+-		// Case 14: thinking.budget_tokens=0 → clamped to minimal
++		// Case 14: Explicit disable precedes capability flags
+ 		{
+ 			name:        "14",
+ 			from:        "claude",
+@@ -1248,7 +1254,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			model:       "level-model",
+ 			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+ 			expectField: "reasoning_effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+ 		// Case 15: thinking.budget_tokens=-1 → medium (DynamicAllowed=false)
+@@ -1810,34 +1816,37 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectField: "",
+ 			expectErr:   false,
+ 		},
+-		// Case 59: thinkingBudget=8192 → stripped
++		// Case 59: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "59",
+ 			from:        "gemini",
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "medium",
+ 			expectErr:   false,
+ 		},
+-		// Case 60: thinkingBudget=0 → stripped
++		// Case 60: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "60",
+ 			from:        "gemini",
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+-		// Case 61: thinkingBudget=-1 → stripped
++		// Case 61: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "61",
+ 			from:        "gemini",
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "auto",
+ 			expectErr:   false,
+ 		},
+ 		// Case 62: Claude no param → passthrough
+@@ -1850,34 +1859,37 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectField: "",
+ 			expectErr:   false,
+ 		},
+-		// Case 63: thinking.budget_tokens=8192 → stripped
++		// Case 63: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "63",
+ 			from:        "claude",
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "medium",
+ 			expectErr:   false,
+ 		},
+-		// Case 64: thinking.budget_tokens=0 → stripped
++		// Case 64: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "64",
+ 			from:        "claude",
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "none",
+ 			expectErr:   false,
+ 		},
+-		// Case 65: thinking.budget_tokens=-1 → stripped
++		// Case 65: Missing metadata retains capability-free conversion
+ 		{
+ 			name:        "65",
+ 			from:        "claude",
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":-1}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "auto",
+ 			expectErr:   false,
+ 		},
+ 
+@@ -2052,15 +2064,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+-		// Case 81: OpenAI to OpenAI, reasoning_effort=xhigh → out of range error
++		// Case 81: Native intent is validated by upstream, not the catalog
+ 		{
+ 			name:        "81",
+ 			from:        "openai",
+ 			to:          "openai",
+ 			model:       "level-model",
+ 			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+-			expectField: "",
+-			expectErr:   true,
++			expectField: "reasoning_effort",
++			expectValue: "xhigh",
++			expectErr:   false,
+ 		},
+ 		// Case 82: OpenAI-Response to Codex, reasoning.effort=high → passthrough
+ 		{
+@@ -2073,15 +2086,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+-		// Case 83: OpenAI-Response to Codex, reasoning.effort=xhigh → out of range error
++		// Case 83: Native intent is validated by upstream, not the catalog
+ 		{
+ 			name:        "83",
+ 			from:        "openai-response",
+ 			to:          "codex",
+ 			model:       "level-model",
+ 			inputJSON:   `{"model":"level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"xhigh"}}`,
+-			expectField: "",
+-			expectErr:   true,
++			expectField: "reasoning.effort",
++			expectValue: "xhigh",
++			expectErr:   false,
+ 		},
+ 		// Case 84: Gemini to Gemini, thinkingBudget=8192 → passthrough
+ 		{
+@@ -2116,15 +2130,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
+ 			expectValue: "8192",
+ 			expectErr:   false,
+ 		},
+-		// Case 87: Claude to Claude, thinking.budget_tokens=200000 → exceeds Max error
++		// Case 87: Native intent is validated by upstream, not the catalog
+ 		{
+ 			name:        "87",
+ 			from:        "claude",
+ 			to:          "claude",
+ 			model:       "claude-budget-model",
+ 			inputJSON:   `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":200000}}`,
+-			expectField: "",
+-			expectErr:   true,
++			expectField: "thinking.budget_tokens",
++			expectValue: "200000",
++			expectErr:   false,
+ 		},
+ 		// Gemini Family Cross-Channel Consistency (Cases 88-89)
+ 		// Tests that gemini/antigravity as same API family should have consistent validation behavior
+@@ -2219,10 +2234,8 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
+ 			model:        "kimi-tiered-thinking-model(none)",
+ 			inputJSON:    `{"model":"kimi-tiered-thinking-model(none)","messages":[{"role":"user","content":"hi"}]}`,
+ 			expectField:  "thinking.type",
+-			expectValue:  "enabled",
+-			expectField2: "thinking.effort",
+-			expectValue2: "low",
+-			expectAbsent: []string{"reasoning_effort"},
++			expectValue:  "disabled",
++			expectAbsent: []string{"thinking.effort", "reasoning_effort"},
+ 		},
+ 		{
+ 			name:         "K6",
+@@ -2287,10 +2300,8 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
+ 			model:        "kimi-tiered-thinking-model",
+ 			inputJSON:    `{"model":"kimi-tiered-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+ 			expectField:  "thinking.type",
+-			expectValue:  "enabled",
+-			expectField2: "thinking.effort",
+-			expectValue2: "low",
+-			expectAbsent: []string{"reasoning_effort"},
++			expectValue:  "disabled",
++			expectAbsent: []string{"thinking.effort", "reasoning_effort"},
+ 		},
+ 		{
+ 			name:         "K12",
+@@ -2338,11 +2349,9 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
+ 			to:           "kimi",
+ 			model:        "kimi-toggle-thinking-model",
+ 			inputJSON:    `{"model":"kimi-toggle-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"effort":"high"},"reasoning_effort":"low"}`,
+-			expectField:  "thinking.type",
+-			expectValue:  "enabled",
+-			expectField2: "thinking.effort",
+-			expectValue2: "high",
+-			expectAbsent: []string{"reasoning_effort"},
++			expectField:  "thinking.effort",
++			expectValue:  "high",
++			expectAbsent: []string{"thinking.type", "reasoning_effort"},
+ 		},
+ 		{
+ 			name:         "K16",
+@@ -2419,7 +2428,7 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
+ 			model:       "xai-level-model",
+ 			inputJSON:   `{"model":"xai-level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"minimal"}}`,
+ 			expectField: "reasoning.effort",
+-			expectValue: "low",
++			expectValue: "minimal",
+ 		},
+ 		{
+ 			name:        "X8",
+@@ -2489,7 +2498,7 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
+ 			model:       "level-model",
+ 			inputJSON:   `{"model":"level-model","input":"hi","reasoning":{"effort":"none"}}`,
+ 			expectField: "reasoning_effort",
+-			expectValue: "minimal",
++			expectValue: "none",
+ 		},
+ 		{
+ 			name:         "R3",
+@@ -3072,7 +3081,8 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
+ 			to:          "openai",
+ 			model:       "no-thinking-model",
+ 			inputJSON:   `{"model":"no-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+-			expectField: "",
++			expectField: "reasoning_effort",
++			expectValue: "high",
+ 			expectErr:   false,
+ 		},
+ 
+@@ -3230,12 +3240,14 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
+ 			expectErr:    false,
+ 		},
+ 		{
+-			name:      "C22",
+-			from:      "claude",
+-			to:        "claude",
+-			model:     "claude-opus-4-6-model",
+-			inputJSON: `{"model":"claude-opus-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+-			expectErr: true,
++			name:        "C22",
++			from:        "claude",
++			to:          "claude",
++			model:       "claude-opus-4-6-model",
++			inputJSON:   `{"model":"claude-opus-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
++			expectField: "output_config.effort",
++			expectValue: "xhigh",
++			expectErr:   false,
+ 		},
+ 		{
+ 			name:         "C23",
+@@ -3250,20 +3262,24 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
+ 			expectErr:    false,
+ 		},
+ 		{
+-			name:      "C24",
+-			from:      "claude",
+-			to:        "claude",
+-			model:     "claude-sonnet-4-6-model",
+-			inputJSON: `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+-			expectErr: true,
++			name:        "C24",
++			from:        "claude",
++			to:          "claude",
++			model:       "claude-sonnet-4-6-model",
++			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
++			expectField: "output_config.effort",
++			expectValue: "max",
++			expectErr:   false,
+ 		},
+ 		{
+-			name:      "C25",
+-			from:      "claude",
+-			to:        "claude",
+-			model:     "claude-sonnet-4-6-model",
+-			inputJSON: `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+-			expectErr: true,
++			name:        "C25",
++			from:        "claude",
++			to:          "claude",
++			model:       "claude-sonnet-4-6-model",
++			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
++			expectField: "output_config.effort",
++			expectValue: "xhigh",
++			expectErr:   false,
+ 		},
+ 	}
+ 

@@ -1,0 +1,12 @@
+{
+  "repository": "router-for-me/CLIProxyAPI",
+  "version": "v7.2.149",
+  "source_sha": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
+  "go_version": "go1.26.4",
+  "avibe_fixture_base": "76e269c9a9dfd3a6286ce0da81b77316ca4be38a",
+  "sha256": {
+    "internal/registry/models/models.json": "b19b2655a4f294605d3a347be16e67ef6ea776d70cedbd69c36629f3dbb945d9",
+    "internal/registry/models/codex_client_models.json": "a044aa222836b32091fdf4c9c34030443cb8717dea65db875cf705406c332fd6",
+    "go.sum": "b29392b1f713b238d6232af2f8fd09e28b7f5d221847ddccf0fc35682a9b29bd"
+  }
+}
