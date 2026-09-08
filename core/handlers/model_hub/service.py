@@ -86,7 +86,6 @@ from .events import (
     EventReason,
     build_resolution_event,
     contains_credential_material,
-    redact_credential_material,
 )
 from .errors import ModelDiscoveryError
 from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
@@ -174,7 +173,6 @@ PROBE_RESULT_CONTRACT_VERSION = 10
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
-_REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -432,56 +430,6 @@ class HandleSettlement:
 
 
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
-
-
-@dataclass(frozen=True)
-class ExactReasoningEffortRequest:
-    request: Mapping[str, Any]
-    stripped_efforts: tuple[str, ...] = ()
-    declared_efforts: tuple[str, ...] = ()
-
-
-def _bounded_reasoning_effort_telemetry(value: object) -> str:
-    """Redact and fold an untrusted effort value into bounded telemetry."""
-
-    if not isinstance(value, str):
-        if value is None:
-            return "<null>"
-        if isinstance(value, bool):
-            return "<bool>"
-        if isinstance(value, int):
-            return "<int>"
-        if isinstance(value, float):
-            return "<float>"
-        if isinstance(value, list):
-            return "<list>"
-        if isinstance(value, Mapping):
-            return "<dict>"
-        return "<non-string>"
-
-    redacted = redact_credential_material(value)
-    encoded = redacted.encode("utf-8")
-    if len(encoded) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
-        return redacted
-    digest = hashlib.sha256(encoded).hexdigest()
-    suffix = f"... [sha256:{digest}]"
-    preview_bytes = _REASONING_EFFORT_TELEMETRY_MAX_BYTES - len(
-        suffix.encode("utf-8")
-    )
-    preview = encoded[:preview_bytes].decode("utf-8", errors="ignore")
-    return f"{preview}{suffix}"
-
-
-def _bounded_declared_effort_telemetry(values: Iterable[str]) -> tuple[str, ...]:
-    redacted = tuple(redact_credential_material(value) for value in values)
-    payload = json.dumps(
-        redacted,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    if len(payload.encode("utf-8")) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
-        return redacted
-    return (_bounded_reasoning_effort_telemetry(payload),)
 
 
 AttemptObserver = Callable[
@@ -6883,72 +6831,6 @@ class ModelHubService:
             )
         return ResolutionDecision("fallback", reason="credential_revoked")
 
-    @staticmethod
-    def _request_for_exact_reasoning_effort(
-        request: Mapping[str, Any],
-        source: ModelHubSourceConfig,
-        model_id: str,
-    ) -> ExactReasoningEffortRequest:
-        model = next((item for item in source.models if item.id == model_id), None)
-        declared = tuple(model.reasoning_efforts) if model is not None else ()
-        supported = set(declared)
-
-        payload = dict(request)
-        changed = False
-        stripped: list[str] = []
-
-        def note_stripped(value: object) -> None:
-            safe_value = _bounded_reasoning_effort_telemetry(value)
-            if safe_value not in stripped:
-                stripped.append(safe_value)
-
-        direct = payload.get("reasoning_effort")
-        if "reasoning_effort" in payload and not (
-            isinstance(direct, str) and direct in supported
-        ):
-            payload.pop("reasoning_effort")
-            changed = True
-            note_stripped(direct)
-        reasoning = payload.get("reasoning")
-        nested = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
-        if (
-            isinstance(reasoning, Mapping)
-            and "effort" in reasoning
-            and not (isinstance(nested, str) and nested in supported)
-        ):
-            filtered_reasoning = dict(reasoning)
-            filtered_reasoning.pop("effort")
-            if filtered_reasoning:
-                payload["reasoning"] = filtered_reasoning
-            else:
-                payload.pop("reasoning")
-            changed = True
-            note_stripped(nested)
-        if not changed:
-            return ExactReasoningEffortRequest(request=request)
-        if isinstance(request, ModelHubRequest):
-            filtered_request: Mapping[str, Any] = ModelHubRequest(
-                payload,
-                protocol=request.protocol,
-                headers=request.headers,
-            )
-        else:
-            filtered_request = payload
-        safe_declared = _bounded_declared_effort_telemetry(declared)
-        logger.info(
-            "Stripped undeclared Model Hub reasoning effort(s) %s for source %s "
-            "model %s; declared tiers: %s",
-            stripped,
-            source.id,
-            model_id,
-            list(safe_declared),
-        )
-        return ExactReasoningEffortRequest(
-            request=filtered_request,
-            stripped_efforts=tuple(stripped),
-            declared_efforts=safe_declared,
-        )
-
     async def resolve(
         self,
         *,
@@ -7026,12 +6908,6 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
-            exact_reasoning_request = self._request_for_exact_reasoning_effort(
-                request,
-                source,
-                target_model,
-            )
-            exact_request = exact_reasoning_request.request
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -7065,15 +6941,15 @@ class ModelHubService:
                         False,
                         None,
                         None,
-                        exact_reasoning_request.stripped_efforts,
-                        exact_reasoning_request.declared_efforts,
+                        (),
+                        (),
                     )
 
             try:
                 handle, outcome, cancelled = await self._invoke(
                     source=source,
                     model_id=target_model,
-                    request=exact_request,
+                    request=request,
                     stream=stream,
                     backend=backend,
                     requested_model_id=model_id,
@@ -7125,7 +7001,7 @@ class ModelHubService:
                     handle, outcome, cancelled = await self._invoke(
                         source=source,
                         model_id=target_model,
-                        request=exact_request,
+                        request=request,
                         stream=stream,
                         backend=backend,
                         requested_model_id=model_id,

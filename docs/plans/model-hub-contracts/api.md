@@ -1124,12 +1124,12 @@ An unknown `turn_id` returns `turn_not_found`. The server derives ambiguous abse
 live from “known turn, no exact record”; it does not persist a placeholder and never
 guesses which attempt belonged to the turn.
 
-When exact-match forwarding removes a requested reasoning effort, that exact attempted
-hop carries both `stripped_reasoning_efforts` and the declaration consulted in
-`declared_reasoning_efforts`. The paired fields appear only on the failed, served,
-terminal, or canceled attempt where a strip actually occurred; they never leak onto a
-fallback hop or another turn. The same redacted source/model, stripped effort, and
-declared-tier facts are written to the application logger without changing chat copy.
+Historical exact-match forwarding records can carry `stripped_reasoning_efforts`
+and `declared_reasoning_efforts` on the exact attempt that stripped them. These
+paired fields remain readable. The owner amendment of 2026-09-08 removes the
+resolver's inventory-based effort filtering: new attempts preserve caller intent
+and do not emit stripping fields or logs. Engine translation is a separate boundary,
+documented in `../model-hub-reasoning-intent.md`, not inferred from this telemetry.
 
 ## Resolution events
 

@@ -68,9 +68,9 @@ discovery. Its loading indicator belongs to the add operation; only explicit
 refetch can animate the refetch button. Post-write local projection reads are
 not upstream model fetching.
 
-Reasoning levels are capability declarations consumed by managed model
-registration, not the effort setting for a conversation. Keep the data and
-editor, but show them only after opening Advanced settings. The default
-inventory shows model identities and ordinary model actions. In the advanced
-view, "Avibe preset levels" identifies capability metadata provenance without
-implying that a discovered model itself came from a built-in inventory.
+The owner amendment at 12:33 on 2026-09-08 supersedes the advanced-only tier
+editor: remove reasoning levels, provenance badges and their editor from the
+provider inventory entirely. The now-empty Advanced settings toggle is removed
+too. Saved capability metadata and compatibility APIs remain available to their
+other consumers; this UI change does not rewrite them. See
+[Reasoning intent](model-hub-reasoning-intent.md) for the forwarding boundary.

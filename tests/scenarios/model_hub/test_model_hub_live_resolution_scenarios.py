@@ -637,10 +637,10 @@ def test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn(
     asyncio.run(exercise())
 
 
-def test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes(
+def test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes(
     tmp_path: Path,
 ) -> None:
-    """MH-EFFORT-001: an undeclared effort is omitted from the exact-hop request and the turn still completes."""
+    """MH-EFFORT-001: unknown Source capability does not erase caller intent."""
 
     async def exercise() -> None:
         adapter = AdapterBoundaryFake(
@@ -672,7 +672,7 @@ def test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes(
             assert body == b'{"ok":true}'
             assert len(adapter.requests) == 1
             assert "reasoning_effort" not in adapter.requests[0]
-            assert adapter.requests[0]["reasoning"] == {"summary": "auto"}
+            assert adapter.requests[0]["reasoning"] == {"effort": "low", "summary": "auto"}
         finally:
             await gateway.close()
 

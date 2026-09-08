@@ -20,7 +20,6 @@ describe('Source model wire contract', () => {
     const enumeratedFields = modelSchema.required.filter(
       (field: string) => Array.isArray(modelSchema.properties[field]?.enum),
     );
-    const detail = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'SourceDetailPanel.tsx'), 'utf8');
 
     for (const model of models) {
       expect(modelSchema.required.every((field: string) => Object.hasOwn(model, field))).toBe(true);
@@ -28,7 +27,6 @@ describe('Source model wire contract', () => {
     for (const field of enumeratedFields) {
       expect(new Set(models.map((model) => model[field as keyof typeof model])))
         .toEqual(new Set(modelSchema.properties[field].enum));
-      expect(detail).toContain(`model.${field}`);
     }
   });
 });
