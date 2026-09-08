@@ -5646,6 +5646,45 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         assert body["error"] == error
 
 
+@pytest.mark.parametrize("mode", ["hub", "direct"])
+def test_refresh_empty_inventory_returns_success_without_route_removal_confirmation(monkeypatch, tmp_path, mode):
+    service, store, adapter = _service(tmp_path)
+    for vendor, protocol in (("anthropic", "anthropic"), ("openai", "openai_responses")):
+        store.config.sources.append(ModelHubSourceConfig(
+            id=f"src_{vendor}01", kind="api_key", vendor=vendor, display_name=vendor,
+            protocol=protocol, supply_channel="hub", billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")] if vendor == "anthropic" else [],
+            credential_ref=f"cred_{vendor}01",
+        ))
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id for source in store.config.sources]
+        agent.routes = {}
+    store.config.agents["codex"].mode = mode
+    models = [model.id for model in store.config.agents["codex"].models]
+
+    async def discover(*_args):
+        return tuple(DiscoveredModel(id=model) for model in models)
+
+    adapter.discover_models = discover
+    before = store.config.to_payload()
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/src_openai01/refresh", json={},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    _assert_envelope(body, ok=True)
+    assert body["removed_hops"] == body["interrupted"] == []
+    assert [model["id"] for model in body["source"]["models"]] == models
+    after = store.config.to_payload()
+    assert after["agents"] == before["agents"]
+    assert after["sources"][0] == before["sources"][0]
+
+
 def test_discovered_source_model_delete_persists_retirement_tombstone(
     monkeypatch,
     tmp_path,

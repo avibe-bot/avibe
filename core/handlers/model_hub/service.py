@@ -3424,7 +3424,19 @@ class ModelHubService:
     ) -> tuple[list[dict], list[dict]]:
         invalidated = self._invalidated_route_hops(updated, source_id)
         self._prune_invalidated_route_hops(updated, invalidated)
-        would_remove_hops = self._removed_effective_hops(previous, updated)
+        # Inventory evidence narrows speculative candidates without deleting routes.
+        # Keep explicit invalidations and newly introduced supply gaps guarded below.
+        would_remove_hops = [
+            item for item in self._removed_effective_hops(previous, updated)
+            if not (
+                effective_model_route(
+                    previous, cast(BackendName, item["backend"]), item["menu_model"],
+                ).route_origin == "passthrough"
+                and effective_model_route(
+                    updated, cast(BackendName, item["backend"]), item["menu_model"],
+                ).route_origin == "automatic"
+            )
+        ]
         would_remove_hops.extend(item for item in invalidated if item not in would_remove_hops)
         would_interrupt = self._introduced_interruptions(previous, updated)
         self._require_guard_plan(

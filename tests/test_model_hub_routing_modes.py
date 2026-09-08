@@ -471,13 +471,15 @@ def test_legacy_empty_key_keeps_derived_catalog_but_invalid_nonmenu_key_is_not_r
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("mode", ["hub", "direct"])
 @pytest.mark.parametrize("operation", ["retire_discovered", "remove_subscription_manual", "refresh_subscription"])
-def test_final_inventory_hop_removal_uses_inherited_guard_plan(tmp_path, backend, operation):
+def test_final_inventory_hop_removal_uses_inherited_guard_plan(tmp_path, backend, mode, operation):
     default = _source("src_default01", (MODEL,))
     manual = _source("src_manual001", ("mapped",), kind="api_key" if operation == "retire_discovered" else "subscription")
     if operation == "remove_subscription_manual":
         manual.models[0].provenance = "manual"
     config = _loaded_catalog_config(backend, MODEL, default)
+    config.agents[backend].mode = mode
     config.sources.append(manual)
     config.agents[backend].routes[MODEL] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(manual.id, "mapped"),))
     service, store, adapter = _service(tmp_path, config)
@@ -502,8 +504,10 @@ def test_final_inventory_hop_removal_uses_inherited_guard_plan(tmp_path, backend
     ))
     assert result["interrupted"] == []
     assert store.config.agents[backend].routes == {}
-    assert service.agent_chain(backend, MODEL)["current"] == {"source_id": default.id, "model_id": MODEL}
-    assert service._bindings(store.config)[0].route_model_ids == (MODEL,)
+    assert _pairs(effective_model_route(store.config, backend, MODEL)) == [(default.id, MODEL)]
+    if mode == "hub":
+        assert service.agent_chain(backend, MODEL)["current"] == {"source_id": default.id, "model_id": MODEL}
+        assert service._bindings(store.config)[0].route_model_ids == (MODEL,)
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
@@ -598,12 +602,8 @@ def test_empty_intent_follows_refresh_defaults_and_health_without_reseeding(tmp_
     service, store, adapter = _service(tmp_path, config)
     assert service.agent_chain(backend, MODEL)["route_origin"] == "passthrough"
     adapter.discovered = (MODEL,)
-    with pytest.raises(ModelHubError) as refusal:
-        asyncio.run(service.refresh_source(second.id))
-    asyncio.run(service.refresh_source(second.id, force=True,
-        confirmed_remove_hops=refusal.value.data["would_remove_hops"],
-        confirmed_interruptions=refusal.value.data["would_interrupt"],
-    ))
+    refreshed = asyncio.run(service.refresh_source(second.id))
+    assert refreshed["removed_hops"] == refreshed["interrupted"] == []
     assert service.agent_chain(backend, MODEL)["route_origin"] == "automatic"
     bindings = service._bindings(store.config)
     store.config.sources[1].state = ModelHubSourceStateConfig(status="error", detail_key="models.source.error.unclassified")
@@ -615,6 +615,60 @@ def test_empty_intent_follows_refresh_defaults_and_health_without_reseeding(tmp_
     asyncio.run(service.set_agent_sources(backend, {"order": [first.id], "force": True, **defaults.value.data}))
     assert service.agent_chain(backend, MODEL)["route_origin"] == "passthrough"
     assert store.config.agents[backend].routes == {}
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_inventory_refinement_still_guards_new_supply_loss(tmp_path, backend):
+    fallback = _source("src_fallback1", ())
+    known = _source("src_known0001", (), status="error")
+    known.state.detail_key = "models.source.error.unclassified"
+    config = _loaded_catalog_config(backend, MODEL, fallback, known)
+    service, store, adapter = _service(tmp_path, config)
+    updated = copy.deepcopy(config)
+    updated.sources[1].models = [ModelHubModelConfig(id=MODEL, provenance="discovered")]
+    before = config.to_payload()
+    with pytest.raises(ModelHubError) as refusal:
+        service._guard_inventory_mutation(
+            config, updated, known.id, force=False,
+            confirmed_remove_hops=None, confirmed_interruptions=None,
+        )
+    assert refusal.value.code == "source_last_supplier"
+    assert refusal.value.data == {
+        "would_remove_hops": [],
+        "would_interrupt": [{"backend": backend, "model_id": MODEL, "agents": []}],
+    }
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("mode", ["hub", "direct"])
+def test_refresh_preserves_guard_for_disappearing_inventory_matches(tmp_path, backend, mode):
+    first = _source("src_refresh01", (MODEL,))
+    second = _source("src_refresh02", (MODEL,))
+    config = _loaded_catalog_config(backend, MODEL, first, second)
+    config.agents[backend].mode = mode
+    service, store, adapter = _service(tmp_path, config)
+    adapter.discovered = ()
+    before = config.to_payload()
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.refresh_source(second.id))
+    assert refusal.value.code == "source_model_in_route_chain"
+    assert refusal.value.data == {
+        "would_remove_hops": [{
+            "backend": backend, "menu_model": MODEL, "source_id": second.id,
+            "model_id": MODEL, "position": 2,
+        }],
+        "would_interrupt": [],
+    }
+    assert store.config.to_payload() == before
+    assert adapter.synced == []
+    result = asyncio.run(service.refresh_source(second.id, force=True,
+        confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+        confirmed_interruptions=refusal.value.data["would_interrupt"],
+    ))
+    assert result["removed_hops"] == refusal.value.data["would_remove_hops"]
+    assert result["interrupted"] == []
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex"])

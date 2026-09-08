@@ -167,6 +167,9 @@ scenarios:
     kind: persistence
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reload
+    partial_evidence:
+      covers: Inventory gains refine inherited candidates without destructive confirmations or saved-intent changes in Hub and Direct modes
+      test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_refresh_refines_inherited_candidates_without_removing_saved_routes
   - id: MH-ROUTING-004
     name: Restore and undo previews are inert and committed restore deletes the override idempotently
     status: covered

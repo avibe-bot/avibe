@@ -1176,8 +1176,16 @@ under one commit lock. Inventory disappearance can change an automatic matching 
 it never invalidates an explicit API-key manual invocation by itself. Subscription
 model-membership admission remains unchanged. Explicit retirement
 excludes the exact pair, while manual inventory deletion removes matching evidence
-without deleting explicit API-key hops; subscription admission remains unchanged. Refusals report complete effective removals and protected
-supply loss in the existing arrays. Forced success must match both echoed arrays and
+without deleting explicit API-key hops; subscription admission remains unchanged.
+When inventory evidence changes an inherited plan from `passthrough` to `automatic`,
+displaced speculative candidates are not destructive removals and are excluded from
+`would_remove_hops` / `removed_hops`. This applies equally to active Hub plans and
+dormant Direct plans: learning a model list does not delete saved route intent.
+Explicit manual-hop invalidations, disappearance of existing inventory matches, and
+new protected-supply loss remain guarded. Other mutation guards, including Source
+deletion, default membership and Restore, continue to compare all effective removals.
+Refusals report complete destructive removals and protected supply loss in the
+existing arrays. Forced success must match both echoed arrays and
 preserves surviving nonempty manual intent; Source deletion removes its actual references.
 Every final-hop removal, including catalog reconciliation, uses the same normalized
 planner. Normal saves persist the canonical sparse map; pure reads/preview never write.

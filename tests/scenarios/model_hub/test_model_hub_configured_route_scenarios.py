@@ -137,6 +137,48 @@ def test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reloa
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("mode", ["hub", "direct"])
+@pytest.mark.parametrize("inventory", [[], ["unrelated-inventory-model"]], ids=["empty", "incomplete"])
+@pytest.mark.parametrize("intent", ["manual", "absent", "legacy-empty"])
+def test_mh_routing_003_refresh_refines_inherited_candidates_without_removing_saved_routes(
+    tmp_path, backend, mode, inventory, intent,
+):
+    """MH-ROUTING-003: gaining inventory evidence is not a destructive route mutation."""
+    first = source("src_refreshfirst", ["other-provider-model"])
+    second = source("src_refreshsecond", inventory, vendor="openai", protocol="openai_responses")
+    manual = {"manual": [(first.id, "vendor/unlisted-original")], "absent": None, "legacy-empty": []}[intent]
+    config, model = _routing_config(backend, [first, second], manual=manual)
+    config.agents[backend].mode = mode
+    config = round_trip(config)
+    before = config.to_payload()
+    store = MemoryModelHubStore(config)
+    adapter = ModelHubScenarioAdapter(refresh_models=(*inventory, model))
+    service = service_for(tmp_path, store, adapter)
+
+    result = asyncio.run(service.refresh_source(second.id))
+
+    assert result["removed_hops"] == result["interrupted"] == []
+    persisted = round_trip(store.load()).to_payload()
+    assert persisted["agents"] == before["agents"]
+    assert persisted["sources"][0] == before["sources"][0]
+    assert [item["id"] for item in persisted["sources"][1]["models"]] == [*inventory, model]
+    assert len(store.saved_payloads) == 1
+    reloaded = service_for(tmp_path / "reload", MemoryModelHubStore(round_trip(store.load())), adapter)
+    resolution = resolve_model_hub_turn(reloaded.store.load(), backend, model, now=reloaded.now())
+    if mode == "direct":
+        assert resolution.channel == "direct"
+        assert resolution.route_origin is None
+        assert resolution.source_model_ids == ()
+    else:
+        assert resolution.route_origin == ("manual" if intent == "manual" else "automatic")
+        assert list(resolution.source_model_ids) == (
+            manual if intent == "manual" else [(second.id, model)]
+        )
+    assert adapter.observation_calls == adapter.invocations == []
+    assert adapter.discovery_calls == [(second.vendor, second.protocol, second.base_url, second.credential_ref)]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("operation", ["delete", "empty-put"])
 def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_override(tmp_path, backend, monkeypatch, operation):
     """MH-ROUTING-004: draft restore is read-only; committed restore removes the override idempotently."""
