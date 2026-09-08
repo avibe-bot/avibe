@@ -67,7 +67,7 @@ import sys
 import tempfile
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
@@ -1186,14 +1186,60 @@ SeedAssignment = tuple[tuple[str, object], ...]
 class ShapeProposals:
     derived: list[tuple[str, object]]
     numeric_fallback: list[SeedAssignment]
+    text_fallback: list[tuple[str, object]] = field(default_factory=list)
+
+
+def conjunctive_terms(expression: str) -> Iterable[str]:
+    """Only descend through AND and grouping, never conditional boolean branches."""
+    pending = [expression]
+    while pending:
+        term = pending.pop().strip()
+        active = sql_projection(term)
+        depth = case_depth = 0
+        cuts = []
+        between = False
+        outer_end = None
+        for token in re.finditer(r'\(|\)|\b(?:and|or|between|case|end)\b', active, re.IGNORECASE):
+            kind = token.group().lower()
+            if kind == '(':
+                depth += 1
+            elif kind == ')':
+                depth -= 1
+                if depth == 0 and outer_end is None:
+                    outer_end = token.end()
+            elif kind == 'case':
+                case_depth += 1
+            elif kind == 'end':
+                case_depth -= 1
+            elif depth == 0 and case_depth == 0:
+                if kind == 'or':
+                    cuts = []
+                    break  # OR has lower precedence than AND.
+                if kind == 'between':
+                    between = True
+                elif between:
+                    between = False
+                else:
+                    cuts.append((token.start(), token.end()))
+        if cuts:
+            edges = [0, *(end for _, end in cuts)]
+            ends = [*(start for start, _ in cuts), len(term)]
+            pending.extend(reversed([term[start:end] for start, end in zip(edges, ends)]))
+        elif active.lstrip().startswith('(') and outer_end == len(active.rstrip()):
+            pending.append(term[len(active) - len(active.lstrip()) + 1:outer_end - 1])
+        else:
+            yield term
 
 
 def column_equality_groups(expression: str, columns: Iterable[str]) -> list[list[str]]:
     """Group bare column equalities without exposing opaque SQL or function calls."""
     names = {identifier_key(name): name for name in columns}
     groups = {name: [name] for name in names.values()}
-    pattern = rf'(?<![.\w$])({SQL_IDENTIFIER}){EQUALITY}({SQL_IDENTIFIER})(?![\w$]|\s*[.(])'
-    for match in sql_matches(pattern, expression):
+    pattern = rf'\s*({SQL_IDENTIFIER}){EQUALITY}({SQL_IDENTIFIER})\s*'
+    for term in conjunctive_terms(expression):
+        match = re.fullmatch(pattern, sql_projection(term, identifiers=True), re.IGNORECASE)
+        if match is None:
+            continue
         left, right = (names.get(identifier_key(unquote_identifier(token))) for token in match.groups())
         if left is not None and right is not None and groups[left] is not groups[right]:
             joined, moved = groups[left], groups[right]
@@ -1229,20 +1275,21 @@ def shape_proposals(
         name = names.get(identifier_key(unquote_identifier(name)), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
         if name in text_eligible and size is not None:
-            text.setdefault(name, "x")
             widths[name] = size
-            text[name] = text[name][:size].ljust(size, "0")
+            if isinstance(values[name], str) or connection.execute("select length(?)", (values[name],)).fetchone()[0] != size:
+                text.setdefault(name, "x")
+                text[name] = text[name][:size].ljust(size, "0")
     globs = (match.groups() for match in sql_matches(GLOB_REQUIREMENT, shapes))
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
     for name, negated, quoted in globs:
         name = names.get(identifier_key(unquote_identifier(name)), name)
         if name in text_eligible:
-            text.setdefault(name, "x")
             pattern = quoted.replace("''", "'")
             (negative if negated else positive)[name].append(pattern)
     groups = column_equality_groups(shapes, (name for name, _ in required if name in text_eligible))
     aliases = {name: members for members in groups for name in members}
+    witnesses = []
     for members in groups:
         patterns = tuple(dict.fromkeys(pattern for name in members for pattern in positive[name]))
         excluded = tuple(dict.fromkeys(pattern for name in members for pattern in negative[name]))
@@ -1252,6 +1299,13 @@ def shape_proposals(
         if len(sizes) > 1:
             continue  # No common text can satisfy incompatible declared widths.
         width = next(iter(sizes), None)
+        if len(members) == 1 and not isinstance(values[members[0]], str):
+            original = values[members[0]]
+            if ((width is None or connection.execute("select length(?)", (original,)).fetchone()[0] == width)
+                    and all(connection.execute("select ? glob ?", (original, pattern)).fetchone()[0] for pattern in patterns)
+                    and not any(connection.execute("select ? glob ?", (original, pattern)).fetchone()[0] for pattern in excluded)):
+                text.pop(members[0], None)
+                continue
         witness = next((text[name] for name in members if name in text
                         and (width is None or len(text[name]) == width)
                         and all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns)
@@ -1261,6 +1315,7 @@ def shape_proposals(
             witness = glob_witness(connection, patterns, excluded=excluded, width=width, alphabet=alphabet)
         if witness is not None:
             text.update((name, witness) for name in members)
+            witnesses.append(witness)
     for name, start, width, other in substring_requirements(shapes):
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
@@ -1275,6 +1330,10 @@ def shape_proposals(
     proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
     active = sql_projection(expression)
     mentioned = sql_identifiers(expression)
+    # Retain computed values for functional dependents as guesses, not aliases.
+    # Raw pattern operands remain owned by the GLOB matcher.
+    text_fallback = [(name, witness) for witness in dict.fromkeys(witnesses)
+                     for name, _ in required if name in text_eligible and identifier_key(name) in mentioned]
     numeric_text = active + " " + " ".join(
         match.group()[1:-1] for match in re.finditer(SQL_STRING, sql_projection(expression, literals=True))
         if re.fullmatch(r"-?[0-9]+", match.group()[1:-1])
@@ -1295,7 +1354,7 @@ def shape_proposals(
         if SQLITE_INT_MIN <= value <= SQLITE_INT_MAX
     ))
     if not numeric or not candidates:
-        return ShapeProposals(proposals, [])
+        return ShapeProposals(proposals, [], text_fallback)
     domains = numeric_domains(expression, numeric, values, candidates)
     assignments = numeric_assignments(domains, tuple(values[name] for name in numeric), candidates)
     fallback = [tuple(zip(numeric, assignment)) for assignment in itertools.islice(assignments, SEED_ATTEMPTS)]
@@ -1303,7 +1362,7 @@ def shape_proposals(
     declared_names = {identifier_key(name) for name, _ in required} | {identifier_key(name) for name, _, _ in omitted} | {identifier_key(name) for name in unavailable}
     implicit = {"rowid", "_rowid_", "oid"} - declared_names
     if any(identifier_key(name) in mentioned for name in (*unavailable, *implicit)):
-        return ShapeProposals(proposals, fallback)
+        return ShapeProposals(proposals, fallback, text_fallback)
     # Native typed insertion models affinity, but scratch DML must never change
     # the fixture connection's changes()/last_insert_rowid()/total_changes().
     evaluation = sqlite3.connect(":memory:")
@@ -1319,22 +1378,14 @@ def shape_proposals(
     columns = ', '.join(quote_identifier(name) for name, _ in required)
     placeholders = ', '.join('?' for _ in required)
     try:
-        contextual = {
-            str(row[0]) for row in evaluation.execute("pragma function_list")
-            if not int(row[5]) & 0x800  # SQLITE_DETERMINISTIC
-        }
-        def authorize(action, _first, function, _database, _source):
-            if action == sqlite3.SQLITE_FUNCTION and function in contextual:
-                return sqlite3.SQLITE_DENY
-            return sqlite3.SQLITE_OK
-
-        evaluation.set_authorizer(authorize)
-        # INSERT compilation does not authorize DEFAULT functions. Compile them
-        # separately without execution, including SQLite's keyword-style functions.
+        evaluation.execute(f"create table {table} ({', '.join(declarations)})" + (" STRICT" if strict else ""))
+        # Let SQLite resolve overloads and enforce expression-index determinism.
+        # EXPLAIN compiles without creating an index or evaluating any expression.
+        # Defaults need their own check before scratch INSERT can execute them.
         for _, _, default in omitted:
             if default is not None:
-                evaluation.execute(f"explain select ({default})").fetchall()
-        evaluation.execute(f"create table {table} ({', '.join(declarations)})" + (" STRICT" if strict else ""))
+                evaluation.execute(f"explain create index seed_probe on {table} (+({default}\n))").fetchall()
+        evaluation.execute(f"explain create index seed_probe on {table} (+({expression}\n))").fetchall()
         for assignment in fallback:
             changes = dict(assignment)
             parameters = [changes.get(column, values[column]) for column, _ in required]
@@ -1352,10 +1403,10 @@ def shape_proposals(
                 break
     except sqlite3.OperationalError:
         # Unrepresentable context cannot reject a candidate; actual INSERT decides.
-        return ShapeProposals(proposals, fallback)
+        return ShapeProposals(proposals, fallback, text_fallback)
     finally:
         evaluation.close()
-    return ShapeProposals(proposals, [])
+    return ShapeProposals(proposals, [], text_fallback)
 
 
 def numeric_assignments(
@@ -1712,7 +1763,7 @@ def insert_seed_row(
         check_expression(ddl, unquote_identifier(match.group(1)))
         for match in sql_matches(rf'\bconstraint\s+({SQL_IDENTIFIER})\s+check\s*\(', ddl)
     ]
-    text_constraints = "\n".join(constraints)
+    text_constraints = " AND ".join(f"({constraint}\n)" for constraint in constraints)
     omitted = []
     unavailable = []
     for info in connection.execute(f'pragma table_xinfo({quote_identifier(table)})'):
@@ -1759,7 +1810,7 @@ def insert_seed_row(
             if not untried:
                 sources = [
                     shaped.numeric_fallback,
-                    [(pair,) for pair in [*check_proposals(expression, names), *json_proposals(connection, expression, names)]],
+                    [(pair,) for pair in [*check_proposals(expression, names), *shaped.text_fallback, *json_proposals(connection, expression, names)]],
                 ]
                 # Derived repairs precede guesses. Both guess sources remain live
                 # throughout the INSERT budget, with JSON after generic literals.
