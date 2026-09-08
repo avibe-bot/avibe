@@ -236,6 +236,58 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
     assert captured["options"].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
 
 
+@pytest.mark.parametrize("channel", ["hub", "native_cli"])
+@pytest.mark.parametrize("explicit", [None, "", "333333"])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_session_handler_preserves_explicit_limits_and_passes_alias_planning_metadata(
+    monkeypatch, tmp_path: Path, channel, explicit, has_metadata,
+) -> None:
+    import json
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured = {}
+    keys = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    for key in keys:
+        if explicit is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, explicit)
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    class Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel=channel,
+                requested_model=requested_model, target_model="custom-upstream",
+                runtime_model="custom-upstream", source_id="src_limitfixture",
+                gateway_base_url="http://127.0.0.1:18443/claude",
+                gateway_token="limit-fixture-token",
+                context_window=128_000 if has_metadata else None,
+                max_output_tokens=32_000 if has_metadata else None,
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    controller.settings_manager.get_channel_routing = lambda _: RoutingSettings(model="planning-alias")
+    _run_session(SessionHandler(controller), MessageContext(user_id="U123", channel_id="C123"))
+
+    options = captured["options"]
+    assert options.extra_args["model"] == "custom-upstream"
+    for key, fallback in zip(keys, ("128000", "32000")):
+        expected = explicit if explicit is not None else fallback if has_metadata else None
+        assert options.env.get(key) == expected
+        assert key not in json.loads(options.settings).get("env", {})
+    assert options.setting_sources == (["project", "local"] if channel == "hub" else ["user", "project", "local"])
+
+
 def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp_path: Path) -> None:
     import json
     from modules.agents.model_hub import ModelHubLaunch

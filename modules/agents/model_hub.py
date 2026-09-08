@@ -220,7 +220,12 @@ def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None
     if launch is None or launch.channel != "hub":
         return base_settings
     settings = json.loads(base_settings)
-    settings["env"] = {**settings.get("env", {}), **build_claude_hub_env({}, launch)}
+    connection_env = build_claude_hub_env({}, launch)
+    # Catalog limits assist planning through the subprocess environment. They
+    # must not become launch-settings overrides of native project/local choices.
+    connection_env.pop("CLAUDE_CODE_MAX_CONTEXT_TOKENS", None)
+    connection_env.pop("CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
+    settings["env"] = {**settings.get("env", {}), **connection_env}
     settings["apiKeyHelper"] = ""
     return json.dumps(settings)
 
@@ -329,8 +334,6 @@ def build_claude_hub_env(
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX",
             "CLAUDE_CODE_USE_FOUNDRY",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
         }
         result = {
             key: "" if key.startswith("ANTHROPIC_") or key in masked_keys else value
@@ -341,13 +344,12 @@ def build_claude_hub_env(
         result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
         result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     else:
-        # A native_cli hop keeps the user's official CLI authentication while
-        # applying metadata owned by the selected Hub catalog row.
+        # A native_cli hop keeps the user's official CLI authentication.
         result = dict(base_env)
     if launch.context_window is not None:
-        result["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(launch.context_window)
+        result.setdefault("CLAUDE_CODE_MAX_CONTEXT_TOKENS", str(launch.context_window))
     if launch.max_output_tokens is not None:
-        result["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(launch.max_output_tokens)
+        result.setdefault("CLAUDE_CODE_MAX_OUTPUT_TOKENS", str(launch.max_output_tokens))
     return result
 
 

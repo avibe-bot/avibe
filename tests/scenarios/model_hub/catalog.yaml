@@ -36,6 +36,7 @@ capability:
     - tests/e2e/test_model_hub_mock_upstream.py
     - tests/e2e/test_model_hub_routing.py
     - tests/e2e/test_model_hub_backend_settings.py
+    - tests/e2e/test_model_hub_catalog_consumer.py
     - tests/e2e/test_model_hub_runtime.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
@@ -273,12 +274,21 @@ scenarios:
     layer: contract
     missing_layer: scenario
     test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
+    partial_evidence:
+      covers: Real Codex catalog and turn consumption preserves unknown image and explicit effort intent; this does not exercise the managed engine
+      test: tests/e2e/test_model_hub_catalog_consumer.py::test_codex_unknown_catalog_preserves_supplied_image_and_effort
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_explicit_catalog_choices_reach_the_consumer
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_native_context_override_wins_over_catalog_planning
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_auto_compaction_consumes_resolved_limits
   - id: MH-CLAUDE-LAUNCH-001
     name: Claude Hub turns preserve the configured Source and model despite native connection settings
     status: covered
     kind: injection
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_claude_consumer_preserves_explicit_limit_settings
   - id: MH-CODEX-LAUNCH-001
     name: Native Codex provider settings preserve the configured Hub Source and upstream model
     status: covered

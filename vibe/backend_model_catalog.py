@@ -202,22 +202,25 @@ def _codex_hub_catalog_bytes(
                 and context_window > 0
             ):
                 row["context_window"] = context_window
-                row["max_context_window"] = context_window
+                # This saved planning value is not an independently known hard
+                # ceiling. Codex clamps explicit model_context_window overrides
+                # to max_context_window, so duplicating it here silently defeats
+                # a user's larger native setting.
+                row.pop("max_context_window", None)
                 # Codex derives this from the active window when omitted; a
                 # bundled value belongs to the native window we just replaced.
                 row.pop("auto_compact_token_limit", None)
             input_modalities = configured.get("input_modalities")
-            # Persisted built-ins use an empty list to mean "not overridden".
-            # Custom rows still need a conservative text-only default instead
-            # of inheriting the native template model's image capabilities.
-            if native_row is None or (
-                isinstance(input_modalities, list) and input_modalities
-            ):
+            # Empty lists in released rows mean "not overridden". Codex's
+            # omitted-modality default accepts text and images; narrowing that
+            # to text would discard supplied images merely for lack of metadata.
+            # Original-resolution detail is a separate provider capability.
+            if native_row is None:
+                row["supports_image_detail_original"] = False
+            if isinstance(input_modalities, list) and input_modalities:
                 supported_modalities = [
                     modality
-                    for modality in (
-                        input_modalities if isinstance(input_modalities, list) else []
-                    )
+                    for modality in input_modalities
                     if modality in {"text", "image"}
                 ]
                 row["input_modalities"] = supported_modalities or ["text"]
@@ -233,12 +236,17 @@ def _codex_hub_catalog_bytes(
                     if isinstance(effort, str) and effort
                 ]
             elif native_row is None:
-                settled_efforts = ["none"]
+                # The list is required by Codex's schema, but an unknown model
+                # has neither an advertised ladder nor a default effort. Codex
+                # can still carry the effort explicitly supplied with a turn.
+                settled_efforts = []
             else:
                 settled_efforts = None
             if settled_efforts is not None:
                 native_default = row.get("default_reasoning_level")
-                if not (
+                if not settled_efforts:
+                    row.pop("default_reasoning_level", None)
+                elif not (
                     isinstance(native_default, str)
                     and native_default in settled_efforts
                 ):
@@ -247,7 +255,8 @@ def _codex_hub_catalog_bytes(
                         if "medium" in settled_efforts
                         else settled_efforts[0]
                     )
-                row["default_reasoning_level"] = native_default
+                if settled_efforts:
+                    row["default_reasoning_level"] = native_default
                 row["supported_reasoning_levels"] = [
                     {
                         "effort": effort,
