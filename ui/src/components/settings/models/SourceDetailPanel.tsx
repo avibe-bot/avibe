@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Info, Loader2, LogIn, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -57,6 +57,7 @@ import {
 } from './tierMutation';
 import { TIER_SUGGESTIONS } from './tierSuggestions';
 import { useDeadlineClock } from './useDeadlineClock';
+import { SourceTestDialog } from './SourceTestDialog';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   AgentBackend,
@@ -450,7 +451,11 @@ export const SourceDetailPanel: React.FC<{
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
-  const [busy, setBusy] = React.useState(false);
+  const [pendingAction, setPendingAction] = React.useState<'refetch' | 'add_model' | 'other' | null>(null);
+  const busy = pendingAction !== null;
+  const refetching = pendingAction === 'refetch';
+  const [testing, setTesting] = React.useState(false);
+  const [advanced, setAdvanced] = React.useState(false);
   const [confirmingReauth, setConfirmingReauth] = React.useState(false);
   const [replacingKey, setReplacingKey] = React.useState(false);
   const [manageStage, dispatchManageStage] = React.useReducer(transitionManageStage, { kind: 'idle' });
@@ -491,7 +496,7 @@ export const SourceDetailPanel: React.FC<{
     if (busy) return Promise.resolve();
     setResult(null);
     setRefetchFailed(false);
-    setBusy(true);
+    setPendingAction('refetch');
     return trackMutation(async (latest, settlement) => {
       const before = new Set(latest.models.map((model) => model.id));
       try {
@@ -522,7 +527,7 @@ export const SourceDetailPanel: React.FC<{
           }
         }
       }
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const reconcileManualCreate = async (sourceId: string, modelId: string, settlement: SourceMutationSettlement) => reconcileUnknownWrite(
     settlement.readInventory,
@@ -550,7 +555,7 @@ export const SourceDetailPanel: React.FC<{
     if (!modelId) return;
     setResult(null);
     setRefetchFailed(false);
-    setBusy(true);
+    setPendingAction('add_model');
     return trackMutation(async (latest, settlement) => {
       if (latest.models.some((model) => model.id === modelId)) {
         setManualDraft(null);
@@ -599,7 +604,7 @@ export const SourceDetailPanel: React.FC<{
           }
         }
       }
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const reconcileRemoval = async (sourceId: string, model: SuppliedModel, settlement: SourceMutationSettlement) => {
     const reconciliation = await reconcileUnknownWrite(
@@ -626,7 +631,7 @@ export const SourceDetailPanel: React.FC<{
     setResult(null);
     setRefetchFailed(false);
     setRemoveFailure(null);
-    setBusy(true);
+    setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
       if (!latest.models.some((candidate) => candidate.id === model.id)) {
         setGuard(null);
@@ -647,7 +652,7 @@ export const SourceDetailPanel: React.FC<{
           } else await reconcileRemoval(latest.id, model, settlement);
         }
       }
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const commitManagementMutation = async (
     action: ManageCommitAction,
@@ -740,7 +745,7 @@ export const SourceDetailPanel: React.FC<{
       plan,
       surface: forced ? 'guard' : 'edit',
     });
-    setBusy(true);
+    setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
       try {
         const answer = await modelsApi.patchSource(
@@ -782,13 +787,13 @@ export const SourceDetailPanel: React.FC<{
           }
         }
       }
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const submitDelete = (plan: ManageGuardPlan | null) => {
     if (busy) return Promise.resolve();
     const forced = plan !== null;
     dispatchManageStage({ type: 'submit_delete', plan });
-    setBusy(true);
+    setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
       try {
         const answer = await modelsApi.deleteSource(
@@ -822,12 +827,12 @@ export const SourceDetailPanel: React.FC<{
           }
         }
       }
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const retryEditRead = (failed: Extract<ManageStage, { kind: 'edit_failed' }>) => {
     if (busy) return Promise.resolve();
     dispatchManageStage({ type: 'retry' });
-    setBusy(true);
+    setPendingAction('other');
     return trackMutation(async (_latest, settlement) => {
       await reconcileEditWrite(
         failed.before,
@@ -836,15 +841,15 @@ export const SourceDetailPanel: React.FC<{
         failed.plan,
         settlement,
       );
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const retryDeleteRead = (failed: Extract<ManageStage, { kind: 'delete_failed' }>) => {
     if (busy) return Promise.resolve();
     dispatchManageStage({ type: 'retry' });
-    setBusy(true);
+    setPendingAction('other');
     return trackMutation(async (_latest, settlement) => {
       await reconcileDeleteWrite(failed.before, failed.plan, settlement);
-    }).finally(() => setBusy(false));
+    }).finally(() => setPendingAction(null));
   };
   const submitEditDialog = () => {
     if (!editDraft || !editAssessment.valid || !editAssessment.patch) return;
@@ -930,7 +935,7 @@ export const SourceDetailPanel: React.FC<{
     : t('settings.models.gateway.modelCount', { count: source.models.length });
 
   return (
-    <div className="model-hub-source-detail">
+    <div className="model-hub-source-detail" data-advanced={advanced}>
       <section className="model-hub-source-bar flex shrink-0 items-center border-b border-border bg-surface">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
         <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
@@ -963,21 +968,26 @@ export const SourceDetailPanel: React.FC<{
         <div className="flex shrink-0 items-center gap-2">
           {repairDestination === 'reauth_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {repairDestination === 'replace_key_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
-          {source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
+          {source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
+          {source.kind === 'api_key' && source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" disabled={busy} onClick={() => setTesting(true)}><FlaskConical />{t('settings.models.sourceTest.open')}</Button>}
+          <Button variant="ghost" size="xs" className="model-hub-source-action" aria-expanded={advanced}
+            disabled={busy} onClick={() => { setAdvanced((value) => !value); setEditingTiers(null); }}>
+            <Settings2 />{t('settings.models.sourceDetail.advanced')}
+          </Button>
           {source.kind === 'api_key' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
       <section className="model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
-          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span><span />
+          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span>{advanced && <span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span>}<span />
         </div>
         <div className="model-hub-source-table-scroll min-h-0 flex-1 overflow-y-auto">
         {filteredModels.length === 0 && !manualDraft && <p className="px-5 py-12 text-center text-[12px] text-muted">{t(normalizedQuery ? 'settings.models.sourceDetail.searchEmpty' : source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p>}
         {models.map((model) => (
           <div key={model.id} hidden={!visibleModelIds.has(model.id)} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            <TierEditor
+            {advanced && <TierEditor
               model={model}
               protocol={source.protocol}
               editing={editingTiers === model.id}
@@ -988,21 +998,21 @@ export const SourceDetailPanel: React.FC<{
               onClose={() => setEditingTiers((current) => (current === model.id ? null : current))}
               onMutating={() => { setResult(null); setRefetchFailed(false); }}
               trackMutation={trackMutation}
-            />
+            />}
             <div className="model-hub-source-row-actions flex items-center justify-end gap-1">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);
                 else {
-                  setBusy(true);
+                  setPendingAction('other');
                   void trackMutation(async (latest, settlement) => reconcileRemoval(latest.id, model, settlement))
-                    .finally(() => setBusy(false));
+                    .finally(() => setPendingAction(null));
                 }
               }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
               {/* The pencil is a second door into the same tier editor, so a locked
                   row has to close it too — a manual entry whose id matches a
                   catalog model is locked exactly like a discovered one. Removing
                   the model itself is a different question and stays offered. */}
-              {model.origin === 'manual' && <>{!managedTierSource(model.reasoning_efforts_source) && <button type="button" disabled={busy} aria-label={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} title={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} className="model-hub-source-row-action grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground" onClick={() => setEditingTiers(model.id)}><Pencil className="size-3.5" /></button>}<ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} /></>}
+              {model.origin === 'manual' && <>{advanced && !managedTierSource(model.reasoning_efforts_source) && <button type="button" disabled={busy} aria-label={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} title={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} className="model-hub-source-row-action grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground" onClick={() => setEditingTiers(model.id)}><Pencil className="size-3.5" /></button>}<ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} /></>}
             </div>
           </div>
         ))}
@@ -1024,16 +1034,17 @@ export const SourceDetailPanel: React.FC<{
                 placeholder={t('settings.models.sourceDetail.col.id') as string}
                 className="model-hub-source-manual-id model-hub-source-model h-8 min-w-0 font-mono"
               /><span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span></span>
-            <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false, retryRead: false } : current)} />
+            {advanced && <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false, retryRead: false } : current)} />}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
-              <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>
+              <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{pendingAction === 'add_model' && <Loader2 className="animate-spin" />}{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>
             </div>
             {manualDraft.failed && <p className="model-hub-source-draft-line text-[11px] text-destructive-ink">{t('settings.models.sourceDetail.fail.addModel')}</p>}
           </div>
         )}
         </div>
       </section>
+      {testing && <SourceTestDialog key={source.id} source={source} trackMutation={trackMutation} onClose={() => setTesting(false)} />}
       {/* Confirmed before the journey opens, not inside it: `OAuthConnectDialog`
           POSTs the re-auth as it mounts, and on a native source that call is the
           irreversible half — `mark_native_irreversible_start` empties every

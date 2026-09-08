@@ -35,10 +35,10 @@ def _draft(**changes):
     [{"vendor": entry.id} for entry in api_key_vendor_catalog()]
     + [{"vendor": "custom", "protocol": protocol} for protocol in SOURCE_PROTOCOLS],
 )
-def test_unverified_save_uses_declared_owner_without_upstream_work(tmp_path, owner):
+def test_save_first_uses_declared_owner_despite_unavailable_inventory(tmp_path, owner):
     service, store, adapter = _service(tmp_path)
     adapter.observe_source = AsyncMock(side_effect=AssertionError("unexpected observation"))
-    adapter.discover_models = AsyncMock(side_effect=AssertionError("unexpected inventory"))
+    adapter.discover_models = AsyncMock(side_effect=ModelHubError("discovery_failed", status=502))
     draft = _draft(**owner)
     if owner["vendor"] != "custom":
         draft.pop("protocol")
@@ -51,7 +51,7 @@ def test_unverified_save_uses_declared_owner_without_upstream_work(tmp_path, own
     assert adapter.credential_count == 1
     assert len(store.config.sources) == 1
     adapter.observe_source.assert_not_awaited()
-    adapter.discover_models.assert_not_awaited()
+    adapter.discover_models.assert_awaited_once()
     with pytest.raises(ModelHubError):
         asyncio.run(service.create_source(draft))
     assert adapter.credential_count == 1

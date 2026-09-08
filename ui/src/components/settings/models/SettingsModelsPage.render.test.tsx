@@ -329,8 +329,7 @@ describe('SettingsModelsPage surface branches', () => {
     await user.click(trigger);
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
     await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
-    await user.click(screen.getByRole('button', { name: /^Detect$|^检测$/ }));
-    await user.click(await screen.findByRole('button', { name: /Confirm & add|确认添加/ }));
+    await user.click(await screen.findByRole('button', { name: /Add provider|添加供应商/ }));
 
     const detail = await screen.findByRole('dialog', { name: 'Created API key' });
     await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
@@ -613,6 +612,7 @@ describe('SettingsModelsPage surface branches', () => {
     const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
     await user.click(sourceOpener);
     const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
+    await user.click(within(sourceDialog).getByRole('button', { name: /Advanced settings|高级设置/ }));
     await user.click(within(sourceDialog).getByRole('button', { name: /high/i }));
     const tierInput = within(sourceDialog).getByPlaceholderText(/Enter to add|回车添加/i);
     await user.type(tierInput, 'draft');

@@ -37,6 +37,7 @@ import type {
   Source,
   SourceObservation,
   SourcePatch,
+  SourceProbeResult,
   SourceRepaired,
   SupplyChannel,
   SupplyGap,
@@ -105,6 +106,7 @@ export type ModelsApi = {
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
   refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
+  probeSource(id: string, model: string): Promise<SourceProbeResult>;
   /** Delete a source. A destructive retry echoes the server's exact guard plan. */
   deleteSource(id: string, confirmation?: GuardConfirmation): Promise<SourceDeleted>;
   /** Replace the credential of a hub-channel api_key source. The normal guarded
@@ -574,6 +576,9 @@ export const modelsApi: ModelsApi = {
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(sourcePatched),
   refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
+  probeSource: (id, model) => call<{ probe: SourceProbeResult }>(
+    `/api/models/sources/${encodeURIComponent(id)}/probe`, jsonInit('POST', { model }),
+  ).then((r) => r.probe),
   deleteSource: (id, confirmation) => call<SourceDeletedResponse>(
     `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
     jsonInit('DELETE', confirmation ? {

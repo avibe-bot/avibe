@@ -171,6 +171,8 @@ def _storable_backend_model_metadata(
 
 AGENT_CHAIN_CONTRACT_VERSION = 10
 PROBE_RESULT_CONTRACT_VERSION = 10
+_SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
+_SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
 _REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
@@ -2989,6 +2991,22 @@ class ModelHubService:
             source = ModelHubSourceConfig.from_payload(source.to_payload())
             persisted = False
             try:
+                if save_unverified:
+                    # Inventory is useful, not admission evidence. Work on a
+                    # clone so a failed listing cannot partly replace manual
+                    # entries. The new Source still has one commit/nonce owner.
+                    candidate = ModelHubSourceConfig.from_payload(source.to_payload())
+                    try:
+                        discovered = await asyncio.wait_for(
+                            self._discover(candidate), timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+                        )
+                        self._apply_discovered_models(
+                            candidate, candidate.models, discovered, allow_empty=True,
+                        )
+                    except (ModelHubError, asyncio.TimeoutError):
+                        pass
+                    else:
+                        source = candidate
                 async with self._mutation_lock:
                     await self._commit_new_source_locked(source)
                     persisted = True
@@ -5164,6 +5182,8 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         model_id: str,
         backend: str,
+        *,
+        output_tokens: int = 1,
     ) -> ModelHubRequest:
         # A probe enters the same translation seam as a live backend turn, so
         # its payload must be shaped in the backend's client protocol.
@@ -5171,22 +5191,159 @@ class ModelHubService:
         if request_protocol == "anthropic":
             payload = {
                 "model": model_id,
-                "max_tokens": 1,
+                "max_tokens": output_tokens,
                 "messages": [{"role": "user", "content": "ping"}],
             }
         elif request_protocol == "openai_responses":
             payload = {
                 "model": model_id,
-                "max_output_tokens": 1,
+                "max_output_tokens": output_tokens,
                 "input": "ping",
             }
         else:
             payload = {
                 "model": model_id,
-                "max_tokens": 1,
+                "max_tokens": output_tokens,
                 "messages": [{"role": "user", "content": "ping"}],
             }
         return ModelHubRequest(payload, protocol=request_protocol)
+
+    async def probe_source(self, source_id: str, payload: object) -> dict:
+        """Test one saved API-key model, independently of Agent route/health."""
+        if not isinstance(payload, dict) or set(payload) != {"model"}:
+            raise ModelHubError("discovery_failed")
+        model_id = payload["model"]
+        # This selects an existing inventory identity, not a newly admitted ID.
+        # Legacy persisted IDs remain testable even beyond today's input bound.
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ModelHubError("discovery_failed")
+        model_id = normalized_model_id(model_id)
+
+        def selected(config: ModelHubConfig) -> ModelHubSourceConfig:
+            source = self._source(config, source_id)
+            if (
+                source.kind != "api_key"
+                or source.supply_channel != "hub"
+                or not source.credential_ref
+                or not any(model.id == model_id and not model.retired for model in source.models)
+            ):
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            return source
+
+        handle = None
+        outcome = None
+        source = None
+        admitted_at = None
+
+        async def invoke_selected() -> None:
+            nonlocal source, handle, outcome, admitted_at
+            # Bound local waiting too, but never call it a model failure before
+            # the adapter has actually admitted this Source/model invocation.
+            async with self._mutation_lock:
+                selected(self.store.load())
+            while True:
+                await self._prepare_engine_for_demand()
+                await self._mutation_lock.acquire()
+                held = True
+
+                def release_owner() -> None:
+                    nonlocal held
+                    if held:
+                        held = False
+                        self._mutation_lock.release()
+
+                def admitted() -> None:
+                    nonlocal admitted_at
+                    admitted_at = time.monotonic()
+                    release_owner()
+
+                try:
+                    source = ModelHubSourceConfig.from_payload(
+                        selected(self.store.load()).to_payload(),
+                    )
+                    if not self._engine_synced:
+                        continue
+                    # OpenCode preserves the request's explicit protocol and
+                    # API keys have unrestricted origins. No Agent resolver
+                    # is involved: the adapter binds this exact Source.
+                    handle = await self._engine_call(self.adapter.invoke(
+                        source.id,
+                        model_id,
+                        self._probe_request(source, model_id, "opencode", output_tokens=128),
+                        False,
+                        "opencode",
+                        on_admitted=admitted,
+                    ))
+                    break
+                finally:
+                    release_owner()
+            if admitted_at is None:
+                raise ModelHubError("engine_down", status=503)
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+            outcome = await self._engine_call(handle.outcome())
+
+        async def settle_attempt() -> None:
+            try:
+                if source is not None and outcome is not None:
+                    await self._verify_successful_source(
+                        source.id, source.credential_ref, source.verification_pending, outcome,
+                    )
+            finally:
+                if handle is not None:
+                    try:
+                        await handle.close_stream()
+                    finally:
+                        await self._meter_call(
+                            source_id=source_id, model_id=model_id,
+                            outcome=outcome, observed=handle.observed,
+                        )
+
+        try:
+            await asyncio.wait_for(invoke_selected(), timeout=_SOURCE_PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if admitted_at is None:
+                raise ModelHubError("engine_down", status=503) from None
+            outcome = RawCallOutcome(
+                kind=RawOutcomeKind.TIMEOUT,
+                http_status=None,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id=model_id,
+                source_id=source_id,
+            )
+        finally:
+            elapsed_ms = max(0, round((time.monotonic() - admitted_at) * 1000)) if admitted_at is not None else 0
+            # A known outcome belongs to the attempt even if its caller leaves.
+            # Drain finite settlement before propagating caller cancellation.
+            settlement_task = asyncio.create_task(settle_attempt())
+            try:
+                await asyncio.shield(settlement_task)
+            except asyncio.CancelledError as cancelled:
+                try:
+                    await await_owned_task(settlement_task)
+                except BaseException:
+                    # Cancellation owns the response, not resource settlement.
+                    pass
+                raise cancelled
+        assert source is not None and outcome is not None
+        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
+        # Classify for display only. A selected model failure cannot block other
+        # models on this Source, refresh credentials, or modify route state.
+        decision = classify_outcome(outcome)
+        if decision.action == "refresh":
+            decision = ResolutionDecision("fallback", reason="credential_revoked")
+        error = None if succeeded else self._probe_failure(outcome, decision)[0]
+        return {
+            "source_id": source.id,
+            "model_id": model_id,
+            "protocol": source.protocol,
+            "reachable": succeeded,
+            "latency_ms": elapsed_ms,
+            "error": error,
+        }
 
     @staticmethod
     def _probe_failure(

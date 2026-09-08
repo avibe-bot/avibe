@@ -2954,7 +2954,7 @@ def test_api_key_setup_does_not_schedule_a_model(
     service, store, adapter = _service(tmp_path)
     # Keep engine lifecycle simulated; exercise real credential custody, HTTP
     # observation, inventory discovery, and Source admission together.
-    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models"):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
     async def scenario():
@@ -3027,11 +3027,11 @@ def test_api_key_setup_does_not_schedule_a_model(
                 })
             before = len(requests)
             await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
-            assert len(requests) == before
+            assert requests[before:] == [("GET", "/v1/models", None)]
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
-            assert h.source["models"] == []
+            assert [model["id"] for model in h.source["models"]] == ["relay-model"]
             assert h.source["verification_pending"]
             assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
 

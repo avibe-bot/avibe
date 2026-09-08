@@ -1,5 +1,14 @@
 # Model Hub — Product Spec
 
+## Save-first API-key amendment — 2026-09-08
+
+`model-hub-save-first-testing.md` records the owner's replacement for add-time
+automatic-detection admission in the UI: save configuration, attempt optional
+inventory discovery, and offer a separate real-model test. Test failure does
+not block saving or condemn the provider. Discovery is not invocation proof;
+the existing credential-identity-bound verification marker remains authoritative.
+Older explicit observation clients and subscription OAuth admission are unchanged.
+
 Status: **Routing modes, contract_version 10** (2026-09-06).
 Owner-approved implementation contract: `model-hub-routing-modes.md`, frozen before
 implementation at `2db273891`, with API-key scope/synchronization decision `c1d398d5f`

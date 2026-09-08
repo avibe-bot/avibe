@@ -90,6 +90,9 @@ class ModelHubRemoteService:
     async def create_source(self, payload: dict) -> dict:
         return await _rpc("create_source", {"source": payload})
 
+    async def probe_source(self, source_id: str, payload: object) -> dict:
+        return await _rpc("probe_source", {"source_id": source_id, "probe": payload})
+
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         return await _rpc("patch_source", {"source_id": source_id, "patch": payload})
 

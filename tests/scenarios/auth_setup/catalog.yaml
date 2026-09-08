@@ -114,7 +114,7 @@ scenarios:
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
   - id: AUTH-SETUP-112
-    name: API-key setup keeps validation unverified and explicitly saves without upstream scheduling
+    name: API-key setup saves unverified with best-effort inventory and never schedules a model
     status: covered
     kind: happy_path
     layer: scenario
