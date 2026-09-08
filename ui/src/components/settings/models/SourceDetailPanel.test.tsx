@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as React from 'react';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render as renderRaw, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -33,6 +33,15 @@ import {
 } from './types';
 import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 import { useSourceMutationReport } from './useSourceMutationReport';
+
+// Existing tier/editor invariants exercise the explicit advanced surface.
+// Default inventory behavior is tested separately with renderRaw below.
+const render = (ui: React.ReactNode) => {
+  const view = renderRaw(ui);
+  const advanced = screen.queryByRole('button', { name: /Advanced settings|高级设置/ });
+  if (advanced) fireEvent.click(advanced);
+  return view;
+};
 
 const source: Source = {
   id: 'src_detail',
@@ -189,7 +198,7 @@ const chipTiers = () => Array.from(document.querySelectorAll('.model-hub-source-
  */
 const MANAGED_BADGE: Readonly<Record<ManagedTierSource, RegExp>> = {
   upstream: /^From provider$|^供应商声明$/,
-  catalog: /^Built-in catalog$|^内置目录$/,
+  catalog: /^Avibe preset levels$|^Avibe 预置档位$/,
 };
 
 const EchoPanel: React.FC<{
@@ -245,6 +254,44 @@ afterEach(() => {
 });
 
 describe('SourceDetailPanel', () => {
+  it('keeps capability details out of the default inventory without removing advanced controls', async () => {
+    renderRaw(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
+    expect(screen.queryByRole('button', { name: /high/i })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings|高级设置/ }));
+    expect(screen.getByRole('button', { name: /high/i })).toBeTruthy();
+  });
+
+  it('never presents a manual model write as an upstream refetch', async () => {
+    const pending = new Promise<Source>(() => {});
+    const add = vi.spyOn(modelsApi, 'addCustomModel').mockReturnValue(pending);
+    const refetch = vi.spyOn(modelsApi, 'refreshSource');
+    renderRaw(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Add model|添加模型/ }));
+    await user.type(screen.getByPlaceholderText(/Model ID|模型 ID/), 'manual-model');
+    await user.click(screen.getAllByRole('button', { name: /Add model|添加模型/ }).at(-1)!);
+    expect(add).toHaveBeenCalledOnce();
+    expect(refetch).not.toHaveBeenCalled();
+    const button = screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i });
+    expect(button.getAttribute('aria-busy')).toBe('false');
+    expect(button.querySelector('.animate-spin')).toBeNull();
+  });
+
+  it('shows refetch progress only on refetch while a manual draft is open', async () => {
+    vi.spyOn(modelsApi, 'refreshSource').mockReturnValue(new Promise(() => {}));
+    const add = vi.spyOn(modelsApi, 'addCustomModel');
+    renderRaw(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
+    await userEvent.click(screen.getByRole('button', { name: /Add model|添加模型/ }));
+    const refetch = screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i });
+    await userEvent.click(refetch);
+    expect(refetch.getAttribute('aria-busy')).toBe('true');
+    expect(refetch.querySelector('.animate-spin')).toBeTruthy();
+    for (const button of screen.getAllByRole('button', { name: /Add model|添加模型/ })) {
+      expect(button.querySelector('.animate-spin')).toBeNull();
+    }
+    expect(add).not.toHaveBeenCalled();
+  });
+
   it('exposes a stable, programmatically focusable heading for committed navigation', () => {
     const headingRef = React.createRef<HTMLHeadingElement>();
     render(
@@ -1232,7 +1279,7 @@ describe('SourceDetailPanel', () => {
       ]);
 
       expect(screen.getByText(lng === 'en' ? 'From provider' : '供应商声明')).toBeTruthy();
-      expect(screen.getByText(lng === 'en' ? 'Built-in catalog' : '内置目录')).toBeTruthy();
+      expect(screen.getByText(lng === 'en' ? 'Avibe preset levels' : 'Avibe 预置档位')).toBeTruthy();
 
       await userEvent.click(screen.getByRole('button', { name: /high/i }));
       await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');

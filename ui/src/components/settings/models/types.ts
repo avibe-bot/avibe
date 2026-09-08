@@ -853,7 +853,16 @@ export type ApiKeySourceObservation = {
   protocol?: SourceProtocol;
 };
 
-/** POST /api/models/sources — observation is bypassed only by explicit consent. */
+export type SourceProbeResult = {
+  source_id: string;
+  model_id: string;
+  protocol: SourceProtocol;
+  reachable: boolean;
+  latency_ms: number;
+  error: string | null;
+};
+
+/** POST /api/models/sources — the UI always uses save-first configuration. */
 export type ApiKeySourceCreate = {
   kind: 'api_key';
   vendor: string;
@@ -866,7 +875,7 @@ export type ApiKeySourceCreate = {
   protocol?: SourceProtocol;
   /** Explicit consent for a repeated, protocol-proven inventory failure. */
   accept_unavailable_inventory?: boolean;
-  /** Save a catalog-pinned or declared interface without calling the upstream. */
+  /** Save independently of verification; inventory discovery is best-effort. */
   save_unverified?: boolean;
 };
 

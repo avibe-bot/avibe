@@ -1,5 +1,16 @@
 # Model Hub — UI & Interaction Spec (gateway frames)
 
+## Save-first provider revision — 2026-09-08
+
+The owner-approved `model-hub-save-first-testing.md` supersedes the automatic
+observation gate in the API-key add dialog and the always-visible Source-model
+capability column below. Add saves a concrete protocol configuration and
+attempts inventory discovery, without requiring either discovery or a model
+test to succeed. An independent Test dialog selects a real saved model and
+reports only that invocation. Capability declarations remain under Advanced
+settings; ordinary model addition never fetches the upstream inventory.
+Subscription OAuth and credential replacement retain their existing lifecycle.
+
 Companion to `model-hub.md`. That file is the **behaviour** authority; this one is
 the **surface** authority: what each frame shows, which states it can be in, the
 exact words it says in both locales, and what it does when the data is ugly.

@@ -2,11 +2,9 @@ import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
   CheckCircle2,
-  ChevronDown,
   CircleX,
   Eye,
   EyeOff,
-  Info,
   LoaderCircle,
   Save,
   TriangleAlert,
@@ -22,11 +20,7 @@ import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './api
 import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
 import { Field } from './dialogFields';
 import {
-  classifyObservation,
-  isAbortError,
   PROTOCOL_COPY_KEYS,
-  type AddApiKeyFailure,
-  type AddApiKeyOrigin,
 } from './addApiKeyState';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { GuardImpact } from './GuardImpact';
@@ -48,7 +42,6 @@ import {
   type ApiKeySourceCreate,
   type RouteHopRef,
   type Source,
-  type SourceObservation,
   type SourceProtocol,
   type SupplyGap,
 } from './types';
@@ -57,41 +50,13 @@ import { optionalTrimmedTextWithin } from './validation';
 import { VendorGlyph } from './vendorGlyph';
 
 type Phase =
-  | { kind: 'form'; report: SourceObservation | null }
-  | { kind: 'working'; origin: AddApiKeyOrigin; stage: 'observe' | 'persist' }
-  | { kind: 'failure'; origin: AddApiKeyOrigin; cause: AddApiKeyFailure }
-  | { kind: 'undetermined'; origin: AddApiKeyOrigin; observation: SourceObservation }
-  | { kind: 'inventory'; origin: AddApiKeyOrigin; observation: SourceObservation }
-  | {
-      kind: 'persist_failure';
-      messageKey: string | null;
-      protocol: SourceProtocol | undefined;
-      acceptUnavailableInventory: boolean;
-      saveUnverified: boolean;
-    }
-  | {
-      kind: 'save_unconfirmed';
-      protocol: SourceProtocol | undefined;
-      acceptUnavailableInventory: boolean;
-      saveUnverified: boolean;
-    };
+  | { kind: 'form' }
+  | { kind: 'working' }
+  | { kind: 'persist_failure'; messageKey: string | null }
+  | { kind: 'save_unconfirmed' };
 
-const INITIAL_PHASE: Phase = { kind: 'form', report: null };
-type ProtocolSelection = 'auto' | SourceProtocol;
-
-// A phase whose primary commits WITHOUT observing again is carrying evidence
-// that only this endpoint, this credential and this probe constraint produced:
-// ①″'s report, ⑤'s waived inventory, and the protocol a refused or unanswered
-// create already proved. That is the property, not a list of the states that
-// happen to be reachable today — a phase added later inherits the rule from how
-// its own exit behaves. Phases whose primary re-observes (③ / ④ / ⑤'s 重试, ⑥)
-// are deliberately absent: their retry reads the fields as they now stand, and
-// §0.8 keeps the form intact across it.
-const persistsWithoutObserving = (phase: Phase): boolean =>
-  (phase.kind === 'form' && phase.report !== null)
-  || phase.kind === 'inventory'
-  || phase.kind === 'persist_failure'
-  || phase.kind === 'save_unconfirmed';
+const INITIAL_PHASE: Phase = { kind: 'form' };
+type ProtocolSelection = SourceProtocol;
 
 const ProtocolSegments: React.FC<{
   id?: string;
@@ -107,7 +72,7 @@ const ProtocolSegments: React.FC<{
       aria-label={t('settings.models.addKey.field.protocol')}
       className="model-hub-add-key-segments flex max-w-full flex-wrap"
     >
-      {(['auto', ...SOURCE_PROTOCOLS] as const).map((item) => (
+      {SOURCE_PROTOCOLS.map((item) => (
         <button
           key={item}
           type="button"
@@ -119,10 +84,8 @@ const ProtocolSegments: React.FC<{
           )}
           onClick={() => onSelect(item)}
         >
-          {item !== 'auto' && <ProtocolGlyph protocol={item} />}
-          {t(item === 'auto'
-            ? 'settings.models.addKey.protocol.auto'
-            : PROTOCOL_COPY_KEYS[item])}
+          <ProtocolGlyph protocol={item} />
+          {t(PROTOCOL_COPY_KEYS[item])}
         </button>
       ))}
     </div>
@@ -200,32 +163,8 @@ const sourceClientNonce = (): string => {
   return `scn_${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`;
 };
 
-const failureCopy = (cause: AddApiKeyFailure): string => {
-  switch (cause) {
-    case 'auth': return 'settings.models.addKey.fail.auth';
-    case 'network': return 'settings.models.addKey.fail.network';
-    case 'interface': return 'settings.models.addKey.fail.undetermined';
-    case 'engineDown': return 'settings.models.addKey.fail.engineDown';
-    case 'unclassified': return 'settings.models.addKey.fail.unclassified';
-  }
-};
-
-const observationFailureCopy = (observation: SourceObservation | undefined): string | null => {
-  if (!observation) return null;
-  if (observation.outcome === 'authentication_failed') return 'settings.models.addKey.fail.auth';
-  if (observation.outcome === 'unreachable' || observation.outcome === 'timeout') return 'settings.models.addKey.fail.network';
-  if (observation.outcome === 'ambiguous') return 'settings.models.addKey.fail.undetermined';
-  if (observation.outcome === 'observed' && observation.discovery === 'failed') return 'settings.models.addKey.fail.inventory';
-  return 'settings.models.addKey.fail.unclassified';
-};
-
-const failureMessageKey = (failure: ReturnType<typeof apiFailure>): string | null => {
-  if (!failure) return null;
-  const observationKey = observationFailureCopy(failure.observation);
-  if (observationKey) return observationKey;
-  if (failure.detail?.startsWith('modelHub.errors.')) return failure.detail;
-  return failure.code || null;
-};
+const failureMessageKey = (failure: ReturnType<typeof apiFailure>): string | null =>
+  failure?.detail ?? failure?.code ?? null;
 
 const REPLACE_FAILURE_KEY: Record<ModelHubFailureClass, string> = {
   'authoritative-terminal': 'settings.models.repair.replaceFailed',
@@ -293,15 +232,13 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
   const [apiKey, setApiKey] = React.useState('');
-  const [protocolSelection, setProtocolSelection] = React.useState<ProtocolSelection>('auto');
+  const [protocolSelection, setProtocolSelection] = React.useState<ProtocolSelection>('openai_chat');
   const [revealed, setRevealed] = React.useState(false);
-  const [manualOpen, setManualOpen] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
   const [replacePhase, setReplacePhase] = React.useState<ReplacePhase>({ kind: 'edit' });
   const [continuation] = React.useState(createContinuationSettlement);
   const [createdDelivery] = React.useState(createSourceCreatedDelivery);
   const clientNonce = React.useRef(sourceClientNonce());
-  const observationAbort = React.useRef<AbortController | null>(null);
   const replaceCloseTimer = React.useRef<number | null>(null);
   React.useEffect(() => {
     if (addOnAdded) createdDelivery.update(addOnAdded, onClose);
@@ -309,8 +246,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
 
   React.useEffect(() => {
     continuation.invalidate();
-    observationAbort.current?.abort();
-    observationAbort.current = null;
     if (replaceCloseTimer.current !== null) {
       window.clearTimeout(replaceCloseTimer.current);
       replaceCloseTimer.current = null;
@@ -321,13 +256,13 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       setDisplayName('');
       setBaseUrl('');
       setApiKey('');
-      setProtocolSelection('auto');
+      setProtocolSelection('openai_chat');
       setRevealed(false);
-      setManualOpen(false);
       setPhase(INITIAL_PHASE);
       setReplacePhase({ kind: 'edit' });
     }
     return () => {
+      continuation.invalidate();
       if (replaceCloseTimer.current !== null) {
         window.clearTimeout(replaceCloseTimer.current);
         replaceCloseTimer.current = null;
@@ -361,108 +296,28 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     if (settle) void settle().catch(() => undefined);
   }, [continuation]);
 
-  const draft = React.useCallback((
-    protocol?: SourceProtocol,
-    acceptUnavailableInventory = false,
-    saveUnverified = false,
-  ): ApiKeySourceCreate => ({
-    kind: 'api_key',
-    vendor,
-    // The name is left out when empty rather than filled in here: the server
-    // already names a catalog source after its catalog label, and a second
-    // owner of that default is a second thing to keep in step with the catalog.
+  const draft = React.useCallback((): ApiKeySourceCreate => ({
+    kind: 'api_key', vendor,
     ...(displayName.trim() ? { display_name: displayName.trim() } : {}),
-    base_url: baseUrl.trim(),
-    key: apiKey.trim(),
-    client_nonce: clientNonce.current,
-    ...(protocol ? { protocol } : {}),
-    ...(acceptUnavailableInventory ? { accept_unavailable_inventory: true } : {}),
-    ...(saveUnverified ? { save_unverified: true } : {}),
-  }), [apiKey, baseUrl, displayName, vendor]);
+    base_url: baseUrl.trim(), key: apiKey.trim(),
+    protocol: apiKeyVendorPreset(vendor)?.protocol ?? protocolSelection,
+    client_nonce: clientNonce.current, save_unverified: true,
+  }), [apiKey, baseUrl, displayName, protocolSelection, vendor]);
 
-  const persist = React.useCallback(async (
-    seq: ContinuationTicket,
-    protocol?: SourceProtocol,
-    acceptUnavailableInventory = false,
-    saveUnverified = false,
-  ) => {
-    if (continuation.settle(seq, () => setPhase({ kind: 'working', origin: 'add', stage: 'persist' })) === 'stale') return;
+  const persist = React.useCallback(async (seq: ContinuationTicket) => {
+    if (continuation.settle(seq, () => setPhase({ kind: 'working' })) === 'stale') return;
     try {
-      const created = await modelsApi.createApiKeySource(draft(protocol, acceptUnavailableInventory, saveUnverified));
+      const created = await modelsApi.createApiKeySource(draft());
       createdDelivery.settle(continuation, seq, created);
     } catch (error) {
       const failure = apiFailure(error);
-      const definitiveClientFailure = failure?.serverNamed
-        && failure.responseStatus !== undefined
-        && failure.responseStatus >= 400
-        && failure.responseStatus < 500
-        && failure.responseStatus !== 409;
-      const verdict = failure?.observation ? classifyObservation(failure.observation) : null;
-      continuation.settle(seq, () => {
-        if (definitiveClientFailure && verdict && verdict.kind !== 'ready') {
-          if (verdict.kind === 'undetermined') {
-            setPhase({ kind: 'undetermined', origin: 'add', observation: verdict.observation });
-          } else if (verdict.kind === 'inventory') {
-            setPhase({ kind: 'inventory', origin: 'add', observation: verdict.observation });
-          } else {
-            setPhase({ kind: 'failure', origin: 'add', cause: verdict.cause });
-          }
-          return;
-        }
-        setPhase(definitiveClientFailure
-          ? {
-              kind: 'persist_failure',
-              messageKey: failureMessageKey(failure),
-              protocol,
-              acceptUnavailableInventory,
-              saveUnverified,
-            }
-          : { kind: 'save_unconfirmed', protocol, acceptUnavailableInventory, saveUnverified });
-      });
+      const definitive = failure?.serverNamed && failure.responseStatus !== undefined
+        && failure.responseStatus >= 400 && failure.responseStatus < 500 && failure.responseStatus !== 409;
+      continuation.settle(seq, () => setPhase(definitive
+        ? { kind: 'persist_failure', messageKey: failureMessageKey(failure) }
+        : { kind: 'save_unconfirmed' }));
     }
   }, [continuation, createdDelivery, draft]);
-
-  const observe = React.useCallback(async (
-    origin: AddApiKeyOrigin,
-    protocol?: SourceProtocol,
-  ) => {
-    const seq = continuation.begin();
-    observationAbort.current?.abort();
-    const controller = new AbortController();
-    observationAbort.current = controller;
-    setPhase({ kind: 'working', origin, stage: 'observe' });
-    try {
-      const observation = await modelsApi.observeApiKeySource({
-        vendor,
-        base_url: baseUrl.trim(),
-        key: apiKey.trim(),
-        ...(protocol ? { protocol } : {}),
-      }, controller.signal);
-      const verdict = classifyObservation(observation);
-      continuation.settle(seq, () => {
-        observationAbort.current = null;
-        if (verdict.kind === 'ready') {
-          setPhase({ kind: 'form', report: observation });
-        } else if (verdict.kind === 'undetermined') {
-          setPhase({ kind: 'undetermined', origin, observation });
-        } else if (verdict.kind === 'inventory') {
-          setPhase({ kind: 'inventory', origin, observation });
-        } else {
-          setPhase({ kind: 'failure', origin, cause: verdict.cause });
-        }
-      });
-    } catch (error) {
-      if (isAbortError(error)) return;
-      continuation.settle(seq, () => {
-        observationAbort.current = null;
-        setPhase({
-          kind: 'failure',
-          origin,
-          cause: apiFailure(error)?.code === 'engine_down' ? 'engineDown' : 'unclassified',
-        });
-      });
-    }
-  }, [apiKey, baseUrl, continuation, vendor]);
 
   const submitReplacement = React.useCallback(async (force: boolean) => {
     if (props.mode !== 'replace' || !apiKey.trim() || replacePhase.kind === 'submitting') return;
@@ -552,39 +407,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       onClose();
       return;
     }
-    if (phase.kind === 'working' && phase.stage === 'persist') return;
+    if (phase.kind === 'working') return;
     continuation.invalidate();
-    observationAbort.current?.abort();
-    observationAbort.current = null;
-    if (phase.kind === 'working' && phase.stage === 'observe') {
-      setPhase(INITIAL_PHASE);
-      return;
-    }
     createdDelivery.close();
   }, [continuation, createdDelivery, onClose, phase, replaceMode, replacePhase.kind]);
 
-  // What the next observation will be made under. A catalog vendor pins the
-  // interface (ladder rung 1: the catalog row is the proof, so the response only
-  // has to authenticate); 自定义 leaves it to the disclosure — a concrete choice
-  // is a declaration (rung 3), and Auto sends nothing so the shape must prove it
-  // (rung 2). Read by the handlers below and by the render, because "what 检测
-  // will send" and "what the row says 检测 will send" must be one value.
   const vendorPreset = apiKeyVendorPreset(vendor);
-  const selectedProtocol = protocolSelection === 'auto' ? undefined : protocolSelection;
-  const constrainedProtocol = vendorPreset?.protocol ?? selectedProtocol;
-
+  const constrainedProtocol = vendorPreset?.protocol ?? protocolSelection;
   const retry = async () => {
-    if (phase.kind === 'undetermined') {
-      if (!constrainedProtocol) return;
-      await observe(phase.origin, constrainedProtocol);
-      return;
-    }
-    if (phase.kind === 'inventory') {
-      // 2026-08-11 ruling: retry repeats the complete observation. There is no
-      // inventory-only credential lifetime or server capability.
-      await observe(phase.origin, phase.observation.protocol ?? undefined);
-      return;
-    }
     if (phase.kind === 'save_unconfirmed') {
       if (!addSourceReads) return;
       const seq = continuation.begin();
@@ -601,108 +431,49 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         return;
       }
       if (reconciliation.kind === 'absent') {
-        await persist(seq, phase.protocol, phase.acceptUnavailableInventory, phase.saveUnverified);
+        await persist(seq);
       }
       return;
     }
-    if (phase.kind === 'persist_failure') {
-      await persist(
-        continuation.begin(),
-        phase.protocol,
-        phase.acceptUnavailableInventory,
-        phase.saveUnverified,
-      );
-      return;
-    }
-    if (phase.kind === 'failure') {
-      await observe(phase.origin, constrainedProtocol);
-    }
+    if (phase.kind === 'persist_failure') await persist(continuation.begin());
   };
 
-  const addAnyway = async () => {
-    if (phase.kind !== 'inventory' || !phase.observation.protocol) return;
-    const seq = continuation.begin();
-    await persist(seq, phase.observation.protocol, true);
-  };
-
-  // §0.8 ①″: editing Base URL, the API key, or the protocol selection returns
-  // the dialog to ① Ready with the report dropped. The same three inputs are
-  // what every persisting exit's evidence was proved against, so one retirement
-  // covers the whole class instead of each handler picking its own phase.
-  const retireProvedEvidence = () => {
-    setPhase((current) => (persistsWithoutObserving(current) ? INITIAL_PHASE : current));
+  const clearSaveFailure = () => {
+    setPhase((current) => current.kind === 'persist_failure' ? INITIAL_PHASE : current);
   };
 
   const editEndpoint = (value: string) => {
     setBaseUrl(value);
-    retireProvedEvidence();
+    clearSaveFailure();
   };
   const editKey = (value: string) => {
     setApiKey(value);
     if (replaceMode && replacePhase.kind === 'failure') setReplacePhase({ kind: 'edit' });
-    retireProvedEvidence();
+    clearSaveFailure();
   };
-  // The display name is in no observation, so it proves and unproves nothing —
-  // ①″ keeps its report across a rename. It IS in the create request, so a
-  // server-named refusal of that request stops describing the request the user
-  // now holds.
   const editDisplayName = (value: string) => {
     setDisplayName(value);
     if (phase.kind === 'persist_failure') setPhase(INITIAL_PHASE);
   };
   const editProtocol = (value: ProtocolSelection) => {
     setProtocolSelection(value);
-    retireProvedEvidence();
+    clearSaveFailure();
   };
-  // A vendor is not one more field of the same request. It changes the endpoint
-  // AND the interface the request is made under, so anything observed before the
-  // switch was observed against a different pair — including a report that
-  // `retireProvedEvidence` would have kept, and an ④/failure the new vendor may
-  // simply not have. §1.5: switching resets the URL to the new vendor's official
-  // one, drops the interface selection, and retires the observation outright.
-  // Picking the vendor that is already picked is not a switch, and everything
-  // below is destructive: it would throw away a hand-edited address, a declared
-  // interface, and a completed detection to arrive back where it started. The
-  // guard is here rather than in the picker because this function is what
-  // destroys that state — a caller that re-announces the same choice is not
-  // wrong, acting on it is.
+  // Re-selecting the current vendor must preserve a hand-edited endpoint and
+  // protocol. A different vendor starts from that vendor's defaults.
   const editVendor = (value: string) => {
     if (value === vendor) return;
     setVendor(value);
     setBaseUrl(apiKeyVendorPreset(value)?.official_base_url ?? '');
-    setProtocolSelection('auto');
-    setManualOpen(false);
+    setProtocolSelection('openai_chat');
     setPhase(INITIAL_PHASE);
   };
 
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
-  const canCancel = replaceMode
-    ? replacePhase.kind !== 'submitting'
-    : !(phase.kind === 'working' && phase.stage === 'persist');
+  const canCancel = replaceMode ? replacePhase.kind !== 'submitting' : !isWorking;
   const displayNameValid = optionalTrimmedTextWithin(displayName, SOURCE_DISPLAY_NAME_MAX_LENGTH);
-  const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
-  const canSubmit = canObserve && displayNameValid;
-  const protocolIdle = !baseUrl.trim() || !apiKey.trim();
-  const detecting = isWorking && phase.kind === 'working' && phase.stage === 'observe';
-  const identified = phase.kind === 'form' && phase.report !== null && Boolean(phase.report.protocol);
-  const identifiedProtocol = identified && phase.kind === 'form' ? phase.report?.protocol ?? null : null;
-  // The segments and the summary row are two renderings of one selection, so
-  // only one of them is on screen at a time: expanded, the pressed segment IS
-  // the statement; collapsed, the row carries it. Under a catalog pin neither
-  // the disclosure nor ④'s forced selector may open one: the interface is not
-  // this dialog's to choose, so offering the choice would be offering a control
-  // whose value the request then ignores.
-  const segmentsOpen = !vendorPreset && (phase.kind === 'undetermined' || (manualOpen && !isWorking));
-  // Why the interface is what it is, on every strip that states it. A catalog
-  // pin and a user declaration are the two answers that are not "the response
-  // proved it" — and Auto, which is that third answer, carries no badge.
-  const protocolBadge = vendorPreset
-    ? <span className="model-hub-add-key-protocol-badge">{t('settings.models.addKey.protocol.catalogPinned')}</span>
-    : selectedProtocol
-      ? <span className="model-hub-add-key-protocol-badge">{t('settings.models.addKey.protocol.declared')}</span>
-      : null;
-  const showForm = phase.kind !== 'inventory';
+  const canSubmit = Boolean(baseUrl.trim() && apiKey.trim()) && displayNameValid && !formLocked;
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
   const replaceFieldLocked = replacePhase.kind === 'submitting'
@@ -713,7 +484,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="model-hub-add-key-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
-          className="model-hub-add-key-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-border-strong bg-surface p-0 shadow-xl outline-none"
+          className="model-hub-add-key-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0 shadow-xl outline-none"
           onEscapeKeyDown={(event) => { if (!canCancel) event.preventDefault(); }}
           onPointerDownOutside={(event) => { if (!canCancel) event.preventDefault(); }}
         >
@@ -743,7 +514,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               ? replacePhase.kind === 'guard'
                 ? t('settings.models.guard.subtitle.replaceKey')
                 : t('settings.models.repair.replaceBody')
-              : t('settings.models.addKey.subtitle')}
+              : t('settings.models.addKey.saveFirstHint')}
           </DialogPrimitive.Description>
         </header>
 
@@ -803,7 +574,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           </div>
         )}
 
-        {!replaceMode && showForm && (
+        {!replaceMode && (
           <div className="model-hub-add-key-body flex flex-col">
             {/* First, because it is the field the rest are conditioned on: it
                 decides what the Base URL starts as and whether the interface is
@@ -853,119 +624,21 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               onToggleReveal={() => setRevealed((value) => !value)}
             />
 
-            <div className={cn(
-              'model-hub-add-key-protocol-area',
-              protocolIdle && !isWorking && phase.kind !== 'undetermined' && 'is-idle',
-            )}>
+            <div className="model-hub-add-key-protocol-area">
               <span className="model-hub-add-key-label">{t('settings.models.addKey.field.protocol')}</span>
-              {phase.kind === 'undetermined' && (
-                <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
-                  <Info className="model-hub-ink-gold size-3.5 shrink-0" />
-                  <div className="flex min-w-0 flex-col gap-[3px]">
-                    <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
-                    <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
-                  </div>
-                  {protocolBadge}
-                </div>
-              )}
-              {detecting && (
-                <div className="model-hub-add-key-protocol-detecting">
-                  <LoaderCircle className="model-hub-ink-mint size-3.5 shrink-0 animate-spin" />
-                  <span>{t('settings.models.addKey.protocol.detecting')}</span>
-                </div>
-              )}
-              {identified && identifiedProtocol && (
-                <div className="model-hub-add-key-strip model-hub-add-key-strip--success">
-                  <CheckCircle2 className="model-hub-ink-mint size-3.5 shrink-0" />
-                  <ProtocolGlyph protocol={identifiedProtocol} />
-                  <span>
-                    {t(PROTOCOL_COPY_KEYS[identifiedProtocol])}
-                    {' · '}
-                    {phase.kind === 'form' && phase.report && phase.report.models.length === 0
-                      ? t('settings.models.addKey.pull.empty')
-                      : t('settings.models.addKey.pull.result', {
-                          count: phase.kind === 'form' && phase.report ? phase.report.models.length : 0,
-                        })}
-                  </span>
-                  {protocolBadge}
-                </div>
-              )}
-              {phase.kind === 'form' && !phase.report && !segmentsOpen && (
+              {vendorPreset ? (
                 <div className="model-hub-add-key-protocol-idle-row">
-                  {/* The statement and its badge are one line; the sentence that
-                      explains them is the next. Beside the glyph the hint read as
-                      a second statement competing with the first, and it is the
-                      longer of the two — it wrapped around the name it belongs
-                      to. Underneath, at its own smaller scale, it is plainly
-                      subordinate to the line above. */}
-                  <div className="model-hub-add-key-protocol-idle-line">
-                    {/* Whatever 检测 is about to send, and nothing else: a catalog
-                        pin and a concrete choice are each the active constraint
-                        even while the disclosure that could have made one is shut
-                        — or, under a pin, is not offered at all. */}
-                    <span className="model-hub-add-key-protocol-active">
-                      {constrainedProtocol && <ProtocolGlyph protocol={constrainedProtocol} />}
-                      {t(constrainedProtocol
-                        ? PROTOCOL_COPY_KEYS[constrainedProtocol]
-                        : 'settings.models.addKey.protocol.auto')}
-                    </span>
-                    {/* The pin is the reason this row has no control beside it, so
-                        it says so here rather than only on the strip 检测 returns. */}
-                    {vendorPreset && protocolBadge}
-                  </div>
-                  {/* The idle hint promises automatic identification, which is
-                      only what Auto does. A named interface has already answered
-                      it; a pin answers a different question — what 检测 still has
-                      to establish once the interface is no longer in doubt. */}
-                  {vendorPreset ? (
-                    <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.catalogPinned.hint')}</span>
-                  ) : !selectedProtocol && (
-                    <span className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.idleHint')}</span>
-                  )}
+                  <span className="model-hub-add-key-protocol-active">
+                    <ProtocolGlyph protocol={constrainedProtocol} />{t(PROTOCOL_COPY_KEYS[constrainedProtocol])}
+                  </span>
                 </div>
-              )}
-              {segmentsOpen && (
-                <div className="model-hub-add-key-protocol-manual">
-                  <ProtocolSegments
-                    disabled={formLocked}
-                    selection={protocolSelection}
-                    onSelect={editProtocol}
-                  />
-                  <p className="model-hub-add-key-hint">{t('settings.models.addKey.field.protocol.hint')}</p>
-                </div>
-              )}
-              {!vendorPreset && !isWorking && phase.kind !== 'undetermined' && (
-                <button
-                  type="button"
-                  className="model-hub-add-key-protocol-disclosure"
-                  aria-expanded={manualOpen}
-                  onClick={() => setManualOpen((open) => !open)}
-                >
-                  <ChevronDown className={cn('size-3.5 shrink-0', manualOpen && 'rotate-180')} />
-                  {t('settings.models.addKey.protocol.manual')}
-                </button>
-              )}
+              ) : <ProtocolSegments disabled={formLocked} selection={protocolSelection} onSelect={editProtocol} />}
+              <p className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.saveFirstHint')}</p>
             </div>
-
-            {phase.kind === 'working' && phase.stage === 'persist' && (
-              <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
-                <LoaderCircle className="model-hub-ink-mint size-3.5 shrink-0 animate-spin" />
-                <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-strip-title text-foreground">{t('settings.models.addKey.saving')}</span>
-                  <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.saving.detail')}</span>
-                </div>
-              </div>
-            )}
-            {phase.kind === 'failure' && (
-              <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
-                <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
-                <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">{t(failureCopy(phase.cause))}</span>
-                  {phase.cause === 'auth' && <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.fail.auth.detail')}</span>}
-                  {phase.cause !== 'engineDown' && <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.fail.subtitle')}</span>}
-                </div>
-              </div>
-            )}
+            {isWorking && <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
+              <LoaderCircle className="model-hub-ink-mint size-3.5 animate-spin" />
+              <span className="model-hub-add-key-strip-title">{t('settings.models.addKey.saving')}</span>
+            </div>}
             {phase.kind === 'save_unconfirmed' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
                 <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
@@ -981,15 +654,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 </span>
               </div>
             )}
-          </div>
-        )}
-
-        {!replaceMode && phase.kind === 'inventory' && (
-          <div className="model-hub-add-key-outcome-wrap">
-            <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory model-hub-add-key-strip--inventory">
-              <TriangleAlert className="model-hub-ink-gold size-3.5 shrink-0" />
-              <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.inventory.title')}</span>
-            </div>
           </div>
         )}
 
@@ -1039,68 +703,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               >
                 {t('settings.models.addKey.cancel')}
               </Button>
-              {phase.kind === 'inventory' && (
-                <Button type="button" variant="outline" className="model-hub-add-key-action" onClick={() => void addAnyway()}>
-                  {t('settings.models.addKey.addAnyway')}
-                </Button>
-              )}
-              {constrainedProtocol && (phase.kind === 'undetermined' || phase.kind === 'failure' || (phase.kind === 'form' && !phase.report)) && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="model-hub-add-key-action"
-                  disabled={!canSubmit}
-                  onClick={() => void persist(continuation.begin(), constrainedProtocol, false, true)}
-                >
-                  <Save className="size-3 shrink-0" />
-                  {t('settings.models.addKey.saveUnverified')}
-                </Button>
-              )}
-              {phase.kind === 'form' && !phase.report && (
-                <Button
-                  type="button"
-                  variant="brand"
-                  className="model-hub-add-key-action"
-                  disabled={!canSubmit}
-                  onClick={() => void observe('add', constrainedProtocol)}
-                >
-                  {t('settings.models.addKey.detect')}
-                </Button>
-              )}
-              {phase.kind === 'form' && phase.report?.protocol && (
-                <Button
-                  type="button"
-                  variant="brand"
-                  className="model-hub-add-key-action"
-                  disabled={!canSubmit}
-                  onClick={() => void persist(continuation.begin(), phase.report?.protocol ?? undefined)}
-                >
-                  {t('settings.models.addKey.confirm')}
-                </Button>
-              )}
-              {phase.kind === 'working' && (
-                <Button type="button" variant="brand" className="model-hub-add-key-action" disabled>
-                  <LoaderCircle className="size-3 animate-spin" />
-                  {t(phase.stage === 'persist'
-                    ? 'settings.models.addKey.saving'
-                    : 'settings.models.addKey.protocol.detecting')}
-                </Button>
-              )}
-              {(phase.kind === 'failure' || phase.kind === 'persist_failure' || phase.kind === 'save_unconfirmed' || phase.kind === 'inventory' || phase.kind === 'undetermined') && (
-                <Button
-                  type="button"
-                  variant="brand"
-                  className={cn(
-                    'model-hub-add-key-action',
-                    (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && !constrainedProtocol))
-                      && 'model-hub-add-key-action--dim',
-                  )}
-                  disabled={phase.kind === 'undetermined' && !constrainedProtocol}
-                  onClick={() => void retry()}
-                >
-                  {t('settings.models.addKey.retry')}
-                </Button>
-              )}
+              <Button type="button" variant="brand" className="model-hub-add-key-action"
+                disabled={isWorking || (phase.kind !== 'save_unconfirmed' && !canSubmit)}
+                onClick={() => void (phase.kind === 'save_unconfirmed' || phase.kind === 'persist_failure'
+                  ? retry() : persist(continuation.begin()))}>
+                {isWorking ? <LoaderCircle className="size-3 animate-spin" /> : <Save className="size-3" />}
+                {t(isWorking ? 'settings.models.addKey.saving'
+                  : phase.kind === 'form' ? 'settings.models.addKey.confirm' : 'settings.models.addKey.retry')}
+              </Button>
             </>
           )}
         </footer>

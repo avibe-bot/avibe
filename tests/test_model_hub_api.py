@@ -148,6 +148,9 @@ class FakeInvokeHandle:
     async def outcome(self):
         return self._outcome
 
+    async def close_stream(self):
+        pass
+
 
 class FakeAdapter:
     def __init__(self):

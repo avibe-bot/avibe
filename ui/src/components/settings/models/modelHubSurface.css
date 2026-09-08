@@ -710,6 +710,7 @@
 }
 
 .model-hub-add-key-head {
+  flex-shrink: 0;
   --model-hub-add-key-head-gap: 4px;
   --model-hub-add-key-head-padding-x: 20px;
   --model-hub-add-key-head-padding-y: 16px;
@@ -725,6 +726,8 @@
   font-size: var(--model-hub-add-key-subtitle-size);
 }
 .model-hub-add-key-body {
+  min-height: 0;
+  overflow-y: auto;
   --model-hub-add-key-body-gap: 14px;
   --model-hub-add-key-body-padding: 20px;
   padding: var(--model-hub-add-key-body-padding);
@@ -963,6 +966,7 @@
   color: var(--mint-ink);
 }
 .model-hub-add-key-foot {
+  flex-shrink: 0;
   --model-hub-add-key-footer-fill: var(--model-hub-wash-05);
   --model-hub-add-key-foot-gap: 8px;
   --model-hub-add-key-foot-padding-x: 20px;
@@ -1303,6 +1307,10 @@
 .model-hub-source-table-draft {
   column-gap: var(--model-hub-source-table-gap);
   padding-inline: var(--model-hub-source-table-padding-x);
+}
+
+.model-hub-source-detail[data-advanced="false"] :is(.model-hub-source-table-head, .model-hub-source-table-row, .model-hub-source-table-draft) {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 /* The columns are what a heading makes a claim about, so only the bands read
    against that heading take them. */

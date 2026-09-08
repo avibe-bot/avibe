@@ -56,6 +56,7 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           npm run test:model-catalog
+          npm run test:model-provider
           npm run test:project-order
 
   build-linux-artifacts:

@@ -71,8 +71,7 @@ const settleKeyVerdict = async (
   return last;
 };
 
-// Each protocol's segment button carries its own label, and the observation is
-// supposed to reach the same verdict for all three without being told which.
+// Custom providers persist the protocol the user selected, without observation.
 const PROTOCOLS = [
   { id: 'anthropic', label: copy('addKey.protocol.anthropicMessages') },
   { id: 'openai_responses', label: copy('addKey.protocol.openaiResponses') },
@@ -94,212 +93,110 @@ test.describe('B · add an API-key source', () => {
   });
 
   for (const protocol of PROTOCOLS) {
-    test(`B1 · Add identifies a ${protocol.id} upstream without being told`, async ({ hub, mock, api }) => {
+    test('B1 · saves the selected ' + protocol.id + ' protocol without model invocation', async ({ hub, mock, api }) => {
       await mock.configure({ auth: 'ok', protocol: protocol.id, models_endpoint: 'ok' });
-      const name = `${E2E_SOURCE_PREFIX}auto-${protocol.id}`;
-
+      const name = E2E_SOURCE_PREFIX + 'selected-' + protocol.id;
       await hub.goto();
       await hub.addApiKeyButton.click();
-      await expect(hub.addKeyDialog).toBeVisible();
-      // No protocol is chosen: "Auto detect" is the default, and the response
-      // shape is the only evidence the product is allowed to use.
-      await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-add' });
-      await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
-      await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click({ timeout: 30_000 });
-
-      // Success is defined by where the user lands, not by a toast: the dialog
-      // closes and the new source's detail panel opens.
+      await fillApiKeyForm(hub.addKeyDialog, {
+        name, baseUrl: mockBaseUrl(), apiKey: 'e2e-add', protocol: protocol.label,
+      });
+      await mock.resetRequests();
+      await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
       await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
-      await expect(hub.sourceDetailDialog).toBeVisible();
       await expect(hub.sourceDetailDialog).toContainText(name);
-
       const created = (await api.sources()).find((source) => source.display_name === name);
-      expect(created?.protocol).toBe(protocol.id);
-      expect(created?.vendor).toBe('custom');
+      expect(created).toMatchObject({ vendor: 'custom', protocol: protocol.id, verification_pending: expect.any(String) });
+      expect((await mock.requests()).filter((request) => request.method === 'POST' && request.path.startsWith('/v1/'))).toEqual([]);
     });
   }
 
-  // B1 · the other rung of the same scenario. A vendor picked from the shipped
-  // catalog is not asked to prove its interface by shape — the catalog row is the
-  // proof, so detection only has to authenticate and fetch. The address is then
-  // pointed at the mock, which is both the only way this suite can reach a real
-  // upstream AND the state a user behind a gateway is actually in: it proves the
-  // pin belongs to the VENDOR and not to the URL it proposed.
-  test('B1 · a catalog vendor is added under its own id, with its interface pinned', async ({ hub, mock, api }) => {
+  test('B1 · a catalog vendor saves under its own id and pinned interface', async ({ hub, mock, api }) => {
     const preset = CATALOG_VENDORS[0];
     await mock.configure({ auth: 'ok', protocol: preset.protocol, models_endpoint: 'ok' });
-    const name = `${E2E_SOURCE_PREFIX}catalog-${preset.id}`;
-
+    const name = E2E_SOURCE_PREFIX + 'catalog-' + preset.id;
     await hub.goto();
     await hub.addApiKeyButton.click();
-    await expect(hub.addKeyDialog).toBeVisible();
-    await fillApiKeyForm(hub.addKeyDialog, {
-      // Picked the way a user picks it, by the name on the row; the id below is
-      // what that click has to end up sending.
-      vendor: preset.label,
-      name,
-      baseUrl: mockBaseUrl(),
-      apiKey: 'e2e-add',
-    });
-
-    // The interface is stated, not asked: the pinned name is on screen with the
-    // badge that says where it came from, and the control that would offer a
-    // different one is gone rather than merely disabled.
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.protocol.catalogPinned'));
-    await expect(
-      hub.addKeyDialog.getByRole('button', { name: copy('addKey.protocol.manual'), exact: true }),
-    ).toHaveCount(0);
-
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click({ timeout: 30_000 });
-
+    await fillApiKeyForm(hub.addKeyDialog, { vendor: preset.label, name, baseUrl: mockBaseUrl(), apiKey: 'e2e-add' });
+    await expect(hub.addKeyDialog.getByRole('group', { name: copy('addKey.field.protocol') })).toHaveCount(0);
+    await expect(hub.addKeyDialog).toContainText(PROTOCOLS.find((item) => item.id === preset.protocol)!.label);
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
     await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
-    await expect(hub.sourceDetailDialog).toBeVisible();
-
-    const created = (await api.sources()).find((source) => source.display_name === name);
-    expect(created?.vendor).toBe(preset.id);
-    expect(created?.protocol).toBe(preset.protocol);
+    expect((await api.sources()).find((source) => source.display_name === name)).toMatchObject({
+      vendor: preset.id, protocol: preset.protocol, verification_pending: expect.any(String),
+    });
   });
 
-  test('B1 · a rejected credential is named as a credential problem', async ({ hub, mock }) => {
+  test('B1 · upstream authentication failure cannot veto saving configuration', async ({ hub, mock, api }) => {
     await mock.configure({ auth: '401', protocol: 'anthropic', models_endpoint: 'ok' });
-
-    await hub.goto();
-    await hub.addApiKeyButton.click();
-    // The suite prefix is on this "doomed" create too: if the regression under
-    // test commits the source before reporting the failure, teardown still has
-    // to be able to sweep it. A failure path that can leave state behind is a
-    // failure path that poisons whichever spec runs next.
-    await fillApiKeyForm(hub.addKeyDialog, {
-      name: `${E2E_SOURCE_PREFIX}auth-rejected`,
-      baseUrl: mockBaseUrl(),
-      apiKey: 'e2e-bad-key',
-    });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
-
-    // The three lines are one message: what went wrong, where to look, and that
-    // Add cannot proceed until it is fixed. A test that asserted only the first
-    // would pass on a dialog that has stopped explaining itself.
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.fail.auth'), { timeout: 30_000 });
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.fail.auth.detail'));
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.fail.subtitle'));
-    await expect(hub.addKeyDialog).toBeVisible();
-  });
-
-  test('B2 · a declared interface is warned about and persisted without claiming response proof', async ({ hub, mock, api }) => {
-    // A concrete custom interface is a declaration, not a response-shape claim.
-    // Authentication still gates it; Auto's shape-proof branch is covered by B1
-    // and test_source_observation_accepts_catalog_pin_and_custom_declaration_without_shape_proof.
-    await mock.configure({ auth: 'ok', protocol: 'openai_chat', models_endpoint: 'ok' });
-    const name = `${E2E_SOURCE_PREFIX}mismatch`;
-
+    const name = E2E_SOURCE_PREFIX + 'auth-unverified';
     await hub.goto();
     await hub.addApiKeyButton.click();
     await fillApiKeyForm(hub.addKeyDialog, {
-      name,
-      baseUrl: mockBaseUrl(),
-      apiKey: 'e2e-mismatch',
-      protocol: copy('addKey.protocol.anthropicMessages'),
+      name, baseUrl: mockBaseUrl(), apiKey: 'e2e-bad-key', protocol: PROTOCOLS[0].label,
     });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
-
-    await expect(hub.addKeyDialog.locator('.model-hub-add-key-protocol-badge')).toHaveText(copy('addKey.protocol.declared'));
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.field.protocol.hint'));
-    const confirm = hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true });
-    await expect(confirm).toBeEnabled({ timeout: 30_000 });
-    expect((await api.sources()).filter((source) => source.display_name === name)).toEqual([]);
-    await confirm.click();
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
     await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
-    await expect(hub.sourceDetailDialog).toBeVisible();
-    await expect(hub.sourceDetailDialog).toContainText(name);
-    const saved = (await api.sources()).filter((source) => source.display_name === name);
-    expect(saved).toHaveLength(1);
-    expect(saved[0]).toMatchObject({ vendor: 'custom', protocol: 'anthropic' });
+    expect((await api.sources()).find((source) => source.display_name === name)).toMatchObject({
+      protocol: 'anthropic', verification_pending: expect.any(String),
+    });
   });
 
-  test('B3 · Detect reports the count, and only ids survive the save', async ({ hub, mock, api }) => {
-    // The mock returns rich rows on purpose: `display_name`, `context_length`
-    // and `pricing` all come back and all are dropped. §3 marks B3
-    // `assert-current` — this documents the drop, it does not bless it.
+  test('B2 · a declared protocol persists without claiming response proof', async ({ hub, mock, api }) => {
+    await mock.configure({ auth: 'ok', protocol: 'openai_chat', models_endpoint: 'ok' });
+    const name = E2E_SOURCE_PREFIX + 'mismatch';
+    await hub.goto();
+    await hub.addApiKeyButton.click();
+    await fillApiKeyForm(hub.addKeyDialog, {
+      name, baseUrl: mockBaseUrl(), apiKey: 'e2e-mismatch', protocol: PROTOCOLS[0].label,
+    });
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
+    await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
+    expect((await api.sources()).find((source) => source.display_name === name)).toMatchObject({
+      vendor: 'custom', protocol: 'anthropic', verification_pending: expect.any(String),
+    });
+  });
+
+  test('B3 · automatically fetches ordered inventory, then tests only the chosen model', async ({ hub, mock, api, page }) => {
     const inventory = anthropicInventory(['e2e-alpha', 'e2e-beta', 'e2e-gamma']);
-    await mock.configure({
-      auth: 'ok',
-      protocol: 'anthropic',
-      models_endpoint: 'ok',
-      models: inventory,
-    });
-    const name = `${E2E_SOURCE_PREFIX}inventory`;
-
+    await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'ok', models: inventory });
+    const name = E2E_SOURCE_PREFIX + 'inventory';
     await hub.goto();
     await hub.addApiKeyButton.click();
-    await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-pull' });
-
-    // Detect is the mandatory pre-flight: it reports, it does not save.
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
-    await expect(hub.addKeyDialog).toContainText(
-      copy('addKey.pull.result', { count: inventory.length }),
-      { timeout: 30_000 },
-    );
-    expect(await api.sources()).not.toContainEqual(expect.objectContaining({ display_name: name }));
-
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click({ timeout: 30_000 });
+    await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-pull', protocol: PROTOCOLS[0].label });
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
     await expect(hub.sourceDetailDialog).toBeVisible({ timeout: 30_000 });
-
     const created = (await api.sources()).find((source) => source.display_name === name);
-
-    // assert-current: everything the upstream said about a model except its id
-    // is discarded on the way to storage. The whole row is stated rather than
-    // its key set, so each drop is asserted as a value and not merely as a name
-    // that exists. `reasoning_efforts_source` is the one that matters: it is
-    // #1836's tier provenance, product shape to record here rather than a leak
-    // to strip, and `null` is the claim — the persisted schema also admits
-    // `catalog` alongside an empty tier list, so a regression stamping it would
-    // make the UI treat these tiers as managed and non-editable while a key
-    // check still passed. A field arriving later fails this too.
-    const byId = (one: { id: string }, other: { id: string }) => one.id.localeCompare(other.id);
-    expect([...(created?.models ?? [])].sort(byId)).toEqual(
-      inventory
-        .map((model) => ({
-          id: model.id,
-          origin: 'discovered',
-          display_name: null,
-          reasoning_efforts: [],
-          reasoning_efforts_source: null,
-          discovered_at: expect.any(String),
-          retired: false,
-        }))
-        .sort(byId),
-    );
+    expect(created?.models).toEqual(inventory.map((model) => ({
+      id: model.id, origin: 'discovered', display_name: null, reasoning_efforts: [],
+      reasoning_efforts_source: null, discovered_at: expect.any(String), retired: false,
+    })));
+    expect(created?.verification_pending).toEqual(expect.any(String));
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceTest.open'), exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: copy('sourceTest.title', { source: name }), exact: true });
+    await expect(dialog.getByRole('combobox')).toContainText('e2e-alpha');
+    await dialog.getByRole('combobox').click();
+    await page.getByRole('option', { name: 'e2e-beta', exact: true }).click();
+    await mock.resetRequests();
+    await dialog.getByRole('button', { name: copy('sourceTest.run'), exact: true }).click();
+    await expect(dialog.getByRole('status')).toContainText('e2e-beta', { timeout: 75_000 });
+    await expect.poll(async () => (await api.sources()).find((source) => source.id === created?.id)?.verification_pending).toBeFalsy();
+    const requests = (await mock.requests()).filter((request) => request.method === 'POST' && request.path === '/v1/messages');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].body).toMatchObject({ model: 'e2e-beta' });
   });
 
-  test('B4 · a proven interface with no model list can still be added, on the record', async ({ hub, mock, api }) => {
-    // The interface answers; only discovery is broken. That is a different
-    // situation from "we do not know what this is", and the product treats it
-    // as one: it offers to add the source anyway. `models_endpoint: http_500`
-    // is exactly this shape: the interface probes 200, `/v1/models` 500s.
+  test('B4 · unavailable inventory still saves an unverified provider', async ({ hub, mock, api }) => {
     await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'http_500' });
-    const name = `${E2E_SOURCE_PREFIX}no-inventory`;
-
+    const name = E2E_SOURCE_PREFIX + 'no-inventory';
     await hub.goto();
     await hub.addApiKeyButton.click();
-    await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-empty' });
-    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.detect'), exact: true }).click();
-
-    await expect(hub.addKeyDialog).toContainText(copy('addKey.inventory.title'), { timeout: 30_000 });
-    const addAnyway = hub.addKeyDialog.getByRole('button', {
-      name: copy('addKey.addAnyway'),
-      exact: true,
-    });
-    await expect(addAnyway).toBeVisible();
-    await addAnyway.click();
-
+    await fillApiKeyForm(hub.addKeyDialog, { name, baseUrl: mockBaseUrl(), apiKey: 'e2e-empty', protocol: PROTOCOLS[0].label });
+    await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
     await expect(hub.sourceDetailDialog).toBeVisible({ timeout: 30_000 });
-    const created = (await api.sources()).find((source) => source.display_name === name);
-    // The source commits, and it commits carrying the failure — a source that
-    // came in this way must not look identical to one that discovered cleanly.
-    expect(created?.protocol).toBe('anthropic');
-    expect(created?.models).toEqual([]);
-    expect(created?.state.status).toBe('error');
+    expect((await api.sources()).find((source) => source.display_name === name)).toMatchObject({
+      protocol: 'anthropic', models: [], verification_pending: expect.any(String),
+    });
   });
 
   test('B6 · replacing the key reuses the same dialog, and reports what it did', async ({ hub, mock, api, gateway }) => {

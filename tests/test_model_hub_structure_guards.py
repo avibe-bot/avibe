@@ -645,8 +645,14 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    assert len(meter_calls) == 1
-    assert meter_calls[0] in set(ast.walk(invoke))
+    # Explicit Source tests consume their own response rather than forwarding a
+    # Turn to the gateway. They reuse the same metering owner, exactly once.
+    consumers = (invoke, _functions(service_tree)["probe_source"])
+    assert len(meter_calls) == len(consumers)
+    assert all(
+        sum(call in set(ast.walk(consumer)) for call in meter_calls) == 1
+        for consumer in consumers
+    )
     # Any of the gateway's endings may report the forwarded call, so exactly-once
     # rests on the write it owns; a caller that pre-checks or clears that handle
     # would move the decision outside the owner. An ending may still need to know

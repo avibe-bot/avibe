@@ -43,16 +43,16 @@ Out of scope (documented, not dropped silently):
 ### B. API-key sources (C16–C29)
 | ID | Steps | Expect | Status |
 |---|---|---|---|
-| B1 | observe against mock for each protocol, `protocol:'auto'` | correct protocol chosen by response shape; observation payload contract_version 10 | assert |
-| B2 | custom user-declared protocol differs from response shape, authentication succeeds | declaration badge and runtime-risk warning stay visible; explicit confirmation persists exactly the chosen protocol, not an inferred one. Authentication remains required. Auto still needs matching shape evidence (2026-09-04 declaration rule; adapter consumer rejects authenticated but unshaped Auto responses). | assert |
-| B3 | pull models (mock returns `display_name`, `context_length`, `pricing`, `supported_parameters`) | unrelated metadata is dropped; `supported_parameters` is retained in observation and the provenance ladder applies protocol-default tiers | assert |
-| B4 | discovery fails | 422 `inventory_unavailable` unless `accept_unavailable_inventory:true`; then source commits with `state.status=error` | assert |
+| B1 | save custom/catalog providers under their selected/pinned protocol | save-first UI invokes no model and does not require authentication evidence; inventory discovery is best effort and pending verification remains (2026-09-08 owner decision) | assert |
+| B2 | custom declaration differs from the upstream interface | save persists exactly the selected protocol, without an inferred protocol or verified claim; legacy observation API behavior is separate | assert |
+| B3 | save, inspect automatically fetched inventory, choose a model and run Test | preserve upstream inventory order and metadata ownership; preferred exact ID wins, otherwise first model; invoke only the chosen Source/model with no route fallback and clear only its matching credential marker | assert |
+| B4 | discovery fails | save succeeds with pending verification; preserve manual inventory and allow manual addition without refetching | assert |
 | B5 | replay create with same `client_nonce` | idempotent, no duplicate source | assert |
 | B6 | replace key happy + rollback; rename; patch base URL | C22/C23 contracts | assert |
 | B7 | sole owned default source + exact one-hop manual route, verified by reads → delete source → guard 409 → echo plan → force | actual inherited supply gap; impact report lists interrupted agents; malformed echo rejected; canonical route and exact captured default order restored independently (only the owned deleted ID may be omitted) | assert |
 | B8 | force transport asymmetry (`?force=` vs body) | document current split (B6 issue); decide normalization | baseline |
 | B9 | refetch after upstream inventory change | added/removed diff; **`discovered_at` preserved for pre-existing models** (currently overwritten — fix-first, see B-list) | fix-first |
-| B10 | inspect catalog-managed tiers; edit user/null tiers; reload a v6 row and refresh | catalog edits return 409 `source_model_tiers_managed` with exact provenance; user tiers remain editable; refresh restores catalog truth and emits one redacted override event | assert |
+| B10 | open Advanced settings, inspect catalog-managed tiers; edit user/null tiers; reload a v6 row and refresh | default inventory hides capability details; advanced catalog edits return 409 `source_model_tiers_managed` with exact provenance; user tiers remain editable; refresh restores catalog truth and emits one redacted override event | assert |
 | B11 | trigger each of: `mapping_target_unavailable`, `runtime_in_use`, `source_nonce_conflict`, `reauth_confirmation_required`, `turn_not_found` | UI renders human copy, never the raw `modelHub.errors.*` string (B1 — fix-first; baseline expected-fail) | fix-first |
 
 ### C. OAuth lifecycle (C30–C40, partial by §1)

@@ -2989,6 +2989,21 @@ class ModelHubService:
             source = ModelHubSourceConfig.from_payload(source.to_payload())
             persisted = False
             try:
+                if save_unverified:
+                    # Inventory is useful, not admission evidence. Work on a
+                    # clone so a failed listing cannot partly replace manual
+                    # entries. The new Source still has one commit/nonce owner.
+                    candidate = ModelHubSourceConfig.from_payload(source.to_payload())
+                    try:
+                        async with asyncio.timeout(15):
+                            discovered = await self._discover(candidate)
+                        self._apply_discovered_models(
+                            candidate, candidate.models, discovered, allow_empty=True,
+                        )
+                    except (ModelHubError, TimeoutError):
+                        pass
+                    else:
+                        source = candidate
                 async with self._mutation_lock:
                     await self._commit_new_source_locked(source)
                     persisted = True
@@ -5152,6 +5167,8 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         model_id: str,
         backend: str,
+        *,
+        output_tokens: int = 1,
     ) -> ModelHubRequest:
         # A probe enters the same translation seam as a live backend turn, so
         # its payload must be shaped in the backend's client protocol.
@@ -5159,22 +5176,125 @@ class ModelHubService:
         if request_protocol == "anthropic":
             payload = {
                 "model": model_id,
-                "max_tokens": 1,
+                "max_tokens": output_tokens,
                 "messages": [{"role": "user", "content": "ping"}],
             }
         elif request_protocol == "openai_responses":
             payload = {
                 "model": model_id,
-                "max_output_tokens": 1,
+                "max_output_tokens": output_tokens,
                 "input": "ping",
             }
         else:
             payload = {
                 "model": model_id,
-                "max_tokens": 1,
+                "max_tokens": output_tokens,
                 "messages": [{"role": "user", "content": "ping"}],
             }
         return ModelHubRequest(payload, protocol=request_protocol)
+
+    async def probe_source(self, source_id: str, payload: object) -> dict:
+        """Test one saved API-key model, independently of Agent route/health."""
+        if not isinstance(payload, dict) or set(payload) != {"model"}:
+            raise ModelHubError("discovery_failed")
+        model_id = payload["model"]
+        # This selects an existing inventory identity, not a newly admitted ID.
+        # Legacy persisted IDs remain testable even beyond today's input bound.
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ModelHubError("discovery_failed")
+        model_id = normalized_model_id(model_id)
+
+        def selected(config: ModelHubConfig) -> ModelHubSourceConfig:
+            source = self._source(config, source_id)
+            if (
+                source.kind != "api_key"
+                or source.supply_channel != "hub"
+                or not source.credential_ref
+                or not any(model.id == model_id and not model.retired for model in source.models)
+            ):
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            return source
+
+        # Refuse malformed/stale selections before starting the managed engine.
+        async with self._mutation_lock:
+            selected(self.store.load())
+        started_at = time.monotonic()
+        handle = None
+        outcome = None
+        source = None
+        try:
+            async with asyncio.timeout(60):
+                while True:
+                    await self._prepare_engine_for_demand()
+                    await self._mutation_lock.acquire()
+                    held = True
+
+                    def admitted() -> None:
+                        nonlocal held
+                        if held:
+                            held = False
+                            self._mutation_lock.release()
+
+                    try:
+                        source = ModelHubSourceConfig.from_payload(
+                            selected(self.store.load()).to_payload(),
+                        )
+                        if not self._engine_synced:
+                            continue
+                        # OpenCode preserves the request's explicit protocol and
+                        # API keys have unrestricted origins. No Agent resolver
+                        # is involved: the adapter binds this exact Source.
+                        handle = await self._engine_call(self.adapter.invoke(
+                            source.id,
+                            model_id,
+                            self._probe_request(source, model_id, "opencode", output_tokens=128),
+                            False,
+                            "opencode",
+                            on_admitted=admitted,
+                        ))
+                        break
+                    finally:
+                        admitted()
+                if handle.stream is not None:
+                    async for _chunk in handle.stream:
+                        pass
+                outcome = await self._engine_call(handle.outcome())
+        except TimeoutError:
+            if source is None:
+                raise ModelHubError("engine_down", status=503) from None
+            outcome = RawCallOutcome(
+                kind=RawOutcomeKind.TIMEOUT,
+                http_status=None,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id=model_id,
+                source_id=source_id,
+            )
+        finally:
+            if handle is not None:
+                await handle.close_stream()
+                await self._meter_call(
+                    source_id=source_id, model_id=model_id,
+                    outcome=outcome, observed=handle.observed,
+                )
+        assert source is not None and outcome is not None
+        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
+        if succeeded:
+            await self._verify_successful_source(
+                source.id, source.credential_ref, source.verification_pending, outcome,
+            )
+        # Classify for display only. A selected model failure cannot block other
+        # models on this Source, refresh credentials, or modify route state.
+        error = None if succeeded else self._probe_failure(outcome, classify_outcome(outcome))[0]
+        return {
+            "source_id": source.id,
+            "model_id": model_id,
+            "protocol": source.protocol,
+            "reachable": succeeded,
+            "latency_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+            "error": error,
+        }
 
     @staticmethod
     def _probe_failure(

@@ -13,6 +13,7 @@
     {"method": "POST", "path": "/api/models/sources/<id>/reauth", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/sources/src_subscribe01/reauth", "status": 200, "json": {"acknowledge_irreversible": true}}},
     {"method": "DELETE", "path": "/api/models/sources/<id>?force=<bool>", "response_schema": "SourceDeleteResponse", "exercise": {"path": "/api/models/sources/src_delete0001?force=false", "status": 200, "json": {}}},
     {"method": "POST", "path": "/api/models/sources/<id>/refresh", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/refresh", "status": 200, "json": {}}},
+    {"method": "POST", "path": "/api/models/sources/<id>/probe", "response_schema": "SourceProbeResponse", "exercise": {"path": "/api/models/sources/src_conform001/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
     {"method": "POST", "path": "/api/models/sources/<source_id>/models", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models", "status": 201, "json": {"model_id": "manual-contract-model", "reasoning_efforts": []}}},
     {"method": "PATCH", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {"reasoning_efforts": ["high"]}}},
     {"method": "DELETE", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {}}},
@@ -47,6 +48,16 @@
     {"method": "POST", "path": "/api/models/runtime/stop", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/stop", "status": 200}}
   ],
   "definitions": {
+    "SourceProbeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "contract_version", "probe"],
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 10},
+        "probe": {"$ref": "model-hub/source-probe-result.schema.json"}
+      }
+    },
     "SourceApi": {
       "allOf": [
         {"$ref": "model-hub/source.schema.json"},

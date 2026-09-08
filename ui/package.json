@@ -23,6 +23,7 @@
     "test:inbox-return": "tsc -p e2e/inbox-return/tsconfig.json --noEmit && playwright test --config playwright.inbox-return.config.ts",
     "test:project-order": "tsc -p e2e/project-order/tsconfig.json --noEmit && playwright test --config playwright.project-order.config.ts",
     "test:model-catalog": "tsc -p e2e/model-catalog/tsconfig.json --noEmit && playwright test --config playwright.model-catalog.config.ts",
+    "test:model-provider": "tsc -p e2e/model-provider/tsconfig.json --noEmit && playwright test --config playwright.model-provider.config.ts",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
   },

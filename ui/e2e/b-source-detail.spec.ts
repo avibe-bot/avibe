@@ -97,6 +97,7 @@ test.describe('B · the source detail panel', () => {
 
     await hub.goto();
     await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
     await expect(hub.sourceDetailDialog).toBeVisible();
 
     await hub.manageMenuTrigger(before).click();
@@ -143,6 +144,7 @@ test.describe('B · the source detail panel', () => {
 
     await hub.goto();
     await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
     await hub.sourceDetailDialog
       .getByRole('button', { name: copy('sourceDetail.action.refetch'), exact: true })
       .click();
@@ -178,6 +180,7 @@ test.describe('B · the source detail panel', () => {
 
     await hub.goto();
     await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
     await hub.sourceDetailDialog
       .getByRole('button', { name: copy('sourceDetail.action.addModel'), exact: true })
       .click();
@@ -247,6 +250,7 @@ test.describe('B · the source detail panel', () => {
 
     await hub.goto();
     await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
     await hub.tierCell('e2e-vocab').click();
 
     await expect(hub.modelRow('e2e-vocab').getByRole('textbox')).toBeVisible();
@@ -277,6 +281,7 @@ test.describe('B · the source detail panel', () => {
 
     await hub.goto();
     await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
     await expectLockedRow(hub, catalogId, 'catalog');
 
     // Locking is per model: the sibling the catalog does not know stays a door.
@@ -313,6 +318,7 @@ test.describe('B · the source detail panel', () => {
 
     await hub.goto();
     await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
     await expectLockedRow(hub, upstreamId, 'upstream');
 
     await hub.tierCell(siblingId).click();
@@ -369,6 +375,7 @@ test.describe('B · the source detail panel', () => {
 
       await hub.goto();
       await hub.openSource(source.id);
+    await hub.sourceDetailDialog.getByRole('button', { name: copy('sourceDetail.advanced'), exact: true }).click();
       await expect(
         hub.sourceDetailDialog.getByRole('button', {
           name: copy('sourceDetail.action.refetch', undefined, locale),
