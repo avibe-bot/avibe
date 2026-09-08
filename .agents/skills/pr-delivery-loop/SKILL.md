@@ -95,6 +95,9 @@ do not load them routinely. They introduce no additional delivery gates.
   otherwise post `@codex review`. While awaiting review, never pause without a
   pending review or a new trigger. Do not push another head during a pending
   review. Use wait time for acceptance, integration, and final-report preparation.
+- Act on auto-review findings as inline reviews. A clean auto-review may pass
+  only through the PR-body reaction; trigger review when a SHA-bearing pass
+  comment is needed, rather than waiting for one to appear automatically.
 - Save the trigger comment ID returned by your own write and read it back.
   Check that exact comment for the Codex bot's `eyes` reaction within about two
   minutes. Never select the last comment or search bodies for the trigger text.
