@@ -806,7 +806,7 @@ def test_codex_local_efforts_override_remote_metadata(monkeypatch, tmp_path):
     ]
 
 
-def test_claude_snapshot_merges_configured_custom_models(monkeypatch, tmp_path):
+def test_claude_snapshot_ignores_native_default_models(monkeypatch, tmp_path):
     claude_home = tmp_path / ".claude"
     claude_home.mkdir()
     (claude_home / "settings.json").write_text(
@@ -823,8 +823,8 @@ def test_claude_snapshot_merges_configured_custom_models(monkeypatch, tmp_path):
 
     snapshot = backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=False)
 
-    assert "custom-claude-model" in snapshot["models"]
-    assert "custom-fast-model" in snapshot["models"]
+    assert "custom-claude-model" not in snapshot["models"]
+    assert "custom-fast-model" not in snapshot["models"]
     assert snapshot["models"][:2] == ["claude-fable-5-1", "claude-fable-5"]
     assert snapshot["model_labels"]["claude-fable-5-1"] == "claude-fable-5-1 [1M]"
     assert [option["value"] for option in snapshot["reasoning_options"]["claude-fable-5-1"]] == [
@@ -1168,7 +1168,8 @@ def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", "~/codex-state")
 
     assert backend_model_catalog._read_codex_models_cache() == [{"id": "gpt-expanded", "visibility": "list"}]
-    assert backend_model_catalog._read_codex_config_models()[0]["id"] == "gpt-configured"
+    snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
+    assert "gpt-configured" not in snapshot["models"]
 
 
 def test_backend_builtin_models_merge_backend_snapshots_but_exclude_user_config(
@@ -1193,7 +1194,6 @@ def test_backend_builtin_models_merge_backend_snapshots_but_exclude_user_config(
             ("bundled", [{"id": "gpt-bundled", "reasoning_efforts": ["high"]}]),
             ("local", [{"id": "gpt-local"}]),
             ("legacy", [{"id": "gpt-legacy"}]),
-            ("config", [{"id": "gpt-user-configured"}]),
         ],
     )
 
@@ -1449,19 +1449,3 @@ def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
     assert first["generation"] != second["generation"]
     assert first["models"][0]["id"] == "gpt-file-generation-one"
     assert second["models"][0]["id"] == "gpt-file-generation-two"
-
-
-def test_parse_toml_falls_back_to_tomli_when_tomllib_is_unavailable(monkeypatch):
-    real_import = builtins.__import__
-    fallback = SimpleNamespace(loads=lambda raw: {"model": "gpt-python-310"})
-
-    def fake_import(name, *args, **kwargs):
-        if name == "tomllib":
-            raise ModuleNotFoundError("No module named 'tomllib'")
-        if name == "tomli":
-            return fallback
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-
-    assert backend_model_catalog._parse_toml('model = "gpt-python-310"') == {"model": "gpt-python-310"}

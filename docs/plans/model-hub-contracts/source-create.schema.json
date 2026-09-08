@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. The default path requires authenticated observation and a protocol established by a shipped catalog pin, a declaration on custom, or matching response proof. Explicit save_unverified consent instead persists configuration with verification pending, without observation or discovery, and requires a catalog pin or a concrete custom declaration. The server owns Source identity, discovered inventory, health, usage, custody metadata and timestamps. Both paths use canonical validation and the same custody, rollback and reconciliation lifecycle. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
+  "description": "API-key Source creation input. The default path requires authenticated observation and a protocol established by a shipped catalog pin, a declaration on custom, or matching response proof. Explicit save_unverified consent instead persists configuration with verification pending, without observation, attempts best-effort inventory discovery, and requires a catalog pin or a concrete custom declaration. The server owns Source identity, discovered inventory, health, usage, custody metadata and timestamps. Both paths use canonical validation and the same custody, rollback and reconciliation lifecycle. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
@@ -10,7 +10,7 @@
     "save_unverified": {
       "type": "boolean",
       "default": false,
-      "description": "Explicit consent to save configuration without upstream observation or discovery. Requires a catalog-pinned or explicitly declared protocol; custom Auto cannot be guessed. Canonical input validation, credential custody, rollback and nonce reconciliation are unchanged. Sets Source.verification_pending, preserves manual models and does not claim usability."
+      "description": "Save configuration independently of observation. The default UI uses true. Requires a catalog-pinned or explicitly declared protocol; custom Auto cannot be guessed. Attempts bounded inventory discovery with the provisioned credential, but failed or invalid inventory never blocks saving or erases manual entries. Canonical input validation, credential custody, rollback and nonce reconciliation are unchanged. Sets Source.verification_pending and does not claim usability."
     },
     "vendor": {
       "type": "string",

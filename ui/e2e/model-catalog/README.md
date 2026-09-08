@@ -20,5 +20,13 @@ contracts remain covered by their existing tests; this is not live acceptance.
 
 The live `playwright.config.ts` excludes this fixture directory. The consuming
 `scripts/modelCatalogDiscovery.test.mjs` checks both real configs with `--list`:
-live discovery excludes the fixture, while isolated discovery retains all 36
-scenario-labelled cases. Collection starts no browser, web server or fixture.
+live discovery excludes the fixture, while isolated discovery retains the original
+36 catalog scenarios and discovers every fixture spec on desktop and mobile.
+Collection starts no browser, web server or fixture.
+
+`gateway-status.spec.ts` consumes `MH-GATEWAY-STATUS-001`. It renders the real
+Agent card with isolated catalog and Agent supply data. The route summary and
+collapsible Agent footer remain separate, and long identifiers wrap inside the
+footer. Every localized route status fits the existing compact control, including
+a wider fallback-font check. These are browser layout contracts, not live routing
+or backend acceptance.

@@ -30,6 +30,7 @@ export type Source = {
   base_url?: string | null;
   credential_ref?: string | null;
   client_nonce?: string | null;
+  verification_pending?: string | null;
   models: {
     id: string;
     origin: string;

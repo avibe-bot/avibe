@@ -254,6 +254,9 @@ class CodexAgent(BaseAgent):
     ) -> str:
         """Run a read-only ephemeral turn on the normal persistent app-server."""
 
+        from core.agent_model_selection import require_agent_model
+
+        model = require_agent_model(model, "codex")
         probe_cwd = paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR
         probe_cwd.mkdir(parents=True, exist_ok=True)
         transport: CodexTransport | None = None
@@ -284,6 +287,7 @@ class CodexAgent(BaseAgent):
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "ephemeral": True,
+                    "model": model,
                     "developerInstructions": (
                         "This is a connection probe. Do not use tools. "
                         "Reply with a short greeting."
@@ -307,9 +311,8 @@ class CodexAgent(BaseAgent):
                 "approvalPolicy": "never",
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                 "effort": "low",
+                "model": model,
             }
-            if isinstance(model, str) and model.strip():
-                turn_params["model"] = model.strip()
             turn_response = await transport.send_request("turn/start", turn_params)
             turn = turn_response.get("turn")
             turn_id = turn_response.get("id") or (

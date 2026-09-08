@@ -329,8 +329,7 @@ describe('SettingsModelsPage surface branches', () => {
     await user.click(trigger);
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
     await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
-    await user.click(screen.getByRole('button', { name: /^Detect$|^检测$/ }));
-    await user.click(await screen.findByRole('button', { name: /Confirm & add|确认添加/ }));
+    await user.click(await screen.findByRole('button', { name: /Add provider|添加供应商/ }));
 
     const detail = await screen.findByRole('dialog', { name: 'Created API key' });
     await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
@@ -602,7 +601,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeNull();
   });
 
-  it('keeps tier-editor Escape local to the provider dialog', async () => {
+  it('keeps manual-model draft Escape local to the provider dialog', async () => {
     const editableSource: Source = {
       ...retainedSource,
       models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'], reasoning_efforts_source: 'user' }],
@@ -613,31 +612,14 @@ describe('SettingsModelsPage surface branches', () => {
     const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
     await user.click(sourceOpener);
     const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
-    await user.click(within(sourceDialog).getByRole('button', { name: /high/i }));
-    const tierInput = within(sourceDialog).getByPlaceholderText(/Enter to add|回车添加/i);
-    await user.type(tierInput, 'draft');
-    await user.keyboard('{Escape}');
-
-    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
-    expect(within(sourceDialog).queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
-
     await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
-    let manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    const manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
     const modelIdInput = within(manualDraft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     await user.type(modelIdInput, 'draft-model');
     await user.keyboard('{Escape}');
 
     expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
     expect(sourceDialog.querySelector('[data-manual-model-draft]')).toBeNull();
-
-    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
-    manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
-    const draftTierInput = within(manualDraft as HTMLElement).getByPlaceholderText(/Enter to add|回车添加/i);
-    await user.type(draftTierInput, 'draft');
-    await user.keyboard('{Escape}');
-
-    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
-    expect((draftTierInput as HTMLInputElement).value).toBe('');
 
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Retained source' })).toBeNull());

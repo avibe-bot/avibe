@@ -1,4 +1,8 @@
 {
+  "errors": {
+    "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
+    "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"
+  },
   "status": {
     "backendUnresponsive": "后端无响应",
     "done": "完成",

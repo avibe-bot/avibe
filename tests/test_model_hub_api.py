@@ -148,6 +148,9 @@ class FakeInvokeHandle:
     async def outcome(self):
         return self._outcome
 
+    async def close_stream(self):
+        pass
+
 
 class FakeAdapter:
     def __init__(self):
@@ -2115,23 +2118,10 @@ def test_agents_project_one_shared_backend_catalog_contract(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     claude_models = agents["claude"]["catalog_models"]
-    assert claude_models[0] == {
-        "id": "default",
-        "display_name": None,
-        "origin": "builtin",
-        "models_dev_id": None,
-        "context_window": None,
-        "max_output_tokens": None,
-        "input_modalities": [],
-        "output_modalities": [],
-        "supports_tools": None,
-        "supports_reasoning": None,
-        "reasoning_efforts": [],
-        "locked": True,
-        "routeable": False,
-    }
-    assert all(model["locked"] is False for model in claude_models[1:])
-    assert all(model["routeable"] is True for model in claude_models[1:])
+    assert claude_models
+    assert all(model["id"] != "default" for model in claude_models)
+    assert all(model["locked"] is False for model in claude_models)
+    assert all(model["routeable"] is True for model in claude_models)
     assert agents["codex"]["catalog_models"]
     assert agents["opencode"]["catalog_models"] == []
 
@@ -3623,37 +3613,25 @@ def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline
     assert raised.value.code == "backend_model_id_prefix"
 
 
-def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
+def test_backend_catalog_saves_claude_models_without_native_default(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(service.set_agent_models("claude", baseline, baseline[1:]))
-
-    assert raised.value.code == "backend_model_locked"
-    assert raised.value.status == 409
+    result = asyncio.run(service.set_agent_models("claude", baseline, baseline))
+    assert result["agent"]["catalog_models"] == baseline
+    assert all(model["id"] != "default" for model in baseline)
 
 
-@pytest.mark.parametrize("mutation", ["edit", "duplicate", "reorder"])
-def test_backend_catalog_rejects_any_claude_locked_default_mutation(
-    tmp_path,
-    mutation,
-):
+def test_backend_catalog_rejects_claude_native_default_selection(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     desired = copy.deepcopy(baseline)
-    if mutation == "edit":
-        desired[0]["display_name"] = "Not the server sentinel"
-    elif mutation == "duplicate":
-        desired.insert(1, copy.deepcopy(desired[0]))
-    else:
-        desired[0], desired[1] = desired[1], desired[0]
+    desired.append({**desired[0], "id": "default"})
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("claude", baseline, desired))
 
-    assert raised.value.code == "backend_model_locked"
-    assert raised.value.status == 409
+    assert raised.value.code == "backend_model_id_invalid"
 
 
 def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):
@@ -5644,6 +5622,45 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         body = response.get_json()
         _assert_envelope(body, ok=False)
         assert body["error"] == error
+
+
+@pytest.mark.parametrize("mode", ["hub", "direct"])
+def test_refresh_empty_inventory_returns_success_without_route_removal_confirmation(monkeypatch, tmp_path, mode):
+    service, store, adapter = _service(tmp_path)
+    for vendor, protocol in (("anthropic", "anthropic"), ("openai", "openai_responses")):
+        store.config.sources.append(ModelHubSourceConfig(
+            id=f"src_{vendor}01", kind="api_key", vendor=vendor, display_name=vendor,
+            protocol=protocol, supply_channel="hub", billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")] if vendor == "anthropic" else [],
+            credential_ref=f"cred_{vendor}01",
+        ))
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id for source in store.config.sources]
+        agent.routes = {}
+    store.config.agents["codex"].mode = mode
+    models = [model.id for model in store.config.agents["codex"].models]
+
+    async def discover(*_args):
+        return tuple(DiscoveredModel(id=model) for model in models)
+
+    adapter.discover_models = discover
+    before = store.config.to_payload()
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/src_openai01/refresh", json={},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    _assert_envelope(body, ok=True)
+    assert body["removed_hops"] == body["interrupted"] == []
+    assert [model["id"] for model in body["source"]["models"]] == models
+    after = store.config.to_payload()
+    assert after["agents"] == before["agents"]
+    assert after["sources"][0] == before["sources"][0]
 
 
 def test_discovered_source_model_delete_persists_retirement_tombstone(

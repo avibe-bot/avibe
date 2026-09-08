@@ -651,7 +651,6 @@
       "opencodeProviderModelsCount": "{{count}} 个模型",
       "opencodeProviderModelsEmpty": "暂无模型。可以在上方手动添加 Model ID。",
       "opencodeProviderModels": "模型列表",
-      "opencodeProviderDefaultModel": "默认",
       "opencodeProviderAddModel": "添加模型",
       "opencodeProviderModelPlaceholder": "model-id，不要带 provider/",
       "opencodeProviderModelAdd": "添加模型",
@@ -933,6 +932,23 @@
         "moreModels_other": "还有 {{count}} 个模型",
         "collapse": "收起",
         "retry": "重试",
+        "routeStatus": {
+          "empty": "未配置模型",
+          "unknown": "路由状态待确认",
+          "unconfigured": "未配置模型路由",
+          "available": "路由可用",
+          "partial": "部分路由不可用",
+          "unavailable": "路由不可用"
+        },
+        "agentIssues": {
+          "summary_one": "{{count}} 个 Agent 需关注",
+          "summary_other": "{{count}} 个 Agent 需关注",
+          "modelMissing": "未选择模型",
+          "routeMissing": "此模型未配置路由",
+          "degraded": "模型供应已降级",
+          "waiting": "等待供应商恢复",
+          "interrupted": "此模型没有可用供应商"
+        },
         "supply": {
           "none": "没有可用供应商",
           "unread": "路由状态暂时不可用 · 模型网关本身正常"
@@ -969,7 +985,6 @@
           "columnActions": "操作",
           "columnState": "状态",
           "lockedBadge": "默认",
-          "systemDefault": "Claude Code 默认模型",
           "edit": "编辑 {{model}}",
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
@@ -1430,6 +1445,7 @@
         "deletedSource": "已删除"
       },
       "addKey": {
+        "saveFirstHint": "保存供应商时会尝试拉取模型列表。测试是可选的，可在添加后进行。",
         "title": "添加 API Key",
         "subtitle": "API Key 与模型接口",
         "field": {
@@ -1453,7 +1469,7 @@
           "empty": "已经连接，但这个供应商没有可用模型"
         },
         "detect": "检测",
-        "confirm": "确认添加",
+        "confirm": "添加供应商",
         "adding": "连接中…",
         "adding.detail": "连接 + 验证接口 + 首次拉取模型列表 · 通常 1–3 秒",
         "saving": "保存中…",
@@ -1476,6 +1492,7 @@
           "detail": "这次响应不足以同时确认接口类型和凭证有效性"
         },
         "protocol": {
+          "saveFirstHint": "选择供应商使用的 API 格式，无需检测或测试通过即可保存。",
           "auto": "自动探测",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
@@ -1656,7 +1673,21 @@
         "codex": "Codex",
         "opencode": "OpenCode"
       },
+      "sourceTest": {
+        "open": "测试",
+        "title": "测试 {{source}}",
+        "hint": "使用此供应商和选中的模型发送一次简短请求，可能产生少量费用。结果仅代表这个模型。",
+        "model": "测试模型",
+        "empty": "暂无模型。关闭此窗口后，可拉取列表或手动添加模型 ID。",
+        "run": "开始测试",
+        "running": "测试中…",
+        "success": "{{model}} 调用成功 · {{ms}} 毫秒",
+        "failure": "{{model}} 本次测试未通过：{{reason}}",
+        "unknown": "模型请求失败。",
+        "requestFailed": "暂时无法确认测试结果，供应商配置仍已保存。"
+      },
       "sourceDetail": {
+        "advanced": "高级设置",
         "back": "返回模型供应商列表",
         "close": "关闭供应商详情",
         "modelsHeading": "模型",
@@ -1777,7 +1808,7 @@
           "managedHint": "自动确定，不能添加或移除",
           "managed": {
             "upstream": "供应商声明",
-            "catalog": "内置目录"
+            "catalog": "Avibe 预置档位"
           }
         },
         "addRow": {

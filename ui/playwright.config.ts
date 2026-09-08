@@ -16,7 +16,7 @@ import { BASE_URL } from './e2e/support/env';
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: ['**/chat-paging/**', '**/inbox-return/**', '**/model-catalog/**'],
+  testIgnore: ['**/chat-paging/**', '**/inbox-return/**', '**/model-catalog/**', '**/model-provider/**'],
   outputDir: './e2e/.artifacts/test-results',
   // Every spec mutates shared instance state (sources, agent modes, the
   // runtime switch). Parallel workers would race on it, so the suite is serial

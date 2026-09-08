@@ -32,6 +32,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | Both Hub OAuth and `native_cli` Sources require the acknowledgement before OAuth starts. Missing or false acknowledgement returns `reauth_confirmation_required` before any adapter call. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. A nonempty destructive plan commits only when the body exactly echoes the current refusal plan. |
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
+| POST `/api/models/sources/<id>/probe` | `{model}` → `{probe: SourceProbeResult}` | Explicit API-key test through the managed invocation adapter, using this exact Source/model/protocol. The model must be a non-retired saved inventory row. No Agent routing, fallback, discovery, credential refresh or Source-health change. Only a successful matching credential invocation clears pending verification. Usage is metered; the total invocation deadline is 60 seconds. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list only when `reasoning_efforts_source` is `user` or null, without changing identity, origin, or Routes. An `upstream` or `catalog` declaration returns HTTP 409 `source_model_tiers_managed` with its provenance in the `reasoning_efforts_source` sibling. |
 | DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
@@ -112,8 +113,10 @@ with failed inventory discovery produces no Source unless this request explicitl
 `accept_unavailable_inventory: true`; the accepted Source has `models: []` and the
 existing uncertain health projection.
 
-Explicit `save_unverified: true` instead saves the catalog-pinned or user-declared
-interface without upstream observation or discovery. Custom Auto without a declaration
+The add dialog always uses `save_unverified: true`: it saves the catalog-pinned or user-declared
+interface without upstream observation as an admission gate. It attempts one bounded
+inventory discovery with the provisioned credential before committing the new Source;
+failure preserves manual entries and does not block saving. Custom Auto without a declaration
 is rejected before credential provisioning. Manual models remain manual; no inventory
 is invented. The Source carries an opaque `verification_pending` marker, independently of its
 routing health, and may be configured and invoked. List/detail surfaces label it
@@ -601,6 +604,13 @@ The guard evaluates each protected `(backend, model)` against the post-mutation
 state. It counts only runnable exact hops in that model's effective Route chain, never
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
+
+Inventory updates that refine an inherited `passthrough` plan into `automatic`
+matching do not report displaced speculative candidates as `would_remove_hops` or
+`removed_hops`, in either Hub or Direct mode. They leave saved route intent unchanged.
+Explicit manual-hop invalidations, lost inventory matches, and newly introduced
+protected-supply gaps still use the exact-plan guard. This exception does not apply
+to Source deletion, default-membership changes, or Restore.
 
 Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the complete
 `guard-refusal.schema.json` shape. The first refusal is:
@@ -1114,12 +1124,12 @@ An unknown `turn_id` returns `turn_not_found`. The server derives ambiguous abse
 live from “known turn, no exact record”; it does not persist a placeholder and never
 guesses which attempt belonged to the turn.
 
-When exact-match forwarding removes a requested reasoning effort, that exact attempted
-hop carries both `stripped_reasoning_efforts` and the declaration consulted in
-`declared_reasoning_efforts`. The paired fields appear only on the failed, served,
-terminal, or canceled attempt where a strip actually occurred; they never leak onto a
-fallback hop or another turn. The same redacted source/model, stripped effort, and
-declared-tier facts are written to the application logger without changing chat copy.
+Historical exact-match forwarding records can carry `stripped_reasoning_efforts`
+and `declared_reasoning_efforts` on the exact attempt that stripped them. These
+paired fields remain readable. The owner amendment of 2026-09-08 removes the
+resolver's inventory-based effort filtering: new attempts preserve caller intent
+and do not emit stripping fields or logs. Engine translation is a separate boundary,
+documented in `../model-hub-reasoning-intent.md`, not inferred from this telemetry.
 
 ## Resolution events
 

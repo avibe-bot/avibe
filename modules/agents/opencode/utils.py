@@ -117,7 +117,6 @@ def filter_opencode_models_to_allowed_providers(
         if isinstance(provider_id, str) and provider_id
     }
     providers = []
-    projected_by_provider: dict[str, set[str]] = {}
     for provider in opencode_models.get("providers", []) or []:
         if not isinstance(provider, dict):
             continue
@@ -125,8 +124,6 @@ def filter_opencode_models_to_allowed_providers(
         if not provider_id:
             continue
         projected_model_ids = _opencode_model_hub_model_ids(provider)
-        if projected_model_ids:
-            projected_by_provider[provider_id] = projected_model_ids
         if provider_id in allowed:
             providers.append(provider)
             continue
@@ -150,17 +147,7 @@ def filter_opencode_models_to_allowed_providers(
             models = {}
         providers.append({**provider, "models": models})
 
-    defaults = opencode_models.get("default")
-    if isinstance(defaults, dict):
-        defaults = {
-            provider_id: model_id
-            for provider_id, model_id in defaults.items()
-            if provider_id in allowed
-            or model_id in projected_by_provider.get(provider_id, set())
-        }
-    else:
-        defaults = {}
-    return {**opencode_models, "providers": providers, "default": defaults}
+    return {**opencode_models, "providers": providers, "default": {}}
 
 
 def find_opencode_model_info(
@@ -222,26 +209,6 @@ def resolve_opencode_model_id(
             return matches[0] if len(matches) == 1 else model_id
         return model_id
     return model_id
-
-
-def resolve_opencode_configured_default_model(
-    default_model: str | None,
-    *,
-    default_provider: str | None,
-    provider_id: str | None,
-) -> str | None:
-    """Return the configured agent model when it belongs to ``provider_id``."""
-
-    model = (default_model or "").strip()
-    provider = (provider_id or "").strip()
-    configured_provider = (default_provider or "").strip()
-    if not model or not provider:
-        return None
-
-    model_provider, model_id = _parse_model_key(model)
-    if model_provider:
-        return model_id if model_provider == provider and model_id else None
-    return model if configured_provider == provider else None
 
 
 def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
@@ -371,39 +338,6 @@ def _extract_provider_ids_from_config(config: dict) -> List[str]:
     return providers
 
 
-def resolve_opencode_default_model(
-    opencode_default_config: dict,
-    opencode_agents: list,
-    selected_agent: Optional[str],
-) -> Optional[str]:
-    """Resolve default OpenCode model for an agent from config."""
-    agent_names: List[str] = []
-    for agent in opencode_agents or []:
-        if isinstance(agent, dict):
-            name = agent.get("name") or agent.get("id")
-        elif isinstance(agent, str):
-            name = agent
-        else:
-            name = None
-        if isinstance(name, str) and name:
-            agent_names.append(name)
-
-    agent_name = selected_agent or ("build" if "build" in agent_names else (agent_names[0] if agent_names else None))
-
-    if isinstance(opencode_default_config, dict):
-        agents_config = opencode_default_config.get("agent", {})
-        if isinstance(agents_config, dict) and agent_name:
-            agent_config = agents_config.get(agent_name, {})
-            if isinstance(agent_config, dict):
-                model = agent_config.get("model")
-                if isinstance(model, str) and model:
-                    return model
-        model = opencode_default_config.get("model")
-        if isinstance(model, str) and model:
-            return model
-    return None
-
-
 def resolve_opencode_provider_preferences(
     opencode_default_config: dict,
     current_model: Optional[str] = None,
@@ -414,13 +348,6 @@ def resolve_opencode_provider_preferences(
     _append_unique(providers, _parse_provider_id(current_model))
 
     if isinstance(opencode_default_config, dict):
-        _append_unique(providers, _parse_provider_id(opencode_default_config.get("model")))
-        agents_config = opencode_default_config.get("agent", {})
-        if isinstance(agents_config, dict):
-            for agent_config in agents_config.values():
-                if isinstance(agent_config, dict):
-                    _append_unique(providers, _parse_provider_id(agent_config.get("model")))
-
         for provider_id in _extract_provider_ids_from_config(opencode_default_config):
             _append_unique(providers, provider_id)
 
@@ -435,10 +362,6 @@ def resolve_opencode_allowed_providers(
     providers = _extract_provider_ids_from_config(opencode_default_config)
     if providers:
         return providers
-    if isinstance(opencode_models, dict):
-        defaults = opencode_models.get("default", {})
-        if isinstance(defaults, dict) and defaults:
-            return [key for key in defaults.keys() if isinstance(key, str) and key]
     return []
 
 
@@ -469,7 +392,6 @@ def build_opencode_model_option_items(
         return []
 
     providers_data = opencode_models.get("providers", [])
-    defaults = opencode_models.get("default", {})
 
     providers: List[Tuple[str, dict]] = []
     for provider in providers_data:
@@ -484,7 +406,6 @@ def build_opencode_model_option_items(
             allowed_providers,
         )
         providers_data = visible_models.get("providers", [])
-        defaults = visible_models.get("default", {})
         providers = []
         for provider in providers_data:
             provider_id = get_opencode_provider_id(provider)
@@ -540,15 +461,11 @@ def build_opencode_model_option_items(
                 model_id,
                 model_info,
             )
-            is_default = defaults.get(provider_id) == model_id if provider_id else False
             display = (
                 model_name
                 if opencode_model_is_hub_projected(model_info)
                 else f"{provider_name}: {model_name}" if provider_name else model_name
             )
-            if is_default:
-                display += " (default)"
-
             options.append({"label": display, "value": full_model})
             provider_model_count += 1
 

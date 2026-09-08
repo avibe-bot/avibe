@@ -1,5 +1,14 @@
 # Model Hub — Product Spec
 
+## Save-first API-key amendment — 2026-09-08
+
+`model-hub-save-first-testing.md` records the owner's replacement for add-time
+automatic-detection admission in the UI: save configuration, attempt optional
+inventory discovery, and offer a separate real-model test. Test failure does
+not block saving or condemn the provider. Discovery is not invocation proof;
+the existing credential-identity-bound verification marker remains authoritative.
+Older explicit observation clients and subscription OAuth admission are unchanged.
+
 Status: **Routing modes, contract_version 10** (2026-09-06).
 Owner-approved implementation contract: `model-hub-routing-modes.md`, frozen before
 implementation at `2db273891`, with API-key scope/synchronization decision `c1d398d5f`
@@ -534,7 +543,7 @@ for hop in C, in effective-plan order:
         continue
 
     attempted = true
-    result = invoke_exact(hop.source_id, hop.model_id, exact_reasoning_effort(hop))
+    result = invoke_exact(hop.source_id, hop.model_id, original_request)
     if result == served: return SERVED(hop)
     if result == canceled: return CANCELED
     if result is terminal_request_error: return FAILED_TERMINAL(result)
@@ -559,9 +568,14 @@ repairs or rewrites configuration.
 
 `invoke_exact` preserves chain order. A `native_cli` hop uses the sanctioned backend's
 singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
-system never prepends native supply or chooses a model. If the requested reasoning
-effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
-value; otherwise omit the effort field, with no approximation or downgrade.
+system never prepends native supply or chooses a model. Owner amendment (2026-09-08):
+the shared resolver passes the original reasoning intent to the adapter on every
+attempt, including credential retries and provider fallback. Source inventory
+capability metadata is not a forwarding allowlist: an absent declaration does not
+establish unsupported reasoning. The resolver neither removes nor approximates the
+requested value. Protocol translation remains the managed adapter's responsibility;
+the separate engine boundary and remaining compatibility limitations are recorded in
+[Reasoning intent](model-hub-reasoning-intent.md).
 
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
@@ -1176,8 +1190,16 @@ under one commit lock. Inventory disappearance can change an automatic matching 
 it never invalidates an explicit API-key manual invocation by itself. Subscription
 model-membership admission remains unchanged. Explicit retirement
 excludes the exact pair, while manual inventory deletion removes matching evidence
-without deleting explicit API-key hops; subscription admission remains unchanged. Refusals report complete effective removals and protected
-supply loss in the existing arrays. Forced success must match both echoed arrays and
+without deleting explicit API-key hops; subscription admission remains unchanged.
+When inventory evidence changes an inherited plan from `passthrough` to `automatic`,
+displaced speculative candidates are not destructive removals and are excluded from
+`would_remove_hops` / `removed_hops`. This applies equally to active Hub plans and
+dormant Direct plans: learning a model list does not delete saved route intent.
+Explicit manual-hop invalidations, disappearance of existing inventory matches, and
+new protected-supply loss remain guarded. Other mutation guards, including Source
+deletion, default membership and Restore, continue to compare all effective removals.
+Refusals report complete destructive removals and protected supply loss in the
+existing arrays. Forced success must match both echoed arrays and
 preserves surviving nonempty manual intent; Source deletion removes its actual references.
 Every final-hop removal, including catalog reconciliation, uses the same normalized
 planner. Normal saves persist the canonical sparse map; pure reads/preview never write.
@@ -1432,8 +1454,9 @@ moment; it never infers a removal or tombstone. Each snapshot change adds, but n
 removes, missing built-ins not in the set, in snapshot order among built-ins already present
 (or at the menu tail when none remain), seeds snapshot label and reasoning efforts, and
 leaves each new row automatic without seeding route keys. Remote-catalog payload, validators, success, failure,
-and backoff state are keyed by the configured catalog source. Claude's locked `default` row
-is excluded.
+and backoff state are keyed by the configured catalog source. Model catalogs contain
+explicit models only; backend-native default selections are not projected. See
+`avibe-owned-model-selection.md` for the model-selection contract.
 
 A write validates every newly introduced or changed exact pair before commit. An exact
 pair already present in the persisted array may be retained or reordered even when a

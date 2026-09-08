@@ -721,7 +721,7 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
     assert [p["id"] for p in providers] == ["openai", "custom"]
     custom = next(provider for provider in providers if provider["id"] == "custom")
     assert set(custom["models"]) == {"first-model"}
-    assert result["data"]["models"]["default"] == {"openai": "gpt-5"}
+    assert result["data"]["models"]["default"] == {}
 
 
 def test_opencode_options_keeps_legacy_config_api_key_provider(monkeypatch, tmp_path):
@@ -805,7 +805,7 @@ def test_opencode_options_keeps_legacy_config_api_key_provider(monkeypatch, tmp_
 
     providers = result["data"]["models"]["providers"]
     assert [p["id"] for p in providers] == ["poe"]
-    assert result["data"]["models"]["default"] == {"poe": "claude-opus-4"}
+    assert result["data"]["models"]["default"] == {}
 
 
 def test_opencode_options_does_not_readd_unconfigured_user_model_provider(
@@ -995,7 +995,7 @@ def test_opencode_options_filters_catalog_provider_with_only_stale_user_model(
     assert result["ok"] is True
     providers = result["data"]["models"]["providers"]
     assert [p["id"] for p in providers] == ["openai"]
-    assert result["data"]["models"]["default"] == {"openai": "gpt-5"}
+    assert result["data"]["models"]["default"] == {}
 
 
 def test_opencode_options_preserves_models_when_provider_catalog_fails(
@@ -1338,10 +1338,7 @@ def test_opencode_options_includes_keyless_custom_provider_models(monkeypatch, t
     providers = result["data"]["models"]["providers"]
     ids = [provider["id"] for provider in providers]
     assert ids == ["openai", "llama.cpp"]
-    assert result["data"]["models"]["default"] == {
-        "openai": "gpt-5",
-        "llama.cpp": "local-model",
-    }
+    assert result["data"]["models"]["default"] == {}
     local = next(provider for provider in providers if provider["id"] == "llama.cpp")
     assert local["models"] == {"local-model": {"name": "local-model", "vibe_remote": {"user_model": True}}}
 
@@ -1406,23 +1403,21 @@ def test_opencode_provider_catalog_uses_native_models_for_provider_probes(
 
 
 @pytest.mark.parametrize(
-    ("available_models", "runtime_model", "expected_model"),
+    ("available_models", "runtime_model"),
     [
-        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, None, "gpt-5.3-chat-latest"),
-        ({"gpt-5.3-chat-latest": {}}, None, "gpt-5.3-chat-latest"),
+        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, None),
+        ({"gpt-5.3-chat-latest": {}}, None),
         (
             {"gpt-5.3-chat-latest": {}, "gpt-5.4": {}, "gpt-5.4-runtime": {}},
             "openai/gpt-5.4-runtime",
-            "gpt-5.4-runtime",
         ),
     ],
 )
-def test_opencode_provider_catalog_prefers_runtime_agent_model(
+def test_opencode_provider_catalog_ignores_native_default_models(
     monkeypatch,
     tmp_path,
     available_models,
     runtime_model,
-    expected_model,
 ):
     class _FakeServer:
         async def get_providers(self):
@@ -1454,7 +1449,7 @@ def test_opencode_provider_catalog_prefers_runtime_agent_model(
             return "build"
 
         def get_agent_model_from_config(self, agent_name):
-            return runtime_model if agent_name == "build" else None
+            raise AssertionError(f"Native model {runtime_model} must not be read")
 
     async def _fake_get_server():
         return _FakeServer()
@@ -1476,7 +1471,8 @@ def test_opencode_provider_catalog_prefers_runtime_agent_model(
     result = asyncio.run(api.get_opencode_providers_async())
 
     provider = next(provider for provider in result["providers"] if provider["id"] == "openai")
-    assert provider["default_model"] == expected_model
+    assert "default_model" not in provider
+    assert set(provider["models"]) == set(available_models)
 
 
 def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
@@ -2742,8 +2738,8 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
         "gpt-5.6-terra",
         "gpt-5.6-luna",
     ]
-    assert "custom-codex-model" in result["models"]
-    assert "legacy-codex" in result["models"]
+    assert "custom-codex-model" not in result["models"]
+    assert "legacy-codex" not in result["models"]
     assert "gpt-5.1-codex-max" in result["models"]
     assert "gpt-5.1-codex-mini" in result["models"]
 
@@ -2847,12 +2843,11 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
     by_value = {m["value"]: m for m in result["models"]}
     # custom-provider models + reasoning + source annotation flow through unchanged
     assert by_value["anthropic/claude-x"]["reasoning_efforts"] == ["low", "high"]
-    assert by_value["anthropic/claude-x"]["default"] is True
+    assert all("default" not in model for model in result["models"])
     assert by_value["anthropic/claude-x"]["source"] == "catalog"
     assert by_value["deepseek/deepseek-chat"]["source"] == "user"
     assert by_value["gpt-5"] == {
         "value": "gpt-5",
-        "default": False,
         "source": "catalog",
         "reasoning_efforts": ["high"],
     }

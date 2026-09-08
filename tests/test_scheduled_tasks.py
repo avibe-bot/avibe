@@ -12882,6 +12882,7 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
                 base_session_id=session_id,
                 composite_session_id=f"{session_id}:{tmp_path}",
                 session_key=controller._get_session_key(context),
+                vibe_agent_model="claude-fixture",
             ),
         )
 

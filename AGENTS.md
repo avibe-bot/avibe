@@ -169,6 +169,9 @@ High-level V2 config areas:
 
 Agent routing model:
 
+- Avibe owns model selection for every backend. Never read or delegate to a
+  backend-native default model; see `docs/plans/avibe-owned-model-selection.md`.
+
 - global default: the enabled Vibe Agent recorded in SQLite `state_meta.default_agent_name`
 - backend availability and CLI path: `agents.<backend>.enabled` and `agents.<backend>.cli_path`
 - per-channel overrides: configured via the Web UI Agent Settings / channel settings

@@ -86,7 +86,6 @@ from .events import (
     EventReason,
     build_resolution_event,
     contains_credential_material,
-    redact_credential_material,
 )
 from .errors import ModelDiscoveryError
 from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
@@ -171,8 +170,9 @@ def _storable_backend_model_metadata(
 
 AGENT_CHAIN_CONTRACT_VERSION = 10
 PROBE_RESULT_CONTRACT_VERSION = 10
+_SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
+_SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
-_REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -430,56 +430,6 @@ class HandleSettlement:
 
 
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
-
-
-@dataclass(frozen=True)
-class ExactReasoningEffortRequest:
-    request: Mapping[str, Any]
-    stripped_efforts: tuple[str, ...] = ()
-    declared_efforts: tuple[str, ...] = ()
-
-
-def _bounded_reasoning_effort_telemetry(value: object) -> str:
-    """Redact and fold an untrusted effort value into bounded telemetry."""
-
-    if not isinstance(value, str):
-        if value is None:
-            return "<null>"
-        if isinstance(value, bool):
-            return "<bool>"
-        if isinstance(value, int):
-            return "<int>"
-        if isinstance(value, float):
-            return "<float>"
-        if isinstance(value, list):
-            return "<list>"
-        if isinstance(value, Mapping):
-            return "<dict>"
-        return "<non-string>"
-
-    redacted = redact_credential_material(value)
-    encoded = redacted.encode("utf-8")
-    if len(encoded) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
-        return redacted
-    digest = hashlib.sha256(encoded).hexdigest()
-    suffix = f"... [sha256:{digest}]"
-    preview_bytes = _REASONING_EFFORT_TELEMETRY_MAX_BYTES - len(
-        suffix.encode("utf-8")
-    )
-    preview = encoded[:preview_bytes].decode("utf-8", errors="ignore")
-    return f"{preview}{suffix}"
-
-
-def _bounded_declared_effort_telemetry(values: Iterable[str]) -> tuple[str, ...]:
-    redacted = tuple(redact_credential_material(value) for value in values)
-    payload = json.dumps(
-        redacted,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    if len(payload.encode("utf-8")) <= _REASONING_EFFORT_TELEMETRY_MAX_BYTES:
-        return redacted
-    return (_bounded_reasoning_effort_telemetry(payload),)
 
 
 AttemptObserver = Callable[
@@ -2989,6 +2939,22 @@ class ModelHubService:
             source = ModelHubSourceConfig.from_payload(source.to_payload())
             persisted = False
             try:
+                if save_unverified:
+                    # Inventory is useful, not admission evidence. Work on a
+                    # clone so a failed listing cannot partly replace manual
+                    # entries. The new Source still has one commit/nonce owner.
+                    candidate = ModelHubSourceConfig.from_payload(source.to_payload())
+                    try:
+                        discovered = await asyncio.wait_for(
+                            self._discover(candidate), timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+                        )
+                        self._apply_discovered_models(
+                            candidate, candidate.models, discovered, allow_empty=True,
+                        )
+                    except (ModelHubError, asyncio.TimeoutError):
+                        pass
+                    else:
+                        source = candidate
                 async with self._mutation_lock:
                     await self._commit_new_source_locked(source)
                     persisted = True
@@ -3424,7 +3390,19 @@ class ModelHubService:
     ) -> tuple[list[dict], list[dict]]:
         invalidated = self._invalidated_route_hops(updated, source_id)
         self._prune_invalidated_route_hops(updated, invalidated)
-        would_remove_hops = self._removed_effective_hops(previous, updated)
+        # Inventory evidence narrows speculative candidates without deleting routes.
+        # Keep explicit invalidations and newly introduced supply gaps guarded below.
+        would_remove_hops = [
+            item for item in self._removed_effective_hops(previous, updated)
+            if not (
+                effective_model_route(
+                    previous, cast(BackendName, item["backend"]), item["menu_model"],
+                ).route_origin == "passthrough"
+                and effective_model_route(
+                    updated, cast(BackendName, item["backend"]), item["menu_model"],
+                ).route_origin == "automatic"
+            )
+        ]
         would_remove_hops.extend(item for item in invalidated if item not in would_remove_hops)
         would_interrupt = self._introduced_interruptions(previous, updated)
         self._require_guard_plan(
@@ -3816,33 +3794,12 @@ class ModelHubService:
             "routeable": True,
         }
 
-    @staticmethod
-    def _claude_default_catalog_payload() -> dict:
-        return {
-            "id": "default",
-            "display_name": None,
-            "origin": "builtin",
-            "models_dev_id": None,
-            "context_window": None,
-            "max_output_tokens": None,
-            "input_modalities": [],
-            "output_modalities": [],
-            "supports_tools": None,
-            "supports_reasoning": None,
-            "reasoning_efforts": [],
-            "locked": True,
-            "routeable": False,
-        }
-
     @classmethod
     def _catalog_models_payload(
         cls,
         agent: ModelHubAgentSupplyConfig,
     ) -> list[dict]:
-        models = [cls._catalog_model_payload(model) for model in agent.models]
-        if agent.backend == "claude":
-            models.insert(0, cls._claude_default_catalog_payload())
-        return models
+        return [cls._catalog_model_payload(model) for model in agent.models]
 
     def backend_catalog_models(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -4242,25 +4199,10 @@ class ModelHubService:
             raise ModelHubError("mapping_target_unavailable")
         if not isinstance(payload, list):
             raise ModelHubError("backend_model_catalog_invalid")
-        default_indices = [
-            index
-            for index, item in enumerate(payload)
-            if isinstance(item, dict) and item.get("id") == "default"
-        ]
-        if backend == "claude":
-            if (
-                default_indices != [0]
-                or payload[0] != cls._claude_default_catalog_payload()
-            ):
-                raise ModelHubError("backend_model_locked", status=409)
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
-            if (
-                backend == "claude"
-                and isinstance(item, dict)
-                and item.get("id") == "default"
-            ):
-                continue
+            if backend == "claude" and isinstance(item, dict) and item.get("id") == "default":
+                raise ModelHubError("backend_model_id_invalid")
             try:
                 model = ModelHubBackendModelConfig.from_payload(item)
             except (TypeError, ValueError) as exc:
@@ -5152,6 +5094,8 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         model_id: str,
         backend: str,
+        *,
+        output_tokens: int = 1,
     ) -> ModelHubRequest:
         # A probe enters the same translation seam as a live backend turn, so
         # its payload must be shaped in the backend's client protocol.
@@ -5159,22 +5103,159 @@ class ModelHubService:
         if request_protocol == "anthropic":
             payload = {
                 "model": model_id,
-                "max_tokens": 1,
+                "max_tokens": output_tokens,
                 "messages": [{"role": "user", "content": "ping"}],
             }
         elif request_protocol == "openai_responses":
             payload = {
                 "model": model_id,
-                "max_output_tokens": 1,
+                "max_output_tokens": output_tokens,
                 "input": "ping",
             }
         else:
             payload = {
                 "model": model_id,
-                "max_tokens": 1,
+                "max_tokens": output_tokens,
                 "messages": [{"role": "user", "content": "ping"}],
             }
         return ModelHubRequest(payload, protocol=request_protocol)
+
+    async def probe_source(self, source_id: str, payload: object) -> dict:
+        """Test one saved API-key model, independently of Agent route/health."""
+        if not isinstance(payload, dict) or set(payload) != {"model"}:
+            raise ModelHubError("discovery_failed")
+        model_id = payload["model"]
+        # This selects an existing inventory identity, not a newly admitted ID.
+        # Legacy persisted IDs remain testable even beyond today's input bound.
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ModelHubError("discovery_failed")
+        model_id = normalized_model_id(model_id)
+
+        def selected(config: ModelHubConfig) -> ModelHubSourceConfig:
+            source = self._source(config, source_id)
+            if (
+                source.kind != "api_key"
+                or source.supply_channel != "hub"
+                or not source.credential_ref
+                or not any(model.id == model_id and not model.retired for model in source.models)
+            ):
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            return source
+
+        handle = None
+        outcome = None
+        source = None
+        admitted_at = None
+
+        async def invoke_selected() -> None:
+            nonlocal source, handle, outcome, admitted_at
+            # Bound local waiting too, but never call it a model failure before
+            # the adapter has actually admitted this Source/model invocation.
+            async with self._mutation_lock:
+                selected(self.store.load())
+            while True:
+                await self._prepare_engine_for_demand()
+                await self._mutation_lock.acquire()
+                held = True
+
+                def release_owner() -> None:
+                    nonlocal held
+                    if held:
+                        held = False
+                        self._mutation_lock.release()
+
+                def admitted() -> None:
+                    nonlocal admitted_at
+                    admitted_at = time.monotonic()
+                    release_owner()
+
+                try:
+                    source = ModelHubSourceConfig.from_payload(
+                        selected(self.store.load()).to_payload(),
+                    )
+                    if not self._engine_synced:
+                        continue
+                    # OpenCode preserves the request's explicit protocol and
+                    # API keys have unrestricted origins. No Agent resolver
+                    # is involved: the adapter binds this exact Source.
+                    handle = await self._engine_call(self.adapter.invoke(
+                        source.id,
+                        model_id,
+                        self._probe_request(source, model_id, "opencode", output_tokens=128),
+                        False,
+                        "opencode",
+                        on_admitted=admitted,
+                    ))
+                    break
+                finally:
+                    release_owner()
+            if admitted_at is None:
+                raise ModelHubError("engine_down", status=503)
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+            outcome = await self._engine_call(handle.outcome())
+
+        async def settle_attempt() -> None:
+            try:
+                if source is not None and outcome is not None:
+                    await self._verify_successful_source(
+                        source.id, source.credential_ref, source.verification_pending, outcome,
+                    )
+            finally:
+                if handle is not None:
+                    try:
+                        await handle.close_stream()
+                    finally:
+                        await self._meter_call(
+                            source_id=source_id, model_id=model_id,
+                            outcome=outcome, observed=handle.observed,
+                        )
+
+        try:
+            await asyncio.wait_for(invoke_selected(), timeout=_SOURCE_PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if admitted_at is None:
+                raise ModelHubError("engine_down", status=503) from None
+            outcome = RawCallOutcome(
+                kind=RawOutcomeKind.TIMEOUT,
+                http_status=None,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id=model_id,
+                source_id=source_id,
+            )
+        finally:
+            elapsed_ms = max(0, round((time.monotonic() - admitted_at) * 1000)) if admitted_at is not None else 0
+            # A known outcome belongs to the attempt even if its caller leaves.
+            # Drain finite settlement before propagating caller cancellation.
+            settlement_task = asyncio.create_task(settle_attempt())
+            try:
+                await asyncio.shield(settlement_task)
+            except asyncio.CancelledError as cancelled:
+                try:
+                    await await_owned_task(settlement_task)
+                except BaseException:
+                    # Cancellation owns the response, not resource settlement.
+                    pass
+                raise cancelled
+        assert source is not None and outcome is not None
+        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
+        # Classify for display only. A selected model failure cannot block other
+        # models on this Source, refresh credentials, or modify route state.
+        decision = classify_outcome(outcome)
+        if decision.action == "refresh":
+            decision = ResolutionDecision("fallback", reason="credential_revoked")
+        error = None if succeeded else self._probe_failure(outcome, decision)[0]
+        return {
+            "source_id": source.id,
+            "model_id": model_id,
+            "protocol": source.protocol,
+            "reachable": succeeded,
+            "latency_ms": elapsed_ms,
+            "error": error,
+        }
 
     @staticmethod
     def _probe_failure(
@@ -6750,72 +6831,6 @@ class ModelHubService:
             )
         return ResolutionDecision("fallback", reason="credential_revoked")
 
-    @staticmethod
-    def _request_for_exact_reasoning_effort(
-        request: Mapping[str, Any],
-        source: ModelHubSourceConfig,
-        model_id: str,
-    ) -> ExactReasoningEffortRequest:
-        model = next((item for item in source.models if item.id == model_id), None)
-        declared = tuple(model.reasoning_efforts) if model is not None else ()
-        supported = set(declared)
-
-        payload = dict(request)
-        changed = False
-        stripped: list[str] = []
-
-        def note_stripped(value: object) -> None:
-            safe_value = _bounded_reasoning_effort_telemetry(value)
-            if safe_value not in stripped:
-                stripped.append(safe_value)
-
-        direct = payload.get("reasoning_effort")
-        if "reasoning_effort" in payload and not (
-            isinstance(direct, str) and direct in supported
-        ):
-            payload.pop("reasoning_effort")
-            changed = True
-            note_stripped(direct)
-        reasoning = payload.get("reasoning")
-        nested = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
-        if (
-            isinstance(reasoning, Mapping)
-            and "effort" in reasoning
-            and not (isinstance(nested, str) and nested in supported)
-        ):
-            filtered_reasoning = dict(reasoning)
-            filtered_reasoning.pop("effort")
-            if filtered_reasoning:
-                payload["reasoning"] = filtered_reasoning
-            else:
-                payload.pop("reasoning")
-            changed = True
-            note_stripped(nested)
-        if not changed:
-            return ExactReasoningEffortRequest(request=request)
-        if isinstance(request, ModelHubRequest):
-            filtered_request: Mapping[str, Any] = ModelHubRequest(
-                payload,
-                protocol=request.protocol,
-                headers=request.headers,
-            )
-        else:
-            filtered_request = payload
-        safe_declared = _bounded_declared_effort_telemetry(declared)
-        logger.info(
-            "Stripped undeclared Model Hub reasoning effort(s) %s for source %s "
-            "model %s; declared tiers: %s",
-            stripped,
-            source.id,
-            model_id,
-            list(safe_declared),
-        )
-        return ExactReasoningEffortRequest(
-            request=filtered_request,
-            stripped_efforts=tuple(stripped),
-            declared_efforts=safe_declared,
-        )
-
     async def resolve(
         self,
         *,
@@ -6893,12 +6908,6 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
-            exact_reasoning_request = self._request_for_exact_reasoning_effort(
-                request,
-                source,
-                target_model,
-            )
-            exact_request = exact_reasoning_request.request
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -6932,15 +6941,15 @@ class ModelHubService:
                         False,
                         None,
                         None,
-                        exact_reasoning_request.stripped_efforts,
-                        exact_reasoning_request.declared_efforts,
+                        (),
+                        (),
                     )
 
             try:
                 handle, outcome, cancelled = await self._invoke(
                     source=source,
                     model_id=target_model,
-                    request=exact_request,
+                    request=request,
                     stream=stream,
                     backend=backend,
                     requested_model_id=model_id,
@@ -6992,7 +7001,7 @@ class ModelHubService:
                     handle, outcome, cancelled = await self._invoke(
                         source=source,
                         model_id=target_model,
-                        request=exact_request,
+                        request=request,
                         stream=stream,
                         backend=backend,
                         requested_model_id=model_id,

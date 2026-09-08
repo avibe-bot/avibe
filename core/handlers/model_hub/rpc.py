@@ -81,6 +81,8 @@ async def dispatch_model_hub_rpc(
         return await service.observe_source(payload.get("observation"))
     if operation == "create_source":
         return await service.create_source(payload.get("source"))
+    if operation == "probe_source":
+        return await service.probe_source(payload.get("source_id"), payload.get("probe"))
     if operation == "patch_source":
         return await service.patch_source(payload.get("source_id"), payload.get("patch"))
     if operation == "replace_credential":

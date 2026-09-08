@@ -342,11 +342,7 @@ export const BackendModelCatalogDialog: React.FC<{
    *  as settled, so pressing Save again has to stay possible. */
   const retryable = editable && saveFailedKey !== null;
   const filtering = query.trim() !== '';
-  const displayLabel = (model: BackendModel): string => (
-    backend === 'claude' && model.id === 'default' && model.locked && !model.routeable
-      ? t('settings.models.gateway.catalog.systemDefault') as string
-      : model.display_name ?? model.id
-  );
+  const displayLabel = (model: BackendModel): string => model.display_name ?? model.id;
   /**
    * The rows on screen.
    *

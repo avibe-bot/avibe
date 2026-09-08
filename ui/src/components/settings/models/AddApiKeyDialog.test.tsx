@@ -16,24 +16,10 @@ import type {
   TrackSourceMutation,
 } from './mutationSettlement';
 import {
-  CONTRACT_VERSION,
-  SOURCE_DISPLAY_NAME_MAX_LENGTH,
   type RouteHopRef,
   type Source,
-  type SourceObservation,
   type SupplyGap,
 } from './types';
-
-const observed = (patch: Partial<SourceObservation> = {}): SourceObservation => ({
-  contract_version: CONTRACT_VERSION,
-  outcome: 'observed',
-  reachable: true,
-  authenticated: 'authenticated',
-  protocol: 'openai_chat',
-  discovery: 'succeeded',
-  models: ['model-a', 'model-b'],
-  ...patch,
-});
 
 const source: Source = {
   id: 'src_new',
@@ -134,9 +120,7 @@ const renderReplacement = (
   return { onClose, settlement };
 };
 
-const DETECT = /^Detect$|^检测$/;
-const CONFIRM = /Confirm & add|确认添加/;
-const RETRY = /^Retry$|^重试$/i;
+const CONFIRM = /Add provider|添加供应商/;
 
 const fillCredentials = async () => {
   const user = userEvent.setup();
@@ -149,7 +133,6 @@ const fillCredentials = async () => {
  *  continues with whichever vendor is currently chosen. */
 const vendorField = () => screen.getByRole('combobox', { name: /^(Vendor|服务商)(\s|$)/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
-const disclosure = () => screen.queryByRole('button', { name: /Manually specify interface type|手动指定接口类型/i });
 
 /** A catalog row read from the shipped file, so the case does not restate an id,
  *  a URL, or a pin that the backend owns. Chosen by protocol rather than by name:
@@ -181,14 +164,6 @@ const selectVendor = async (user: ReturnType<typeof userEvent.setup>, id: string
   await user.click(await screen.findByRole('option', { name: vendorOptionName(id) }));
 };
 
-const openManualProtocol = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(screen.getByRole('button', { name: /Manually specify interface type|手动指定接口类型/i }));
-};
-
-const clickDetect = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(screen.getByRole('button', { name: DETECT }));
-};
-
 const clickConfirm = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(await screen.findByRole('button', { name: CONFIRM }));
 };
@@ -211,233 +186,69 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('AddApiKeyDialog', () => {
-  it('saves only a selected interface as unverified without observing', async () => {
+describe('AddApiKeyDialog · save reconciliation', () => {
+  it('saves directly with a visible protocol and never performs automatic detection', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
-      source: { ...source, verification_pending: 'vp_0123456789abcdef0123456789abcdef' }, added_to: [], adopted_by: [],
+      source, added_to: [], adopted_by: [],
     });
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
-    expect(screen.queryByRole('button', { name: 'Save unverified' })).toBeNull();
-    await openManualProtocol(user);
-    await user.click(screen.getByRole('button', { name: 'OpenAI Chat Completions' }));
-    await user.click(screen.getByRole('button', { name: 'Save unverified' }));
-    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'OpenAI Chat Completions' }).getAttribute('aria-pressed')).toBe('true');
+    await clickConfirm(user);
+    await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
       protocol: 'openai_chat', save_unverified: true, key: 'secret-key',
     }));
     expect(observe).not.toHaveBeenCalled();
   });
 
-  it('retains unverified consent and nonce while reconciling an unknown write', async () => {
-    const create = vi.spyOn(modelsApi, 'createApiKeySource')
-      .mockRejectedValueOnce(new Error('Connection interrupted'))
-      .mockResolvedValue({ source: { ...source, verification_pending: 'vp_0123456789abcdef0123456789abcdef' }, added_to: [], adopted_by: [] });
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+  it.each(API_KEY_VENDOR_PRESETS)('saves $id with its catalog protocol without a connectivity gate', async (entry) => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
-    const { onAdded } = renderDialog();
-    const user = await fillCredentials();
-    await selectVendor(user, preset('openai_chat').id);
-    await user.click(screen.getByRole('button', { name: 'Save unverified' }));
-    await user.click(await screen.findByRole('button', { name: RETRY }));
-    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
-    expect(create).toHaveBeenCalledTimes(2);
-    expect(create.mock.calls[1][0]).toEqual(create.mock.calls[0][0]);
-    expect(create.mock.calls[1][0].save_unverified).toBe(true);
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source, added_to: [], adopted_by: [],
+    });
+    renderDialog();
+    const user = userEvent.setup();
+    await selectVendor(user, entry.id);
+    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).toMatchObject({
+      vendor: entry.id, protocol: entry.protocol, base_url: entry.official_base_url, save_unverified: true,
+    });
     expect(observe).not.toHaveBeenCalled();
   });
 
-  it('detects without persisting, names the protocol, and drops the report when credentials change', async () => {
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+  it('lets the user choose a custom protocol and keeps validation failures editable', async () => {
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValueOnce(new ApiCallError('discovery_failed', undefined, true, [], [], [], 400))
+      .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
+    renderDialog();
+    const user = await fillCredentials();
+    await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
+    await clickConfirm(user);
+    await screen.findByRole('button', { name: /^Retry$/ });
+    await user.type(baseUrlInput(), '/changed');
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls[1][0]).toMatchObject({
+      protocol: 'anthropic', base_url: 'https://relay.example/v1/changed', save_unverified: true,
+    });
+  });
+
+  it('does not submit missing credentials or an overlong display name', async () => {
     const create = vi.spyOn(modelsApi, 'createApiKeySource');
     renderDialog();
+    expect(screen.getByRole('button', { name: CONFIRM }).hasAttribute('disabled')).toBe(true);
     const user = await fillCredentials();
-
-    await clickDetect(user);
-    expect(await screen.findByText(/OpenAI Chat Completions/)).toBeTruthy();
-    expect(screen.getByText(/Fetched 2 models|拉到 2 个模型/i)).toBeTruthy();
-    expect(screen.queryByText('model-a')).toBeNull();
-    expect(screen.getByRole('button', { name: CONFIRM })).toBeTruthy();
+    await user.type(screen.getByRole('textbox', { name: /Name|名称/i }), 'n'.repeat(65));
+    expect(screen.getByRole('button', { name: CONFIRM }).hasAttribute('disabled')).toBe(true);
     expect(create).not.toHaveBeenCalled();
-
-    await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/changed');
-    expect(screen.queryByText(/Fetched 2 models|拉到 2 个模型/i)).toBeNull();
-    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
-  });
-
-  it('puts protocol-family glyphs on concrete interface names and never on Auto detect', async () => {
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(
-      observed({ protocol: 'anthropic' }),
-    );
-    renderDialog();
-    expect(screen.getByText(/Identified automatically once Base URL and API key are filled|填好 Base URL 和 API Key 后自动识别/)).toBeTruthy();
-    const user = await fillCredentials();
-    await openManualProtocol(user);
-
-    expect(screen.getByRole('button', { name: /Auto detect|自动探测/i }).querySelector('svg')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Anthropic Messages' }).querySelector('svg')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'OpenAI Responses' }).querySelector('svg')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'OpenAI Chat Completions' }).querySelector('svg')).toBeTruthy();
-
-    await clickDetect(user);
-    await waitFor(() => {
-      const identified = document.querySelector('.model-hub-add-key-strip--success');
-      expect(identified?.textContent).toMatch(/Anthropic Messages/);
-      expect(identified?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
-    });
-  });
-
-  it('sends one manually selected interface on the first observation and create', async () => {
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
-      .mockResolvedValueOnce(observed({ protocol: 'openai_responses' }));
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
-      source,
-      added_to: [],
-      adopted_by: [],
-    });
-    renderDialog();
-    const user = await fillCredentials();
-
-    await openManualProtocol(user);
-    expect(screen.getByRole('button', { name: /Auto detect|自动探测/i }).getAttribute('aria-pressed')).toBe('true');
-    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(observe.mock.calls[0][0].protocol).toBe('openai_responses');
-    expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
-  });
-
-  it('turns an ambiguous auto-detection into one exact manual retry, then confirms', async () => {
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
-      .mockResolvedValueOnce(observed({
-        outcome: 'ambiguous',
-        authenticated: 'unknown',
-        protocol: null,
-        discovery: 'not_attempted',
-        models: [],
-      }))
-      .mockResolvedValueOnce(observed({ protocol: 'openai_responses' }));
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
-      source,
-      added_to: [],
-      adopted_by: [],
-    });
-    const { onAdded } = renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
-    expect((retry as HTMLButtonElement).disabled).toBe(true);
-    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
-    await user.click(retry);
-
-    expect(await screen.findByRole('button', { name: CONFIRM })).toBeTruthy();
-    expect(create).not.toHaveBeenCalled();
-    await clickConfirm(user);
-
-    await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    const secondObservation = observe.mock.calls[1][0];
-    expect(secondObservation.protocol).toBe('openai_responses');
-    expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
-    expect(onAdded).toHaveBeenCalledWith({ source, added_to: [], adopted_by: [] });
-  });
-
-  it('retries the complete observation from inventory failure and persists only through Add anyway', async () => {
-    const inventory = observed({ discovery: 'failed', models: [] });
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(inventory);
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
-      source,
-      added_to: [],
-      adopted_by: [],
-    });
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await screen.findByRole('button', { name: /Add anyway|仍要添加/i });
-    await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
-    await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
-    expect(create).not.toHaveBeenCalled();
-    expect(screen.queryByText(/The list could not be read|清单没能读出来/i)).toBeNull();
-
-    await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
-    await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(create.mock.calls[0][0].protocol).toBe('openai_chat');
-    expect(create.mock.calls[0][0].accept_unavailable_inventory).toBe(true);
-  });
-
-  it('adopts the new observation result when inventory retry moves to interface undetermined', async () => {
-    const inventory = observed({ discovery: 'failed', models: [] });
-    const ambiguous = observed({
-      outcome: 'ambiguous',
-      authenticated: 'unknown',
-      protocol: null,
-      discovery: 'not_attempted',
-      models: [],
-    });
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
-      .mockResolvedValueOnce(inventory)
-      .mockResolvedValueOnce(ambiguous);
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await screen.findByRole('button', { name: /Add anyway|仍要添加/i });
-    await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
-
-    await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(i18n.t('settings.models.addKey.undetermined.title'))).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Add anyway|仍要添加/i })).toBeNull();
-  });
-
-  it('preserves unavailable-inventory consent across lost-response reconciliation', async () => {
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(
-      observed({ discovery: 'failed', models: [] }),
-    );
-    const create = vi.spyOn(modelsApi, 'createApiKeySource')
-      .mockRejectedValueOnce(new TypeError('response lost'))
-      .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
-    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
-
-    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
-    expect(create.mock.calls.map(([draft]) => draft.accept_unavailable_inventory)).toEqual([
-      true,
-      true,
-    ]);
-    expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
-  });
-
-  it('aborts an in-flight detect and returns to the form without dismissing', async () => {
-    let wasAborted = false;
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockImplementation((_draft, signal) => new Promise((_resolve, reject) => {
-      signal?.addEventListener('abort', () => {
-        wasAborted = true;
-        reject(new DOMException('aborted', 'AbortError'));
-      }, { once: true });
-    }));
-    const { onClose } = renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
-
-    expect(wasAborted).toBe(true);
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
   });
 
   it('reconciles a lost source-create response by nonce without posting twice', async () => {
     let nonce: string | undefined;
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockImplementationOnce(async (draft) => {
       nonce = draft.client_nonce;
       throw new TypeError('response lost');
@@ -450,7 +261,6 @@ describe('AddApiKeyDialog', () => {
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
 
-    await clickDetect(user);
     await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
@@ -461,7 +271,6 @@ describe('AddApiKeyDialog', () => {
   });
 
   it('retries source creation only after the nonce is confirmed absent', async () => {
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
     const create = vi.spyOn(modelsApi, 'createApiKeySource')
       .mockRejectedValueOnce(new TypeError('response lost'))
       .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
@@ -469,7 +278,6 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await clickDetect(user);
     await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
@@ -480,13 +288,11 @@ describe('AddApiKeyDialog', () => {
 
   it('cannot create or navigate after cancelling a pending lost-response reconciliation', async () => {
     const pendingInventory = deferred<Source[]>();
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValueOnce(new TypeError('response lost'));
     vi.spyOn(modelsApi, 'listSources').mockReturnValueOnce(pendingInventory.promise);
     const { onAdded, onClose } = renderDialog();
     const user = await fillCredentials();
 
-    await clickDetect(user);
     await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
@@ -501,7 +307,6 @@ describe('AddApiKeyDialog', () => {
   it('cannot replay a reconciled Source after the dialog attempt is cancelled', async () => {
     const pendingInventory = deferred<Source[]>();
     let nonce: string | undefined;
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
     vi.spyOn(modelsApi, 'createApiKeySource').mockImplementationOnce(async (draft) => {
       nonce = draft.client_nonce;
       throw new TypeError('response lost');
@@ -510,7 +315,6 @@ describe('AddApiKeyDialog', () => {
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
 
-    await clickDetect(user);
     await clickConfirm(user);
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
@@ -520,248 +324,9 @@ describe('AddApiKeyDialog', () => {
     expect(onAdded).not.toHaveBeenCalled();
   });
 
-  it('rejects a trimmed blank or overlong display name before observation', async () => {
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
-    renderDialog();
-    const user = await fillCredentials();
-    const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
-    const detect = screen.getByRole('button', { name: DETECT }) as HTMLButtonElement;
+});
 
-    await user.type(name, '   ');
-    expect(detect.disabled).toBe(true);
-    await user.clear(name);
-    await user.type(name, 'x'.repeat(SOURCE_DISPLAY_NAME_MAX_LENGTH + 1));
-    expect(detect.disabled).toBe(true);
-    await user.click(detect);
-    expect(observe).not.toHaveBeenCalled();
-  });
-
-  it('counts supplementary display-name characters as JSON Schema code points', async () => {
-    renderDialog();
-    const user = await fillCredentials();
-    const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
-    const detect = screen.getByRole('button', { name: DETECT }) as HTMLButtonElement;
-
-    await user.type(name, '😀'.repeat(SOURCE_DISPLAY_NAME_MAX_LENGTH));
-    expect(detect.disabled).toBe(false);
-    await user.type(name, '😀');
-    expect(detect.disabled).toBe(true);
-  });
-
-  it('keeps a server-named create validation failure editable and out of save reconciliation', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input) === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
-      return Response.json({ ok: false, error: 'invalid_source', detail: 'modelHub.errors.discovery_failed' }, { status: 422 });
-    }));
-    let validationError: unknown;
-    try {
-      await modelsApi.createApiKeySource({ kind: 'api_key', vendor: 'custom', base_url: 'https://relay.example/v1', key: 'secret-key' });
-    } catch (error) {
-      validationError = error;
-    }
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(validationError);
-    const list = vi.spyOn(modelsApi, 'listSources');
-    renderDialog();
-    const user = await fillCredentials();
-    const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
-    await user.type(name, 'Relay');
-
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    expect(await screen.findByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeTruthy();
-    expect(screen.queryByText('modelHub.errors.discovery_failed')).toBeNull();
-    expect((name as HTMLInputElement).disabled).toBe(false);
-    expect(screen.queryByText(/not confirmed saved|确认.*保存/i)).toBeNull();
-    expect(list).not.toHaveBeenCalled();
-    await user.clear(name);
-    await user.type(name, 'Fixed relay');
-    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
-    expect(create).toHaveBeenCalledOnce();
-  });
-
-  it('retires the evidence of every exit that would persist without observing again', async () => {
-    // One rule, stated over how a state exits rather than over which states exist:
-    // ①″'s report and the protocol a server-named refusal still holds were each
-    // proved against this endpoint, this credential and this probe constraint, so
-    // changing any of those three ends both. Every combination is driven through
-    // the UI so neither arm can quietly become its own special case.
-    type Act = (user: ReturnType<typeof userEvent.setup>) => Promise<void>;
-    const exits: Act[] = [
-      async (user) => {
-        await clickDetect(user);
-        await screen.findByRole('button', { name: CONFIRM });
-      },
-      async (user) => {
-        await clickDetect(user);
-        await clickConfirm(user);
-        await screen.findByRole('button', { name: RETRY });
-      },
-    ];
-    const connectionEdits: Act[] = [
-      async (user) => { await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/v2'); },
-      async (user) => { await user.type(screen.getByLabelText(/^API key$/i), 'x'); },
-      async (user) => {
-        await openManualProtocol(user);
-        await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
-      },
-    ];
-
-    for (const reachExit of exits) {
-      for (const edit of connectionEdits) {
-        vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
-        const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(
-          new ApiCallError('invalid_source', 'modelHub.errors.discovery_failed', true, [], [], [], 422),
-        );
-        renderDialog();
-        const user = await fillCredentials();
-        await reachExit(user);
-        const persistedBefore = create.mock.calls.length;
-
-        await edit(user);
-
-        expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
-        expect(screen.queryByRole('button', { name: CONFIRM })).toBeNull();
-        expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
-        expect(create.mock.calls.length).toBe(persistedBefore);
-
-        cleanup();
-        vi.restoreAllMocks();
-      }
-    }
-  });
-
-  it('keeps a state whose own primary re-observes across the same edit', async () => {
-    // The counterpart of the rule above, and the reason it is written over exits:
-    // ④'s 重试 reads the fields as they now stand, so naming an interface there is
-    // how the user answers it — not evidence to retire.
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed({
-      outcome: 'ambiguous',
-      authenticated: 'unknown',
-      protocol: null,
-      discovery: 'not_attempted',
-      models: [],
-    }));
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await user.click(await screen.findByRole('button', { name: 'Anthropic Messages' }));
-
-    expect(screen.getByRole('button', { name: RETRY })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: DETECT })).toBeNull();
-  });
-
-  it('names the interface Detect will send while the disclosure is closed', async () => {
-    // The collapsed row and the expanded selector are one selection rendered two
-    // ways, so the row states the active constraint rather than the default it
-    // replaced, and the promise of automatic identification goes with it.
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
-    renderDialog();
-    const user = await fillCredentials();
-    const autoRow = document.querySelector('.model-hub-add-key-protocol-active');
-    expect(autoRow?.textContent).toMatch(/Auto detect|自动探测/);
-    expect(autoRow?.querySelector('.model-hub-add-key-protocol-glyph')).toBeNull();
-
-    await openManualProtocol(user);
-    expect(document.querySelector('.model-hub-add-key-protocol-active')).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
-    await openManualProtocol(user);
-
-    const chosenRow = document.querySelector('.model-hub-add-key-protocol-active');
-    expect(chosenRow?.textContent).toMatch(/Anthropic Messages/);
-    expect(chosenRow?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
-    expect(screen.queryByText(i18n.t('settings.models.addKey.protocol.idleHint'))).toBeNull();
-
-    await clickDetect(user);
-    await screen.findByRole('button', { name: CONFIRM });
-    expect(observe.mock.calls[0][0].protocol).toBe('anthropic');
-  });
-
-  it('renders the safe observation cause when create rejects after probing', async () => {
-    const failure = new ApiCallError(
-      'discovery_failed',
-      'modelHub.errors.discovery_failed',
-      true,
-      [],
-      [],
-      [],
-      422,
-      observed({
-        outcome: 'authentication_failed',
-        authenticated: 'rejected',
-        protocol: null,
-        discovery: 'not_attempted',
-        models: [],
-      }),
-    );
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
-    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    expect(await screen.findByText(i18n.t('settings.models.addKey.fail.auth'))).toBeTruthy();
-    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
-  });
-
-  it('re-enters the classified observation state when create rejects with inventory evidence', async () => {
-    const failure = new ApiCallError(
-      'discovery_failed',
-      'modelHub.errors.discovery_failed',
-      true,
-      [],
-      [],
-      [],
-      422,
-      observed({ discovery: 'failed', models: [] }),
-    );
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
-    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    expect(await screen.findByText(/model list did not come back|没拿到它的模型清单/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Add anyway|仍要添加/i })).toBeTruthy();
-    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
-  });
-
-  it('re-enters the classified observation state when create rejects with ambiguous evidence', async () => {
-    const failure = new ApiCallError(
-      'discovery_failed',
-      'modelHub.errors.discovery_failed',
-      true,
-      [],
-      [],
-      [],
-      422,
-      observed({
-        outcome: 'ambiguous',
-        reachable: true,
-        authenticated: 'authenticated',
-        protocol: null,
-        discovery: 'not_attempted',
-        models: [],
-      }),
-    );
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
-    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    expect(await screen.findByText(i18n.t('settings.models.addKey.undetermined.title'))).toBeTruthy();
-    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
-  });
-
+describe('AddApiKeyDialog · replacement', () => {
   it('reaches the credential PUT with only the trimmed key', async () => {
     const requests: Array<{ input: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1072,33 +637,7 @@ describe('AddApiKeyDialog', () => {
   );
 });
 
-// The vendor dropdown is the ladder's rung selector. A catalog row makes the
-// interface a fact this dialog READS — from the same shipped file the server
-// pins by — so detection only has to authenticate; 自定义 leaves the two rungs
-// that still ask, the response's shape or the user's word.
-describe('AddApiKeyDialog · vendor', () => {
-  it('sends custom with nothing pinned when the vendor is left on 自定义', async () => {
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
-      source,
-      added_to: [],
-      adopted_by: [],
-    });
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(observe.mock.calls[0][0].vendor).toBe('custom');
-    expect(observe.mock.calls[0][0].protocol).toBeUndefined();
-    expect(create.mock.calls[0][0].vendor).toBe('custom');
-  });
-
-  // A vendor is recognised by its mark before its name is read, so the mark has
-  // to be on the row AND on the field that shows what was chosen — the second is
-  // the half a `<select>` could never carry.
+describe('AddApiKeyDialog · vendor accessibility', () => {
   it('puts a mark on every row and on the field once a vendor is chosen', async () => {
     const entry = preset('anthropic');
     renderDialog();
@@ -1214,129 +753,4 @@ describe('AddApiKeyDialog · vendor', () => {
     expect(screen.getByText(/No vendor by that name|没有同名的服务商/)).toBeTruthy();
   });
 
-  it('prefills the official address and sends the catalog id with its pinned interface', async () => {
-    const entry = preset('openai_chat');
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
-      .mockResolvedValueOnce(observed({ protocol: entry.protocol }));
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
-      source,
-      added_to: [],
-      adopted_by: [],
-    });
-    renderDialog();
-    const user = userEvent.setup();
-
-    await selectVendor(user, entry.id);
-    expect(baseUrlInput().value).toBe(entry.official_base_url);
-    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(observe.mock.calls[0][0]).toMatchObject({ vendor: entry.id, protocol: entry.protocol });
-    expect(create.mock.calls[0][0]).toMatchObject({ vendor: entry.id, protocol: entry.protocol });
-  });
-
-  it('states the pinned interface as a fact and offers no way to choose another', async () => {
-    const entry = preset('anthropic');
-    renderDialog();
-    const user = userEvent.setup();
-
-    await selectVendor(user, entry.id);
-
-    const row = document.querySelector('.model-hub-add-key-protocol-idle-row');
-    expect(row?.textContent).toMatch(/Anthropic Messages/);
-    expect(row?.querySelector('.model-hub-add-key-protocol-glyph')).toBeTruthy();
-    expect(row?.textContent).toMatch(/Built-in catalog/);
-    expect(disclosure()).toBeNull();
-    expect(screen.queryByRole('button', { name: 'OpenAI Responses' })).toBeNull();
-  });
-
-  it('puts the pin’s explanation under the interface it explains, not beside it', async () => {
-    // The statement and the sentence about it are two lines: the hint is the
-    // longer text, so beside the glyph it wrapped around the very name it is
-    // about. Asserted structurally, because "on the next line" is a fact about
-    // which element the hint is a child of, not about its text.
-    const entry = preset('anthropic');
-    renderDialog();
-    const user = userEvent.setup();
-
-    await selectVendor(user, entry.id);
-
-    const row = document.querySelector('.model-hub-add-key-protocol-idle-row');
-    const statement = row?.querySelector('.model-hub-add-key-protocol-idle-line');
-    const hint = row?.querySelector('.model-hub-add-key-hint');
-    expect(statement?.textContent).toMatch(/Anthropic Messages/);
-    expect(statement?.textContent).toMatch(/Built-in catalog/);
-    expect(hint?.textContent).toBe(i18n.t('settings.models.addKey.protocol.catalogPinned.hint'));
-    // A sibling of the statement's line, not a child of it.
-    expect(hint?.parentElement).toBe(row);
-    expect(statement?.contains(hint ?? null)).toBe(false);
-  });
-
-  it('retires an observation taken under the previous vendor', async () => {
-    const entry = preset('openai_chat');
-    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
-    renderDialog();
-    const user = await fillCredentials();
-
-    await clickDetect(user);
-    expect(await screen.findByRole('button', { name: CONFIRM })).toBeTruthy();
-
-    await selectVendor(user, entry.id);
-
-    expect(screen.queryByRole('button', { name: CONFIRM })).toBeNull();
-    expect(screen.getByRole('button', { name: DETECT })).toBeTruthy();
-    expect(baseUrlInput().value).toBe(entry.official_base_url);
-  });
-
-  it('keeps the pin when a preset is pointed at another address', async () => {
-    const entry = preset('openai_chat');
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
-      .mockResolvedValueOnce(observed({ protocol: entry.protocol }));
-    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
-      source,
-      added_to: [],
-      adopted_by: [],
-    });
-    renderDialog();
-    const user = userEvent.setup();
-
-    await selectVendor(user, entry.id);
-    await user.clear(baseUrlInput());
-    await user.type(baseUrlInput(), 'https://relay.example/v1');
-    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
-
-    // A gateway in front of a catalog vendor is still that vendor: the address
-    // is the one thing the preset only proposes.
-    expect(document.querySelector('.model-hub-add-key-protocol-idle-row')?.textContent)
-      .toMatch(/Built-in catalog/);
-    expect(disclosure()).toBeNull();
-
-    await clickDetect(user);
-    await clickConfirm(user);
-
-    await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(observe.mock.calls[0][0]).toMatchObject({
-      vendor: entry.id,
-      base_url: 'https://relay.example/v1',
-      protocol: entry.protocol,
-    });
-    expect(create.mock.calls[0][0]).toMatchObject({
-      vendor: entry.id,
-      base_url: 'https://relay.example/v1',
-    });
-  });
-
-  it('gives the address and the interface choice back on the way to 自定义', async () => {
-    const entry = preset('openai_chat');
-    renderDialog();
-    const user = userEvent.setup();
-
-    await selectVendor(user, entry.id);
-    await selectVendor(user, 'custom');
-
-    expect(baseUrlInput().value).toBe('');
-    expect(disclosure()).not.toBeNull();
-  });
 });

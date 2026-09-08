@@ -137,15 +137,15 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('2 models')).toBeTruthy();
   });
 
-  it('localizes the server-owned Claude default row instead of rendering backend copy', async () => {
+  it('renders Claude models without inventing a native default choice', async () => {
     await i18n.changeLanguage('zh');
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([
-      model('default', { display_name: null, locked: true, routeable: false }),
+      model('claude-fixture', { display_name: 'Fixture model' }),
     ]));
     renderDialog();
 
-    expect(await screen.findByText('Claude Code 默认模型')).toBeTruthy();
-    expect(screen.getByText('default')).toBeTruthy();
+    expect(await screen.findByText('Fixture model')).toBeTruthy();
+    expect(screen.queryByText('Claude Code 默认模型')).toBeNull();
     expect(screen.queryByText('Default')).toBeNull();
     expect(screen.getByLabelText('搜索名称或模型 ID')).toBeTruthy();
   });

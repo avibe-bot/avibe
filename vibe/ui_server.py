@@ -4491,6 +4491,17 @@ async def model_hub_sources_patch(source_id):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/sources/<source_id>/probe", methods=["POST"])
+async def model_hub_source_probe(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().probe_source(source_id, _model_hub_json_object())
+        return _model_hub_success(probe=result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/sources/<source_id>/credential", methods=["PUT"])
 async def model_hub_source_credential_put(source_id):
     from core.handlers.model_hub import ModelHubError
@@ -8120,7 +8131,7 @@ async def backend_opencode_providers():
 
     Fans out to the live OpenCode daemon's ``/provider``, ``/provider/auth``,
     and ``/config/providers`` endpoints and merges them into a list of
-    ``{id, name, configured, oauth_available, local, models, default_model}``.
+    ``{id, name, configured, oauth_available, local, models}``.
     """
     from vibe import api
 
