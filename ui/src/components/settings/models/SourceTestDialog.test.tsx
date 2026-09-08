@@ -5,9 +5,10 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { modelsApi } from './modelsApi';
-import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import type { SourceMutationLanding, SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import { readyRegion, unreadRegion } from './regionRead';
 import { SourceTestDialog } from './SourceTestDialog';
-import type { Source, SourceProbeResult } from './types';
+import { CONTRACT_VERSION, type Source, type SourceProbeResult } from './types';
 
 const source: Source = {
   id: 'src_test0001', kind: 'api_key', vendor: 'custom', display_name: 'My relay',
@@ -22,8 +23,18 @@ const answer = (patch: Partial<SourceProbeResult> = {}): SourceProbeResult => ({
   source_id: source.id, model_id: 'gpt-5.6-luna', protocol: source.protocol,
   reachable: true, latency_ms: 123, error: null, ...patch,
 });
+const landing = (sources: Source[] = [source]): SourceMutationLanding => ({
+  verdict: 'landed', affectedChains: [], reads: {
+    sources: readyRegion(sources), supply: readyRegion([]), chains: readyRegion({}),
+    runtime: readyRegion({
+      contract_version: CONTRACT_VERSION,
+      manifest: { name: 'cliproxyapi', resolution: 'unresolved', assets: [] },
+      status: { verified: false, health: 'not_started' },
+    }),
+  },
+});
 const settlement = {
-  unread: vi.fn().mockResolvedValue({ verdict: 'degraded', reads: null, affectedChains: [] }),
+  unread: vi.fn(),
   gone: vi.fn().mockResolvedValue({ verdict: 'degraded', reads: null, affectedChains: [] }),
 } as unknown as SourceMutationSettlement;
 const track: TrackSourceMutation = (work) => work(source, settlement);
@@ -32,6 +43,7 @@ const view = (current = source) => <I18nextProvider i18n={i18n}>
 </I18nextProvider>;
 
 beforeEach(async () => {
+  vi.mocked(settlement.unread).mockReset().mockResolvedValue(landing());
   await i18n.changeLanguage('en');
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   Element.prototype.scrollIntoView = vi.fn();
@@ -80,6 +92,88 @@ describe('SourceTestDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
     expect((await screen.findByRole('alert')).textContent).toContain('Your provider is still saved');
     expect(screen.getByRole('combobox').textContent).toContain('gpt-5.6-luna');
+    expect(settlement.unread).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])('publishes no verdict before reconciliation completes: reachable=%s', async (reachable) => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
+    let resolve!: (value: SourceMutationLanding) => void;
+    vi.mocked(settlement.unread).mockReturnValue(new Promise((done) => { resolve = done; }));
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await waitFor(() => expect(settlement.unread).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    resolve(landing());
+    expect((await screen.findByRole('status')).textContent).toContain('gpt-5.6-luna');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it.each([true, false])('does not retry or publish a verdict after rejected reconciliation: reachable=%s', async (reachable) => {
+    const probe = vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
+    vi.mocked(settlement.unread).mockRejectedValue(new Error('Source list unavailable'));
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(settlement.unread).toHaveBeenCalledTimes(1);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['unread', 'stale', 'deleted', 'credential', 'marker', 'base_url', 'protocol', 'model'])('requires a current matching Source after reconciliation: %s', async (change) => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    const current = { ...source };
+    if (change === 'credential') current.credential_ref = 'cred_replacement';
+    if (change === 'marker') current.verification_pending = 'vp_replacement';
+    if (change === 'base_url') current.base_url = 'https://other.example/v1';
+    if (change === 'protocol') current.protocol = 'anthropic';
+    if (change === 'model') current.models = [];
+    const result = landing(change === 'deleted' ? [] : [current]);
+    if (change === 'unread') result.reads!.sources = unreadRegion();
+    if (change === 'stale') result.verdict = 'degraded';
+    vi.mocked(settlement.unread).mockResolvedValue(result);
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(settlement.unread).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts reconciliation that clears the tested credential marker', async () => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    vi.mocked(settlement.unread).mockResolvedValue(landing([{ ...source, verification_pending: null }]));
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByText(/responded successfully/);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('invalidates a reconciliation result when the dialog identity changes while it waits', async () => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    let resolve!: (value: SourceMutationLanding) => void;
+    vi.mocked(settlement.unread).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const rendered = render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await waitFor(() => expect(settlement.unread).toHaveBeenCalledTimes(1));
+    rendered.rerender(view({ ...source, credential_ref: 'cred_new', verification_pending: 'vp_new' }));
+    resolve(landing());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run test' }).hasAttribute('disabled')).toBe(false));
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('replaces an unconfirmed status only after a new explicit test settles', async () => {
+    const probe = vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    vi.mocked(settlement.unread).mockRejectedValueOnce(new Error('unavailable'));
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByRole('alert');
+    expect(probe).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByText(/responded successfully/);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(settlement.unread).toHaveBeenCalledTimes(2);
   });
 
   it.each(['remove', 'retire', 'empty'])('clears a completed result when inventory changes selection: %s', async (change) => {

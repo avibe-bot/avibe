@@ -5272,6 +5272,22 @@ class ModelHubService:
                     pass
             outcome = await self._engine_call(handle.outcome())
 
+        async def settle_attempt() -> None:
+            try:
+                if source is not None and outcome is not None:
+                    await self._verify_successful_source(
+                        source.id, source.credential_ref, source.verification_pending, outcome,
+                    )
+            finally:
+                if handle is not None:
+                    try:
+                        await handle.close_stream()
+                    finally:
+                        await self._meter_call(
+                            source_id=source_id, model_id=model_id,
+                            outcome=outcome, observed=handle.observed,
+                        )
+
         try:
             await asyncio.wait_for(invoke_selected(), timeout=_SOURCE_PROBE_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
@@ -5288,18 +5304,20 @@ class ModelHubService:
             )
         finally:
             elapsed_ms = max(0, round((time.monotonic() - admitted_at) * 1000)) if admitted_at is not None else 0
-            if handle is not None:
-                await handle.close_stream()
-                await self._meter_call(
-                    source_id=source_id, model_id=model_id,
-                    outcome=outcome, observed=handle.observed,
-                )
+            # A known outcome belongs to the attempt even if its caller leaves.
+            # Drain finite settlement before propagating caller cancellation.
+            settlement_task = asyncio.create_task(settle_attempt())
+            try:
+                await asyncio.shield(settlement_task)
+            except asyncio.CancelledError as cancelled:
+                try:
+                    await await_owned_task(settlement_task)
+                except BaseException:
+                    # Cancellation owns the response, not resource settlement.
+                    pass
+                raise cancelled
         assert source is not None and outcome is not None
         succeeded = outcome.kind is RawOutcomeKind.SUCCESS
-        if succeeded:
-            await self._verify_successful_source(
-                source.id, source.credential_ref, source.verification_pending, outcome,
-            )
         # Classify for display only. A selected model failure cannot block other
         # models on this Source, refresh credentials, or modify route state.
         decision = classify_outcome(outcome)

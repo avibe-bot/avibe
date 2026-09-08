@@ -299,6 +299,77 @@ def test_pre_admission_timeout_is_a_request_failure_not_a_model_result(tmp_path,
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("phase", ["verification", "close", "meter"])
+@pytest.mark.parametrize("change", ["unchanged", "delete", "replace", "same_handle"])
+def test_known_success_settles_once_despite_cancellation(tmp_path, phase, change):
+    service, store, adapter = _service(tmp_path)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_invoke, original_verify = adapter.invoke, service._verify_successful_source
+        steps = []
+
+        async def barrier(step):
+            steps.append(step)
+            if step == phase:
+                entered.set()
+                await release.wait()
+
+        async def verify(*args):
+            await barrier("verification")
+            await original_verify(*args)
+
+        async def close():
+            await barrier("close")
+
+        async def meter(**kwargs):
+            await barrier("meter")
+
+        async def invoke(*args, **kwargs):
+            handle = await original_invoke(*args, **kwargs)
+            handle.close_stream = AsyncMock(side_effect=close)
+            return handle
+
+        adapter.invoke = AsyncMock(side_effect=invoke)
+        service._verify_successful_source = AsyncMock(side_effect=verify)
+        service._meter_call = AsyncMock(side_effect=meter)
+        task = asyncio.create_task(service.probe_source(source["id"], {"model": source["models"][0]["id"]}))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        current = store.config.sources[0]
+        if change == "delete":
+            store.config.sources.clear()
+        elif change != "unchanged":
+            if change == "replace":
+                current.credential_ref = "cred_replacement"
+            service._mark_source_unverified(current)
+        pending = current.verification_pending
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        still_settling = not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert still_settling
+        assert steps == ["verification", "close", "meter"]
+        adapter.invoke.assert_awaited_once()
+        service._verify_successful_source.assert_awaited_once()
+        service._meter_call.assert_awaited_once()
+        assert service._meter_call.call_args.kwargs["outcome"].kind is RawOutcomeKind.SUCCESS
+        assert not service._mutation_lock.locked()
+        if change == "delete":
+            assert not store.config.sources
+        elif change == "unchanged":
+            assert store.config.sources[0].verification_pending is None
+        else:
+            assert store.config.sources[0].verification_pending == pending
+            assert pending is not None
+
+    asyncio.run(scenario())
+
+
 def test_unadmitted_engine_handle_is_not_presented_as_a_model_failure(tmp_path):
     service, store, adapter = _service(tmp_path)
 

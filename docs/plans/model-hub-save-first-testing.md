@@ -44,6 +44,13 @@ not subscription OAuth admission or credential replacement.
 - Displayed results belong to the current effective selection and credential
   identity. Inventory-driven selection changes clear completed results and
   invalidate late results; unrelated inventory updates preserve them.
+  Publish a result only after the mutation owner reconciles a current matching
+  Source/model. Rejected, unread or stale reconciliation produces an unconfirmed
+  status, never a model verdict or an automatic second read.
+- A known invocation outcome owns finite verification, cleanup and metering
+  settlement through caller cancellation. Verify the matching credential before
+  cleanup, drain settlement exactly once, then propagate cancellation to the
+  caller. Cancellation before a known success cannot verify a credential.
 - Source deletion/credential replacement during a test cannot resurrect a
   Source, overwrite current configuration, or verify a replacement credential.
 

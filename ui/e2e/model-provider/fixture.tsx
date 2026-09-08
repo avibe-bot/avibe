@@ -11,8 +11,8 @@ import { AddApiKeyDialog } from '../../src/components/settings/models/AddApiKeyD
 import { SourceDetailPanel } from '../../src/components/settings/models/SourceDetailPanel';
 import { createSourceCollectionReadAuthority } from '../../src/components/settings/models/collectionReadAuthority';
 import { modelsApi } from '../../src/components/settings/models/modelsApi';
-import type { TrackSourceMutation } from '../../src/components/settings/models/mutationSettlement';
-import type { Source } from '../../src/components/settings/models/types';
+import { readSurfaceLanding, sourceMutationLanding, type TrackSourceMutation } from '../../src/components/settings/models/mutationSettlement';
+import { CONTRACT_VERSION, type Source } from '../../src/components/settings/models/types';
 
 const params = new URLSearchParams(location.search);
 const language = createInstance();
@@ -54,13 +54,37 @@ const sourceReads = createSourceCollectionReadAuthority(modelsApi);
 export function Fixture() {
   const [open, setOpen] = useState(false);
   const [source, setSource] = useState(saved);
-  const trackMutation: TrackSourceMutation = async (work) => work(saved, {
-    source: async (next) => { setSource(next); return { verdict: 'degraded', reads: null, affectedChains: [] }; },
-    unread: async () => { setSource(saved); return { verdict: 'degraded', reads: null, affectedChains: [] }; },
-    gone: async () => ({ verdict: 'degraded', reads: null, affectedChains: [] }),
-    readInventory: async () => ({ sources: [saved], snapshot: 1 }),
-    release: () => {},
-  });
+  const [callLog, setCallLog] = useState<string[]>([]);
+  const reconcile = async () => {
+    const reads = await readSurfaceLanding({
+      sources: async () => {
+        if (params.get('reconcile') === 'failed') throw new Error('Fixture Source read unavailable');
+        return modelsApi.listSources();
+      },
+      supply: async () => [],
+      runtime: async () => ({
+        contract_version: CONTRACT_VERSION,
+        manifest: { name: 'cliproxyapi', resolution: 'unresolved', assets: [] },
+        status: { verified: false, health: 'not_started' },
+      }),
+      chains: async () => ({}),
+    }, []);
+    if (reads.sources.kind === 'ready') setSource(saved);
+    return sourceMutationLanding(reads, [], true);
+  };
+  const trackMutation: TrackSourceMutation = async (work) => {
+    try {
+      return await work(saved, {
+        source: async (next) => { setSource(next); return reconcile(); },
+        unread: reconcile,
+        gone: async () => ({ verdict: 'degraded', reads: null, affectedChains: [] }),
+        readInventory: async () => ({ sources: [saved], snapshot: 1 }),
+        release: () => {},
+      });
+    } finally {
+      setCallLog([...calls]);
+    }
+  };
   return <I18nextProvider i18n={language}>
     <main className="mx-auto flex h-dvh w-full max-w-[720px] flex-col bg-surface">
       <Button onClick={() => setOpen(true)}>Add provider fixture</Button>
@@ -68,7 +92,7 @@ export function Fixture() {
         onMutationCommitted={async (commit) => { await commit.settle(); }} />
       <AddApiKeyDialog open={open} sourceReads={sourceReads} onClose={() => setOpen(false)}
         onAdded={(created) => setSource(created.source)} />
-      <output hidden data-testid="calls">{JSON.stringify(calls)}</output>
+      <output hidden data-testid="calls">{JSON.stringify(callLog)}</output>
     </main>
   </I18nextProvider>;
 }

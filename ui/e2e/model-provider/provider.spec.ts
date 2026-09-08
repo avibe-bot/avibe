@@ -31,4 +31,17 @@ for (const lang of ['en', 'zh'] as const) {
     await page.screenshot({ path: info.outputPath('inventory.png') });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
+
+  test('unread Source reconciliation cannot publish a model verdict: ' + lang, async ({ page }, info) => {
+    const text = (key: string) => hub(key, undefined, lang);
+    await page.route('**/api/**', (route) => route.abort());
+    await page.goto('/e2e/model-provider/fixture.html?reconcile=failed&lang=' + lang);
+    await page.getByRole('button', { name: text('sourceTest.open'), exact: true }).click();
+    await page.getByRole('button', { name: text('sourceTest.run'), exact: true }).click();
+    await expect(page.getByRole('alert')).toHaveText(text('sourceTest.requestFailed'));
+    await expect(page.getByRole('status')).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath('unconfirmed-result.png') });
+    expect(await page.getByTestId('calls').textContent()).toBe('["test:src_fixture001/gpt-5.6-luna"]');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
 }
