@@ -59,6 +59,7 @@ import ast
 import hashlib
 import itertools
 import json
+import operator
 import re
 import sqlite3
 import string
@@ -822,6 +823,7 @@ SQL_QUOTED_IDENTIFIER = r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]'
 SQL_IDENTIFIER_CHARS = r'A-Za-z_0-9$\x80-\U0010ffff'
 SQL_FLAGS = re.IGNORECASE | re.ASCII
 SQL_WHITESPACE = " \t\n\r\f"
+SQL_IDENTIFIER_CASE = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 SQL_IDENTIFIER = rf'(?:{SQL_QUOTED_IDENTIFIER}|(?<![{SQL_IDENTIFIER_CHARS}])(?!\ufeff)[A-Za-z_\x80-\U0010ffff][{SQL_IDENTIFIER_CHARS}]*)'
 # These scalar-function results have no column affinity for unary '+' to erase.
 SQL_UNARY_PLUS = r'(?:\+\s*)*'
@@ -998,7 +1000,7 @@ def check_expression(ddl: str, name: str) -> str:
 
 def identifier_key(value: str) -> str:
     """SQLite folds ASCII identifier case, not Unicode or JSON member names."""
-    return value.translate(str.maketrans(string.ascii_uppercase, string.ascii_lowercase))
+    return value.translate(SQL_IDENTIFIER_CASE)
 
 
 def bounded_integer(literal: str, lower: int, upper: int) -> int | None:
@@ -1295,9 +1297,34 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
     truth = r'(?:1|true)' if "true" not in names else '1'
     is_true = r'is\s+true' if "true" not in names else r'(?!)'
     not_false = r'|is\s+not\s+false' if "false" not in names else ''
-    pending = [expression]
+    zero = r'[+-]?(?:0+(?:\.0*)?|\.0+)'
+    if "false" not in names:
+        zero = rf'(?:{zero}|false)'
+    inequality = r'(?:<>|!=|is\s+not)\s*'
+    nonzero = rf'{inequality}{zero}'
+    reverse_truth = rf'(?:{truth}{EQUALITY}|{zero}\s*{inequality})'
+    positive_suffix = rf'(?:{EQUALITY}{truth}{not_false}|{nonzero})'
+
+    def transparent(before: str, after: str) -> bool:
+        # Only recognized wrapper syntax reaches this constant probe. Keep its
+        # complete composition: BLOB('0') <> 0 accepts false, whereas a direct
+        # BLOB truth CAST rejects it. Do not approximate affinity in Python.
+        probe = sqlite3.connect(":memory:")
+        try:
+            statement = f"select coalesce(cast(({before}?{after}) as numeric), 1) != 0"
+            return [probe.execute(statement, (value,)).fetchone()[0] for value in (0, 1)] == [0, 1]
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            probe.close()
+
+    pending = [(expression, "", "", False)]
     while pending:
-        term = pending.pop().strip(SQL_WHITESPACE)
+        term, before, after, verify = pending.pop()
+        start = len(term) - len(term.lstrip(SQL_WHITESPACE))
+        end = len(term.rstrip(SQL_WHITESPACE))
+        before, after = before + term[:start], term[end:] + after
+        term = term[start:end]
         active = sql_projection(term)
         depth = case_depth = 0
         cuts = []
@@ -1335,55 +1362,57 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
                 else:
                     cuts.append((token.start(), token.end()))
         if cuts:
+            if verify and not transparent(before, after):
+                yield before + term + after
+                continue
             edges = [0, *(end for _, end in cuts)]
             ends = [*(start for start, _ in cuts), len(term)]
-            pending.extend(reversed([term[start:end] for start, end in zip(edges, ends)]))
+            pending.extend(reversed([(term[start:end], "", "", False) for start, end in zip(edges, ends)]))
         else:
             inner = None
             if outer_start is not None and outer_end is not None:
                 prefix = sql_projection(term[:outer_start], identifiers=True).strip(SQL_WHITESPACE)
                 suffix = sql_projection(term[outer_end:], literals=True, identifiers=True).strip(SQL_WHITESPACE)
-                body = term[outer_start + 1:outer_end - 1]
+                body = (outer_start + 1, outer_end - 1)
                 # These operators wrap the whole parenthesized operand (or hint).
                 # Never strip '+' from an operand of an equality: it removes affinity.
                 unary = re.match(rf'(?:(?:[+-]|not(?![{SQL_IDENTIFIER_CHARS}]))\s*)*', prefix, SQL_FLAGS)
                 negations = len(re.findall('not', unary.group(), SQL_FLAGS))
                 operand = prefix[unary.end():]
                 boolean_suffix = re.fullmatch(
-                    rf'(?:{is_true}{not_false})', suffix, SQL_FLAGS,
+                    rf'(?:{is_true}{not_false}|{nonzero})', suffix, SQL_FLAGS,
                 )
                 whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood", "cast"}
                 if whole_operand and negations % 2 == 0 and (not suffix or (
                     not negations and ("-" not in unary.group() or boolean_suffix)
                 )):
                     prefix = operand
-                if not prefix and (not suffix or re.fullmatch(
-                    rf'(?:{EQUALITY}{truth}{not_false})', suffix, SQL_FLAGS
-                )):
+                verify = verify or bool(re.fullmatch(nonzero, suffix, SQL_FLAGS)
+                                        or re.match(rf'{zero}\s*{inequality}', prefix, SQL_FLAGS))
+                if not prefix and (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)):
                     inner = body
-                elif not suffix and re.fullmatch(rf'{truth}{EQUALITY}', prefix, SQL_FLAGS):
+                elif not suffix and re.fullmatch(reverse_truth, prefix, SQL_FLAGS):
                     inner = body
-                elif not suffix and identifier_key(unquote_identifier(prefix)) in {"likely", "unlikely"} and not commas:
+                elif (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)) and identifier_key(unquote_identifier(prefix)) in {"likely", "unlikely"} and not commas:
                     inner = body
-                elif not suffix and identifier_key(unquote_identifier(prefix)) == "likelihood" and len(commas) == 1:
+                elif (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)) and identifier_key(unquote_identifier(prefix)) == "likelihood" and len(commas) == 1:
                     probability = sql_projection(term[commas[0] + 1:outer_end - 1]).strip(SQL_WHITESPACE)
                     if re.fullmatch(r'(?:0(?:\.\d*)?|1(?:\.0*)?|\.\d+)', probability, SQL_FLAGS):
-                        inner = term[outer_start + 1:commas[0]]
+                        inner = (outer_start + 1, commas[0])
                 elif cast_as is not None and (
                     (prefix.lower() == "cast" and (not suffix or re.fullmatch(
-                        rf'(?:{EQUALITY}{truth}{not_false})', suffix, SQL_FLAGS
+                        positive_suffix, suffix, SQL_FLAGS
                     )))
-                    or (not suffix and re.fullmatch(rf'{truth}{EQUALITY}cast', prefix, SQL_FLAGS))
+                    or (not suffix and re.fullmatch(rf'{reverse_truth}cast', prefix, SQL_FLAGS))
                 ):
                     target = sql_projection(term[cast_as[1]:outer_end - 1], literals=True, identifiers=True)
-                    if sqlite_affinity(target.strip(SQL_WHITESPACE)) in {"INTEGER", "REAL", "NUMERIC"}:
-                        # A whole numeric truth CAST exposes required predicates,
-                        # not a converted operand of an arbitrary comparison.
-                        inner = term[outer_start + 1:cast_as[0]]
+                    verify = verify or sqlite_affinity(target.strip(SQL_WHITESPACE)) in {"TEXT", "BLOB"}
+                    inner = (outer_start + 1, cast_as[0])
             if inner is None:
-                yield term
+                yield term if not verify or transparent(before, after) else before + term + after
             else:
-                pending.append(inner)
+                start, end = inner
+                pending.append((term[start:end], before + term[:start], term[end:] + after, verify))
 
 
 def column_equality_groups(
@@ -1687,30 +1716,31 @@ def numeric_domains(
     """Rank finite domains by local predicates; the complete CHECK still decides."""
     identifier = f'({SQL_IDENTIFIER})'
     literal = f"({SQL_INTEGER})"
-    operator = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
+    comparison = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
     predicates: dict[str, list[tuple[str, int]]] = defaultdict(list)
-    clauses = [match.groups() for match in sql_matches(identifier + operator + literal, expression)]
+    clauses = [match.groups() for match in sql_matches(identifier + comparison + literal, expression)]
     reverse = {"<": ">", ">": "<", "<=": ">=", ">=": "<=", "=": "=", "==": "==", "!=": "!=", "<>": "<>"}
     clauses.extend((name, reverse[op], token) for token, op, name in (
-        match.groups() for match in sql_matches(literal + operator + identifier, expression)
+        match.groups() for match in sql_matches(literal + comparison + identifier, expression)
     ))
     for name, op, token in clauses:
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None:
             predicates[identifier_key(unquote_identifier(name))].append((op, bound))
 
-    def score(name: str, value: object) -> int:
-        if not isinstance(value, (int, float)):
-            return -len(predicates[identifier_key(name)])
-        return sum(
-            {"=": value == bound, "==": value == bound, "!=": value != bound, "<>": value != bound,
-             "<": value < bound, ">": value > bound, "<=": value <= bound, ">=": value >= bound}[op]
-            for op, bound in predicates[identifier_key(name)]
-        )
+    comparisons = {"=": operator.eq, "==": operator.eq, "!=": operator.ne, "<>": operator.ne,
+                   "<": operator.lt, ">": operator.gt, "<=": operator.le, ">=": operator.ge}
 
-    return [
-        sorted(dict.fromkeys([values[name], *candidates]), key=lambda value: -score(name, value))
-        for name in numeric
-    ]
+    def score(terms: list, value: object) -> int:
+        if not isinstance(value, (int, float)):
+            return -len(terms)
+        return sum(compare(value, bound) for compare, bound in terms)
+
+    domains = []
+    for name in numeric:
+        terms = [(comparisons[op], bound) for op, bound in predicates[identifier_key(name)]]
+        domain = list(dict.fromkeys([values[name], *candidates]))
+        domains.append(sorted(domain, key=lambda value: -score(terms, value)) if terms else domain)
+    return domains
 
 
 def moved_row(base: dict[str, object], step: int, *, held: str | None) -> dict[str, object]:
@@ -1941,7 +1971,7 @@ def restore_repeat(
         name: value if value is None or name == column or name in references else varied(value, RESTORE_STEP)
         for name, value in zip(names, survivor)
     }
-    objection, settled = insert_seed_row(connection, table, ddl, offered, row)
+    objection, settled = insert_seed_row(connection, table, ddl, offered, row, held=(column,))
     if not objection or column in references:
         return objection, settled
     optional = {
@@ -1950,7 +1980,7 @@ def restore_repeat(
         if not (info[3] or info[5]) and str(info[1]) in references
     }
     emptied = {name: None if name in optional else value for name, value in row.items()}
-    return insert_seed_row(connection, table, ddl, offered, emptied)
+    return insert_seed_row(connection, table, ddl, offered, emptied, held=(column,))
 
 
 def insert_seed_row(
@@ -1959,6 +1989,8 @@ def insert_seed_row(
     ddl: str,
     required: list[tuple[str, str]],
     values: dict[str, object],
+    *,
+    held: Iterable[str] = (),
 ) -> tuple[str, bool]:
     """Insert ``values`` into ``table``, repairing what the schema objects to.
 
@@ -2006,14 +2038,17 @@ def insert_seed_row(
             omitted.append((str(info[1]), str(info[2]), info[4]))
     context_columns = [*names, *(name for name, _, _ in omitted), *unavailable]
     prefix_sources = {identifier_key(other) for _, _, _, other in substring_requirements(text_constraints, context_columns)}
+    json_sources = {identifier_key(unquote_identifier(match.group(2)))
+                    for match in sql_matches(JSON_TERM, text_constraints)}
     strict = is_strict_table(connection, table)
     def row_identity(row: dict[str, object]) -> tuple:
         return tuple((name, type(row[name]), row[name]) for name in names)
 
     proposed: set[tuple] = set()
+    fixed = {name: values[name] for name in held}
 
     def unseen(assignment: SeedAssignment) -> bool:
-        return row_identity({**values, **dict(assignment)}) not in proposed
+        return row_identity({**values, **dict(assignment), **fixed}) not in proposed
 
     source_progress: dict[str, tuple[int, list[int]]] = {}
     objection = ""
@@ -2037,7 +2072,25 @@ def insert_seed_row(
                 strict=strict,
             )
             derived = tuple(shaped.derived)
-            untried = [derived] if derived and unseen(derived) else []
+            documents = json_proposals(
+                connection, expression, names, text_constraints=text_constraints, context_columns=context_columns,
+            )
+            # Only malformed inputs need priority over candidates that can enable
+            # their evaluation. Valid documents retain the semantic source order:
+            # a missing-path alternative must not displace an already-valid one.
+            invalid_documents = {
+                name for name in names if identifier_key(name) in json_sources
+                and not connection.execute("select json_valid(?)", (values[name],)).fetchone()[0]
+            } if documents else set()
+            untried = next((
+                [assignment] for assignment in documents if unseen(assignment) and any(
+                    name in invalid_documents
+                    and connection.execute("select json_valid(?)", (value,)).fetchone()[0]
+                    for name, value in assignment
+                )
+            ), [])
+            if not untried:
+                untried = [derived] if derived and unseen(derived) else []
             if not untried:
                 # Required prefix sources may be defined by another CHECK. Keep
                 # their existing proposals in the semantic turn, not behind a
@@ -2051,7 +2104,7 @@ def insert_seed_row(
                 sources = [
                     shaped.numeric_fallback,
                     [*((pair,) for pair in check_proposals(expression, names, context_columns=context_columns)), *shaped.semantic_fallback,
-                     *json_proposals(connection, expression, names, text_constraints=text_constraints, context_columns=context_columns),
+                     *documents,
                      *((pair,) for pair in related_proposals)],
                 ]
                 # Finish each source's forward pass before either wraps. Otherwise
@@ -2076,6 +2129,9 @@ def insert_seed_row(
             if not untried:
                 return objection, True
             values.update(untried[0])
+            # A repeat offer fixes its held value, not every other cell in a
+            # proposed row. Deduplication above sees this same atomic assignment.
+            values.update(fixed)
         else:
             return "", True
     return f"{SEED_ATTEMPTS} attempts did not produce a row the schema accepts; last was {objection}", False
@@ -2177,7 +2233,10 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             # construction and still has to be seeded.
             strict = is_strict_table(connection, table)
             base = {column: representative_value(column, declared, strict=strict) for column, declared in every}
-            objection, settled = insert_seed_row(connection, table, ddl, every, dict(base))
+            maximal = dict(base)
+            objection, settled = insert_seed_row(connection, table, ddl, every, maximal)
+            if not objection:
+                base = maximal
             offered = every
             if objection:
                 refused[f"{table}, every column at once"] = objection
@@ -2192,7 +2251,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             steps = 0
             for steps, column in enumerate(() if objection else base, start=1):
                 refusal, decided = insert_seed_row(
-                    connection, table, ddl, offered, moved_row(base, steps, held=column)
+                    connection, table, ddl, offered, moved_row(base, steps, held=column), held=(column,)
                 )
                 if not refusal:
                     repeated.append(column)
