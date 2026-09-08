@@ -816,13 +816,14 @@ JSON_VARIED_MEMBER = "__seed_step__"
 # `json_type(col,'$.p') = 'array'` both name the column, the path, and what belongs at it,
 # which is the same three things the plain literal form carries -- so both are read the
 # same way rather than treated as unseedable.
-JSON_REQUIREMENT = re.compile(
-    r"json_(extract|type)\s*\(\s*\"?(\w+)\"?\s*,\s*'([^']*)'\s*\)\s*(?:==|=|is)\s*"
-    r"('[^']*'|-?[0-9]+(?:\.[0-9]+)?)",
-    re.IGNORECASE,
-)
 SUBSTRING_TERM = r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
 EQUALITY = r'\s*(?:==|=(?!=)|\bis\b(?!\s+not\b))\s*'
+SQL_STRING = r"'(?:[^']|'')*'"
+JSON_TERM = r"\bjson_(extract|type)\s*\(\s*\"?(\w+)\"?\s*,\s*'((?:[^']|'')*)'\s*\)"
+JSON_REQUIREMENT = re.compile(JSON_TERM + EQUALITY + rf"({SQL_STRING}|-?[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+SQL_OPAQUE = re.compile(
+    SQL_STRING + r'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\n]*|/\*[\s\S]*?(?:\*/|$)'
+)
 
 # Every name SQLite's `json_type` can return, against the emptiest document member of that
 # type. A `json_type` clause states the type where the `json_extract` form states the
@@ -830,8 +831,8 @@ EQUALITY = r'\s*(?:==|=(?!=)|\bis\b(?!\s+not\b))\s*'
 # whether the result is admissible either way.
 JSON_TYPE_MEMBERS: dict[str, object] = {
     "null": None,
-    "true": 1,
-    "false": 0,
+    "true": "true",
+    "false": "false",
     "integer": 0,
     "real": 0.0,
     "text": "",
@@ -872,9 +873,32 @@ def is_strict_table(connection: sqlite3.Connection, table: str) -> bool:
     return any(row[5] for row in connection.execute(f'pragma main.table_list("{quoted}")'))
 
 
+def sql_projection(expression: str, *, literals: bool = False) -> str:
+    """An offset-preserving code view for the seeder's bounded expression grammar."""
+    def project(match: re.Match) -> str:
+        token = match.group()
+        if token.startswith("'") and literals:
+            return token
+        if token[0] in '\"`[':
+            identifier = token[1:-1]
+            if re.fullmatch(r"\w+", identifier):
+                return identifier.ljust(len(token))
+        return " " * len(token)
+    return SQL_OPAQUE.sub(project, expression)
+
+
+def sql_matches(pattern: str | re.Pattern, expression: str) -> Iterable[re.Match]:
+    """Allow literal operands without interpreting their contents as expressions."""
+    active = sql_projection(expression)
+    for match in re.finditer(pattern, sql_projection(expression, literals=True), 0 if isinstance(pattern, re.Pattern) else re.IGNORECASE):
+        if active[match.start():match.start() + 1].strip():
+            yield match
+
+
 def substring_requirements(expression: str) -> Iterable[tuple[str, str, str, str]]:
     """Normalize either operand order into (target, start, width, source)."""
     identifier = r'"?(\w+)"?'
+    expression = sql_projection(expression)
     yield from re.findall(SUBSTRING_TERM + EQUALITY + identifier, expression, re.IGNORECASE)
     for source, target, start, width in re.findall(identifier + EQUALITY + SUBSTRING_TERM, expression, re.IGNORECASE):
         yield target, start, width, source
@@ -908,15 +932,16 @@ def check_expression(ddl: str, name: str) -> str:
     """Constraint ``name``'s expression as ``ddl`` declares it, or ``''`` if it has none."""
     # SQLite stores the DDL as it was written, so the keywords are whatever case the
     # migration that created the table happened to use.
-    marker = re.search(rf'CONSTRAINT\s+"?{re.escape(name)}"?\s+CHECK\s*\(', ddl, re.IGNORECASE)
+    active = sql_projection(ddl)
+    marker = re.search(rf'CONSTRAINT\s+"?{re.escape(name)}"?\s+CHECK\s*\(', active, re.IGNORECASE)
     if marker is None:
         return ""
     depth = 1
     index = marker.end()
     for offset in range(index, len(ddl)):
-        if ddl[offset] == "(":
+        if active[offset] == "(":
             depth += 1
-        elif ddl[offset] == ")":
+        elif active[offset] == ")":
             depth -= 1
             if depth == 0:
                 return ddl[index:offset]
@@ -951,16 +976,20 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     """
     # Paths and member values already belong to semantic JSON proposals; offering
     # them to ordinary columns can overwrite an otherwise successful repair.
-    expression = JSON_REQUIREMENT.sub("", expression)
-    literals = re.findall(r"'([^']*)'", expression)
-    folded = identifier_key(expression)
+    parts = list(sql_projection(expression, literals=True))
+    for pattern in (JSON_REQUIREMENT, JSON_TERM):
+        for match in sql_matches(pattern, expression):
+            parts[match.start():match.end()] = " " * (match.end() - match.start())
+    expression = "".join(parts)
+    literals = [match.group()[1:-1].replace("''", "'") for match in re.finditer(SQL_STRING, expression)]
+    folded = identifier_key(sql_projection(expression))
     named = [column for column in columns if re.search(rf"\b{re.escape(identifier_key(column))}\b", folded)]
     return [(column, literal) for column in named for literal in literals]
 
 
 def json_proposals(
     connection: sqlite3.Connection, expression: str, columns: Iterable[str]
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, object]]:
     """``(column, document)`` pairs satisfying every JSON-path clause ``expression`` states.
 
     The document is built by SQLite's own ``json_set`` rather than assembled here, so the
@@ -970,7 +999,9 @@ def json_proposals(
     """
     wanted = {identifier_key(column): column for column in columns}
     required: dict[str, list[tuple[str, str, object]]] = {}
-    for function, column, path, literal in JSON_REQUIREMENT.findall(expression):
+    for match in sql_matches(JSON_REQUIREMENT, expression):
+        function, column, path, literal = match.groups()
+        path = path.replace("''", "'")
         column = wanted.get(identifier_key(column))
         if column is None:
             continue
@@ -979,12 +1010,11 @@ def json_proposals(
             if named not in JSON_TYPE_MEMBERS:
                 continue
             member = JSON_TYPE_MEMBERS[named]
-            # A composite has to be spliced in as a document; anything else is a scalar and
-            # would be stored as one whatever `json_set` is handed.
-            term = "json(?)" if named in {"array", "object"} else "?"
+            # JSON composites and booleans need their JSON type, not SQL text/integers.
+            term = "json(?)" if named in {"array", "object", "true", "false"} else "?"
             required.setdefault(column, []).append((path, term, member))
         elif literal.startswith("'"):
-            required.setdefault(column, []).append((path, "?", literal[1:-1]))
+            required.setdefault(column, []).append((path, "?", literal[1:-1].replace("''", "'")))
         else:
             required.setdefault(column, []).append((path, "json(?)", str(Decimal(literal))))
 
@@ -996,6 +1026,17 @@ def json_proposals(
             document = f"json_set({document}, ?, {term})"
             parameters.extend([path, value])
         proposals.append((column, str(connection.execute(f"select {document}", parameters).fetchone()[0])))
+    documents = dict(proposals)
+    identifier = r'"?(\w+)"?\b'
+    dependencies = [match.groups() for match in sql_matches(JSON_TERM + EQUALITY + identifier, expression)]
+    dependencies.extend((function, source, path, target) for target, function, source, path in (
+        match.groups() for match in sql_matches(identifier + EQUALITY + JSON_TERM, expression)
+    ))
+    for function, source, path, target in dependencies:
+        source, target = wanted.get(identifier_key(source)), wanted.get(identifier_key(target))
+        if source in documents and target is not None:
+            value = connection.execute(f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))).fetchone()[0]
+            proposals.append((target, value))
     return proposals
 
 
@@ -1127,27 +1168,27 @@ def shape_proposals(
     expressions still fail visibly; every proposed value must survive a real insert.
     """
     names = {identifier_key(name): name for name in values}
-    text = {name: value for name, value in values.items() if isinstance(value, str)}
+    text_eligible = {name for name, declared in required if not strict or declared.upper() in {"TEXT", "ANY"}}
+    text = {name: value for name, value in values.items() if name in text_eligible and isinstance(value, str)}
     widths = {}
     shapes = text_constraints if text_constraints is not None else expression
-    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', shapes, re.IGNORECASE):
+    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', sql_projection(shapes), re.IGNORECASE):
         name = names.get(identifier_key(name), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
-        if name in values and size is not None:
+        if name in text_eligible and size is not None:
             text.setdefault(name, "x")
             widths[name] = size
             text[name] = text[name][:size].ljust(size, "0")
-    globs = re.findall(
+    globs = (match.groups() for match in sql_matches(
         r"\b\"?(\w+)\"?\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
         shapes,
-        re.IGNORECASE,
-    )
+    ))
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
     alphabets: dict[str, str] = defaultdict(lambda: string.printable)
     for name, negated, quoted in globs:
         name = names.get(identifier_key(name), name)
-        if name in values:
+        if name in text_eligible:
             text.setdefault(name, "x")
             pattern = quoted.replace("''", "'")
             alphabets[name] += pattern
@@ -1166,23 +1207,28 @@ def shape_proposals(
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
-        if name in values and isinstance(text.get(other, values.get(other)), str) and position is not None and size is not None:
+        if name in text_eligible and isinstance(text.get(other, values.get(other)), str) and position is not None and size is not None:
             text.setdefault(name, "x")
             offset = position - 1
             source = text.get(other, str(values[other]))
             if len(source) == size:
                 text[name] = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
     proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
+    active = sql_projection(expression)
+    numeric_text = active + " " + " ".join(
+        match.group()[1:-1] for match in re.finditer(SQL_STRING, sql_projection(expression, literals=True))
+        if re.fullmatch(r"-?[0-9]+", match.group()[1:-1])
+    )
     bounds = {
         bound
-        for token in re.findall(r"(?<![\w.])-?[0-9]+(?![\w.])", expression)
+        for token in re.findall(r"(?<![\w.])-?[0-9]+(?![\w.])", numeric_text)
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None
     }
     numeric = [
         name for name, declared in required
         if (sqlite_affinity(declared, strict=strict) in {"INTEGER", "REAL", "NUMERIC"}
             or (strict and declared.upper() == "ANY"))
-        and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
+        and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(active))
     ]
     candidates = list(dict.fromkeys(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
@@ -1191,7 +1237,10 @@ def shape_proposals(
     fallback = [
         (name, candidate) for candidate in candidates for name in numeric if candidate != values[name]
     ]
-    if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)) for name in unavailable):
+    omitted, unavailable = tuple(omitted), tuple(unavailable)
+    declared_names = {identifier_key(name) for name, _ in required} | {identifier_key(name) for name, _, _ in omitted} | {identifier_key(name) for name in unavailable}
+    implicit = {"rowid", "_rowid_", "oid"} - declared_names
+    if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(active)) for name in (*unavailable, *implicit)):
         return ShapeProposals(proposals, fallback)
     if not numeric or not candidates:
         return ShapeProposals(proposals, [])
@@ -1207,7 +1256,6 @@ def shape_proposals(
     def declaration(name: str, declared: str) -> str:
         return quote(name) + (f' {quote(declared)}' if declared else '')
 
-    omitted = tuple(omitted)
     declarations = [declaration(name, declared) for name, declared in required]
     declarations.extend(
         declaration(name, declared) + (f' default ({default})' if default is not None else '')
@@ -1273,6 +1321,13 @@ def numeric_assignments(
 
     seen = {ranked}
     yield ranked
+    local = sparse(current)
+    # Every candidate-bearing column gets its initial sparse opportunity before
+    # family mixing can dilute it. Larger domains still obey the same total cap.
+    for assignment in itertools.islice(local, len(domains)):
+        if assignment not in seen:
+            seen.add(assignment)
+            yield assignment
     uniform = [tuple(candidate for _ in domains) for candidate in candidates]
 
     def interleave(*families):
@@ -1285,7 +1340,7 @@ def numeric_assignments(
     products = itertools.product(*domains)
     # Cartesian search gets two direct turns; local and anchor repairs get one
     # each. Nesting Cartesian behind anchors would dilute its finite budget.
-    for assignment in interleave(sparse(current), products, products, anchors):
+    for assignment in interleave(local, products, products, anchors):
         if assignment not in seen:
             seen.add(assignment)
             yield assignment
@@ -1299,9 +1354,11 @@ def numeric_domains(
     literal = r"(-?[0-9]+)(?![\w.])"
     operator = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
     predicates: dict[str, list[tuple[str, int]]] = defaultdict(list)
-    clauses = re.findall(identifier + operator + literal, expression)
+    clauses = [match.groups() for match in sql_matches(identifier + operator + literal, expression)]
     reverse = {"<": ">", ">": "<", "<=": ">=", ">=": "<=", "=": "=", "==": "==", "!=": "!=", "<>": "<>"}
-    clauses.extend((name, reverse[op], token) for token, op, name in re.findall(literal + operator + identifier, expression))
+    clauses.extend((name, reverse[op], token) for token, op, name in (
+        match.groups() for match in sql_matches(literal + operator + identifier, expression)
+    ))
     for name, op, token in clauses:
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None:
             predicates[identifier_key(name)].append((op, bound))
@@ -1598,7 +1655,7 @@ def insert_seed_row(
     # together so declaration order does not decide whether a prefix can be offered.
     constraints = [
         check_expression(ddl, name)
-        for name in re.findall(r'\bconstraint\s+"?(\w+)"?\s+check\s*\(', ddl, re.IGNORECASE)
+        for name in re.findall(r'\bconstraint\s+"?(\w+)"?\s+check\s*\(', sql_projection(ddl), re.IGNORECASE)
     ]
     text_constraints = "\n".join(constraints)
     omitted = []

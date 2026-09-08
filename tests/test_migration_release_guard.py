@@ -1024,6 +1024,149 @@ def test_numeric_candidates_use_the_column_affinity():
         assert ("n", -1) not in proposals
 
 
+@pytest.mark.parametrize("declared", ["INTEGER", "REAL"])
+@pytest.mark.parametrize("shape", ["length(n)=2", "n glob '[1-9][0-9]'", "substr(n,1,2)='10'"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_strict_numeric_shape_repairs_remain_storable(tmp_path, declared, shape, reverse):
+    if declared == "REAL":
+        shape = shape.replace("length(n)=2", "length(n)=4").replace("'[1-9][0-9]'", "'[1-9][0-9].0'")
+    clauses = [shape, "n=10"]
+    if reverse:
+        clauses.reverse()
+    db_path = tmp_path / "strict-shape.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(n {declared} not null,constraint ck check({' and '.join(clauses)})) STRICT")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where n=10").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("changed", range(17))
+def test_initial_sparse_round_reaches_every_column_before_joint_search(changed):
+    required = [(f"n{i}", "INTEGER") for i in range(17)]
+    expression = '+'.join(f'(n{i}>0)' for i in range(17)) + f'=1 and abs(n{changed})>0'
+    with sqlite3.connect(":memory:") as connection:
+        assert guard.shape_proposals(connection, expression, required, dict.fromkeys((n for n, _ in required), 0)).derived == [(f"n{changed}", 1)]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("equality", ["=", "==", "IS"])
+@pytest.mark.parametrize("literal", ["'ready'", "'it''s ready'", "17", "1.5"])
+@pytest.mark.parametrize("declared", ["", "TEXT", "NUMERIC"])
+def test_json_extraction_dependencies_keep_member_values(tmp_path, reverse, equality, literal, declared):
+    dependency = f"state {equality} json_extract(doc,'$.x')"
+    if reverse:
+        dependency = f"json_extract(doc,'$.x') {equality} state"
+    db_path = tmp_path / "json-dependency.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(doc text not null,state {declared} not null,constraint ck check(json_valid(doc) and json_extract(doc,'$.x')={literal} and {dependency}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where state=json_extract(doc,'$.x')").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("alias", ["rowid", "_rowid_", "oid", '"ROWID"', '[oid]', '`_rowid_`'])
+def test_implicit_row_positions_are_decided_by_actual_insert(tmp_path, alias):
+    db_path = tmp_path / "row-position.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(n integer not null,constraint ck check(n>=1 and n={alias}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where n=rowid").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("alias", ["rowid", "_rowid_", "oid", "ROWID"])
+@pytest.mark.parametrize("omitted", [False, True])
+def test_declared_rowid_names_are_ordinary_candidate_context(alias, omitted):
+    required, values = [("n", "INTEGER")], {"n": 0}
+    defaults = []
+    if omitted:
+        defaults = [(alias, "INTEGER", "2")]
+    else:
+        required.append((alias, "INTEGER"))
+        values[alias] = 2
+    with sqlite3.connect(":memory:") as connection:
+        proposals = guard.shape_proposals(connection, f'n>0 and n="{alias}" and "{alias}"=2', required, values, omitted=defaults)
+        assert proposals.derived == [("n", 2)]
+        assert proposals.numeric_fallback == []
+
+
+@pytest.mark.parametrize("member_type", list(guard.JSON_TYPE_MEMBERS))
+@pytest.mark.parametrize("reverse", [False, True])
+def test_json_type_dependencies_use_sqlite_member_semantics(tmp_path, member_type, reverse):
+    dependency = "tag=json_type(doc,'$.x')" if not reverse else "json_type(doc,'$.x')=tag"
+    db_path = tmp_path / "json-type-dependency.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(doc text not null,tag text not null,constraint ck check(json_valid(doc) and json_type(doc,'$.x')='{member_type}' and {dependency}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where tag=json_type(doc,'$.x')").fetchone()[0] >= guard.SEED_ROWS
+
+
+@pytest.mark.parametrize("payload", [
+    "x=substr(email,5,1)", "substr(email,5,1)=x", "length(email)=2",
+    "email glob '[A-Z]*'", "json_extract(email,'$.x')='ready'", "n=9999",
+])
+@pytest.mark.parametrize("wrapper", ["/* {} */", "-- {}\n", "'{}'", '"{}"', '`{}`', '[{}]'])
+def test_candidate_extractors_share_opaque_sql_boundaries(payload, wrapper):
+    encoded = payload.replace("'", "''") if wrapper == "'{}'" else payload
+    expression = wrapper.format(encoded)
+    assert list(guard.substring_requirements(expression)) == []
+    assert list(guard.sql_matches(guard.JSON_REQUIREMENT, expression)) == []
+    with sqlite3.connect(":memory:") as connection:
+        proposals = guard.shape_proposals(connection, expression, [("email", "TEXT"), ("x", "TEXT"), ("n", "INTEGER")], {"email": "seed@example.invalid", "x": "x", "n": 0})
+        assert proposals.derived == []
+        assert proposals.numeric_fallback == []
+
+
+@pytest.mark.parametrize("literal", ["'(' || ')'", "'x)''('" , "'/* ) */ -- ('"])
+def test_check_body_boundaries_ignore_quoted_and_commented_parentheses(literal):
+    expression = f"length({literal})>0 /* ) */ and n>0 -- (\n"
+    ddl = f"create table shaped(n integer,constraint ck check({expression}))"
+    assert guard.check_expression(ddl, "ck") == expression
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        connection.execute("insert into shaped values(1)")
+
+
+@pytest.mark.parametrize("path", ["$.x", "$.it's"])
+def test_json_literals_keep_sql_comment_markers_and_expression_text(path):
+    value = "/* n=9999 */ -- length(email)=2; json_extract(email,'$.x')='bad'"
+    quoted_path, quoted_value = path.replace("'", "''"), value.replace("'", "''")
+    expression = f"json_extract(doc,'{quoted_path}')='{quoted_value}' and state=json_extract(doc,'{quoted_path}')"
+    with sqlite3.connect(":memory:") as connection:
+        proposals = dict(guard.json_proposals(connection, expression, ["doc", "state", "email"]))
+        assert set(proposals) == {"doc", "state"}
+        assert proposals["state"] == value
+        assert connection.execute("select json_extract(?,?)", (proposals["doc"], path)).fetchone()[0] == value
+
+
+@pytest.mark.parametrize("note", [
+    "1 /* x=substr(email_address,5,1) */",
+    "1 -- x=substr(email_address,5,1)\n",
+    "length('x=substr(email_address,5,1)')>0",
+    "length('quoted '' x=substr(email_address,5,1)')>0",
+])
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+def test_dependency_text_is_not_executable_sql(tmp_path, note, order):
+    clauses = ["constraint ck_email check(instr(email_address,'@')>1)", f"constraint ck_note check({note})", "constraint ck_state check(state='ready')"]
+    db_path = tmp_path / "opaque-sql.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(email_address text not null,x text not null,state text not null,{','.join(clauses[i] for i in order)})")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where instr(email_address,'@')>1 and state='ready'").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
 @pytest.mark.parametrize("unavailable", [(), ("generated",)])
 def test_shape_candidates_keep_derived_repairs_separate_from_numeric_guesses(unavailable):
     expression = "length(code)=4 and n>0" + (" and generated=0" if unavailable else "")
