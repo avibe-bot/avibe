@@ -103,6 +103,19 @@ installs do not trigger that convergence. A disabled published install may expos
 an explicit companion-package bootstrap so the user can install the optional
 package before enabling Memory; it never runs automatically.
 
+Settings > Dependencies presents the companion package and managed artifact as
+one **Memory runtime** entry. Its status and action follow the prerequisite that
+needs attention, while installation still uses the existing package or artifact
+owner. When a dependency inspection proves Memory runtime is missing and admits
+an installation or recovery action, Settings >
+Memory shows only an installation banner linking to that entry; tabs, configuration,
+and runtime actions stay hidden. An active runtime whose artifact is missing can
+use **Retry startup** from Dependencies, through the existing non-destructive Wake
+path. A disabled runtime's `not_required` inspection is not proof of absence and
+does not prevent configuration of an already-installed companion package.
+Unsupported or operator-only failures retain administration, since an installation
+banner cannot resolve them.
+
 Package resolution, installation, upgrade, or restart failures leave core
 Avibe running and are reported as structured terminal results; a later startup
 may retry within that version's budget, while an explicit attempt remains

@@ -437,10 +437,6 @@
           "label": "Node.js",
           "detail": "上述运行时的共同前置依赖。"
         },
-        "memory-package": {
-          "label": "记忆 Python 包",
-          "detail": "与当前 Avibe 版本匹配的可选记忆实现。"
-        },
         "memory-runtime": {
           "label": "记忆运行时",
           "detail": "在本机运行记忆提炼与搜索。"
@@ -4617,7 +4613,7 @@
     },
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
-      "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或删除已存储的数据。"
+      "runtimeRequiredHint": "请前往依赖页面安装记忆运行时，完成后即可配置和使用记忆。"
     },
     "tabs": {
       "processingRecord": "处理记录",
