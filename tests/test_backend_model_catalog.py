@@ -257,11 +257,15 @@ def test_codex_hub_catalog_projects_custom_backend_models_from_native_shape():
             "model_messages": {"instructions_template": "preserved"},
             "support_verbosity": False,
             "experimental_supported_tools": [],
+            "supports_parallel_tool_calls": False,
         }
     ]
 
 
-def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_rows():
+@pytest.mark.parametrize("supports_parallel_tool_calls", [False, True])
+def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_rows(
+    supports_parallel_tool_calls,
+):
     raw = json.dumps(
         {
             "models": [
@@ -286,6 +290,7 @@ def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_row
                     "shell_type": "unified_exec",
                     "support_verbosity": True,
                     "experimental_supported_tools": ["native_tool"],
+                    "supports_parallel_tool_calls": supports_parallel_tool_calls,
                     "truncation_policy": {"mode": "tokens", "limit": 10_000},
                     "model_messages": {"instructions_template": "preserved"},
                 }
@@ -296,7 +301,10 @@ def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_row
     payload = json.loads(
         backend_model_catalog._codex_hub_catalog_bytes(
             raw,
-            [{"id": "custom-model", "input_modalities": [], "reasoning_efforts": []}],
+            [
+                {"id": "custom-model", "input_modalities": [], "reasoning_efforts": []},
+                {"id": "gpt-native"},
+            ],
         )
     )
     custom = payload["models"][0]
@@ -309,6 +317,11 @@ def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_row
     assert custom["supported_reasoning_levels"] == [{"effort": "none", "description": "None"}]
     assert custom["support_verbosity"] is False
     assert custom["experimental_supported_tools"] == []
+    assert custom["supports_parallel_tool_calls"] is False
+    native = payload["models"][1]
+    assert native["support_verbosity"] is True
+    assert native["experimental_supported_tools"] == ["native_tool"]
+    assert native["supports_parallel_tool_calls"] is supports_parallel_tool_calls
     for key in (
         "description",
         "context_window",

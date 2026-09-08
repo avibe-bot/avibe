@@ -164,6 +164,24 @@ scenarios:
     kind: regression
     layer: contract
     test: ui/src/components/workbench/Composer.attachmentRetry.test.tsx::MESSAGE-DELIVERY-025
+  - id: MESSAGE-DELIVERY-026
+    name: Failed-turn retry crosses Web and controller admission without replaying accepted work
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_failure_retry_web_controller_round_trip
+  - id: MESSAGE-DELIVERY-027
+    name: Concurrent failed-notice clicks share one durable continuation owner
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_failure_retry_concurrent_clicks_have_one_owner
+  - id: MESSAGE-DELIVERY-028
+    name: Deferred failed-turn retry cannot execute after newer work
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_failure_retry_queue_drain_rechecks_the_boundary
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered

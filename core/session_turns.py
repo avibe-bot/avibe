@@ -1895,6 +1895,19 @@ class SessionTurnManager:
 
         if owner.session_id != session_id:
             raise RuntimeError("runtime start owner does not match Delivery claim target")
+        from core.backend_failure_retry import admission_denial
+
+        stale_retries = [
+            (delivery, reason)
+            for delivery in deliveries
+            if (reason := admission_denial(conn, delivery)) is not None
+        ]
+        if stale_retries:
+            for delivery, reason in stale_retries:
+                cls._retire_delivery_not_written(
+                    conn, session_id, str(delivery["id"]), reason=reason
+                )
+            return None
         binding = conn.execute(
             select(
                 agent_sessions.c.agent_backend,
@@ -2779,6 +2792,7 @@ class SessionTurnManager:
         turn_id: str | None = None
         delivery_turn_id: str | None = None
         start_context: MessageContext | None = None
+        retry_denial: str | None = None
         delivery: dict[str, Any]
         backend_draining = backend in self._draining_backends
         with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
@@ -2815,12 +2829,26 @@ class SessionTurnManager:
                     str(delivery.get("turn_id") or delivery.get("current_target_turn_id") or "")
                     or None,
                 )
-            if delivery["state"] == "reserved":
+            from core.backend_failure_retry import admission_denial
+
+            if reason := admission_denial(conn, delivery):
+                self._retire_delivery_not_written(
+                    conn, request.session_id, str(delivery["id"]), reason=reason
+                )
+                retry_denial = reason
+                delivery = delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
+                # Removing this reservation may unblock a newer P3 input.
+                # Keep driving the existing FIFO, never leave that input idle
+                # behind the fence that this rejection just removed.
+            if delivery["state"] == "reserved" or (
+                delivery_store.failure_retry_binding(delivery, unclaimed_only=True)
+                and delivery_store.failure_retry_state(delivery) == "reserved"
+            ):
                 queued = delivery_store.cas_delivery(
                     conn,
                     str(delivery["id"]),
                     expected_version=int(delivery["version"]),
-                    expected_states=("reserved",),
+                    expected_states=(str(delivery["state"]),),
                     values={"state": "queued"},
                     history_event={"kind": "queue", "reason": "p3_admission"},
                 )
@@ -2859,7 +2887,7 @@ class SessionTurnManager:
                     delivery = (
                         delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
                     )
-                    if delivery["state"] != "queued":
+                    if delivery["state"] != "queued" and not retry_denial:
                         break
                     continue
                 for claimed in claimed_batch.get("deliveries", []):
@@ -2878,13 +2906,15 @@ class SessionTurnManager:
             await self._start_persisted_turn(turn_id, context=start_context)
             return self._committed_delivery_result(
                 str(delivery["id"]),
-                attempted_turn_id=turn_id,
+                attempted_turn_id=turn_id if not retry_denial else None,
+                reason=retry_denial,
             )
         return DeliveryResult(
             str(delivery["id"]),
             str(delivery.get("message_id") or "") or None,
             str(delivery["state"]),
             delivery_turn_id,
+            reason=retry_denial,
         )
 
     async def _admit_p1(

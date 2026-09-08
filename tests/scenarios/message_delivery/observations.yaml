@@ -1,6 +1,20 @@
 version: 1
 capability: message_delivery
 observations:
+  - id: OBS-MESSAGE-DELIVERY-006
+    source: user_feedback
+    related_scenarios:
+      - MESSAGE-DELIVERY-026
+      - MESSAGE-DELIVERY-027
+      - MESSAGE-DELIVERY-028
+    summary: A terminal backend-failure notice left Web users typing continue manually.
+    previous_assumption: Backend-native retry was needed to offer a retry action.
+    observed_behavior: The three backends share durable ordinary-input admission but no verified universal native retry protocol.
+    required_updates:
+      - bind a Retry action to the exact failure notice and Turn
+      - continue accepted work through one canonical continue Delivery
+      - reuse retained unwritten inputs and their attachments only with definitive negative delivery evidence
+      - recheck ownership at reservation and queue drain and preserve the composer draft
   - id: OBS-MESSAGE-DELIVERY-001
     source: live_local_diagnosis
     related_scenarios:

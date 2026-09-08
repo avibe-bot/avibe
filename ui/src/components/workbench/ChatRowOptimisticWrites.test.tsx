@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { AgentRoutePatch } from './AgentRoutePicker';
+import type { WorkbenchMessage } from '../../context/ApiContext';
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -38,6 +39,8 @@ const mocks = vi.hoisted(() => ({
   // events — the arrival point that has no request to be ordered against.
   events: null as null | {
     onSessionActivity?: (data: { session_id: string; event: string; title?: string | null }) => void;
+    onMessageNew?: (data: WorkbenchMessage) => void;
+    onMessageUpdated?: (data: WorkbenchMessage) => void;
   },
   // Captured from the mocked leaf components: the route pick and the send are
   // both props ChatPage hands down, so driving them needs no DOM choreography.
@@ -329,6 +332,43 @@ describe('the chat row under an optimistic write', () => {
     resetCoalescedWrites();
     resetOpenSessionRowWrites();
     vi.unstubAllGlobals();
+  });
+
+  it('retries the bound failure without submitting the draft or quick-reply label', async () => {
+    await mountChat();
+    const failure = {
+      id: 'msg-failure', session_id: SESSION_ID, author: 'agent', source: 'agent',
+      type: 'notify', text: 'failed', content: {},
+      metadata: { event: 'backend_failure', turn_id: 'failed-turn', failure_id: 'failed-turn' },
+    } as WorkbenchMessage;
+    act(() => mocks.events?.onMessageNew?.(failure));
+    mocks.apiFetch.mockResolvedValue({
+      ok: true, status: 202,
+      json: async () => ({ delivery_state: 'claimed', retry_notice: {
+        ...failure, content: { failure_retry: { delivery_id: 'delivery', state: 'claimed' } },
+      } }),
+    });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'common.retry' })); });
+    const [, request] = mocks.apiFetch.mock.calls.at(-1)!;
+    expect(JSON.parse(request.body)).toEqual({ retry_for: failure.id });
+    expect(mocks.api.reconcileSessionDraftAfterSend).not.toHaveBeenCalled();
+    expect(mocks.api.recoverSessionDraftAfterRejectedSend).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'chat.retryRequested' })).toBeTruthy();
+  });
+
+  it('updates an existing notify action without appending another message', async () => {
+    await mountChat();
+    const failure = {
+      id: 'msg-failure', session_id: SESSION_ID, author: 'agent', source: 'agent',
+      type: 'notify', text: 'failed', content: {},
+      metadata: { event: 'backend_failure', turn_id: 'failed-turn', failure_id: 'failed-turn' },
+    } as WorkbenchMessage;
+    act(() => mocks.events?.onMessageNew?.(failure));
+    act(() => mocks.events?.onMessageUpdated?.({
+      ...failure, content: { failure_retry: { delivery_id: 'delivery', state: 'accepted' } },
+    }));
+    expect(document.querySelectorAll('[data-message-id="msg-failure"]')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'chat.retryRequested' })).toBeTruthy();
   });
 
   it('sends without waiting for the route write to land', async () => {
