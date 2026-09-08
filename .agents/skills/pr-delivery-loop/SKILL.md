@@ -349,7 +349,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
    on which each thread was opened;
 4. Post the final report: PR URL, what shipped, evidence layers, residual
    manual checks (state what end-to-end verification is deferred to the
-   orchestrator's integration pass). Deliver it by §4's delivery rule, or
+   orchestrator's integration pass). Include the applicable user-facing
+   next-action buttons from §5a. Deliver it by §4's delivery rule, or
    finish the run the orchestrator dispatched with it as the result; ending a
    watch-triggered round without that send means the orchestrator never learns
    you finished.
@@ -376,6 +377,50 @@ turn ends because you armed a watch and are waiting, say exactly that.
    noninteractive even when the orchestrator is running outside the PR's
    worktree. If the gate is not CLEAN, report exactly what's missing instead
    of refusing by role.
+
+## 5a. User-facing next-action buttons
+
+Offer the next authorized choice as a real quick-reply button, not merely a
+sentence suggesting it. In Avibe replies, use the existing trailing `---` and
+`[label]` syntax from `core/prompts/quick-replies.md`. Put the block at the very
+end of the final user-facing message, outside code fences; do not append it to
+GitHub comments or internal lane reports. Name the target PR and reviewed head
+in the preceding report so the choice is unambiguous. If several PRs are in the
+conversation, identify exactly which one the following button concerns.
+
+- **Ready, awaiting merge authorization:** only after verifying §5.1–§5.3 on
+  the current head and `mergeStateStatus == CLEAN` for an open, non-draft PR,
+  append the exact button `合并PR`. Do not show it while review/CI is pending,
+  findings remain unresolved, or the PR is conflicted, closed, or already merged.
+  Offering the button is not merge authorization; the user's click is the
+  scoped merge request. Re-fetch the PR/head and all merge gates when handling
+  that reply. If the head changed or readiness was lost, report the change and
+  refresh the offer instead of executing a stale approval. Existing explicit
+  merge authorization still follows §5.6 without an extra confirmation.
+
+  ```text
+  ---
+  [合并PR]
+  ```
+
+- **Merged, next local regression action:** for Avibe, after GitHub confirms
+  the named PR is `MERGED`, replace the merge offer with both exact choices
+  below. The first updates the local regression environment from `master`;
+  the second performs that same update and then the relevant end-to-end
+  verification. Do not present a closed-but-unmerged PR as merged.
+
+  ```text
+  ---
+  [更新master到回归环境] | [更新回归环境并进行端到端验证]
+  ```
+
+  These are separate opt-in actions, not implied by a merge request. On a click,
+  fetch current `master`, preserve local changes, and use the repository's
+  established local Incus regression workflow. Identify the environment and
+  deployed commit in the result. Never reinterpret either choice as permission
+  to update production, a remote tenant, or the running local Avibe. Other
+  repositories offer regression actions only when their own documented local
+  workflow applies; do not invent a deployment target to make a button work.
 
 ## 6. While waiting, don't idle
 
