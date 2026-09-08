@@ -22,6 +22,7 @@ from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    InvokeCancelledError,
     RawCallOutcome,
     RawOutcomeKind,
 )
@@ -580,6 +581,10 @@ class EngineClient:
             ownership_transferred = True
             transport_transferred = True
             return handle
+        except asyncio.CancelledError as cancelled:
+            if wire_state is not None:
+                raise InvokeCancelledError(wire_state) from cancelled
+            raise
         except asyncio.TimeoutError:
             if response is not None:
                 response.close()

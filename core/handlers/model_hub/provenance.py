@@ -1484,6 +1484,12 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is None or trace.outcome_frozen:
                 return
+            if trace.model_supply_state is not None:
+                # Admission supersedes an earlier retryable no-candidate result.
+                trace.model_supply_state = None
+                trace.blockers = []
+                if trace.terminal_outcome is not None and trace.terminal_outcome.outcome == "no_candidate":
+                    trace.terminal_outcome = None
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,

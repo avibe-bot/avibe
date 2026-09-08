@@ -118,3 +118,40 @@ Avibe inference deadlines; this PR does not claim end-to-end infinite patience.
 - Focused combined local validation: 1,223 passed, 30 subtests passed, one
   previously expected xfail. Changed Python files pass Ruff.
 - Production configuration, credentials, and installed service are unchanged.
+
+## Review inventory and scope decisions
+
+The orchestrator fetched every review thread, review verdict, and matching lint
+run before this revision. Review `5136689855` examined
+`2d0700c64c849ba97e71ec7b4cbc7f9cf9522492` and raised three findings:
+
+| Root-cause class | Finding | Complete correction |
+| --- | --- | --- |
+| Timestamp compatibility | Valid UTC `Z` strings fail on Python 3.10 | Normalize the offset before parsing; test both accepted UTC forms through source resolution and the gateway |
+| Cancellation ownership | Transport admission shields an unbounded upstream wait | Propagate cancellation until a handle is acquired; retain shielding for finite settlement; carry already-observed wire facts on cancellation for usage accounting |
+| Retry provenance | A previous no-candidate marker wins over a later admitted attempt | Clear obsolete supply facts and their terminal projection at admission; cover later success, failure, and cancellation |
+
+This is the first findings-bearing head for all three classes; no repeated-class
+circuit breaker has tripped. No architecture or persistent data-model rewrite is
+required. The adapter's cancellation exception extends `CancelledError` with
+already-observed wire facts only; it introduces no source failure, retry, or new
+terminal outcome. Its canonical interface and mirror change together with both
+consumers. Unbounded inference remains cancellable; finite ledger/resource work
+retains its existing owner and limits.
+
+The expanded local regression passed 1,410 tests and 30 subtests, with one
+pre-existing xfail; changed Python files pass Ruff and whitespace checks.
+
+The new complete gateway-to-service-to-adapter-to-HTTP test reproduced the
+original leak: downstream cancellation returned while the loopback provider
+request remained open. It now verifies every wire wait and protocol, transport
+lease release, and exactly-once accounting of pre-output usage. Existing tests
+for a response beating cancellation now synchronize on actual handle availability,
+not mere transport admission.
+
+Local Incus installation, startup, and health verification completed on the first
+head, with 803 passing tests, 30 passing subtests, and one existing xfail. Only
+the task-specific `avr-wt-model-hub-inference-deadlines` environment was used.
+The first lint run's migration-fixture failure is supplied by merged dependency
+#1933 (`a58644528deb8365876915904d11fb89df48db11`); integrate it normally before
+requesting the next exact-head review and CI.

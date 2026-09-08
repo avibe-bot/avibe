@@ -9,10 +9,15 @@ import pytest
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES, classify_outcome
 from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
-from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
+from core.handlers.model_hub.provenance import (
+    BoundedProvenanceStore,
+    TurnCorrelationRegistry,
+    produce_turn_outcome,
+)
+from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from core.handlers.model_hub.service import ModelHubError
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from tests.test_model_hub_resolution import _service
 from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config, _sparse_config
 from tests.ui_server_test_helpers import csrf_headers
@@ -58,6 +63,43 @@ def test_latest_record_is_backend_model_isolated_bounded_and_not_latest_error(tm
     assert store.latest_for_model("claude", MODEL) == success
     assert store.get("first") is None
     assert len(json.loads(path.read_text())) == 3
+
+
+@pytest.mark.parametrize("ending", ["served", "exhausted", "failed_terminal", "canceled"])
+def test_admitted_retry_supersedes_earlier_supply_failure(tmp_path, ending):
+    store = BoundedProvenanceStore(tmp_path / "records.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "fixture", "turn-retry")
+    turn_id = registry.begin_gateway_request(backend="claude", token=token, requested_model_id=MODEL)
+    config = _sparse_config()
+    registry.mark_gateway_no_candidate(turn_id, "interrupted")
+    registry.record_turn_outcome(
+        turn_id, produce_turn_outcome(
+            "turn.no_candidate.blocked", config=config, resolution=resolve_model_hub_turn(config, "claude", MODEL),
+        ),
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_recovered01", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    if ending != "canceled":
+        status = {"served": 200, "exhausted": 503, "failed_terminal": 400}[ending]
+        outcome = RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS if status == 200 else RawOutcomeKind.HTTP_ERROR,
+            http_status=status,
+            error_code="invalid_parameter" if ending == "failed_terminal" else None,
+            redacted_message=None,
+            stream_started=False,
+            model_id=MODEL,
+            source_id="src_recovered01",
+        )
+        registry.finish_attempt(turn_id, outcome=outcome, decision=classify_outcome(outcome))
+    registry.settle(
+        "turn-retry", settled_by=SETTLED_BY_STOPPED if ending == "canceled" else SETTLED_BY_TERMINAL_RESULT,
+    )
+    record = store.get("turn-retry")
+    assert record["outcome"] == ending
+    assert record["model_supply_state"] is None
+    assert record["blockers"] == []
 
 
 @pytest.mark.parametrize("version", range(5, 11))

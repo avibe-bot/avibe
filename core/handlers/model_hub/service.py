@@ -53,6 +53,7 @@ from .adapter import (
     EngineEnsureResult,
     EngineHealth,
     EngineStatus,
+    InvokeCancelledError,
     InvokeHandle,
     OAuthFlowState,
     OriginNotAllowedError,
@@ -6535,23 +6536,17 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[], None] | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
-        transport_admitted = False
+        acquired_handle: InvokeHandle | None = None
 
-        def admitted() -> None:
-            nonlocal transport_admitted
-            transport_admitted = True
-            if on_admitted is not None:
-                on_admitted()
-
-        async def meter_handle(
-            handle: InvokeHandle,
+        async def meter_observed(
+            observed: ProtocolSSEState | None,
             outcome: RawCallOutcome | None,
         ) -> None:
             await self._meter_call(
                 source_id=source.id,
                 model_id=model_id,
                 outcome=outcome,
-                observed=handle.observed,
+                observed=observed,
             )
 
         async def meter_available_outcome(
@@ -6560,22 +6555,28 @@ class ModelHubService:
             if handle.stream is not None and not handle.outcome_available:
                 return None
             outcome = await self._engine_call(handle.outcome())
-            await meter_handle(handle, outcome)
+            await meter_observed(handle.observed, outcome)
             return outcome
 
         async def invoke_and_meter_bodyless() -> tuple[InvokeHandle, Optional[RawCallOutcome]]:
-            handle = await self._invoke_admitted(
-                source=source,
-                model_id=model_id,
-                requested_model_id=requested_model_id,
-                request=request,
-                stream=stream,
-                backend=cast(BackendName, backend),
-                excluded_source_ids=excluded_source_ids,
-                supply_channel=supply_channel,
-                exact_retry=exact_retry,
-                on_admitted=admitted,
-            )
+            nonlocal acquired_handle
+            try:
+                handle = await self._invoke_admitted(
+                    source=source,
+                    model_id=model_id,
+                    requested_model_id=requested_model_id,
+                    request=request,
+                    stream=stream,
+                    backend=cast(BackendName, backend),
+                    excluded_source_ids=excluded_source_ids,
+                    supply_channel=supply_channel,
+                    exact_retry=exact_retry,
+                    on_admitted=on_admitted,
+                )
+            except InvokeCancelledError as cancelled:
+                await meter_observed(cancelled.observed, None)
+                raise
+            acquired_handle = handle
             if handle.stream is not None:
                 # The body is the gateway's to forward, so the tokens in it are the
                 # gateway's to meter.
@@ -6590,7 +6591,9 @@ class ModelHubService:
             handle, outcome = await asyncio.shield(attempt_task)
         except asyncio.CancelledError as caught:
             cancelled = caught
-            if not transport_admitted:
+            # Upstream inference is cancellable even after transport admission.
+            # Only an acquired handle's finite settlement must outlive its caller.
+            if acquired_handle is None:
                 attempt_task.cancel()
             try:
                 handle, outcome = await await_owned_task(attempt_task)
@@ -6602,7 +6605,7 @@ class ModelHubService:
                 await handle.close_stream()
                 outcome = await meter_available_outcome(handle)
                 if outcome is None:
-                    await meter_handle(handle, None)
+                    await meter_observed(handle.observed, None)
                 return outcome
 
             cleanup_task = asyncio.create_task(close_and_meter_observed_stream())

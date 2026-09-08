@@ -1271,7 +1271,7 @@ class ModelHubTurnGateway:
         facts = turn_outcome.supply_facts
         if facts is None or facts.supply_state != "waiting" or not facts.retry_at:
             return None
-        retry_at = datetime.fromisoformat(facts.retry_at)
+        retry_at = datetime.fromisoformat(facts.retry_at.replace("Z", "+00:00"))
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         return max(0.0, (retry_at - self._now()).total_seconds())

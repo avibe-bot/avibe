@@ -2886,7 +2886,7 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
 
 
 @pytest.mark.parametrize("already_cooling", [False, True])
-@pytest.mark.parametrize("ending", ["recover", "fail", "config_change", "cancel"])
+@pytest.mark.parametrize("ending", ["recover", "fail", "config_change", "cancel", "extend_recover"])
 @pytest.mark.parametrize(
     ("backend", "endpoint", "protocol"),
     [
@@ -2910,7 +2910,7 @@ def test_gateway_cooldown_is_one_cancellable_retry(
             "src_retrycool01",
             "Recovering",
             status="cooldown" if already_cooling else "standby",
-            retry_at=(NOW + timedelta(seconds=30)).isoformat() if already_cooling else None,
+            retry_at=(NOW + timedelta(seconds=30)).isoformat().replace("+00:00", "Z") if already_cooling else None,
             vendor="anthropic" if backend == "claude" else "openai",
             protocol=protocol,
         )
@@ -2985,16 +2985,31 @@ def test_gateway_cooldown_is_one_cancellable_retry(
                                     status="needs_action",
                                     detail_key="models.source.needs_action.credential_revoked",
                                 )
+                            elif ending == "extend_recover":
+                                service.store.config.sources[0].state.retry_at = (
+                                    NOW + timedelta(seconds=60)
+                                ).isoformat().replace("+00:00", "Z")
                             release.set()
                             response = await asyncio.wait_for(request, timeout=2)
                             await response.read()
-                            assert response.status == {"recover": 200, "fail": 503, "config_change": 409}[ending]
-                            if ending == "fail":
+                            assert response.status == {
+                                "recover": 200, "fail": 503, "config_change": 409, "extend_recover": 503,
+                            }[ending]
+                            if ending in {"fail", "extend_recover"}:
                                 assert response.headers["Retry-After"] == "30"
                             else:
                                 assert "Retry-After" not in response.headers
+                            if ending == "extend_recover":
+                                clock["now"] += timedelta(seconds=30)
+                                recovered = await client.post(
+                                    f"{base_url}/v1/{endpoint}",
+                                    json=payload,
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
+                                await recovered.read()
+                                assert recovered.status == 200
                         assert delays == [30.0]
-                        expected = (0 if already_cooling else 1) + (ending in {"recover", "fail"})
+                        expected = (0 if already_cooling else 1) + (ending in {"recover", "fail", "extend_recover"})
                         assert len(service.adapter.invocations) == expected
                     finally:
                         if not request.done():
@@ -3003,8 +3018,37 @@ def test_gateway_cooldown_is_one_cancellable_retry(
         finally:
             release.set()
             await gateway.close()
+        if ending == "extend_recover" and backend != "opencode":
+            gateway.correlation.settle("turn_cooldown_retry", settled_by=SETTLED_BY_TERMINAL_RESULT)
+            record = service.provenance.get("turn_cooldown_retry")
+            assert record["outcome"] == "served"
+            assert record["model_supply_state"] is None
+            assert record["blockers"] == []
+            assert len(record["failed_attempts"]) == (0 if already_cooling else 1)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("suffix", ["Z", "+00:00"])
+def test_gateway_parses_supported_cooldown_timestamps_on_python310(tmp_path, suffix):
+    class Python310Datetime(datetime):
+        @classmethod
+        def fromisoformat(cls, value):
+            if value.endswith("Z"):
+                raise ValueError("Python 3.10 requires a numeric UTC offset")
+            return super().fromisoformat(value)
+
+    retry_at = (NOW + timedelta(seconds=30)).replace(tzinfo=None).isoformat() + suffix
+    source = _source(
+        "src_timestamp01", "Cooling", status="cooldown", retry_at=retry_at,
+    )
+    service = _service(tmp_path, sources=[source])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    with pytest.raises(ModelHubError) as failed:
+        asyncio.run(service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub"))
+    gateway = ModelHubTurnGateway(service, now=lambda: NOW)
+    with patch("core.handlers.model_hub.turn_gateway.datetime", Python310Datetime):
+        assert gateway._cooldown_retry_delay(failed.value.turn_outcome) == 30
 
 
 def test_gateway_exhaustion_uses_no_time_copy_when_an_earlier_hop_recovers(
@@ -4212,13 +4256,16 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         invoke_started = asyncio.Event()
         release_invoke = asyncio.Event()
+        handle_ready = asyncio.Event()
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
             kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
-            return await invoke(*args, **kwargs)
+            handle = await invoke(*args, **kwargs)
+            handle_ready.set()
+            return handle
 
         service.adapter.invoke = blocked_invoke
         task = asyncio.create_task(
@@ -4231,8 +4278,9 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
             )
         )
         await asyncio.wait_for(invoke_started.wait(), timeout=1)
-        task.cancel()
         release_invoke.set()
+        await asyncio.wait_for(handle_ready.wait(), timeout=1)
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
@@ -4264,13 +4312,16 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         invoke_started = asyncio.Event()
         release_invoke = asyncio.Event()
+        handle_ready = asyncio.Event()
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
             kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
-            return await invoke(*args, **kwargs)
+            result = await invoke(*args, **kwargs)
+            handle_ready.set()
+            return result
 
         service.adapter.invoke = blocked_invoke
         task = asyncio.create_task(
@@ -4283,8 +4334,9 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
             )
         )
         await asyncio.wait_for(invoke_started.wait(), timeout=1)
-        task.cancel()
         release_invoke.set()
+        await asyncio.wait_for(handle_ready.wait(), timeout=1)
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
