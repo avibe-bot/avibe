@@ -659,7 +659,7 @@ def backend_builtin_snapshot(
             remote_catalog,
             bundled_catalog,
             local_models=local_models,
-        )[:-1]
+        )
         blocked: set[str] = set()
     else:
         local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
@@ -670,7 +670,7 @@ def backend_builtin_snapshot(
             local_catalog,
             bundled_catalog,
         )
-        sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)[:-1]
+        sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)
 
     merged = merge_model_sources(sources, blocked_model_ids=blocked)
     return _versioned_builtin_snapshot(
@@ -793,7 +793,6 @@ def _claude_sources(
         ("remote", backend_model_entries("claude", remote_catalog)),
         ("bundled", backend_model_entries("claude", bundled_catalog)),
         ("legacy", legacy_entries),
-        ("config", _read_claude_settings_models()),
     ]
 
 
@@ -820,7 +819,6 @@ def _codex_sources(
         ("bundled", _overlay_local_reasoning_efforts(bundled_entries, local_by_id)),
         ("local", visible_local),
         ("legacy", built_in),
-        ("config", _read_codex_config_models()),
     ]
 
 
@@ -838,21 +836,6 @@ def _overlay_local_reasoning_efforts(
     return overlaid
 
 
-def _read_claude_settings_models() -> list[dict[str, Any]]:
-    settings_path = Path.home() / ".claude" / "settings.json"
-    try:
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    values = [payload.get("model")]
-    env = payload.get("env")
-    if isinstance(env, dict):
-        values.extend((env.get("ANTHROPIC_MODEL"), env.get("ANTHROPIC_SMALL_FAST_MODEL")))
-    return [{"id": value.strip()} for value in values if isinstance(value, str) and value.strip()]
-
-
 def _read_codex_models_cache() -> list[dict[str, Any]]:
     return _read_codex_models_cache_with_status()[0]
 
@@ -868,37 +851,6 @@ def _read_codex_models_cache_with_status() -> tuple[list[dict[str, Any]], bool]:
         return [], False
     entries = [_normalize_model_entry(item) for item in raw_models]
     return [entry for entry in entries if entry], True
-
-
-def _read_codex_config_models() -> list[dict[str, Any]]:
-    config_path = get_codex_home() / "config.toml"
-    try:
-        payload = _parse_toml(config_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    values = [payload.get("model")]
-    notice = payload.get("notice")
-    migrations = notice.get("model_migrations") if isinstance(notice, dict) else None
-    if isinstance(migrations, dict):
-        for source, target in migrations.items():
-            values.extend((source, target))
-    return [
-        {"id": value.strip(), "reasoning_efforts": _DEFAULT_REASONING_EFFORTS["codex"]}
-        for value in values
-        if isinstance(value, str) and value.strip()
-    ]
-
-
-def _parse_toml(raw: str) -> dict[str, Any]:
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
-        import tomli as tomllib
-
-    payload = tomllib.loads(raw)
-    return payload if isinstance(payload, dict) else {}
 
 
 def _legacy_claude_reasoning_efforts(model: str) -> list[str]:

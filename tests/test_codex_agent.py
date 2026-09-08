@@ -380,6 +380,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
                 "ephemeral": True,
+                "model": "gpt-5.4-mini",
                 "developerInstructions": (
                     "This is a connection probe. Do not use tools. "
                     "Reply with a short greeting."
@@ -437,7 +438,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
                 "app-server exited during the connection probe",
             ),
         ):
-            await agent.probe_connection(cwd)
+            await agent.probe_connection(cwd, model="gpt-fixture")
 
         self.assertEqual(agent._connection_probes, {})
         self.assertEqual(agent._connection_probe_turns, {})
@@ -473,7 +474,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
             "get_runtime_dir",
             return_value=Path(runtime_dir.name),
         ):
-            task = asyncio.create_task(agent.probe_connection(cwd))
+            task = asyncio.create_task(agent.probe_connection(cwd, model="gpt-fixture"))
             await turn_started.wait()
             await asyncio.sleep(0)
             task.cancel()
@@ -533,6 +534,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "returned no response"):
                 await agent.probe_connection(
                     cwd,
+                    model="gpt-fixture",
                     on_diagnostic=diagnostics.append,
                 )
 
@@ -547,7 +549,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         agent = self._agent(cwd, transport)
 
         with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
-            await agent.probe_connection(cwd)
+            await agent.probe_connection(cwd, model="gpt-fixture")
 
         self.assertEqual(agent._connection_probe_cwds, {})
 
@@ -560,7 +562,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
-            await agent.probe_connection(cwd)
+            await agent.probe_connection(cwd, model="gpt-fixture")
 
         agent._get_or_create_transport.assert_awaited_once_with(
             cwd,

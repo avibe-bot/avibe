@@ -629,6 +629,7 @@ class MessageHandler(BaseHandler):
                                 match = name_map.get(normalized)
                                 if match:
                                     subagent_name = match.get("name")
+                                    subagent_model = server.get_explicit_subagent_model(subagent_name)
                         except Exception as err:
                             logger.warning(f"Failed to resolve OpenCode subagent: {err}")
                     elif agent_name == "claude":

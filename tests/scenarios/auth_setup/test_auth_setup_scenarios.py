@@ -1047,6 +1047,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                         "approvalPolicy": "never",
                         "sandbox": "read-only",
                         "ephemeral": True,
+                        "model": "gpt-5.4-mini",
                         "developerInstructions": (
                             "This is a connection probe. Do not use tools. "
                             "Reply with a short greeting."

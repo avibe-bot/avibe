@@ -16,6 +16,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
+from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
 from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -331,7 +332,38 @@ def _request(message: str, runtime_key: str = "session:/repo"):
         context=SimpleNamespace(platform_specific={}),
         message=message,
         composite_session_id=runtime_key,
+        subagent_model=None,
+        vibe_agent_model="fixture-avibe-model",
     )
+
+
+@pytest.mark.parametrize("backend", sorted(SUPPORTED_AGENT_BACKENDS))
+@pytest.mark.parametrize("model", [None, "", "   ", "default", "fixture-avibe-model", " padded-model "])
+@pytest.mark.parametrize("selection_field", ["vibe_agent_model", "subagent_model"])
+def test_model_selection_is_required_before_any_backend_dispatch(backend, model, selection_field):
+    async def run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        agent.name = backend
+        service.register(agent)
+        request = _request("hello")
+        setattr(request, selection_field, model)
+        request.failure_handler = AsyncMock(return_value=True)
+        selected = request.subagent_model if request.subagent_model is not None else request.vibe_agent_model
+        if selected and selected.strip() and not (backend == "claude" and selected == "default"):
+            await service.handle_message(backend, request)
+            assert agent.started == ["hello"]
+            assert (request.subagent_model or request.vibe_agent_model) == selected.strip()
+            service.release_runtime_turn(request.context)
+        else:
+            with pytest.raises(ValueError, match="Select a model"):
+                await service.handle_message(backend, request)
+            assert agent.started == []
+            assert not service.runtime_turn_active(request.composite_session_id)
+
+    asyncio.run(run())
 
 
 def test_agent_service_dispatches_runtime_config_refresh() -> None:
@@ -818,6 +850,8 @@ def _reaction_request(message: str, message_id: str, runtime_key: str = "session
         message=message,
         composite_session_id=runtime_key,
         processing_indicator=handle,
+        subagent_model=None,
+        vibe_agent_model="claude-fixture",
         ack_reaction_message_id=None,
         ack_reaction_emoji=None,
         ack_message_id=None,
@@ -1743,6 +1777,7 @@ def test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime() -> None:
                 base_session_id=runtime_key,
                 composite_session_id=runtime_key,
                 session_key=f"avibe::{runtime_key}",
+                vibe_agent_model="fixture-provider/fixture-model",
             )
 
         first = asyncio.create_task(

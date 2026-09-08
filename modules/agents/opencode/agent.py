@@ -1383,11 +1383,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             override_agent = request.subagent_name or override_agent
             if request.subagent_name:
-                override_model = request.subagent_model
+                override_model = request.subagent_model or override_model
                 override_reasoning = request.subagent_reasoning_effort
 
-            if request.subagent_name and not override_model:
-                override_model = server.get_agent_model_from_config(request.subagent_name)
             if request.subagent_name and not override_reasoning:
                 override_reasoning = server.get_agent_reasoning_effort_from_config(request.subagent_name)
 
@@ -1396,9 +1394,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 agent_to_use = server.get_default_agent_from_config()
 
             model_dict = None
-            model_str = override_model
-            if not model_str:
-                model_str = server.get_agent_model_from_config(agent_to_use)
+            from core.agent_model_selection import require_agent_model
+
+            model_str = require_agent_model(
+                override_model, "opencode", getattr(self.controller.config, "language", "en")
+            )
             opencode_cfg = getattr(self.controller.config, "opencode", None)
             requested_model_str = opencode_requested_model_for_overlay(
                 model_str,
@@ -1415,16 +1415,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 requested_model_str,
                 model_hub_overlay,
             )
-            # Bare model id (no ``provider/`` prefix): only inject ``providerID``
-            # when the user has explicitly chosen a default provider in Settings.
-            # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
-            # routing for legacy installs.
+            # Direct mode needs an explicit provider as well as a model; Gateway
+            # mode resolves the provider from Avibe's model route.
             default_provider = (
                 None
                 if model_hub_overlay is not None
                 else getattr(opencode_cfg, "default_provider", None)
             )
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
+            if model_dict is None:
+                raise ValueError(i18n_t(
+                    "errors.opencodeModelProviderRequired", getattr(self.controller.config, "language", "en")
+                ))
             display_model_dict = resolve_opencode_model_dict(
                 requested_model_str,
                 default_provider,

@@ -396,6 +396,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         server = types.SimpleNamespace(
             ensure_running=AsyncMock(),
             get_available_agents=AsyncMock(return_value=[{"name": "reviewer"}]),
+            get_explicit_subagent_model=Mock(return_value="anthropic/claude-reviewer"),
         )
         controller.agent_service.agents = {
             "opencode": types.SimpleNamespace(
@@ -432,6 +433,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             call["admission_context"]["message_handler_route"]["subagent_name"],
             "reviewer",
         )
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["subagent_model"],
+            "anthropic/claude-reviewer",
+        )
+        server.get_explicit_subagent_model.assert_called_once_with("reviewer")
         self.assertEqual(
             call["admission_context"]["message_handler_route"]["base_session_id"],
             "base-session",

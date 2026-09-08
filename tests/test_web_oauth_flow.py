@@ -1045,7 +1045,7 @@ def test_opencode_provider_test_uses_provider_catalog_without_agent_model(
     }
 
 
-def test_opencode_provider_test_prefers_runtime_agent_model(
+def test_opencode_provider_test_ignores_native_default_models(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _FakeOpencodeServer()
@@ -1061,7 +1061,7 @@ def test_opencode_provider_test_prefers_runtime_agent_model(
                 },
             }
         ],
-        "default": {"openai": "gpt-5.3-chat-latest"},
+        "default": {"openai": "gpt-5.4-runtime"},
     }
     fake.messages = [
         {
@@ -1089,10 +1089,10 @@ def test_opencode_provider_test_prefers_runtime_agent_model(
     result = _run(service.test_opencode_provider("openai"))
 
     assert result["ok"] is True
-    assert result["model"] == "gpt-5.4-runtime"
+    assert result["model"] == "gpt-5.3-chat-latest"
     assert fake.prompt_calls[-1]["model"] == {
         "providerID": "openai",
-        "modelID": "gpt-5.4-runtime",
+        "modelID": "gpt-5.3-chat-latest",
     }
 
 
@@ -1612,7 +1612,7 @@ def test_test_web_auth_codex_uses_owned_runtime_when_backend_is_disabled(
     assert captured[0].binary == "codex-custom"
     probe.assert_awaited_once_with(
         str(probe_runtime / "codex-connection-probe"),
-        model=None,
+        model="gpt-5.6-sol",
         on_diagnostic=ANY,
     )
     shutdown.assert_awaited_once_with()
@@ -1666,7 +1666,7 @@ def test_test_web_auth_codex_does_not_probe_model_hub_transport(
     live_probe.assert_not_awaited()
     temp_probe.assert_awaited_once_with(
         str(probe_runtime / "codex-connection-probe"),
-        model=None,
+        model="gpt-5.6-sol",
         on_diagnostic=ANY,
     )
     temp_agent.shutdown_runtime.assert_awaited_once_with()
@@ -1818,7 +1818,7 @@ def test_test_web_auth_claude_runs_in_runtime_cwd(
     probe.assert_awaited_once_with(
         binary="/usr/bin/echo",
         cwd=str(runtime_cwd),
-        model=None,
+        model="claude-opus-5",
         on_diagnostic=ANY,
     )
     assert runtime_cwd.is_dir()
