@@ -1069,13 +1069,18 @@ def test_numeric_repairs_coordinate_columns_without_order_dependence(tmp_path, c
         assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
-def test_joint_numeric_evaluation_has_a_finite_budget():
+def test_joint_numeric_evaluation_has_a_finite_budget(monkeypatch):
     required = [(f"n{index}", "INTEGER") for index in range(6)]
     values = {name: 0 for name, _ in required}
     expression = " and ".join(f"{name} > 0" for name in values) + " and n5 < 0"
     statements = []
     with sqlite3.connect(":memory:") as connection:
-        connection.set_trace_callback(statements.append)
+        connect = sqlite3.connect
+        def traced_connect(*args, **kwargs):
+            candidate = connect(*args, **kwargs)
+            candidate.set_trace_callback(statements.append)
+            return candidate
+        monkeypatch.setattr(guard.sqlite3, "connect", traced_connect)
         assert guard.shape_proposals(connection, expression, required, values) == []
     evaluations = [statement for statement in statements if statement.startswith("select coalesce(cast(")]
     assert len(evaluations) == guard.SEED_ATTEMPTS
@@ -1296,10 +1301,91 @@ def test_numeric_repair_uses_sqlite_affinity_classification(tmp_path, declared, 
         assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
+@pytest.mark.parametrize("declared", ["", "DATE", "DECIMAL", "NUMERIC", "BOOLEAN", "INTEGER", "REAL", "BLOB", "TEXT"])
+@pytest.mark.parametrize("shape", ["length(value)=4", "value glob 'A???'", "length(value)=4 and value glob 'A*'", "length(value)=4 and value not glob '*[0-9]*'"])
+def test_text_shapes_are_not_restricted_by_initial_storage_class(tmp_path, declared, shape):
+    db_path = tmp_path / "flexible.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(value {declared} not null, constraint ck check({shape}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("declared", ["NUMERIC", "REAL", "INTEGER"])
+@pytest.mark.parametrize("count", [15, 20])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("repair", ["state='ready'", "json_valid(state) and json_extract(state,'$.ready')=1"])
+def test_unvalidated_numeric_fallback_cannot_starve_other_repairs(tmp_path, declared, count, reverse, repair):
+    columns = [f'n{index} {declared} not null' for index in range(count)]
+    if reverse:
+        columns.reverse()
+    checks = ' and '.join([*(f'n{index}>=0' for index in range(count)), 'g=0', repair])
+    db_path = tmp_path / "fallback.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(columns)},state text not null,g integer generated always as (0),constraint ck check({checks}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("function", ["changes()", "total_changes()", "last_insert_rowid()"])
+def test_context_sensitive_check_uses_the_real_insert_state(function):
+    with sqlite3.connect(":memory:") as connection:
+        ddl = f"create table shaped(n integer not null,constraint ck check(n>0 and n>{function}))"
+        connection.execute(ddl)
+        assert guard.insert_seed_row(connection, "shaped", ddl, [("n", "INTEGER")], {"n": 0}) == ("", True)
+        assert connection.execute("select n from shaped").fetchall() == [(1,)]
+
+
+@pytest.mark.parametrize("expression", ["n>0", "n>0 and n<0", "n>changes()", "n>0 and unregistered(n)"])
+def test_candidate_generation_does_not_mutate_fixture_connection_state(expression):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("create table held(n integer primary key)")
+        connection.execute("insert into held values (17)")
+        connection.execute("insert into held values (19)")
+        snapshot = "select changes(),total_changes(),last_insert_rowid()"
+        before = connection.execute(snapshot).fetchone()
+        guard.shape_proposals(connection, expression, [("n", "INTEGER")], {"n": 0})
+        assert connection.execute(snapshot).fetchone() == before
+        assert connection.execute("select n from held").fetchall() == [(17,), (19,)]
+
+
+@pytest.mark.parametrize("expression", ["n>0", "n>0 and n<0", "n>changes()", "n>0 and unregistered(n)"])
+def test_isolated_candidate_connections_are_always_closed(monkeypatch, expression):
+    connections = []
+    connect = sqlite3.connect
+    def tracked_connect(*args, **kwargs):
+        candidate = connect(*args, **kwargs)
+        connections.append(candidate)
+        return candidate
+    with connect(":memory:") as connection:
+        monkeypatch.setattr(guard.sqlite3, "connect", tracked_connect)
+        guard.shape_proposals(connection, f"n>0 and ({expression})", [("n", "INTEGER")], {"n": 0})
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connections[0].execute("select 1")
+
+
+@pytest.mark.parametrize("function", ["changes()", "total_changes()", "last_insert_rowid()", "local_context()"])
+def test_context_functions_in_defaults_defer_to_target_insert(function):
+    with sqlite3.connect(":memory:") as connection:
+        connection.create_function("local_context", 0, lambda: 0)
+        ddl = f"create table shaped(n integer not null,tag integer default ({function}),constraint ck check(n>0 and tag=0))"
+        connection.execute(ddl)
+        assert guard.insert_seed_row(connection, "shaped", ddl, [("n", "INTEGER")], {"n": 0}) == ("", True)
+        assert connection.execute("select n,tag from shaped").fetchall() == [(1,0)]
+
+
 @pytest.mark.parametrize("equality", ["=", "==", "IS"])
 @pytest.mark.parametrize("reverse_operands,reverse_checks", itertools.product([False, True], repeat=2))
 @pytest.mark.parametrize("source", ["a glob 'R-[A-C][0-9]'", "a in ('R-A0')"])
-def test_substring_dependencies_use_normalized_equality(tmp_path, equality, reverse_operands, reverse_checks, source):
+@pytest.mark.parametrize("declared", ["TEXT", "DATE", "", "BLOB"])
+def test_substring_dependencies_use_normalized_equality(tmp_path, equality, reverse_operands, reverse_checks, source, declared):
     left, right = ('substr("C", 1, 4)', '"A"')
     if reverse_operands:
         left, right = right, left
@@ -1308,7 +1394,7 @@ def test_substring_dependencies_use_normalized_equality(tmp_path, equality, reve
         checks.reverse()
     db_path = tmp_path / "vibe.sqlite"
     with sqlite3.connect(db_path) as connection:
-        connection.execute(f"create table shaped(id integer primary key, a text not null, c text not null, {', '.join(checks)})")
+        connection.execute(f"create table shaped(id integer primary key, a {declared} not null, c {declared} not null, {', '.join(checks)})")
     short, _ = guard.seed_representative_rows(db_path)
     assert short == {}
     with sqlite3.connect(db_path) as connection:

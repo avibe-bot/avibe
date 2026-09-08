@@ -70,7 +70,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -1104,6 +1103,7 @@ def shape_proposals(
     text_constraints: str | None = None,
     omitted: Iterable[tuple[str, str, str | None]] = (),
     unavailable: Iterable[str] = (),
+    allow_unvalidated_numeric: bool = True,
 ) -> list[tuple[str, object]]:
     """Derive bounded text-shape and numeric candidates from the rejected CHECK.
 
@@ -1117,7 +1117,8 @@ def shape_proposals(
     for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', shapes, re.IGNORECASE):
         name = names.get(identifier_key(name), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
-        if name in text and size is not None:
+        if name in values and size is not None:
+            text.setdefault(name, "x")
             widths[name] = size
             text[name] = text[name][:size].ljust(size, "0")
     globs = re.findall(
@@ -1127,10 +1128,11 @@ def shape_proposals(
     )
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
-    alphabets = {name: string.printable for name in text}
+    alphabets: dict[str, str] = defaultdict(lambda: string.printable)
     for name, negated, quoted in globs:
         name = names.get(identifier_key(name), name)
-        if name in text:
+        if name in values:
+            text.setdefault(name, "x")
             pattern = quoted.replace("''", "'")
             alphabets[name] += pattern
             (negative if negated else positive)[name].append(pattern)
@@ -1148,7 +1150,8 @@ def shape_proposals(
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
-        if name in text and isinstance(values.get(other), str) and position is not None and size is not None:
+        if name in values and isinstance(text.get(other, values.get(other)), str) and position is not None and size is not None:
+            text.setdefault(name, "x")
             offset = position - 1
             source = text.get(other, str(values[other]))
             if len(source) == size:
@@ -1168,7 +1171,9 @@ def shape_proposals(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
         if SQLITE_INT_MIN <= value <= SQLITE_INT_MAX
     ))
-    fallback = [(name, candidate) for candidate in candidates for name in numeric if candidate != values[name]]
+    fallback = [
+        (name, candidate) for candidate in candidates for name in numeric if candidate != values[name]
+    ] if allow_unvalidated_numeric else []
     if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)) for name in unavailable):
         return [*proposals, *fallback]
     if not numeric or not candidates:
@@ -1180,15 +1185,17 @@ def shape_proposals(
         (tuple(candidate for _ in numeric) for candidate in candidates),
         products,
     )
-    # CAST is not insertion affinity. A private typed table lets SQLite supply
-    # real defaults and storage classes without altering the fixture's schema.
-    table = f'"seed_candidate_{uuid4().hex}"'
+    # Native typed insertion models affinity, but scratch DML must never change
+    # the fixture connection's changes()/last_insert_rowid()/total_changes().
+    evaluation = sqlite3.connect(":memory:")
+    table = '"seed_candidate"'
     def quote(name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
 
     def declaration(name: str, declared: str) -> str:
         return quote(name) + (f' {quote(declared)}' if declared else '')
 
+    omitted = tuple(omitted)
     declarations = [declaration(name, declared) for name, declared in required]
     declarations.extend(
         declaration(name, declared) + (f' default ({default})' if default is not None else '')
@@ -1197,13 +1204,20 @@ def shape_proposals(
     columns = ', '.join(quote(name) for name, _ in required)
     placeholders = ', '.join('?' for _ in required)
     try:
-        connection.execute(f"create temp table {table} ({', '.join(declarations)})")
+        context = identifier_key(expression + "\n" + "\n".join(default or "" for _, _, default in omitted))
+        contextual = {
+            str(row[0]) for row in evaluation.execute("pragma function_list")
+            if not int(row[5]) & 0x800  # SQLITE_DETERMINISTIC
+        }
+        if any(re.search(rf"\b{re.escape(name)}\b", context) for name in contextual):
+            return [*proposals, *fallback]
+        evaluation.execute(f"create table {table} ({', '.join(declarations)})")
         for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
             changes = dict(zip(numeric, assignment))
             parameters = [changes.get(column, values[column]) for column, _ in required]
-            connection.execute(f"delete from {table}")
-            connection.execute(f"insert into {table} ({columns}) values ({placeholders})", parameters)
-            accepted = connection.execute(
+            evaluation.execute(f"delete from {table}")
+            evaluation.execute(f"insert into {table} ({columns}) values ({placeholders})", parameters)
+            accepted = evaluation.execute(
                 f"select coalesce(cast(({expression}) as numeric), 1) != 0 from {table}"
             ).fetchone()[0]
             if accepted:
@@ -1213,7 +1227,7 @@ def shape_proposals(
         # Unrepresentable context cannot reject a candidate; actual INSERT decides.
         proposals.extend(fallback)
     finally:
-        connection.execute(f"drop table if exists {table}")
+        evaluation.close()
     return proposals
 
 
@@ -1541,7 +1555,7 @@ def insert_seed_row(
     prefix_sources = {identifier_key(other) for _, _, _, other in substring_requirements(text_constraints)}
     proposed: set[tuple[str, object]] = set()
     objection = ""
-    for _ in range(SEED_ATTEMPTS):
+    for attempt in range(SEED_ATTEMPTS):
         try:
             connection.execute(statement, [values[column] for column in names])
         except sqlite3.Error as exc:
@@ -1559,9 +1573,10 @@ def insert_seed_row(
                     *shape_proposals(
                         connection, expression, required, values,
                         text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
+                        allow_unvalidated_numeric=attempt < SEED_ATTEMPTS // 2,
                     ),
-                    *check_proposals(expression, names),
                     *json_proposals(connection, expression, names),
+                    *check_proposals(expression, names),
                 ]
                 if pair not in proposed and values[pair[0]] != pair[1]
             ]
