@@ -852,6 +852,87 @@ def _protocol_is_persistable_without_shape_proof(
     return vendor == "custom" and len(protocol_order) == 1 and protocol_order[0] == protocol
 
 
+class _ModelsWitness(Enum):
+    """What an owned interface's model listing established about a credential."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+
+@dataclass(frozen=True)
+class _ModelsWitnessResult:
+    credential: _ModelsWitness
+    models: tuple[DiscoveredModel, ...] = ()
+
+
+async def _authenticate_with_models_witness(
+    *,
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    secret: str,
+) -> _ModelsWitnessResult:
+    """Read the owned interface's model listing as the authentication witness.
+
+    The protocol probe deliberately carries no ``model`` so observation never
+    enters a relay's scheduler, which is exactly why a conforming interface
+    answers it with a request error and leaves authentication unknown. The
+    listing this rung already fetches for inventory is the one call on that same
+    interface that a correct credential answers and a wrong one refuses, so it
+    carries the authentication the probe cannot: an authentication status
+    rejects the credential, and no listing route, an unparseable body, or a
+    transport failure proves nothing and leaves the observation exactly where
+    the probe left it.
+
+    A listing only accepts the credential once the same request without one is
+    refused. Some interfaces publish their catalogue to anybody, and there a
+    listing attests to whoever asked rather than to this key. Asking with no
+    credential settles which kind this is: unlike an altered or fabricated key,
+    an absent one cannot be wrong about a grammar nobody published or collide
+    with another valid key, so the answer is unambiguous. An open catalogue
+    therefore stays inconclusive and the source saves the way it does today.
+
+    Acceptance is bounded accordingly: the interface admits this credential and
+    refuses admission without one, which is not proof that it read the value.
+    An interface that requires a credential without reading it answers those two
+    requests identically, so it is admitted as well, and the third request that
+    would separate the two carries an altered credential and attests to nothing
+    in either direction. The first real call catches a credential nothing
+    validated, exactly where it catches one revoked after its add.
+
+    Only a catalog pin or a concrete declaration asks, because the answer names
+    no protocol; that owner supplies it. The accepted result carries the
+    listing, so one call both authenticates the source and populates it.
+    """
+
+    try:
+        models = await probe_models(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=secret,
+        )
+    except EngineClientError as exc:
+        if exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
+            return _ModelsWitnessResult(credential=_ModelsWitness.REJECTED)
+        return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
+    try:
+        await probe_models(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=None,
+        )
+    except EngineClientError as refusal:
+        if refusal.status_code in _AUTHENTICATION_ERROR_STATUSES:
+            return _ModelsWitnessResult(
+                credential=_ModelsWitness.ACCEPTED,
+                models=tuple(models),
+            )
+    return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
+
+
 def _anthropic_wrapperless_elimination_proof(
     responses: Mapping[str, _ProtocolEvidence],
     *,
@@ -1680,8 +1761,11 @@ class CLIProxyEngineAdapter:
         could be served. A protocol-specific response
         with accepted authentication proves the current attempt and terminates
         observation. A shipped vendor catalog pin or a concrete `custom`
-        declaration also terminates observation after a shaped success.
-        Schema errors remain unverified; explicit unverified saving belongs to
+        declaration also terminates observation after a shaped success, and,
+        because that interface's owner is already named, may take its
+        authentication from the model listing when the model-less probe leaves
+        it unknown. Schema errors that no listing answers remain unverified;
+        explicit unverified saving belongs to
         Source creation, not this observation. A shaped rejection is
         recorded while later candidates continue on Auto detect. Vendor, URL,
         and order never create a conclusion on their own; `custom` Auto still requires response-backed
@@ -1777,6 +1861,36 @@ class CLIProxyEngineAdapter:
                 received_rejection = True
                 ruled_out_protocols.add(protocol)
                 continue
+            if (
+                credential_kind == "api_key"
+                and owner_scoped_protocol
+                and evidence.authentication is _AuthenticationEvidence.UNKNOWN
+            ):
+                # This interface already has an owner, so the only thing left to
+                # establish is whether it accepts the credential -- and the
+                # model-less probe just declined to say. Its model listing
+                # answers that, and is the inventory this rung would fetch next
+                # anyway, so a listing that turns out to be credential-gated
+                # both verifies the source and fills it in one pass.
+                witness = await _authenticate_with_models_witness(
+                    vendor=normalized_vendor,
+                    protocol=protocol,
+                    base_url=base_url,
+                    secret=secret or "",
+                )
+                if witness.credential is _ModelsWitness.REJECTED:
+                    received_rejection = True
+                    ruled_out_protocols.add(protocol)
+                    continue
+                if witness.credential is _ModelsWitness.ACCEPTED:
+                    return make_source_observation(
+                        outcome=ObservationOutcome.OBSERVED,
+                        reachable=True,
+                        authenticated=True,
+                        protocol=protocol,
+                        discovery=ObservationDiscovery.SUCCEEDED,
+                        models=witness.models,
+                    )
             proved_protocol: str | None = None
             if evidence.protocol is _ProtocolProof.PROVEN:
                 if evidence.authentication is _AuthenticationEvidence.UNKNOWN:

@@ -2975,9 +2975,14 @@ def test_api_key_setup_does_not_schedule_a_model(
                 request.headers.get("x-api-key")
                 if protocol == "anthropic"
                 else request.headers.get("Authorization", "").removeprefix("Bearer ")
-            )
+            ) or ""
             observed_credentials.add(supplied_key)
-            if not re.fullmatch(key_syntax, supplied_key):
+            if not supplied_key:
+                # An absent credential is not a malformed one: a public
+                # inventory answers it and every protected surface refuses it.
+                if not (request.method == "GET" and public_inventory):
+                    return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            elif not re.fullmatch(key_syntax, supplied_key):
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.method == "POST" and not auth_before_validation and "model" not in body:
                 return web.json_response(
@@ -3014,26 +3019,47 @@ def test_api_key_setup_does_not_schedule_a_model(
         }
         harness = SimpleNamespace()
         runner = ScenarioRunner(harness)
+        # The interface has an owner either way, so the only open question is
+        # the credential -- and the model-less probe never answers it. The
+        # listing does, but only while it is gated by that credential: a public
+        # inventory answers whoever asks and so names no key.
+        gated_inventory = not public_inventory
+
         async def observe(h):
             result = await service.observe_source(draft)
             observation = result["observation"]
-            assert observation["outcome"] != "observed"
-            assert observation["authenticated"] == "unknown"
+            if gated_inventory:
+                assert observation["outcome"] == "observed"
+                assert observation["authenticated"] == "authenticated"
+                assert observation["protocol"] == protocol
+                assert observation["models"] == ["relay-model"]
+            else:
+                assert observation["outcome"] != "observed"
+                assert observation["authenticated"] == "unknown"
             assert not store.config.sources
 
         async def confirm(h):
-            with pytest.raises(ModelHubError):
-                await service.create_source({
-                    "kind": "api_key", **draft, "accept_unavailable_inventory": True,
-                })
-            before = len(requests)
-            await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
-            assert requests[before:] == [("GET", "/v1/models", None)]
+            if gated_inventory:
+                created = (await service.create_source({"kind": "api_key", **draft}))["source"]
+                assert "verification_pending" not in created
+            else:
+                with pytest.raises(ModelHubError):
+                    await service.create_source({
+                        "kind": "api_key", **draft, "accept_unavailable_inventory": True,
+                    })
+                before = len(requests)
+                await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+                # The explicit save observes nothing. Its one request is the
+                # best-effort inventory, which fills the Source without
+                # answering the credential question the listing left open.
+                assert requests[before:] == [("GET", "/v1/models", None)]
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
+            # Both paths end up holding the listing's inventory; only the one
+            # the listing authenticated ends up without the pending marker.
             assert [model["id"] for model in h.source["models"]] == ["relay-model"]
-            assert h.source["verification_pending"]
+            assert bool(h.source.get("verification_pending")) is not gated_inventory
             assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
 
         async def reject_invalid_key(h):
@@ -3055,7 +3081,11 @@ def test_api_key_setup_does_not_schedule_a_model(
             )
             ScenarioExpect.step_history(runner, ["observe", "confirm", "reject_invalid_key"])
             assert observed_credentials == {
-                valid_key, "invalid-test-key" if valid_key[0].isalpha() else "!!??",
+                valid_key,
+                "invalid-test-key" if valid_key[0].isalpha() else "!!??",
+                # Reading the listing as a witness also asks it with nothing at
+                # all, which is what tells a gated inventory from a public one.
+                "",
             }
             assert all(
                 path == (paths[protocol] if method == "POST" else "/v1/models")

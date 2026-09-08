@@ -72,13 +72,16 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    normally repeats observation before committed credential provisioning. Explicit
    `save_unverified: true` permits a catalog pin or declaration without observation;
    custom Auto still cannot be guessed. Completed Hub OAuth consent can retain its
-   bound credential under the fixed vendor protocol. Every newly stored Hub
-   credential, including observed creates and native-config imports, carries an
-   opaque `verification_pending` identity until an actual matching-credential
-   model call succeeds. Its clearing is a fresh cross-process field mutation;
-   model discovery never clears it. A typed Base URL never
+   bound credential under the fixed vendor protocol. A newly stored Hub credential
+   that no add-time observation authenticated — an explicit unverified save, a
+   native-config import, Hub OAuth admission, any credential or endpoint replacement —
+   carries an opaque `verification_pending` identity until an actual
+   matching-credential model call succeeds. Its clearing is a fresh cross-process
+   field mutation; model discovery never clears it. A typed Base URL never
    supplies protocol ownership. Model-free validation, altered-credential controls
-   and public model lists do not prove authentication. See the 2026-09-07 ruling
+   and publicly readable model lists do not prove authentication; on a protocol that
+   already has an owner, a model listing that answers the credential while refusing
+   the identical uncredentialed request does. See the 2026-09-07 rulings
    in `docs/plans/model-hub.md` and the create/Source schemas for the complete policy.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs

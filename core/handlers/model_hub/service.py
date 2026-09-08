@@ -2884,7 +2884,15 @@ class ModelHubService:
                     detail="modelHub.errors.inventory_unavailable",
                     data={"observation": self._observation_payload(observation)},
                 )
-            self._mark_source_unverified(source)
+            if observation is None:
+                # The marker records that nothing upstream has accepted this
+                # credential yet, so the first successful call can retire it.
+                # An observation reaching here is authenticated -- the terminal
+                # product admits no other `observed` -- and that acceptance is
+                # what the marker was waiting for; keeping it on a Source the
+                # user just watched verify would make it mean something else.
+                # Only the explicit unverified save arrives with none.
+                self._mark_source_unverified(source)
             if observation is not None:
                 source.protocol = cast(
                     Literal["anthropic", "openai_responses", "openai_chat"],
