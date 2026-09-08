@@ -1018,7 +1018,19 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     literals = [match.group()[1:-1].replace("''", "'") for match in SQL_OPAQUE.finditer(expression) if match.group().startswith("'")]
     mentioned = sql_identifiers(expression)
     named = [column for column in columns if identifier_key(column) in mentioned]
-    return [(column, literal) for column in named for literal in literals]
+    names = {identifier_key(column): column for column in named}
+    preferred = []
+    for term in conjunctive_terms(expression):
+        for reverse in (False, True):
+            operands = (SQL_STRING, SQL_IDENTIFIER) if reverse else (SQL_IDENTIFIER, SQL_STRING)
+            match = re.fullmatch(rf'\s*({operands[0]}){EQUALITY}({operands[1]})\s*', term, re.IGNORECASE)
+            if match is not None:
+                token, literal = reversed(match.groups()) if reverse else match.groups()
+                column = names.get(identifier_key(unquote_identifier(token)))
+                if column is not None:
+                    preferred.append((column, literal[1:-1].replace("''", "'")))
+    # An explicit binding should not first be broadcast into unrelated columns.
+    return list(dict.fromkeys([*preferred, *((column, literal) for column in named for literal in literals)]))
 
 
 def json_proposals(
@@ -1290,32 +1302,46 @@ def shape_proposals(
     groups = column_equality_groups(shapes, (name for name, _ in required if name in text_eligible))
     aliases = {name: members for members in groups for name in members}
     witnesses = []
-    for members in groups:
+    pending_groups = deque(groups)
+    while pending_groups:
+        members = pending_groups.popleft()
         patterns = tuple(dict.fromkeys(pattern for name in members for pattern in positive[name]))
         excluded = tuple(dict.fromkeys(pattern for name in members for pattern in negative[name]))
         if not patterns and not excluded:
             continue
         sizes = {widths[name] for name in members if name in widths}
-        if len(sizes) > 1:
-            continue  # No common text can satisfy incompatible declared widths.
         width = next(iter(sizes), None)
-        if len(members) == 1 and not isinstance(values[members[0]], str):
-            original = values[members[0]]
-            if ((width is None or connection.execute("select length(?)", (original,)).fetchone()[0] == width)
-                    and all(connection.execute("select ? glob ?", (original, pattern)).fetchone()[0] for pattern in patterns)
-                    and not any(connection.execute("select ? glob ?", (original, pattern)).fetchone()[0] for pattern in excluded)):
-                text.pop(members[0], None)
-                continue
+        def fits(value: object) -> bool:
+            return (len(sizes) <= 1
+                    and (width is None or connection.execute("select length(?)", (value,)).fetchone()[0] == width)
+                    and all(connection.execute("select ? glob ?", (value, pattern)).fetchone()[0] for pattern in patterns)
+                    and not any(connection.execute("select ? glob ?", (value, pattern)).fetchone()[0] for pattern in excluded))
+
+        # Already-valid native values need no text promotion, including groups.
+        if all(fits(values[name]) and connection.execute(
+                "select ? is ?", (values[members[0]], values[name])
+        ).fetchone()[0] for name in members):
+            for name in members:
+                if isinstance(values[name], str):
+                    text[name] = values[name]
+                else:
+                    text.pop(name, None)
+            witnesses.extend(values[name] for name in members if isinstance(values[name], str))
+            continue
         witness = next((text[name] for name in members if name in text
-                        and (width is None or len(text[name]) == width)
-                        and all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns)
-                        and not any(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in excluded)), None)
-        if witness is None:
+                        and fits(text[name])), None)
+        if witness is None and len(sizes) <= 1:
             alphabet = "".join(dict.fromkeys(string.printable + "".join((*patterns, *excluded))))
             witness = glob_witness(connection, patterns, excluded=excluded, width=width, alphabet=alphabet)
         if witness is not None:
             text.update((name, witness) for name in members)
             witnesses.append(witness)
+        elif len(members) > 1:
+            # Equality may use collation/affinity rather than byte identity.
+            # Reuse independent shape search; the target INSERT decides equality.
+            for name in members:
+                aliases[name] = [name]
+                pending_groups.append([name])
     for name, start, width, other in substring_requirements(shapes):
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
@@ -1428,9 +1454,9 @@ def numeric_assignments(
     seen = {ranked}
     yield ranked
     local = sparse(current)
-    # Reserve half the budget for later local alternatives as well as the first
-    # opportunity per column. Larger domains still obey the same total cap.
-    for assignment in itertools.islice(local, max(len(domains), SEED_ATTEMPTS // 2)):
+    # A column-count-dependent reservation can exclude every joint candidate.
+    # Retain later local alternatives, but leave half the budget for mixed search.
+    for assignment in itertools.islice(local, SEED_ATTEMPTS // 2):
         if assignment not in seen:
             seen.add(assignment)
             yield assignment
@@ -1806,7 +1832,8 @@ def insert_seed_row(
                 text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
                 strict=strict,
             )
-            untried = [(pair,) for pair in shaped.derived if unseen((pair,))]
+            derived = tuple(shaped.derived)
+            untried = [derived] if derived and unseen(derived) else []
             if not untried:
                 sources = [
                     shaped.numeric_fallback,

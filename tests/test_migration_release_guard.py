@@ -1102,6 +1102,101 @@ def test_already_valid_native_shapes_preserve_storage(value, declared, with_glob
         assert not any(name == 'value' for name, _ in proposals.derived)
 
 
+@pytest.mark.parametrize("declared,storage", [('BLOB', 'blob'), ('INTEGER', 'integer'), ('REAL', 'real')])
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("reverse,separate", itertools.product([False, True], repeat=2))
+@pytest.mark.parametrize("state_position", [0, 1, -1])
+def test_native_glob_groups_survive_unrelated_repairs(tmp_path, declared, storage, count, reverse, separate, state_position):
+    names = [f'v{i}' for i in range(count)]
+    clauses = [*(f"typeof({name})='{storage}'" for name in names),
+               *(f'{left}={right}' for left, right in zip(names, names[1:])), "v0 not glob 'x'", "state='ready'"]
+    if reverse:
+        names.reverse()
+        clauses.reverse()
+    checks = ','.join(f'constraint ck{i} check({clause})' for i, clause in enumerate(clauses)) if separate else 'constraint ck check(' + ' and '.join(clauses) + ')'
+    columns = [name+' '+declared+' not null' for name in names]
+    columns.insert(len(columns) if state_position == -1 else state_position, 'state text not null')
+    db_path = tmp_path / 'native-group.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(columns)},{checks})")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
+@pytest.mark.parametrize("value,declared", [(b'', 'BLOB'), (b'abc', 'BLOB'), (b'\x00a', 'BLOB'), (17, 'INTEGER'), (1.5, 'REAL')])
+@pytest.mark.parametrize("equality", ['=', '==', 'IS'])
+def test_group_storage_preservation_uses_native_shape_semantics(value, declared, equality):
+    with sqlite3.connect(':memory:') as connection:
+        width = connection.execute('select length(?)', (value,)).fetchone()[0]
+        expression = f"a {equality} b and length(a)={width} and b not glob 'X*' and state='ready'"
+        proposals = guard.shape_proposals(connection, expression, [('a', declared), ('b', declared), ('state', 'TEXT')], {'a': value, 'b': value, 'state': 'x'})
+        assert not any(name in {'a', 'b'} for name, _ in proposals.derived)
+
+
+@pytest.mark.parametrize("collation,left,right", [('NOCASE', 'A', 'a'), ('RTRIM', 'A', 'A ')])
+@pytest.mark.parametrize("equality", ['=', '==', 'IS'])
+@pytest.mark.parametrize("reverse,separate", itertools.product([False, True], repeat=2))
+def test_collated_groups_keep_independent_glob_witnesses(tmp_path, collation, left, right, equality, reverse, separate):
+    clauses = [f"a glob '{left}'", f"b glob '{right}'", f'length(a)={len(left)}', f'length(b)={len(right)}', f'a {equality} b']
+    if reverse:
+        clauses.reverse()
+    checks = ','.join(f'constraint ck{i} check({clause})' for i, clause in enumerate(clauses)) if separate else 'constraint ck check(' + ' and '.join(clauses) + ')'
+    db_path = tmp_path / 'collated-group.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f'create table shaped(a text collate {collation} not null,b text not null,{checks})')
+        connection.execute('insert into shaped values (?,?)', (left, right))
+        connection.execute('delete from shaped')
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] >= guard.SEED_ROWS
+        assert set(connection.execute('select a,b from shaped')) == {(left, right)}
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
+@pytest.mark.parametrize("operator", ['=', '==', 'IS'])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("name", ['state', 'quoted state', 'a"b'])
+def test_explicit_literal_bindings_precede_broadcasts(operator, reverse, name):
+    identifier = guard.quote_identifier(name)
+    literal = "'it''s ready'"
+    binding = f'{literal} {operator} {identifier}' if reverse else f'{identifier} {operator} {literal}'
+    expression = f"typeof(a)='blob' and (({binding}))"
+    assert guard.check_proposals(expression, ['a', name])[0] == (name, "it's ready")
+
+
+def test_independent_glob_witnesses_do_not_bypass_binary_equality(tmp_path):
+    db_path = tmp_path / 'binary-group.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("create table shaped(a text not null,b text not null,constraint ck check(a glob 'A' and b glob 'a' and a=b))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert 'ck' in short['shaped']
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("count", [31, 58, 59, 60, 80])
+@pytest.mark.parametrize("context,reverse", itertools.product([False, True], repeat=2))
+def test_large_numeric_domains_reach_joint_candidates(tmp_path, count, context, reverse):
+    names = [f'n{i}' for i in range(count)]
+    if reverse:
+        names.reverse()
+    expression = '+'.join(f'abs({name}-1)' for name in names) + '=0'
+    if context:
+        expression += ' and changes()>=0'
+    db_path = tmp_path / 'large-joint.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(name+' integer not null' for name in names)},constraint ck check({expression}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
 @pytest.mark.parametrize("function", ['max(n1,n2)', 'MAX(n1,n2,0)', '"max"(n1,n2)', 'max /* call */ (n1,n2)', 'max(min(n1,2),n2)'])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_scalar_overloads_keep_native_joint_evaluation(tmp_path, function, reverse):
