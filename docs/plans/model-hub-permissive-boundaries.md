@@ -131,3 +131,42 @@ any contract decision required. A callback is evidence to inspect, not approval.
 - Initial decision: implement the 128 MiB compatibility boundary, not unlimited
   buffering; investigate the identifier and engine seams before choosing edits.
 - Initial findings-bearing review heads: zero. No PR has been submitted yet.
+
+### Capability and launch-limit decision (2026-09-09)
+
+The orchestrator independently inspected catalog projection, Claude environment
+construction, its SessionHandler call site, and injection/CLI-path consuming
+tests at the shared contract base. The current Hub path both tombstones limit
+variables as though they were credentials and promotes catalog limits into
+highest-priority launch settings. Native CLI launches also overwrite explicit
+environment limits. These are competing owners, not evidence that a persisted
+provenance system is needed.
+
+Approved scope:
+
+- Keep existing BackendModel storage and the requested alias's metadata
+  authority. A saved non-null limit remains that selected model's planning
+  description; do not infer field provenance from row-level `origin`.
+- For Claude, leave credential/connection tombstones intact but remove the
+  two context/output limit variables from that boundary. Catalog limits fill
+  only absent subprocess variables. Empty explicit values are not permission
+  to invent another override. Do not inject model limits in the Hub connection
+  settings override; preserve native project/local settings precedence.
+- Verify the real launch consumer as well as pure environment helpers: parent
+  environment, explicit settings, absent limits, selected aliases, and both Hub
+  and native CLI paths. Do not broaden the enabled native setting sources.
+- Codex keeps its native configuration precedence if consumer evidence
+  confirms it. Custom capability absence must allow supplied images/reasoning
+  without importing a different model's private features or expensive default
+  effort. Explicit negatives and nonempty lists retain their meanings.
+- OpenCode retains the selected BackendModel as owner of the managed Hub
+  provider's planning metadata. Preserve separate native providers; do not merge
+  arbitrary native provider objects into a managed authentication definition.
+- No new persisted schema, UI policy, engine policy, credential flow, routing
+  policy, or output cap is approved by this decision.
+
+The remaining uncertainty is the native CLI consumer's treatment of absent
+capabilities and conflicting settings. Hermetic consumer evidence must confirm
+the representation and precedence before integration; a schema requirement or
+unexpected consumer override calls for another bounded decision, not a fallback
+to silent filtering.
