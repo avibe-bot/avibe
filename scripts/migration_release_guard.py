@@ -65,7 +65,7 @@ import string
 import subprocess
 import sys
 import tempfile
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -803,6 +803,7 @@ CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
 SEED_ATTEMPTS = 60
 # Shape proposals are witnesses, not an invitation to allocate arbitrary declared widths.
 SEED_TEXT_LIMIT = 4096
+SEED_GLOB_STATES = 16384
 SQLITE_INT_MIN = -(2**63)
 SQLITE_INT_MAX = 2**63 - 1
 
@@ -970,41 +971,99 @@ def json_proposals(
 
 def glob_witness(
     connection: sqlite3.Connection,
-    pattern: str,
+    patterns: tuple[str, ...],
     *,
     width: int | None = None,
     alphabet: str = string.printable,
 ) -> str | None:
-    """Offer one finite witness, using SQLite itself to interpret character classes."""
-    parts: list[str | None] = []
-    for token in re.findall(r"\[[^]]+\]|.", pattern, re.DOTALL):
-        if token == "*":
-            parts.append(None)
-            continue
-        if token == "?" or token.startswith("["):
-            accepted = next(
-                (char for char in alphabet if connection.execute("select ? glob ?", (char, token)).fetchone()[0]),
-                None,
-            )
-            if accepted is None:
-                return None
-            parts.append(accepted)
-        else:
-            parts.append(token)
-    minimum = sum(part is not None for part in parts)
-    size = minimum if width is None else width
-    if not minimum <= size <= SEED_TEXT_LIMIT or (size > minimum and (None not in parts or not alphabet)):
+    """Search the intersection of finite GLOB automata, with SQLite as the oracle.
+
+    A state retains every possible token position after the current prefix. Stars
+    both consume characters and admit an empty transition to the next token.
+    """
+    if (width is not None and not 0 <= width <= SEED_TEXT_LIMIT) or sum(map(len, patterns)) > SEED_TEXT_LIMIT:
         return None
-    padding = size - minimum
-    expanded = []
-    for part in parts:
-        if part is None:
-            expanded.append(alphabet[:1] * padding)
-            padding = 0
-        else:
-            expanded.append(part)
-    witness = "".join(expanded)
-    return witness if connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] else None
+    machines: list[list[str]] = []
+    for pattern in patterns:
+        tokens = []
+        index = 0
+        while index < len(pattern):
+            end = index + 1
+            if pattern[index] == "[":
+                if pattern[end:end + 1] == "^":
+                    end += 1
+                # SQLite admits ']' as the first member, including after '^'.
+                if pattern[end:end + 1] == "]":
+                    end += 1
+                closing = pattern.find("]", end)
+                if closing < 0:
+                    return None
+                end = closing + 1
+            tokens.append(pattern[index:end])
+            index = end
+        machines.append(tokens)
+    alphabet = "".join(dict.fromkeys(alphabet.replace("\x00", "")))
+    members = {
+        token: frozenset(
+            char for char in alphabet
+            if connection.execute("select ? glob ?", (char, token)).fetchone()[0]
+        )
+        for token in sorted({token for tokens in machines for token in tokens if token != "*"})
+    }
+    # Equivalent characters have identical transitions in every pattern.
+    representatives: dict[tuple[bool, ...], str] = {}
+    for char in alphabet:
+        representatives.setdefault(tuple(char in accepted for accepted in members.values()), char)
+
+    def closure(tokens: list[str], positions: Iterable[int]) -> frozenset[int]:
+        result = set(positions)
+        for position in tuple(result):
+            while position < len(tokens) and tokens[position] == "*":
+                position += 1
+                if position in result:
+                    break
+                result.add(position)
+        return frozenset(result)
+
+    initial = tuple(closure(tokens, [0]) for tokens in machines)
+    start = (initial, 0)
+    parents = {start: None}
+    queue = deque([(start, 0)])
+    while queue:
+        key, depth = queue.popleft()
+        states, _ = key
+        if (width is None or depth == width) and all(
+            len(tokens) in state for tokens, state in zip(machines, states)
+        ):
+            parts = []
+            cursor = key
+            while parents[cursor] is not None:
+                cursor, char = parents[cursor]
+                parts.append(char)
+            witness = "".join(reversed(parts))
+            if all(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] for pattern in patterns):
+                return witness
+        if depth >= (SEED_TEXT_LIMIT if width is None else width):
+            continue
+        for char in representatives.values():
+            next_states = tuple(
+                closure(tokens, (
+                    position if tokens[position] == "*" else position + 1
+                    for position in state if position < len(tokens)
+                    and (tokens[position] == "*" or char in members[tokens[position]])
+                ))
+                for tokens, state in zip(machines, states)
+            )
+            if not all(next_states):
+                continue
+            next_key = (next_states, depth + 1 if width is not None else 0)
+            if next_key in parents:
+                continue
+            if len(parents) >= SEED_GLOB_STATES:
+                return None
+            parents[next_key] = (key, char)
+            queue.append((next_key, depth + 1))
+    return None
 
 
 def shape_proposals(
@@ -1014,6 +1073,8 @@ def shape_proposals(
     values: dict[str, object],
     *,
     text_constraints: str | None = None,
+    omitted: Iterable[tuple[str, str, str | None]] = (),
+    unavailable: Iterable[str] = (),
 ) -> list[tuple[str, object]]:
     """Derive bounded text-shape and numeric candidates from the rejected CHECK.
 
@@ -1035,7 +1096,16 @@ def shape_proposals(
         shapes,
         re.IGNORECASE,
     )
+    positive: dict[str, list[str]] = defaultdict(list)
     alphabets = {name: string.printable for name in text}
+    for name, negated, quoted in globs:
+        name = names.get(identifier_key(name), name)
+        if name in text:
+            pattern = quoted.replace("''", "'")
+            alphabets[name] += pattern
+            if not negated:
+                positive[name].append(pattern)
+    alphabets = {name: "".join(dict.fromkeys(alphabet)) for name, alphabet in alphabets.items()}
     # Restrict the alphabet before generating a witness so later CHECK order cannot
     # erase a required width or introduce characters forbidden by another CHECK.
     for name, negated, quoted in globs:
@@ -1052,14 +1122,10 @@ def shape_proposals(
             alphabets[name] = allowed
             if allowed:
                 text[name] = "".join(char if char in allowed else allowed[0] for char in text[name])
-    for name, negated, quoted in globs:
-        name = names.get(identifier_key(name), name)
-        if negated or name not in text:
+    for name, patterns in positive.items():
+        if all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns):
             continue
-        pattern = quoted.replace("''", "'")
-        if connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0]:
-            continue
-        witness = glob_witness(connection, pattern, width=widths.get(name), alphabet=alphabets[name])
+        witness = glob_witness(connection, tuple(patterns), width=widths.get(name), alphabet=alphabets[name])
         if witness is not None:
             text[name] = witness
     for name, start, width, other in SUBSTRING_REQUIREMENT.findall(shapes):
@@ -1081,6 +1147,11 @@ def shape_proposals(
         f'cast(? as {declared}) as "{name}"' if declared else f'? as "{name}"'
         for name, declared in required
     )
+    for name, declared, default in omitted:
+        term = f"({default})" if default is not None else "NULL"
+        if declared:
+            term = f"cast({term} as {declared})"
+        projection += f', {term} as "{name}"'
     numeric = [
         name for name, declared in required
         if "INT" in declared.upper() and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
@@ -1089,21 +1160,33 @@ def shape_proposals(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
         if SQLITE_INT_MIN <= value <= SQLITE_INT_MAX
     ))
-    # A CHECK may require multiple columns to move together. Keep the evaluation
-    # bounded, but evaluate whole assignments rather than rejecting partial moves.
+    fallback = [(name, candidate) for candidate in candidates for name in numeric if candidate != values[name]]
+    if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)) for name in unavailable):
+        return [*proposals, *fallback]
+    # Reserve half the budget for whole-row boundary assignments before a large
+    # single-column search or Cartesian prefix can starve coordinated moves.
     domains = [list(dict.fromkeys([values[name], *candidates])) for name in numeric]
     single_changes = (
         tuple(candidate if name == changed else values[name] for name in numeric)
         for changed in numeric for candidate in candidates if candidate != values[changed]
     )
-    assignments = itertools.chain(single_changes, itertools.product(*domains)) if numeric else ()
+    assignments = itertools.chain(
+        itertools.islice(single_changes, SEED_ATTEMPTS // 2),
+        (tuple(candidate for _ in numeric) for candidate in candidates),
+        single_changes,
+        itertools.product(*domains),
+    ) if numeric else ()
     for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
         changes = dict(zip(numeric, assignment))
         parameters = [changes.get(column, values[column]) for column, _ in required]
         try:
-            accepted = connection.execute(f"select ({expression}) from (select {projection})", parameters).fetchone()[0]
+            accepted = connection.execute(
+                f"select coalesce(cast(({expression}) as numeric), 1) != 0 from (select {projection})", parameters
+            ).fetchone()[0]
         except sqlite3.OperationalError:
-            # Omitted/defaulted columns still leave the actual INSERT authoritative.
+            # Generated columns or unsupported context cannot reject a candidate.
+            # Offer the bounded values to the real INSERT, which supplies that context.
+            proposals.extend(fallback)
             break
         if accepted:
             proposals.extend((name, value) for name, value in changes.items() if value != values[name])
@@ -1391,6 +1474,17 @@ def insert_seed_row(
         for name in re.findall(r'\bconstraint\s+"?(\w+)"?\s+check\s*\(', ddl, re.IGNORECASE)
     ]
     text_constraints = "\n".join(constraints)
+    omitted = []
+    unavailable = []
+    for info in connection.execute(f'pragma table_xinfo("{table}")'):
+        if str(info[1]) in values:
+            continue
+        if info[6] or (info[5] and str(info[2]).upper() == "INTEGER" and info[4] is None):
+            # Generated columns and implicit primary keys depend on the INSERT.
+            # In particular, a missing double-quoted name may silently become text.
+            unavailable.append(str(info[1]))
+        else:
+            omitted.append((str(info[1]), str(info[2]), info[4]))
     prefix_sources = {identifier_key(other) for _, _, _, other in SUBSTRING_REQUIREMENT.findall(text_constraints)}
     proposed: set[tuple[str, object]] = set()
     objection = ""
@@ -1409,7 +1503,10 @@ def insert_seed_row(
             untried = [
                 pair
                 for pair in [
-                    *shape_proposals(connection, expression, required, values, text_constraints=text_constraints),
+                    *shape_proposals(
+                        connection, expression, required, values,
+                        text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
+                    ),
                     *check_proposals(expression, names),
                     *json_proposals(connection, expression, names),
                 ]

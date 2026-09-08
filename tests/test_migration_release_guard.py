@@ -1089,6 +1089,128 @@ def test_joint_numeric_search_preserves_single_column_repairs(changed):
         assert guard.shape_proposals(connection, expression, required, values) == [(f"n{changed}", 1)]
 
 
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+@pytest.mark.parametrize("separate", [False, True])
+@pytest.mark.parametrize("patterns", [("A*", "*Z"), ("[A-C]*", "*[Y-Z]"), ("*A*", "*Z*"), ("\u00e9*", "*]")])
+def test_positive_globs_are_composed_in_every_check_order(tmp_path, order, separate, patterns):
+    requirements = ["length(code) = 4", *(f"code glob '{pattern}'" for pattern in patterns)]
+    expressions = [requirements[index] for index in order]
+    if not separate:
+        expressions = [" and ".join(expressions)]
+    checks = ", ".join(f"constraint ck_{index} check ({expression})" for index, expression in enumerate(expressions))
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (id integer primary key, code text not null, {checks})")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("pattern", ["[]]", "[^]]", "[]-]", "[-]", "[[]", "[]a]", "[a-]", "[\u00e9]", "?[]]*"])
+def test_glob_classes_follow_sqlite_token_semantics(tmp_path, pattern):
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (id integer primary key, code text not null, constraint ck_code check (code glob '{pattern}'))")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+def test_glob_intersection_matches_sqlite_over_a_finite_domain():
+    alphabet = "ab[]-"
+    patterns = ("*", "a*", "*b", "?a", "[ab]", "[]]", "[^]]", "[[]", "[-a]", "a**b", "[a-]", "[", "[]", "[^]")
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("create table domain (value text, width integer)")
+        connection.executemany("insert into domain values (?, ?)", [
+            ("".join(chars), width) for width in range(4) for chars in itertools.product(alphabet, repeat=width)
+        ])
+        for left, right, width in itertools.product(patterns, patterns, range(4)):
+            expected = connection.execute(
+                "select value from domain where width = ? and value glob ? and value glob ? limit 1",
+                (width, left, right),
+            ).fetchone()
+            witness = guard.glob_witness(connection, (left, right), width=width, alphabet=alphabet)
+            assert (witness is None) == (expected is None), (left, right, width, witness)
+            if witness is not None:
+                assert len(witness) == width
+                assert connection.execute("select ? glob ? and ? glob ?", (witness, left, witness, right)).fetchone()[0]
+
+
+def test_glob_search_has_explicit_width_pattern_and_state_limits(monkeypatch):
+    with sqlite3.connect(":memory:") as connection:
+        assert guard.glob_witness(connection, ("*",), width=guard.SEED_TEXT_LIMIT + 1) is None
+        assert guard.glob_witness(connection, ("a" * (guard.SEED_TEXT_LIMIT + 1),)) is None
+        monkeypatch.setattr(guard, "SEED_GLOB_STATES", 3)
+        assert guard.glob_witness(connection, ("????",)) is None
+
+
+@pytest.mark.parametrize("patterns", [("A*", "B*"), ("[]", "*"), ("[", "*")])
+def test_unsatisfiable_glob_intersections_remain_visible_failures(tmp_path, patterns):
+    db_path = tmp_path / "vibe.sqlite"
+    expression = " and ".join(f"code glob '{pattern}'" for pattern in patterns)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (code text not null, constraint ck_code check ({expression}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert "ck_code" in short["shaped"]
+
+
+@pytest.mark.parametrize("count", [5, 6, 16])
+@pytest.mark.parametrize("bound", [0, 7, -7])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_joint_boundary_repairs_are_not_starved_by_cartesian_prefix(tmp_path, count, bound, reverse):
+    names = [f"n{index}" for index in range(count)]
+    clauses = [f"{name} > {bound}" if bound >= 0 else f"{name} < {bound}" for name in names]
+    if reverse:
+        names.reverse()
+    columns = ", ".join(f"{name} integer not null" for name in names)
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped (id integer primary key, {columns}, constraint ck_counts check ({' and '.join(clauses)}))")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize(
+    "column,check,expected",
+    [
+        ("tag TEXT", "tag is null", None),
+        ("tag TEXT DEFAULT 'ready'", "tag = 'ready'", "ready"),
+        ("tag TEXT DEFAULT (upper('ready'))", "tag = 'READY'", "READY"),
+        ("tag INTEGER DEFAULT 7", "tag = 7", 7),
+        ("tag INTEGER DEFAULT NULL", "tag is null", None),
+        ("tag INTEGER", "tag = 7", None),
+        ("tag TEXT GENERATED ALWAYS AS (case when n > 0 then 'ready' end)", "tag = 'ready'", "ready"),
+        ("tag TEXT GENERATED ALWAYS AS (case when n > 0 then 'ready' end)", "\"tag\" = 'ready'", "ready"),
+        ("tag INTEGER PRIMARY KEY", "\"tag\" > 0", 1),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_numeric_check_context_includes_omitted_columns(column, check, expected, reverse):
+    columns = ["n INTEGER NOT NULL", column]
+    if reverse:
+        columns.reverse()
+    ddl = f"create table shaped ({', '.join(columns)}, constraint ck_n check (n > 0 and {check}))"
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(ddl)
+        objection, settled = guard.insert_seed_row(connection, "shaped", ddl, [("n", "INTEGER")], {"n": 0})
+        assert (objection, settled) == ("", True)
+        assert connection.execute("select n, tag from shaped").fetchall() == [(1, expected)]
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_prefix_sources_can_be_derived_from_json_checks(tmp_path, reverse):
     db_path = tmp_path / "vibe.sqlite"
