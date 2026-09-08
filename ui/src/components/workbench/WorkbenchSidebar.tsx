@@ -491,11 +491,11 @@ const ProjectRow: React.FC<{
             onClick={onToggle}
             className="project-drag-header flex min-w-0 flex-1 items-center gap-1.5 text-left"
           >
-            <Chevron className="size-3 shrink-0 text-muted" />
+            <Chevron className="project-drag-icon size-3 shrink-0 text-muted" />
             {expanded ? (
-              <FolderOpen className="size-3.5 shrink-0 text-muted" />
+              <FolderOpen className="project-drag-icon size-3.5 shrink-0 text-muted" />
             ) : (
-              <Folder className="size-3.5 shrink-0 text-muted" />
+              <Folder className="project-drag-icon size-3.5 shrink-0 text-muted" />
             )}
             <span className="flex-1 truncate text-[12px] font-medium text-foreground">
               {project.display_name}
