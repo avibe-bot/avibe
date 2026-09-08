@@ -2049,6 +2049,12 @@
     "retry": "Retry"
   },
   "errors": {
+    "retry_not_available": "This notice cannot be retried. Send a message to continue.",
+    "retry_stale": "Newer work has already started. Send a message if you want to continue.",
+    "retry_busy": "The previous turn is still settling. Try again after it stops.",
+    "retry_acceptance_unknown": "The previous request's delivery is still uncertain. Retry is disabled to avoid repeating work.",
+    "retry_pending_input": "This conversation already has pending input. Retry would duplicate or reorder it.",
+    "retry_original_unavailable": "The original unsent input is no longer available for a safe retry.",
     "runtime_install_inspection_failed": "Show Runtime status could not be inspected. No install or repair was attempted.",
     "model_hub_engine_archive_checksum_mismatch": "The CPA download failed its integrity check. Retry the installation.",
     "model_hub_engine_archive_download_failed": "CPA could not be downloaded. Check your network connection and retry.",
@@ -4131,6 +4137,8 @@
     "streaming": "Streaming",
     "thinking": "Thinking…",
     "notifyLabel": "Notify",
+    "retryRequested": "Retry requested",
+    "retryFailed": "Could not request retry. You can try again safely.",
     "collapse": "Collapse",
     "turnInProgress": "A turn is already running — wait for the reply.",
     "stopFailed": "Couldn't reach the agent to stop it — it may still be running.",

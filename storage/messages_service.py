@@ -95,11 +95,25 @@ def _row_to_payload(
     row: dict[str, Any],
     *,
     include_private_metadata: bool = False,
+    conn: Connection | None = None,
 ) -> dict[str, Any]:
     try:
         content = json.loads(row.get("content_json") or "{}")
     except json.JSONDecodeError:
         content = {}
+    link = content.get("failure_retry") if isinstance(content, dict) else None
+    if conn is not None and isinstance(link, dict):
+        from storage.message_deliveries import failure_retry_state, get_delivery
+
+        delivery = get_delivery(conn, str(link.get("delivery_id") or ""))
+        content["failure_retry"] = {
+            "delivery_id": link.get("delivery_id"),
+            "state": (
+                failure_retry_state(delivery)
+                if delivery is not None and delivery["session_id"] == row.get("session_id")
+                else "retired"
+            ),
+        }
     try:
         metadata = json.loads(row.get("metadata_json") or "{}")
     except json.JSONDecodeError:
@@ -609,7 +623,7 @@ def get_message(
     if session_id is not None:
         query = query.where(messages.c.session_id == session_id)
     row = conn.execute(query).mappings().first()
-    return _row_to_payload(dict(row)) if row else None
+    return _row_to_payload(dict(row), conn=conn) if row else None
 
 
 def native_message_exists(
@@ -917,7 +931,7 @@ def list_session_messages(
         )
         older = [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata
+                dict(row), include_private_metadata=include_private_metadata, conn=conn
             )
             for row in conn.execute(older_q).mappings().all()
         ]
@@ -927,7 +941,7 @@ def list_session_messages(
 
         anchor_rows = [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata
+                dict(row), include_private_metadata=include_private_metadata, conn=conn
             )
             for row in conn.execute(query.where(messages.c.id == anchor_id)).mappings().all()
         ]
@@ -944,7 +958,7 @@ def list_session_messages(
         )
         newer = [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata
+                dict(row), include_private_metadata=include_private_metadata, conn=conn
             )
             for row in conn.execute(newer_q).mappings().all()
         ]
@@ -972,7 +986,7 @@ def list_session_messages(
             conn,
             [
                 _row_to_payload(
-                    dict(row), include_private_metadata=include_private_metadata
+                    dict(row), include_private_metadata=include_private_metadata, conn=conn
                 )
                 for row in conn.execute(query).mappings().all()
             ],
@@ -1005,7 +1019,7 @@ def list_session_messages(
             conn,
             [
                 _row_to_payload(
-                    dict(row), include_private_metadata=include_private_metadata
+                    dict(row), include_private_metadata=include_private_metadata, conn=conn
                 )
                 for row in conn.execute(query).mappings().all()
             ],
@@ -1039,7 +1053,7 @@ def list_session_messages(
         conn,
         [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata
+                dict(row), include_private_metadata=include_private_metadata, conn=conn
             )
             for row in conn.execute(query).mappings().all()
         ],

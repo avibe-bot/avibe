@@ -18,7 +18,7 @@ import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { setConfigField } from '../../lib/configMutations';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isAgentActivityBoundaryMessage, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
+import { isAgentActivityBoundaryMessage, isRetryableFailureNotice, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -59,6 +59,7 @@ import {
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
+import { FailureRetry } from './FailureRetry';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 import { useFileDrop } from '../../lib/useFileDrop';
@@ -1617,6 +1618,12 @@ export const ChatPage: React.FC = () => {
       void refreshSessionRow();
     };
     const disconnect = api.connectWorkbenchEvents({
+      onMessageUpdated: (msg) => {
+        if (msg.session_id !== sessionIdRef.current) return;
+        // An action-state update is not another terminal event, unread message,
+        // or reason to leave the reader's historical window.
+        setMessages((current) => current.map((row) => row.id === msg.id ? msg : row));
+      },
       // NB: match against sessionIdRef.current (the CURRENT route), NOT the
       // captured ``sessionId`` — there is a window after a chat switch before
       // React runs this subscription's cleanup, during which an event for the
@@ -2143,6 +2150,47 @@ export const ChatPage: React.FC = () => {
     (messageId: string, choice: string) => sendMessage(choice, undefined, { quick_reply_for: messageId }),
     [sendMessage],
   );
+
+  const handleFailureRetry = useCallback(async (messageId: string): Promise<boolean> => {
+    const sid = sessionId;
+    if (!sid || !writable) return false;
+    setError(null);
+    try {
+      // A notice-bound action does not read, clear, or restore the composer.
+      const response = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ retry_for: messageId }),
+      });
+      const body = await response.json().catch(() => null);
+      if (sid !== sessionIdRef.current) return false;
+      if (body?.retry_notice) {
+        const notice = body.retry_notice as WorkbenchMessage;
+        setMessages((current) => current.map((row) => row.id === notice.id ? notice : row));
+      }
+      if (isSessionArchivedConflict(response.status, body)) {
+        api.convergeSessionArchived(sid);
+      }
+      if (!response.ok) {
+        const parsed = body ? selectApiErrorFields(body, t('chat.retryFailed')) : null;
+        setError(parsed?.code
+          ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+          : parsed?.fallback ?? t('chat.retryFailed'));
+        return false;
+      }
+      if (body?.author && body?.id && body?.state !== 'reserved' && !body?.queued) {
+        if (historicalWindowRef.current) await reloadLatestMessages();
+        else appendMessage(body as WorkbenchMessage);
+      }
+      void refreshQueue();
+      return ['queued', 'claimed', 'accepted'].includes(body?.delivery_state ?? body?.state ?? '');
+    } catch (err) {
+      if (sid === sessionIdRef.current) setError(errorMessage(err) ?? t('chat.retryFailed'));
+      return false;
+    } finally {
+      if (sid === sessionIdRef.current) void syncTurnStateRef.current?.();
+    }
+  }, [sessionId, writable, api, appendMessage, reloadLatestMessages, refreshQueue, t]);
 
   const stopMessage = useCallback(async () => {
     if (!sessionId || !working) return;
@@ -2805,6 +2853,7 @@ export const ChatPage: React.FC = () => {
           highlightedId={highlightedId}
           messageFontSize={messageFontSize}
           onQuickReply={handleQuickReply}
+          onFailureRetry={handleFailureRetry}
           provisionRequestsByMessage={provisionPlacement.byMessageId}
           onVaultRequestResolved={refreshVaultRequests}
           onQuoteSelection={quoteSelectionToComposer}
@@ -3645,6 +3694,7 @@ interface TranscriptProps {
   highlightedId: string | null;
   messageFontSize: number;
   onQuickReply: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  onFailureRetry?: (messageId: string) => Promise<boolean>;
   provisionRequestsByMessage: Map<string, VaultRequest[]>;
   onVaultRequestResolved: () => void;
   // Chat-selection toolbar: quote the selection into the composer, or fork +
@@ -3704,6 +3754,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   highlightedId,
   messageFontSize,
   onQuickReply,
+  onFailureRetry,
   provisionRequestsByMessage,
   onVaultRequestResolved,
   onQuoteSelection,
@@ -3753,6 +3804,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
     }
   }, [fileViewer, navigate, openApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
+  const latestRetryBoundary = messages.reduce((last, message, index) =>
+    message.type === 'user' || message.type === 'harness' || isRetryableFailureNotice(message)
+      ? index : last, -1);
   const forkSourceSessionId =
     typeof session.metadata?.fork_source_session_id === 'string'
       ? session.metadata.fork_source_session_id
@@ -4207,7 +4261,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           ) : null}
           {/* Degenerate null-anchor groups render at the TOP (never the tail). */}
           {activity?.enabled && activity.topGroups.map((group) => renderActivityChip(group))}
-          {messages.map((message) => {
+          {messages.map((message, index) => {
             // Agent Activity chips positioned relative to THIS row: 'before' it
             // (done/failed, hugging the reply from above) and 'after' it (interrupted,
             // just below the turn's trigger).
@@ -4222,6 +4276,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
                   agentDisplayName={agentDisplayName}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
+                  onFailureRetry={onFailureRetry}
+                  retryDisabled={working || index < latestRetryBoundary}
                   vaultRequests={provisionRequestsByMessage.get(message.id)}
                   onVaultRequestResolved={onVaultRequestResolved}
                   onOpenLocalFile={openLocalFile}
@@ -4350,6 +4406,8 @@ type MessageRowProps = {
   agentDisplayName?: string | null;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  onFailureRetry?: (messageId: string) => Promise<boolean>;
+  retryDisabled?: boolean;
   vaultRequests?: VaultRequest[];
   onVaultRequestResolved?: () => void;
   onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
@@ -4380,6 +4438,8 @@ export const MessageRow = memo(function MessageRow({
   agentDisplayName,
   messageFontSize,
   onQuickReply,
+  onFailureRetry,
+  retryDisabled,
   vaultRequests,
   onVaultRequestResolved,
   onOpenLocalFile,
@@ -4561,6 +4621,14 @@ export const MessageRow = memo(function MessageRow({
               )}
             </span>
           </div>
+          {onFailureRetry && (
+            <FailureRetry
+              message={message}
+              readOnly={readOnly}
+              disabled={retryDisabled}
+              onRetry={onFailureRetry}
+            />
+          )}
           {time}
         </div>
       </div>

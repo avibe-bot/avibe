@@ -72,10 +72,12 @@ class FakeEventSource {
  * stream that never broke must not produce it a second time.
  */
 const onConnected = vi.fn();
+const onMessageNew = vi.fn();
+const onMessageUpdated = vi.fn();
 
 const Subscriber = () => {
   const api = useApi();
-  useEffect(() => api.connectWorkbenchEvents({ onConnected }), [api]);
+  useEffect(() => api.connectWorkbenchEvents({ onConnected, onMessageNew, onMessageUpdated }), [api]);
   return null;
 };
 
@@ -170,6 +172,8 @@ beforeEach(() => {
   apiFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
   showToast.mockReset();
   onConnected.mockReset();
+  onMessageNew.mockReset();
+  onMessageUpdated.mockReset();
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
@@ -183,6 +187,14 @@ afterEach(() => {
 });
 
 describe('ApiProvider workbench stream liveness', () => {
+  it('routes an action update without replaying a terminal message', () => {
+    mountConnectedStream();
+    const notice = { id: 'failed-notice', session_id: 'session', type: 'notify' };
+    FakeEventSource.latest().emit('message.updated', { type: 'message.updated', data: notice });
+    expect(onMessageUpdated).toHaveBeenCalledExactlyOnceWith(notice);
+    expect(onMessageNew).not.toHaveBeenCalled();
+  });
+
   it('leaves a stream that keeps proving itself alone across reactivations', () => {
     mountConnectedStream();
     expect(onConnected).toHaveBeenCalledTimes(1);

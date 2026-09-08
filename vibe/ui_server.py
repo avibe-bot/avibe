@@ -11270,6 +11270,9 @@ async def sessions_messages_create(session_id: str):
     or, when a turn is already running, promotes it to ``queued`` itself
     (send-while-busy). The legacy per-turn ``?stream=1`` SSE proxy was retired
     in Step 6 — the session-scoped stream replaced it.
+
+    ``retry_for`` is a notice-bound action. Its input and idempotency identity
+    are derived from durable server state; it never consumes the composer draft.
     """
 
     from core.services import sessions as workbench_sessions_service
@@ -11283,6 +11286,13 @@ async def sessions_messages_create(session_id: str):
     from vibe import internal_client
 
     payload = request.json or {}
+    retry_for = payload.get("retry_for")
+    if retry_for is not None:
+        if not isinstance(retry_for, str) or not retry_for.strip():
+            return jsonify({"error": "invalid retry_for"}), 400
+        # This is an action, not a caller-supplied replacement prompt. Do not
+        # accept attachments, identities, or quick-reply metadata alongside it.
+        payload = {"text": "continue"}
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
@@ -11290,6 +11300,8 @@ async def sessions_messages_create(session_id: str):
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
     message_kind = workbench_message_kind(payload, quick_reply_for)
+    if retry_for:
+        message_kind = "quick_reply"
     web_push_user_key = _web_push_user_key()
     workbench_author_id = _workbench_author_id()
     web_push_authorization_context = web_push_authorization_context_record(
@@ -11379,43 +11391,74 @@ async def sessions_messages_create(session_id: str):
                 message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [
                     web_push_authorization_context
                 ]
-            row = message_deliveries.insert_delivery(
-                conn,
-                delivery_id=delivery_id,
+            snapshot = message_deliveries.message_snapshot(
+                scope_id=session["scope_id"],
                 session_id=session_id,
-                priority="p3",
-                state="reserved",
-                snapshot=message_deliveries.message_snapshot(
-                    scope_id=session["scope_id"],
-                    session_id=session_id,
-                    platform="avibe",
-                    author="user",
-                    source="user",
-                    text=text if isinstance(text, str) else None,
-                    content=content if isinstance(content, dict) else None,
-                    metadata=message_metadata,
-                    author_id=workbench_author_id,
-                    author_name=payload.get("author_name"),
-                    message_kind=message_kind,
-                ),
-                dispatch_text=dispatch_text,
-                history_event={"kind": "admission", "priority": "p3", "state": "reserved"},
+                platform="avibe",
+                author="user",
+                source="user",
+                text=text if isinstance(text, str) else None,
+                content=content if isinstance(content, dict) else None,
+                metadata=message_metadata,
+                author_id=workbench_author_id,
+                author_name=payload.get("author_name"),
+                message_kind=message_kind,
             )
-            if not quick_reply_for:
+            if retry_for:
+                from core.backend_failure_retry import reserve_retry
+
+                row = reserve_retry(
+                    conn,
+                    session_id=session_id,
+                    notice_id=retry_for,
+                    snapshot=snapshot,
+                )
+            else:
+                row = message_deliveries.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=session_id,
+                    priority="p3",
+                    state="reserved",
+                    snapshot=snapshot,
+                    dispatch_text=dispatch_text,
+                    history_event={"kind": "admission", "priority": "p3", "state": "reserved"},
+                )
+            if not quick_reply_for and not retry_for:
                 message_deliveries.set_draft(conn, session_id, None)
             draft = message_deliveries.get_draft_state(conn, session_id)
             workbench_sessions_service.touch_session(conn, session_id)
         result = message_deliveries.public_delivery_payload(row)
         result["draft"] = _session_draft_payload(draft)
-        result["draft_advanced"] = not bool(quick_reply_for)
+        result["draft_advanced"] = not bool(quick_reply_for or retry_for)
         return result
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
-    message = _persist_user_row()
+    from core.backend_failure_retry import RetryUnavailable
+
+    try:
+        message = _persist_user_row()
+    except RetryUnavailable as error:
+        return _coded_error_response(error.code, error.code, 409)
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
         return _session_archived_response()
-    if not dispatch_text.strip() and not attachment_specs:
+    if retry_for:
+        # Retained pre-write input comes from its immutable Delivery, including
+        # attachments. The controller independently reconstructs the same input.
+        content = message.get("content") or {}
+        dispatch_text = message.get("dispatch_text") or message.get("text") or ""
+        from core.workbench_media import resolve_attachment_specs
+
+        with engine.connect() as conn:
+            attachment_specs = resolve_attachment_specs(
+                conn, session_id=session_id, attachments=content.get("attachments") or []
+            )
+    if (
+        not dispatch_text.strip()
+        and not attachment_specs
+        and not (retry_for and message.get("state") == "accepted")
+    ):
         from storage import message_deliveries
 
         with engine.begin() as conn:
@@ -11451,11 +11494,21 @@ async def sessions_messages_create(session_id: str):
 
         with engine.connect() as conn:
             current = message_deliveries.get_delivery(conn, str(message["id"]))
+            retry_notice = (
+                messages_service.get_message(conn, retry_for, session_id=session_id)
+                if retry_for else None
+            )
         if current is None:
             return dict(message)
         payload = message_deliveries.public_delivery_payload(current)
         payload["draft"] = message["draft"]
         payload["draft_advanced"] = message["draft_advanced"]
+        if retry_notice is not None:
+            from vibe.sse_broker import broker
+
+            payload["retry_notice"] = retry_notice
+            # An upsert of an existing notice is not new user communication.
+            broker.publish("message.updated", retry_notice)
         if current["state"] == "queued":
             payload["type"] = "queued"
             payload["queued"] = True
@@ -11522,6 +11575,8 @@ async def sessions_messages_create(session_id: str):
     if status == 202:
         delivery_state = str(body.get("delivery_state") or "")
         current = _current_delivery_response()
+        if retry_for and current.get("state") == "retired":
+            return jsonify({**current, "code": "retry_stale", "error": "retry_stale"}), 409
         if delivery_state == "accepted":
             accepted_message_id = str(
                 body.get("message_id")
@@ -11544,10 +11599,13 @@ async def sessions_messages_create(session_id: str):
                     **body,
                     "draft": message["draft"],
                     "draft_advanced": message["draft_advanced"],
+                    **({"retry_notice": current["retry_notice"]} if retry_for else {}),
                 }
             ), 201
         return jsonify({**current, **body}), 202
     current = _retire_unclaimed_delivery(f"internal_dispatch_rejected_{status}")
+    if retry_for and status == 409:
+        return jsonify({**current, **body}), 409
     return jsonify(
         {
             **current,

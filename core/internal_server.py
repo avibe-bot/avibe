@@ -923,7 +923,17 @@ def create_app(
                     "delivery_id": delivery_id,
                 },
             )
-        if delivery["state"] != "reserved":
+        from core.backend_failure_retry import retry_binding
+
+        failure_retry = retry_binding(delivery)
+        if delivery["state"] != "reserved" and not (
+            retry_binding(delivery, unclaimed_only=True) and delivery["state"] == "queued"
+        ):
+            if failure_retry and delivery["state"] == "retired":
+                return JSONResponse(
+                    status_code=409,
+                    content={"ok": False, "code": "retry_stale", "delivery_id": delivery_id},
+                )
             return JSONResponse(
                 status_code=202,
                 content={
@@ -982,6 +992,11 @@ def create_app(
         )
         with get_cached_sqlite_engine().connect() as conn:
             settled = message_deliveries.get_delivery(conn, delivery_id)
+        if failure_retry and (settled or {}).get("state") == "retired":
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "code": "retry_stale", "delivery_id": delivery_id},
+            )
         return JSONResponse(
             status_code=202,
             content={

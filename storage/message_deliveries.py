@@ -28,6 +28,7 @@ from storage.models import (
 
 
 TURN_OWNER_STATES = ("starting", "active")
+FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
@@ -328,6 +329,30 @@ def delivery_has_history_event(delivery: dict[str, Any], *, kind: str) -> bool:
         isinstance(event, dict) and str(event.get("kind") or "") == kind
         for event in events
     )
+
+
+def failure_retry_binding(
+    delivery: dict[str, Any], *, unclaimed_only: bool = False
+) -> dict[str, Any] | None:
+    """Server-written action provenance, never caller Message metadata."""
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if unclaimed_only and event.get("kind") == "start" and event.get("outcome") in {"claimed", "opened"}:
+            return None
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            return event
+    return None
+
+
+def failure_retry_state(delivery: dict[str, Any]) -> str:
+    """An original queued input predates its retry; await this action's admission."""
+    state = str(delivery["state"])
+    if state == "queued":
+        for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+            if event.get("kind") in {"start", "queue"}:
+                break
+            if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+                return "reserved"
+    return state
 
 
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:

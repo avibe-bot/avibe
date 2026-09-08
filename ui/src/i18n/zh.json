@@ -2049,6 +2049,12 @@
     "retry": "重试"
   },
   "errors": {
+    "retry_not_available": "这条通知无法重试，可以发送消息继续。",
+    "retry_stale": "会话已经开始了后续任务，如需继续请发送消息。",
+    "retry_busy": "上一轮还在结束处理中，请稍后再试。",
+    "retry_acceptance_unknown": "暂时无法确认原请求是否已送达，为避免重复执行，不能重试。",
+    "retry_pending_input": "会话已有待处理输入，请先等待处理，避免重复或打乱顺序。",
+    "retry_original_unavailable": "原始未送达输入已不可用，无法安全重试。",
     "runtime_install_inspection_failed": "无法检查 Show Runtime 状态。未执行安装或修复。",
     "model_hub_engine_archive_checksum_mismatch": "CPA 下载文件未通过完整性校验，请重试安装。",
     "model_hub_engine_archive_download_failed": "无法下载 CPA，请检查网络连接后重试。",
@@ -4131,6 +4137,8 @@
     "streaming": "实时输出中",
     "thinking": "思考中…",
     "notifyLabel": "通知",
+    "retryRequested": "已请求重试",
+    "retryFailed": "未能提交重试，可以再次点击。",
     "collapse": "收起",
     "turnInProgress": "当前回合还在进行中，请等待回复后再发送。",
     "stopFailed": "没能联系到 Agent 来停止，它可能还在运行。",
