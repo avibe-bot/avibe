@@ -62,29 +62,36 @@ where one is replayed.
 
 ## First-wave catalog
 
-Authoritative table, shipped as `vibe/data/api_key_vendors.json`. Vendor
-ids reuse the `Source.vendor` pattern already named in
-`source.schema.json` (`anthropic|openai|zhipuai|kimi|xai|…`). Model-id
-prefix map in `vibe/data/model_vendors.json` is a different document
-(family → vendor for catalog backfill) and is not this picker.
+Mirror of `vibe/data/api_key_vendors.json`, which is the shipped artifact
+and the authority: on any drift — a cell, a missing row, or the row order —
+the JSON wins and this table is what gets corrected (last synced 2026-09-08,
+#1938). A data change belongs in the same PR as its row here. Vendor ids
+reuse the `Source.vendor` pattern already named in `source.schema.json`
+(`anthropic|openai|zhipuai|kimi|xai|…`). Model-id prefix map in
+`vibe/data/model_vendors.json` is a different document (family → vendor for
+catalog backfill) and is not this picker.
 
 | id | Label | Official Base URL | Pinned protocol |
 | --- | --- | --- | --- |
+| `openai` | OpenAI | `https://api.openai.com/v1` | `openai_responses` |
+| `anthropic` | Anthropic | `https://api.anthropic.com` | `anthropic` |
+| `xai` | xAI | `https://api.x.ai/v1` | `openai_responses` |
+| `gemini` | Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `openai_chat` |
 | `deepseek` | DeepSeek | `https://api.deepseek.com` | `openai_chat` |
 | `qwen` | Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `openai_chat` |
 | `kimi` | Kimi | `https://api.moonshot.cn/v1` | `openai_chat` |
-| `zhipuai` | Zhipu AI | `https://open.bigmodel.cn/api/paas/v4` | `openai_chat` |
-| `openai` | OpenAI | `https://api.openai.com/v1` | `openai_responses` |
-| `anthropic` | Anthropic | `https://api.anthropic.com` | `anthropic` |
 | `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openai_chat` |
-| `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
+| `zhipuai` | Zhipu AI | `https://open.bigmodel.cn/api/paas/v4` | `openai_chat` |
 | `mistral` | Mistral | `https://api.mistral.ai/v1` | `openai_chat` |
-| `xai` | xAI | `https://api.x.ai/v1` | `openai_responses` |
+| `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
 | `together` | Together | `https://api.together.xyz/v1` | `openai_chat` |
 | `fireworks` | Fireworks | `https://api.fireworks.ai/inference/v1` | `openai_chat` |
 
-`custom` is the dropdown default, not a catalog row. Gemini native is
-deferred (not in the three-protocol vocabulary).
+`custom` is the dropdown default, not a catalog row. The `gemini` row is
+Gemini's OpenAI-compatible surface, reached on that vendor's own
+`/v1beta/openai` base URL; Gemini **native** stays deferred (not in the
+three-protocol vocabulary, and still Out of scope below). The row and the
+deferral are about different wire formats, not a contradiction.
 
 Engine `_OFFICIAL_BASE_URLS` today only lists anthropic/openai/codex.
 This table is the replacement for api-key observation: look up by
