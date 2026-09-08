@@ -137,8 +137,8 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert env["ANTHROPIC_BASE_URL"] == launch.gateway_base_url
     assert env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
     assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
-    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
-    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "999999"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
     assert claude_setting_sources_for_launch(launch) == ["project", "local"]
 
@@ -187,7 +187,7 @@ def test_claude_hub_launch_cannot_fall_back_to_native_auth(missing):
         claude_settings_for_launch("{}", launch)
 
 
-def test_native_cli_launch_keeps_auth_and_applies_catalog_limits():
+def test_native_cli_launch_keeps_auth_and_explicit_limits():
     launch = hub_launch(
         channel="native_cli",
         gateway_base_url=None,
@@ -209,9 +209,87 @@ def test_native_cli_launch_keeps_auth_and_applies_catalog_limits():
     assert env["ANTHROPIC_AUTH_TOKEN"] == "user-token"
     assert env["ANTHROPIC_BASE_URL"] == "https://user.example"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token"
-    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
-    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "999999"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "999999"
     assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in env
+
+
+@pytest.mark.parametrize("channel", ["hub", "native_cli"])
+@pytest.mark.parametrize("explicit", [{}, {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": ""}, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192"}])
+@pytest.mark.parametrize("limits", [{}, {"context_window": 128_000, "max_output_tokens": 32_000}])
+def test_claude_catalog_limits_fill_only_absent_environment_values(channel, explicit, limits):
+    launch = hub_launch(channel=channel, **limits)
+    original = dict(explicit)
+    env = build_claude_hub_env(explicit, launch)
+    expected = {
+        env_key: explicit.get(env_key, str(limits[field]) if field in limits else None)
+        for env_key, field in (
+            ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "context_window"),
+            ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "max_output_tokens"),
+        )
+    }
+    assert {key: env.get(key) for key in expected} == expected
+    assert explicit == original
+
+
+def test_hub_connection_settings_preserve_explicit_limits_without_promoting_catalog_defaults():
+    launch = hub_launch(context_window=128_000, max_output_tokens=32_000)
+    settings = json.loads(claude_settings_for_launch(
+        json.dumps({"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": ""}}), launch,
+    ))
+    assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == ""
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in settings["env"]
+    assert settings["env"]["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_route_alias_keeps_its_own_planning_metadata(tmp_path, monkeypatch, backend, has_metadata):
+    from unittest.mock import AsyncMock
+    from config.v2_config import ModelHubBackendModelConfig
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+    from tests.scenario_harness.model_hub import (
+        MemoryModelHubStore, ModelHubScenarioAdapter, config_with_sources, service_for, source,
+    )
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    supplied = source("src_planning", ["upstream-target"])
+    config = config_with_sources(
+        [supplied], backend=backend, menu_model="planning-alias",
+        hops=[(supplied.id, "upstream-target")],
+    )
+    config.agents[backend].models = [
+        ModelHubBackendModelConfig(
+            id="planning-alias", native_protocol="openai_responses" if backend == "opencode" else None,
+            context_window=128_000 if has_metadata else None,
+            max_output_tokens=32_000 if has_metadata else None,
+        ),
+        ModelHubBackendModelConfig(
+            id="upstream-target", native_protocol="openai_responses" if backend == "opencode" else None,
+            context_window=999_999, max_output_tokens=99_999,
+        ),
+    ]
+    if backend == "opencode":
+        config.agents[backend].menu.checked = ["planning-alias"]
+    before = config.to_payload()
+    store = MemoryModelHubStore(config)
+    router = ModelHubRuntimeRouter(
+        service=service_for(tmp_path, store, ModelHubScenarioAdapter()),
+        turn_gateway=SimpleNamespace(endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "fixture-token"))),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    launch = asyncio.run(router.resolve(backend, "planning-alias"))
+    assert launch.requested_model == "planning-alias"
+    assert launch.target_model == "upstream-target"
+    assert launch.context_window == (128_000 if has_metadata else None)
+    assert launch.max_output_tokens == (32_000 if has_metadata else None)
+    if backend == "opencode":
+        overlay = asyncio.run(router.prepare_opencode_overlay())
+        row = json.loads(overlay.content)["provider"]["avibe-openai"]["models"]["planning-alias"]
+        assert row.get("limit") == ({"context": 128_000, "output": 32_000} if has_metadata else None)
+    assert store.load().to_payload() == before
+    assert store.saved_payloads == []
 
 
 def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
