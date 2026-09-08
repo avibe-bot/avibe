@@ -925,14 +925,19 @@ def sql_identifiers(expression: str) -> set[str]:
 
 
 def substring_requirements(expression: str) -> Iterable[tuple[str, str, str, str]]:
-    """Normalize either operand order into (target, start, width, source)."""
+    """Normalize required whole equalities into (target, start, width, source)."""
     identifier = f'({SQL_IDENTIFIER})'
-    for match in sql_matches(SUBSTRING_TERM + EQUALITY + identifier, expression):
-        target, start, width, source = match.groups()
-        yield unquote_identifier(target), start, width, unquote_identifier(source)
-    for match in sql_matches(identifier + EQUALITY + SUBSTRING_TERM, expression):
-        source, target, start, width = match.groups()
-        yield unquote_identifier(target), start, width, unquote_identifier(source)
+    for term in conjunctive_terms(expression):
+        active = sql_projection(term, identifiers=True)
+        for reverse in (False, True):
+            operands = (identifier, SUBSTRING_TERM) if reverse else (SUBSTRING_TERM, identifier)
+            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', active, re.IGNORECASE)
+            if match is not None:
+                if reverse:
+                    source, target, start, width = match.groups()
+                else:
+                    target, start, width, source = match.groups()
+                yield unquote_identifier(target), start, width, unquote_identifier(source)
 
 
 def representative_value(column: str, declared_type: str, *, strict: bool = False) -> object:
@@ -1036,12 +1041,13 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
 def json_proposals(
     connection: sqlite3.Connection, expression: str, columns: Iterable[str]
 ) -> list[tuple[str, object]]:
-    """``(column, document)`` pairs satisfying every JSON-path clause ``expression`` states.
+    """``(column, document)`` candidates suggested by JSON-path clauses.
 
     The document is built by SQLite's own ``json_set`` rather than assembled here, so the
     path syntax is whatever SQLite accepts and not a second reading of it. All clauses for
     one column are folded into a single document, because a constraint requiring two paths
-    is not satisfied by a document carrying either one.
+    is not satisfied by a document carrying either one. Missing paths remain an
+    alternative: SQLite can accept NULL comparisons without requiring a member.
     """
     wanted = {identifier_key(column): column for column in columns}
     required: dict[str, list[tuple[str, str, object]]] = {}
@@ -1083,6 +1089,9 @@ def json_proposals(
         if source in documents and target is not None:
             value = connection.execute(f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))).fetchone()[0]
             proposals.append((target, value))
+    # Keep populated members and their dependents first; omission is a fallback,
+    # not permission to replace a document that already satisfies the CHECK.
+    proposals.extend((column, "{}") for column, document in documents.items() if document != "{}")
     return proposals
 
 
@@ -1282,7 +1291,13 @@ def shape_proposals(
     text = {name: value for name, value in values.items() if name in text_eligible and isinstance(value, str)}
     widths = {}
     shapes = text_constraints if text_constraints is not None else expression
-    for match in sql_matches(rf'\blength\s*\(\s*({SQL_IDENTIFIER})\s*\)\s*=\s*(\d+)', shapes):
+    # Only required whole terms may force a shape during an unrelated repair.
+    # Occurrences inside OR/NOT/CASE/functions are not required shapes.
+    shape_terms = [sql_projection(term, literals=True, identifiers=True) for term in conjunctive_terms(shapes)]
+    for term in shape_terms:
+        match = re.fullmatch(rf'\s*length\s*\(\s*({SQL_IDENTIFIER})\s*\)\s*=\s*(\d+)\s*', term, re.IGNORECASE)
+        if match is None:
+            continue
         name, width = match.groups()
         name = names.get(identifier_key(unquote_identifier(name)), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
@@ -1291,7 +1306,8 @@ def shape_proposals(
             if isinstance(values[name], str) or connection.execute("select length(?)", (values[name],)).fetchone()[0] != size:
                 text.setdefault(name, "x")
                 text[name] = text[name][:size].ljust(size, "0")
-    globs = (match.groups() for match in sql_matches(GLOB_REQUIREMENT, shapes))
+    globs = (match.groups() for term in shape_terms
+             if (match := re.fullmatch(rf'\s*{GLOB_REQUIREMENT}\s*', term, re.IGNORECASE)) is not None)
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
     for name, negated, quoted in globs:
@@ -1403,6 +1419,7 @@ def shape_proposals(
     )
     columns = ', '.join(quote_identifier(name) for name, _ in required)
     placeholders = ', '.join('?' for _ in required)
+    rejected: list[SeedAssignment] = []
     try:
         evaluation.execute(f"create table {table} ({', '.join(declarations)})" + (" STRICT" if strict else ""))
         # Let SQLite resolve overloads and enforce expression-index determinism.
@@ -1426,13 +1443,17 @@ def shape_proposals(
             ).fetchone()[0]
             if accepted:
                 proposals.extend((name, value) for name, value in changes.items() if value != values[name])
-                break
+                return ShapeProposals(proposals, [], text_fallback)
+            # Not an accepted row, but still a storage-valid origin for another
+            # bounded search. The INSERT loop owns progress, deduplication and
+            # its total budget; do not discard all partial numeric repairs here.
+            rejected.append(assignment)
     except sqlite3.OperationalError:
         # Unrepresentable context cannot reject a candidate; actual INSERT decides.
         return ShapeProposals(proposals, fallback, text_fallback)
     finally:
         evaluation.close()
-    return ShapeProposals(proposals, [], text_fallback)
+    return ShapeProposals(proposals, rejected, text_fallback)
 
 
 def numeric_assignments(
@@ -1844,9 +1865,19 @@ def insert_seed_row(
             derived = tuple(shaped.derived)
             untried = [derived] if derived and unseen(derived) else []
             if not untried:
+                # Required prefix sources may be defined by another CHECK. Keep
+                # their existing proposals in the semantic turn, not behind a
+                # numeric source that can remain live for the whole budget.
+                related_proposals = [
+                    pair
+                    for related in constraints
+                    for pair in [*check_proposals(related, names), *json_proposals(connection, related, names)]
+                    if identifier_key(pair[0]) in prefix_sources
+                ]
                 sources = [
                     shaped.numeric_fallback,
-                    [(pair,) for pair in [*check_proposals(expression, names), *shaped.text_fallback, *json_proposals(connection, expression, names)]],
+                    [(pair,) for pair in [*check_proposals(expression, names), *shaped.text_fallback,
+                                         *json_proposals(connection, expression, names), *related_proposals]],
                 ]
                 # Derived repairs precede guesses. Both guess sources remain live
                 # throughout the INSERT budget, with JSON after generic literals.
@@ -1862,15 +1893,6 @@ def insert_seed_row(
                     if untried:
                         source_progress[expression] = ((source + 1) % len(sources), source_positions)
                         break
-            if not untried:
-                # Follow only prefix-source dependencies into other CHECKs. Unrelated
-                # literals must not overwrite columns that already satisfy their checks.
-                untried = [
-                    (pair,)
-                    for related in constraints
-                    for pair in [*check_proposals(related, names), *json_proposals(connection, related, names)]
-                    if identifier_key(pair[0]) in prefix_sources and unseen((pair,))
-                ]
             if not untried:
                 return objection, True
             values.update(untried[0])
