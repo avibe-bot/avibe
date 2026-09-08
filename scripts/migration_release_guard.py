@@ -1188,6 +1188,21 @@ class ShapeProposals:
     numeric_fallback: list[SeedAssignment]
 
 
+def column_equality_groups(expression: str, columns: Iterable[str]) -> list[list[str]]:
+    """Group bare column equalities without exposing opaque SQL or function calls."""
+    names = {identifier_key(name): name for name in columns}
+    groups = {name: [name] for name in names.values()}
+    pattern = rf'(?<![.\w$])({SQL_IDENTIFIER}){EQUALITY}({SQL_IDENTIFIER})(?![\w$]|\s*[.(])'
+    for match in sql_matches(pattern, expression):
+        left, right = (names.get(identifier_key(unquote_identifier(token))) for token in match.groups())
+        if left is not None and right is not None and groups[left] is not groups[right]:
+            joined, moved = groups[left], groups[right]
+            joined.extend(moved)
+            for name in moved:
+                groups[name] = joined
+    return [members for name, members in groups.items() if name == members[0]]
+
+
 def shape_proposals(
     connection: sqlite3.Connection,
     expression: str,
@@ -1220,24 +1235,32 @@ def shape_proposals(
     globs = (match.groups() for match in sql_matches(GLOB_REQUIREMENT, shapes))
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
-    alphabets: dict[str, str] = defaultdict(lambda: string.printable)
     for name, negated, quoted in globs:
         name = names.get(identifier_key(unquote_identifier(name)), name)
         if name in text_eligible:
             text.setdefault(name, "x")
             pattern = quoted.replace("''", "'")
-            alphabets[name] += pattern
             (negative if negated else positive)[name].append(pattern)
-    alphabets = {name: "".join(dict.fromkeys(alphabet)) for name, alphabet in alphabets.items()}
-    for name in dict.fromkeys([*positive, *negative]):
-        patterns, excluded = positive[name], negative[name]
-        if all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns) and not any(
-            connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in excluded
-        ):
+    groups = column_equality_groups(shapes, (name for name, _ in required if name in text_eligible))
+    aliases = {name: members for members in groups for name in members}
+    for members in groups:
+        patterns = tuple(dict.fromkeys(pattern for name in members for pattern in positive[name]))
+        excluded = tuple(dict.fromkeys(pattern for name in members for pattern in negative[name]))
+        if not patterns and not excluded:
             continue
-        witness = glob_witness(connection, tuple(patterns), excluded=tuple(excluded), width=widths.get(name), alphabet=alphabets[name])
+        sizes = {widths[name] for name in members if name in widths}
+        if len(sizes) > 1:
+            continue  # No common text can satisfy incompatible declared widths.
+        width = next(iter(sizes), None)
+        witness = next((text[name] for name in members if name in text
+                        and (width is None or len(text[name]) == width)
+                        and all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns)
+                        and not any(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in excluded)), None)
+        if witness is None:
+            alphabet = "".join(dict.fromkeys(string.printable + "".join((*patterns, *excluded))))
+            witness = glob_witness(connection, patterns, excluded=excluded, width=width, alphabet=alphabet)
         if witness is not None:
-            text[name] = witness
+            text.update((name, witness) for name in members)
     for name, start, width, other in substring_requirements(shapes):
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
@@ -1247,7 +1270,8 @@ def shape_proposals(
             offset = position - 1
             source = text.get(other, str(values[other]))
             if len(source) == size:
-                text[name] = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
+                repaired = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
+                text.update((member, repaired) for member in aliases[name])
     proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
     active = sql_projection(expression)
     mentioned = sql_identifiers(expression)
@@ -1710,8 +1734,7 @@ def insert_seed_row(
     def unseen(assignment: SeedAssignment) -> bool:
         return row_identity({**values, **dict(assignment)}) not in proposed
 
-    next_source = 0
-    source_positions = [0, 0]
+    source_progress: dict[str, tuple[int, list[int]]] = {}
     objection = ""
     for _ in range(SEED_ATTEMPTS):
         proposed.add(row_identity(values))
@@ -1726,6 +1749,7 @@ def insert_seed_row(
             if failure is None:
                 return objection, True
             expression = check_expression(ddl, failure.group(1))
+            next_source, source_positions = source_progress.setdefault(expression, (0, [0, 0]))
             shaped = shape_proposals(
                 connection, expression, required, values,
                 text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
@@ -1749,7 +1773,7 @@ def insert_seed_row(
                             source_positions[source] = (index + 1) % len(options)
                             break
                     if untried:
-                        next_source = (source + 1) % len(sources)
+                        source_progress[expression] = ((source + 1) % len(sources), source_positions)
                         break
             if not untried:
                 # Follow only prefix-source dependencies into other CHECKs. Unrelated
