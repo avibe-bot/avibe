@@ -975,6 +975,7 @@
       "candidate_suppliers_changed": "可用供应商已发生变化，请刷新模型选项后重新确认。",
       "models_dev_unavailable": "models.dev 当前不可用，请手动填写模型参数或稍后重试。",
       "codex_catalog_unavailable": "Codex 无法准备本地模型网关目录，请重试本回合。",
+      "request_too_large": "请求超过 Avibe 本地网关的 {limit_mib} MiB 大小上限。请减少图片或对话上下文后重试。",
       "engine_down": "本地模型网关不可用。",
       "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
       "migration_item_conflict": "此迁移项与当前模型网关状态冲突。",
