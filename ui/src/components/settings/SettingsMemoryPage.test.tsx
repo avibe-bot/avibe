@@ -225,6 +225,28 @@ describe('SettingsMemoryPage', () => {
     expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
   });
 
+  it.each(['memory-package', 'memory-runtime'])(
+    'keeps administration available when the %s entry has no admitted installation action',
+    async (id) => {
+      for (const evidence of [
+        { installed: false, status: 'unsupported', action_class: 'none' },
+        { installed: false, status: 'error', action_class: 'operator_only' },
+        { installed: null, status: 'unknown', action_class: 'operator_only' },
+        { installed: null, status: 'missing', action_class: 'repairable' },
+        { installed: null, status: 'not_required', action_class: 'none' },
+      ]) {
+        api.listDependencies.mockResolvedValue({ deps: [{ id, ...evidence }] });
+        const view = renderPage();
+
+        await screen.findByTestId('memory-tabs-scroll');
+        expect(screen.queryByText('memory.setup.runtimeRequired')).toBeNull();
+        await userEvent.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+        expect(screen.getByText('open-delete')).toBeTruthy();
+        view.unmount();
+      }
+    },
+  );
+
   it('offers Retry startup for degraded Memory', async () => {
     api.getMemoryStatus.mockResolvedValue(status('degraded'));
     renderPage();
