@@ -82,6 +82,41 @@ describe('SourceTestDialog', () => {
     expect(screen.getByRole('combobox').textContent).toContain('gpt-5.6-luna');
   });
 
+  it.each(['remove', 'retire', 'empty'])('clears a completed result when inventory changes selection: %s', async (change) => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    const rendered = render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByText(/responded successfully/);
+    const models = change === 'empty' ? [] : change === 'remove'
+      ? source.models.filter((model) => model.id !== 'gpt-5.6-luna')
+      : source.models.map((model) => ({ ...model, retired: model.id === 'gpt-5.6-luna' }));
+    rendered.rerender(view({ ...source, models }));
+    expect(screen.queryByRole('status')).toBeNull();
+    if (change !== 'empty') expect(screen.getByRole('combobox').textContent).toContain('first-model');
+  });
+
+  it('rejects a late result after inventory chooses a different model', async () => {
+    let resolve!: (result: SourceProbeResult) => void;
+    vi.spyOn(modelsApi, 'probeSource').mockReturnValue(new Promise((done) => { resolve = done; }));
+    const rendered = render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    rendered.rerender(view({ ...source, models: source.models.filter((model) => model.id !== 'gpt-5.6-luna') }));
+    resolve(answer());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run test' }).hasAttribute('disabled')).toBe(false));
+    expect(screen.getByRole('combobox').textContent).toContain('first-model');
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('preserves a result across inventory updates that retain the selected model', async () => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    const rendered = render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    await screen.findByText(/responded successfully/);
+    rendered.rerender(view({ ...source, models: [...source.models].reverse() }));
+    expect(screen.getByRole('combobox').textContent).toContain('gpt-5.6-luna');
+    expect(screen.getByText(/responded successfully/)).toBeTruthy();
+  });
+
   it('lets an empty inventory exit to the existing manual model editor', () => {
     render(view({ ...source, models: [] }));
     expect(screen.getByText(/add a model ID manually/)).toBeTruthy();

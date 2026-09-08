@@ -171,6 +171,8 @@ def _storable_backend_model_metadata(
 
 AGENT_CHAIN_CONTRACT_VERSION = 10
 PROBE_RESULT_CONTRACT_VERSION = 10
+_SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
+_SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
 _REASONING_EFFORT_TELEMETRY_MAX_BYTES = 256
 # Settlement generations are minted per attempt start and live only in this
@@ -2995,12 +2997,13 @@ class ModelHubService:
                     # entries. The new Source still has one commit/nonce owner.
                     candidate = ModelHubSourceConfig.from_payload(source.to_payload())
                     try:
-                        async with asyncio.timeout(15):
-                            discovered = await self._discover(candidate)
+                        discovered = await asyncio.wait_for(
+                            self._discover(candidate), timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+                        )
                         self._apply_discovered_models(
                             candidate, candidate.models, discovered, allow_empty=True,
                         )
-                    except (ModelHubError, TimeoutError):
+                    except (ModelHubError, asyncio.TimeoutError):
                         pass
                     else:
                         source = candidate
@@ -5215,52 +5218,64 @@ class ModelHubService:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             return source
 
-        # Refuse malformed/stale selections before starting the managed engine.
-        async with self._mutation_lock:
-            selected(self.store.load())
-        started_at = time.monotonic()
         handle = None
         outcome = None
         source = None
+        admitted_at = None
+
+        async def invoke_selected() -> None:
+            nonlocal source, handle, outcome, admitted_at
+            # Bound local waiting too, but never call it a model failure before
+            # the adapter has actually admitted this Source/model invocation.
+            async with self._mutation_lock:
+                selected(self.store.load())
+            while True:
+                await self._prepare_engine_for_demand()
+                await self._mutation_lock.acquire()
+                held = True
+
+                def release_owner() -> None:
+                    nonlocal held
+                    if held:
+                        held = False
+                        self._mutation_lock.release()
+
+                def admitted() -> None:
+                    nonlocal admitted_at
+                    admitted_at = time.monotonic()
+                    release_owner()
+
+                try:
+                    source = ModelHubSourceConfig.from_payload(
+                        selected(self.store.load()).to_payload(),
+                    )
+                    if not self._engine_synced:
+                        continue
+                    # OpenCode preserves the request's explicit protocol and
+                    # API keys have unrestricted origins. No Agent resolver
+                    # is involved: the adapter binds this exact Source.
+                    handle = await self._engine_call(self.adapter.invoke(
+                        source.id,
+                        model_id,
+                        self._probe_request(source, model_id, "opencode", output_tokens=128),
+                        False,
+                        "opencode",
+                        on_admitted=admitted,
+                    ))
+                    break
+                finally:
+                    release_owner()
+            if admitted_at is None:
+                raise ModelHubError("engine_down", status=503)
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+            outcome = await self._engine_call(handle.outcome())
+
         try:
-            async with asyncio.timeout(60):
-                while True:
-                    await self._prepare_engine_for_demand()
-                    await self._mutation_lock.acquire()
-                    held = True
-
-                    def admitted() -> None:
-                        nonlocal held
-                        if held:
-                            held = False
-                            self._mutation_lock.release()
-
-                    try:
-                        source = ModelHubSourceConfig.from_payload(
-                            selected(self.store.load()).to_payload(),
-                        )
-                        if not self._engine_synced:
-                            continue
-                        # OpenCode preserves the request's explicit protocol and
-                        # API keys have unrestricted origins. No Agent resolver
-                        # is involved: the adapter binds this exact Source.
-                        handle = await self._engine_call(self.adapter.invoke(
-                            source.id,
-                            model_id,
-                            self._probe_request(source, model_id, "opencode", output_tokens=128),
-                            False,
-                            "opencode",
-                            on_admitted=admitted,
-                        ))
-                        break
-                    finally:
-                        admitted()
-                if handle.stream is not None:
-                    async for _chunk in handle.stream:
-                        pass
-                outcome = await self._engine_call(handle.outcome())
-        except TimeoutError:
-            if source is None:
+            await asyncio.wait_for(invoke_selected(), timeout=_SOURCE_PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if admitted_at is None:
                 raise ModelHubError("engine_down", status=503) from None
             outcome = RawCallOutcome(
                 kind=RawOutcomeKind.TIMEOUT,
@@ -5272,6 +5287,7 @@ class ModelHubService:
                 source_id=source_id,
             )
         finally:
+            elapsed_ms = max(0, round((time.monotonic() - admitted_at) * 1000)) if admitted_at is not None else 0
             if handle is not None:
                 await handle.close_stream()
                 await self._meter_call(
@@ -5286,13 +5302,16 @@ class ModelHubService:
             )
         # Classify for display only. A selected model failure cannot block other
         # models on this Source, refresh credentials, or modify route state.
-        error = None if succeeded else self._probe_failure(outcome, classify_outcome(outcome))[0]
+        decision = classify_outcome(outcome)
+        if decision.action == "refresh":
+            decision = ResolutionDecision("fallback", reason="credential_revoked")
+        error = None if succeeded else self._probe_failure(outcome, decision)[0]
         return {
             "source_id": source.id,
             "model_id": model_id,
             "protocol": source.protocol,
             "reachable": succeeded,
-            "latency_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+            "latency_ms": elapsed_ms,
             "error": error,
         }
 

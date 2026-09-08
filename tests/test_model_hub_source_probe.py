@@ -3,12 +3,14 @@
 import asyncio
 import copy
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core.handlers.model_hub.adapter import DiscoveredModel, RawOutcomeKind, SOURCE_PROTOCOLS, SourceBinding
 from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub import service as service_module
 from tests.test_model_hub_api import FakeAdapter, FakeInvokeHandle, _service
 from tests.test_model_hub_unverified import _draft
 
@@ -244,8 +246,7 @@ def test_probe_termination_closes_handle_and_releases_mutation_owner(tmp_path, m
         adapter.invoke = invoke
         service._meter_call = AsyncMock()
         if termination == "timeout":
-            original_timeout = asyncio.timeout
-            monkeypatch.setattr(asyncio, "timeout", lambda _seconds: original_timeout(0.02))
+            monkeypatch.setattr(service_module, "_SOURCE_PROBE_TIMEOUT_SECONDS", 0.02)
         task = asyncio.create_task(service.probe_source(source["id"], {"model": source["models"][0]["id"]}))
         await entered.wait()
         if termination == "cancel":
@@ -260,5 +261,201 @@ def test_probe_termination_closes_handle_and_releases_mutation_owner(tmp_path, m
         assert store.config.sources[0].verification_pending
         handle_closed.assert_awaited_once()
         service._meter_call.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["selection_lock", "preparation", "transport"])
+def test_pre_admission_timeout_is_a_request_failure_not_a_model_result(tmp_path, monkeypatch, phase):
+    service, store, adapter = _service(tmp_path)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        before = copy.deepcopy(store.config.to_payload())
+        monkeypatch.setattr(service_module, "_SOURCE_PROBE_TIMEOUT_SECONDS", 0.02)
+        service._meter_call = AsyncMock()
+
+        async def stalled(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        if phase == "selection_lock":
+            await service._mutation_lock.acquire()
+        elif phase == "preparation":
+            service._prepare_engine_for_demand = stalled
+        else:
+            adapter.invoke = stalled
+        try:
+            with pytest.raises(ModelHubError) as error:
+                await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+            assert error.value.code == "engine_down"
+            assert error.value.status == 503
+            assert service._mutation_lock.locked() is (phase == "selection_lock")
+            assert store.config.to_payload() == before
+            service._meter_call.assert_not_awaited()
+        finally:
+            if phase == "selection_lock":
+                service._mutation_lock.release()
+
+    asyncio.run(scenario())
+
+
+def test_unadmitted_engine_handle_is_not_presented_as_a_model_failure(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        original = adapter.invoke
+        closed = AsyncMock()
+
+        async def unavailable(*args, **kwargs):
+            kwargs.pop("on_admitted")
+            handle = await original(*args, **kwargs)
+            result = FakeInvokeHandle(replace(
+                await handle.outcome(), kind=RawOutcomeKind.NETWORK_ERROR,
+                http_status=None, error_code="engine_down",
+            ))
+            result.close_stream = closed
+            return result
+
+        adapter.invoke = unavailable
+        with pytest.raises(ModelHubError) as error:
+            await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+        assert error.value.code == "engine_down"
+        assert not service._mutation_lock.locked()
+        assert store.config.sources[0].verification_pending
+        closed.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_admitted_timeout_is_a_model_result_even_before_handle_delivery(tmp_path, monkeypatch):
+    service, store, adapter = _service(tmp_path)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+
+        async def admitted_then_stalled(*args, on_admitted, **kwargs):
+            on_admitted()
+            await asyncio.Event().wait()
+
+        adapter.invoke = admitted_then_stalled
+        monkeypatch.setattr(service_module, "_SOURCE_PROBE_TIMEOUT_SECONDS", 0.02)
+        answer = await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+        assert not answer["reachable"]
+        assert answer["error"] == "models.source.cooldown.timeout"
+        assert store.config.sources[0].verification_pending
+        assert not service._mutation_lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_probe_latency_excludes_local_preparation_acquisition_and_settlement(tmp_path, monkeypatch):
+    service, _, adapter = _service(tmp_path)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(service_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+        prepare, invoke, verify = service._prepare_engine_for_demand, adapter.invoke, service._verify_successful_source
+
+        async def prepare_slowly():
+            clock.now += 20
+            await prepare()
+
+        async def invoke_after_acquisition(*args, **kwargs):
+            clock.now += 30
+            handle = await invoke(*args, **kwargs)
+            outcome = await handle.outcome()
+
+            async def respond():
+                clock.now += 0.125
+                return outcome
+
+            async def close():
+                clock.now += 40
+
+            handle.outcome, handle.close_stream = respond, close
+            return handle
+
+        async def meter_slowly(**kwargs):
+            clock.now += 50
+
+        async def verify_slowly(*args):
+            clock.now += 60
+            await verify(*args)
+
+        service._prepare_engine_for_demand = prepare_slowly
+        adapter.invoke = invoke_after_acquisition
+        service._meter_call = meter_slowly
+        service._verify_successful_source = verify_slowly
+        answer = await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+        assert answer["reachable"]
+        assert answer["latency_ms"] == 125
+        assert clock.now == 200.125
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status,code", [(401, None), (400, "invalid_api_key")])
+@pytest.mark.parametrize("stream_started", [False, True])
+def test_key_rejection_has_credential_copy_without_refresh_or_health_changes(tmp_path, status, code, stream_started):
+    service, store, adapter = _service(tmp_path)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        before = copy.deepcopy(store.config.to_payload())
+        original = adapter.invoke
+
+        async def rejected(*args, **kwargs):
+            handle = await original(*args, **kwargs)
+            return FakeInvokeHandle(replace(
+                await handle.outcome(), kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=status, error_code=code, stream_started=stream_started,
+            ))
+
+        adapter.invoke = AsyncMock(side_effect=rejected)
+        adapter.credential_supports_refresh = AsyncMock(side_effect=AssertionError("test never refreshes"))
+        answer = await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+        assert not answer["reachable"]
+        assert answer["error"] == "models.source.needs_action.credential_revoked"
+        adapter.invoke.assert_awaited_once()
+        adapter.credential_supports_refresh.assert_not_awaited()
+        assert store.config.to_payload() == before
+
+    asyncio.run(scenario())
+
+
+def test_save_and_model_probe_work_without_python311_timeout_context(tmp_path, monkeypatch):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.delattr(asyncio, "timeout", raising=False)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        result = await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+        assert result["reachable"]
+
+    asyncio.run(scenario())
+
+
+def test_discovery_deadline_saves_manual_inventory_and_drains_cancelled_work(tmp_path, monkeypatch):
+    service, _, adapter = _service(tmp_path)
+
+    async def scenario():
+        cancelled = asyncio.Event()
+
+        async def stalled(*args):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        adapter.discover_models = stalled
+        monkeypatch.setattr(service_module, "_SOURCE_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+        draft = _draft()
+        draft["models"] = [{"id": "manual-model", "origin": "manual", "reasoning_efforts": []}]
+        source = (await service.create_source(draft))["source"]
+        assert cancelled.is_set()
+        assert [model["id"] for model in source["models"]] == ["manual-model"]
+        assert source["verification_pending"]
 
     asyncio.run(scenario())

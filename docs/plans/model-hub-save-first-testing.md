@@ -35,6 +35,15 @@ not subscription OAuth admission or credential replacement.
   credential-free error key. Usage is metered by the existing Source/model
   ledger. The test has a finite deadline and output budget and can incur a small
   upstream charge.
+- The deadline bounds local preparation and admission as well as invocation.
+  Expiration before adapter admission is a request/engine error, not evidence
+  against the selected model. Reported latency covers admission through the
+  outcome, excluding preparation, cleanup, metering and verification writes.
+  Rejected API keys have credential-specific copy without refresh or health
+  mutation. Deadline handling preserves the supported Python 3.10 runtime.
+- Displayed results belong to the current effective selection and credential
+  identity. Inventory-driven selection changes clear completed results and
+  invalidate late results; unrelated inventory updates preserve them.
 - Source deletion/credential replacement during a test cannot resurrect a
   Source, overwrite current configuration, or verify a replacement credential.
 

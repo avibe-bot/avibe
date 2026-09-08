@@ -25,19 +25,19 @@ export const SourceTestDialog: React.FC<{
   const [continuation] = React.useState(createContinuationSettlement);
   const running = React.useRef(false);
   const identity = `${source.id}/${source.credential_ref}/${source.base_url}/${source.protocol}`;
+  const selected = selectTestModel(source.models, selection);
   React.useEffect(() => {
     continuation.invalidate();
     setResult(null);
     setFailed(false);
     return () => { continuation.invalidate(); };
-  }, [continuation, identity]);
+  }, [continuation, identity, selected]);
   React.useEffect(() => {
     if (source.verification_pending) {
       continuation.invalidate();
       setResult(null);
     }
   }, [continuation, source.verification_pending]);
-  const selected = selectTestModel(source.models, selection);
   const options = source.models.filter((model) => !model.retired).map((model) => ({
     value: model.id, label: model.id,
   }));
