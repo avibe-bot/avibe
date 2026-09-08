@@ -771,7 +771,7 @@ export type ApiContextType = {
     q: string,
     opts?: { limit?: number; includeArchived?: boolean },
   ) => Promise<MessageSearchResult>;
-  sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
+  sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string; retry_for?: string }) => Promise<WorkbenchMessage>;
   markSessionRead: (sessionId: string, untilMessageId?: string, opts?: { handleError?: boolean }) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session?: Record<string, number> }>;
   cancelSession: (
     sessionId: string,
@@ -1223,6 +1223,7 @@ export type WorkbenchEventHandlers = {
     instance_authorization_revision?: number;
   }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
+  onMessageUpdated?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
   // restore the card live. Absent on pre-M1 backends ⇒ consumers no-op.
@@ -3125,6 +3126,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onMessageNew?.(envelope.data);
+      });
+    });
+    source.addEventListener('message.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
+      if (!envelope?.data.session_id) return;
+      clearSessionReadCache(envelope.data.session_id);
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onMessageUpdated?.(envelope.data);
       });
     });
     source.addEventListener('session.activity', (e: MessageEvent) => {

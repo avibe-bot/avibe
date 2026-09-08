@@ -226,6 +226,9 @@ capabilities:
       - tests/test_agent_service.py
       - tests/test_ui_session_stream.py
       - ui/src/components/workbench/Composer.attachmentRetry.test.tsx
+      - tests/test_backend_failure_retry.py
+      - ui/src/components/workbench/FailureRetry.test.tsx
+      - ui/src/components/workbench/ChatRowOptimisticWrites.test.tsx
   - id: tunnel_quality
     name: remote-access tunnel quality and smooth route recovery
     status: active
