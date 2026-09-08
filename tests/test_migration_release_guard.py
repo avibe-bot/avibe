@@ -1197,6 +1197,122 @@ def test_large_numeric_domains_reach_joint_candidates(tmp_path, count, context, 
         assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
 
 
+@pytest.mark.parametrize("changed", range(39))
+@pytest.mark.parametrize("reverse", [False, True])
+def test_sparse_wave_past_half_budget_reaches_every_column(tmp_path, changed, reverse):
+    names = [f'n{i}' for i in range(39)]
+    clauses = ['+'.join(f'({name}>0)' for name in names) + '=1', f'abs(n{changed})>0']
+    if reverse:
+        names.reverse()
+        clauses.reverse()
+    db_path = tmp_path / 'wide-sparse.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(name+' integer not null' for name in names)},constraint ck check({' and '.join(clauses)}))")
+        witness = [int(name == f'n{changed}') for name in names]
+        connection.execute('insert into shaped values (' + ','.join('?' for _ in names) + ')', witness)
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+        connection.execute('delete from shaped')
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
+@pytest.mark.parametrize("count", range(31, 57))
+@pytest.mark.parametrize("ranked_first", [False, True])
+def test_first_sparse_wave_and_joint_anchors_share_fitting_budget(count, ranked_first):
+    candidates = [0, 1, -1, 2]
+    domain = [1, 0, -1, 2] if ranked_first else candidates
+    current = (0,) * count
+    expected = {tuple(value for _ in range(count)) for value in candidates}
+    expected.update((*current[:index], 1, *current[index+1:]) for index in range(count))
+    assert len(expected) <= guard.SEED_ATTEMPTS
+    prefix = list(itertools.islice(guard.numeric_assignments([domain] * count, current, candidates), guard.SEED_ATTEMPTS))
+    assert len(prefix) == len(set(prefix)) == guard.SEED_ATTEMPTS
+    assert expected <= set(prefix)
+
+
+@pytest.mark.parametrize("count", [31, 38, 40, 50, 55, 56])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_wide_sparse_boundary_consumers_keep_last_column(tmp_path, count, reverse):
+    names = [f'n{i}' for i in range(count)]
+    clauses = ['+'.join(f'({name}>0)' for name in names) + '=1', f'abs(n{count-1})>0']
+    if reverse:
+        names.reverse()
+        clauses.reverse()
+    db_path = tmp_path / 'sparse-boundary.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(name+' integer not null' for name in names)},constraint ck check({' and '.join(clauses)}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute('select count(*) from shaped').fetchone()[0]
+        if count <= 40:
+            assert short == {}
+            assert rows >= guard.SEED_ROWS
+        else:
+            # First-wave coverage is not a promise to exhaust later anchor
+            # neighborhoods when constructing repeated rows. A shortfall must
+            # still fail visibly rather than accepting a one-row fixture.
+            assert rows >= 1
+            assert bool(short) == (rows < guard.SEED_ROWS)
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
+@pytest.mark.parametrize("count", [31, 39, 59, 60, 80])
+@pytest.mark.parametrize("target", [-1, 1, 2])
+@pytest.mark.parametrize("context", [False, True])
+def test_wide_joint_anchors_precede_remaining_sparse_wave(tmp_path, count, target, context):
+    names = [f'n{i}' for i in range(count)]
+    expression = '+'.join(f'abs({name}-({target}))' for name in names) + '=0'
+    if context:
+        expression += ' and changes()>=0'
+    db_path = tmp_path / 'wide-joint-anchor.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(name+' integer not null' for name in names)},constraint ck check({expression}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] >= guard.SEED_ROWS
+        assert set(connection.execute('select * from shaped')) == {(target,) * count}
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
+@pytest.mark.parametrize("count", [31, 59, 80])
+@pytest.mark.parametrize("held", [0, 1, -1])
+def test_wide_fallback_anchor_survives_rebased_sparse_rows(count, held):
+    names = [f'n{i}' for i in range(count)]
+    expression = '+'.join(f'abs({name}-1)' for name in names) + '=0 and changes()>=0'
+    with sqlite3.connect(':memory:') as connection:
+        ddl = f"create table shaped({','.join(name+' integer' for name in names)},constraint ck check({expression}))"
+        connection.execute(ddl)
+        values = dict.fromkeys(names, 2)
+        values[names[held]] = 1
+        attempts = []
+        connection.set_trace_callback(lambda sql: attempts.append(sql) if sql.startswith('insert into "shaped"') else None)
+        assert guard.insert_seed_row(connection, 'shaped', ddl, [(name, 'INTEGER') for name in names], values) == ('', True)
+        assert len(attempts) == 3
+        assert connection.execute('select * from shaped').fetchall() == [(1,) * count]
+
+
+@pytest.mark.parametrize("count", [31, 59, 80])
+@pytest.mark.parametrize("context", [False, True])
+def test_wide_ranked_assignment_survives_many_uniform_anchors(tmp_path, count, context):
+    names = [f'n{i}' for i in range(count)]
+    expression = ' and '.join(f'{name}={i+1}' for i, name in enumerate(names))
+    if context:
+        expression += ' and changes()>=0'
+    db_path = tmp_path / 'wide-ranked.sqlite'
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(name+' integer not null' for name in names)},constraint ck check({expression}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute('select count(*) from shaped').fetchone()[0] >= guard.SEED_ROWS
+        assert set(connection.execute('select * from shaped')) == {tuple(range(1, count+1))}
+        assert connection.execute('pragma integrity_check').fetchall() == [('ok',)]
+
+
 @pytest.mark.parametrize("function", ['max(n1,n2)', 'MAX(n1,n2,0)', '"max"(n1,n2)', 'max /* call */ (n1,n2)', 'max(min(n1,2),n2)'])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_scalar_overloads_keep_native_joint_evaluation(tmp_path, function, reverse):

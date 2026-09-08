@@ -1451,16 +1451,25 @@ def numeric_assignments(
                 if rank < len(options):
                     yield (*base[:index], options[rank], *base[index + 1:])
 
-    seen = {ranked}
-    yield ranked
+    seen = set()
+    uniform = [tuple(candidate for _ in domains) for candidate in candidates]
+    if len(domains) > SEED_ATTEMPTS // 2:
+        # A stable anchor prefix survives fallback retries rebasing the sparse
+        # row. Cap it so even a large boundary set leaves room for ranked repair.
+        for assignment in itertools.islice(uniform, SEED_ATTEMPTS // 2):
+            if assignment not in seen:
+                seen.add(assignment)
+                yield assignment
+    if ranked not in seen:
+        seen.add(ranked)
+        yield ranked
     local = sparse(current)
-    # A column-count-dependent reservation can exclude every joint candidate.
-    # Retain later local alternatives, but leave half the budget for mixed search.
-    for assignment in itertools.islice(local, SEED_ATTEMPTS // 2):
+    # Finish the first per-column wave before deeper mixed search dilutes it.
+    # Small domains keep their existing reservation for later alternatives.
+    for assignment in itertools.islice(local, max(len(domains), SEED_ATTEMPTS // 2)):
         if assignment not in seen:
             seen.add(assignment)
             yield assignment
-    uniform = [tuple(candidate for _ in domains) for candidate in candidates]
 
     def interleave(*families):
         for batch in itertools.zip_longest(*families):
