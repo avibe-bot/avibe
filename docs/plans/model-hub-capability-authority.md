@@ -138,5 +138,12 @@ Avibe's existing analytics/update/host-feature disable settings.
 - Actual Codex/Claude consumers: 30 cases, including the three compaction
   boundaries above.
 - Pinned Ruff 0.4.9 and Model Hub authority closure pass.
-- The orchestrator owns canonical registry additions, the broad integrated
-  suite, independent review, CI, and the single PR. No lane push or PR exists.
+- These are implementation-head results, not evidence for a later PR head.
+  The owner's 2026-09-09 independent-delivery decision assigns this lane its
+  own PR, canonical CLI fixture registration, and durable review/CI Watch.
+  MH-PROTOCOL-004 remains partial CLI-only evidence; MH-CLAUDE-LAUNCH-001 gains
+  related launch-limit evidence without claiming managed-engine coverage.
+  After normal landed-master integration, rerun focused tests, real isolated
+  CLI consumers, authority/scenario validation, and pinned Ruff at the PR head.
+  The orchestrator independently verifies all gates and executes any merge;
+  no runtime update or publication is authorized.
