@@ -9,6 +9,7 @@ capability:
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
+    - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_local_deps.py
@@ -230,6 +231,24 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
+  - id: MH-REQUEST-BUDGET-001
+    name: Large multi-image requests retain exact model input through authenticated HTTP ingress
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_large_multi_image_request_is_forwarded_exactly
+  - id: MH-REQUEST-BUDGET-002
+    name: The inclusive request byte budget returns a local structured error without upstream admission or health mutation
+    status: covered
+    kind: boundary
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_request_budget_is_inclusive_and_local
+  - id: MH-REQUEST-BUDGET-003
+    name: Invalid gateway authentication cannot parse or admit a request body
+    status: covered
+    kind: security
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_bad_auth_does_not_parse_or_admit
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered
