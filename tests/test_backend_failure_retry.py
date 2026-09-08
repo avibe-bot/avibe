@@ -164,6 +164,7 @@ def test_failure_retry_retains_prompt_and_attachment(isolated_state, tmp_path):
 
 
 def test_failure_retry_concurrent_clicks_have_one_owner(managers):
+    """MESSAGE-DELIVERY-027: duplicate notice clicks share one native start."""
     manager_a, manager_b, engine_a, engine_b, starts = managers
     with engine_a.begin() as conn:
         notice, _turn, _inputs = seed_failed_notice(conn, session_id="ses_fsm")
@@ -265,7 +266,7 @@ def test_failure_retry_unwritten_original_batch(managers, texts):
 
 @pytest.mark.parametrize("not_written", [False, True])
 def test_failure_retry_web_controller_round_trip(isolated_state, tmp_path, monkeypatch, not_written):
-    """Web action -> real internal admission -> native boundary -> idempotent replay."""
+    """MESSAGE-DELIVERY-026: Web -> real admission -> native boundary -> replay."""
     import httpx
     from core import internal_server
     from tests.test_internal_server import _bind_test_native_start, _build_controller_double
@@ -308,6 +309,7 @@ def test_failure_retry_web_controller_round_trip(isolated_state, tmp_path, monke
 
 
 def test_failure_retry_queue_drain_rechecks_the_boundary(managers):
+    """MESSAGE-DELIVERY-028: a deferred retry cannot overtake newer work."""
     manager, _other, engine, _engine_b, starts = managers
     with engine.begin() as conn:
         notice, _turn, _inputs = seed_failed_notice(conn, session_id="ses_fsm")

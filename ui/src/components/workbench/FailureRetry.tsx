@@ -22,7 +22,11 @@ export function FailureRetry({
   const [sending, setSending] = useState(false);
   const [requested, setRequested] = useState(false);
   const action = message.content?.failure_retry as { state?: string } | undefined;
-  const admitted = requested || ['queued', 'claimed', 'accepted'].includes(action?.state ?? '');
+  // Local success bridges the response only until a durable state is present.
+  // In particular, a later retirement must unlock this same mounted row.
+  const admitted = action?.state
+    ? ['queued', 'claimed', 'accepted'].includes(action.state)
+    : requested;
   if (readOnly || !isRetryableFailureNotice(message)) return null;
   return (
     <Button

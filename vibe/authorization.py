@@ -66,6 +66,7 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
         "inbox.session.updated",
         "inbox.unread.changed",
         "message.new",
+        "message.updated",
         "projects.changed",
         "session.activity",
         "session.status",

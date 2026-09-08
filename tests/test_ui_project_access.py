@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from config.v2_config import (
     AgentsConfig,
     PlatformsConfig,
@@ -1271,6 +1273,54 @@ def test_show_page_payload_redacts_path_when_session_is_missing(monkeypatch) -> 
     )
 
     assert "path" not in payload
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor", "member"])
+def test_retry_notice_update_stream_keeps_remote_session_acl(monkeypatch, tmp_path, role) -> None:
+    import asyncio
+
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _config, ids = _setup_state(tmp_path)
+    context = AuthorizationContext(
+        instance_role=role,
+        email="alice@example.com",
+        subject="user-editor",
+        instance_access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id="member-1",
+        organization_role="member",
+        is_remote=True,
+    )
+    visible = {
+        "id": "notice",
+        "session_id": ids["session_a"],
+        "content": {"failure_retry": {"delivery_id": "retry-delivery", "state": "queued"}},
+    }
+
+    async def collect():
+        with ui_server.app.test_request_context("/api/events"):
+            g.authorization_context = context
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                broker.publish("message.updated", {**visible, "session_id": ids["session_b"]})
+                broker.publish("message.updated", {**visible, "session_id": "missing-session"})
+                broker.publish("message.updated", visible)
+                return await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+
+    frame = asyncio.run(collect())
+    if isinstance(frame, bytes):
+        frame = frame.decode("utf-8")
+    assert "event: message.updated\n" in frame
+    data = next(line.removeprefix("data: ") for line in frame.splitlines() if line.startswith("data: "))
+    assert json.loads(data)["data"] == visible
 
 
 def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) -> None:

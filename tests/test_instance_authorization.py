@@ -542,6 +542,8 @@ def test_workbench_events_follow_role_boundaries() -> None:
     member = _context("member", remote=True)
     owner = _context("owner", remote=True)
     assert can_receive_workbench_event(viewer, "message.new")
+    for context in (viewer, editor, member, owner):
+        assert can_receive_workbench_event(context, "message.updated")
     assert not can_receive_workbench_event(viewer, "queue.updated")
     assert can_receive_workbench_event(editor, "queue.updated")
     assert not can_receive_workbench_event(editor, "runs.updated")

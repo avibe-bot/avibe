@@ -59,6 +59,30 @@ describe('failed-turn retry action', () => {
     expect((screen.getByRole('button', { name: '已请求重试' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it.each(['queued', 'claimed'])('unlocks a %s retry after durable retirement without remounting', async (state) => {
+    const onRetry = vi.fn().mockResolvedValue(true);
+    const row = (message: WorkbenchMessage) => (
+      <I18nextProvider i18n={i18n}>
+        <FailureRetry message={message} onRetry={onRetry} />
+      </I18nextProvider>
+    );
+    const { rerender } = render(row(notice));
+    await act(async () => { fireEvent.click(screen.getByRole('button')); });
+    expect((screen.getByRole('button', { name: '已请求重试' }) as HTMLButtonElement).disabled).toBe(true);
+    rerender(row({ ...notice, content: { failure_retry: { delivery_id: 'delivery', state } } }));
+    expect((screen.getByRole('button') as HTMLButtonElement).disabled).toBe(true);
+    rerender(row({
+      ...notice, content: { failure_retry: { delivery_id: 'delivery', state: 'retired' } },
+    }));
+    expect((screen.getByRole('button', { name: '重试' }) as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { fireEvent.click(screen.getByRole('button')); });
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    rerender(row({
+      ...notice, content: { failure_retry: { delivery_id: 'next-delivery', state: 'accepted' } },
+    }));
+    expect((screen.getByRole('button', { name: '已请求重试' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it.each([
     { readOnly: true },
     { message: { ...notice, metadata: { ...notice.metadata, event: 'progress' } } },
