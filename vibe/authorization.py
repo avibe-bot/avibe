@@ -66,6 +66,7 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
         "inbox.session.updated",
         "inbox.unread.changed",
         "message.new",
+        "projects.changed",
         "session.activity",
         "session.status",
         "show.event",
@@ -487,6 +488,7 @@ _MEMBER_HTTP_RULES = tuple(
         # can_manage_projects. Project ACL lives under /api/permissions and is
         # Owner; agents-md is project content.
         ("POST", r"^/api/projects$"),
+        ("PUT", r"^/api/projects/order$"),
         ("PATCH", r"^/api/projects/[^/]+$"),
         ("DELETE", r"^/api/projects/[^/]+$"),
         ("GET", r"^/api/projects/[^/]+/agents-md$"),

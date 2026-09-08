@@ -61,12 +61,66 @@ from vibe.model_hub_runtime.supervisor import (
 )
 
 
+# The subscription vendors the engine can start an OAuth flow for, and the three
+# names each one answers to on the way through it:
+#
+#   management endpoint  where the start request goes
+#   callback provider    the name `POST /oauth-callback` accepts for the session
+#                        the start registered, for the vendors that take one
+#   auth provider        the `provider` the finished grant carries in
+#                        `GET /auth-files`, which is how a flow finds its own
+#
+# The three can differ for one vendor — Claude starts at `/anthropic-auth-url`,
+# answers a callback as `anthropic`, and lands as `claude` — so none of them is
+# derivable from the Avibe vendor id, and each row states all three. What the
+# flow *asks of the user* is not in here: it is read from the start response,
+# which is the only thing that knows whether this vendor issued a device code or
+# expects a redirect URL back.
 _OAUTH_ENDPOINTS = {
     "anthropic": ("/anthropic-auth-url", "anthropic", "claude"),
     "openai": ("/codex-auth-url", "codex", "codex"),
     "codex": ("/codex-auth-url", "codex", "codex"),
+    "gemini": ("/antigravity-auth-url", "antigravity", "antigravity"),
+    "kimi": ("/kimi-auth-url", "kimi", "kimi"),
+    "xai": ("/xai-auth-url", "xai", "xai"),
 }
-_WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
+
+# The local surface the pinned engine serves a hub-held subscription on.
+#
+# A subscription's protocol is not a fact about the vendor's public API — it is a
+# fact about how the engine that holds the credential exposes it to us, the same
+# kind of shipped product knowledge as `vibe/data/api_key_vendors.json`. It is
+# stated for the vendors whose grant no response probe can reach: the credential
+# never leaves the engine, and the upstream behind it is the vendor's CLI plane
+# rather than an endpoint Avibe may synthesize a request against.
+#
+# Read from the engine at the commit `cliproxyapi_manifest.json` pins
+# (v7.2.149, `2a6b87ac`); each row is one of its serving surfaces, not a guess:
+#
+#   gemini  `internal/translator/antigravity/openai/chat-completions/init.go:9`
+#           registers `translator.Register(OpenAI, Antigravity, ...)`, so an
+#           OpenAI-chat request is translated to the antigravity upstream at
+#           `cloudcode-pa.googleapis.com/v1internal:generateContent`.
+#   kimi    `internal/runtime/executor/kimi_executor.go:54` reports
+#           `FormatOpenAI` from `RequestToFormat`, `:119` translates to
+#           `openai`, and `:150` calls the upstream's `/v1/chat/completions`.
+#   xai     `internal/runtime/executor/xai_executor_request.go:517` accepts
+#           `FormatOpenAI` and folds its output controls into the Responses body
+#           the executor sends to `/responses`
+#           (`internal/runtime/executor/xai_executor_execute.go:45`).
+#
+# All three land on `openai_chat`. This table is not required to agree with
+# `vibe/data/api_key_vendors.json`, and for `xai` it no longer does: that catalog
+# pins the protocol Avibe speaks to a vendor's *public* API with a key it holds,
+# while this one names the surface the engine serves a credential it holds
+# itself. The engine reaches xAI's Responses API from either, so the api-key
+# channel is pinned to the surface OpenAI is steering the ecosystem toward and
+# this one keeps the surface the shipped grant path was verified on.
+_HUB_SUBSCRIPTION_PROTOCOLS = {
+    "gemini": "openai_chat",
+    "kimi": "openai_chat",
+    "xai": "openai_chat",
+}
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
@@ -100,6 +154,19 @@ class _ProtocolEvidence:
     authentication: _AuthenticationEvidence
     shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
     status: int | None = field(default=None, compare=False)
+
+
+# What a finished hub subscription grant establishes on its own.
+#
+# The engine accepted the credential — that is what completing the grant means —
+# so authentication is `ACCEPTED`. It says nothing about which protocol, because
+# no request was made: `_HUB_SUBSCRIPTION_PROTOCOLS` supplies that instead, so
+# the proof stays `UNPROVEN` and there is no response shape to record.
+_ENGINE_SERVED_SUBSCRIPTION_EVIDENCE = _ProtocolEvidence(
+    protocol=_ProtocolProof.UNPROVEN,
+    authentication=_AuthenticationEvidence.ACCEPTED,
+    shape=_ProtocolObservationShape.NONE,
+)
 
 
 @dataclass(frozen=True)
@@ -140,9 +207,9 @@ class _ProtocolObservationTaxonomy:
     """One protocol's request shape and response evidence table.
 
     The request path and body are part of the same authority as the response
-    taxonomy. OpenAI probes deliberately provide the common ``model`` field
-    while omitting the candidate-specific ``input`` or ``messages`` field, so
-    each endpoint reaches its own protocol-shaped validation error.
+    taxonomy. Every probe omits ``model`` so observation does not request model
+    scheduling. Schema validation never proves authentication, regardless of
+    whether the interface has a catalog owner or a user declaration.
     """
 
     request_path: str
@@ -253,13 +320,13 @@ def _openai_evidence_rules(
             error_identifiers=_REQUEST_ERROR_IDENTIFIERS,
             error_params=request_params,
             protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.ACCEPTED,
+            authentication=_AuthenticationEvidence.UNKNOWN,
         ),
         _ProtocolEvidenceRule(
             statuses=_REQUEST_ERROR_STATUSES,
             error_identifiers=_MODEL_ERROR_IDENTIFIERS,
             protocol=_ProtocolProof.UNPROVEN,
-            authentication=_AuthenticationEvidence.ACCEPTED,
+            authentication=_AuthenticationEvidence.UNKNOWN,
             shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
         ),
         _ProtocolEvidenceRule(
@@ -289,6 +356,8 @@ def _openai_evidence_rules(
     )
 
 
+# Omit the model so observation stops at request validation, before a relay
+# schedules upstream capacity or applies model-specific availability limits.
 _PROTOCOL_OBSERVATION_TAXONOMY = {
     "anthropic": _ProtocolObservationTaxonomy(
         request_path="/v1/messages",
@@ -314,7 +383,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 top_level_values=frozenset({"error"}),
                 error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
             ),
             _ProtocolEvidenceRule(
                 statuses=_AUTHENTICATION_ERROR_STATUSES,
@@ -344,7 +413,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     ),
     "openai_responses": _ProtocolObservationTaxonomy(
         request_path="/v1/responses",
-        request_body={"model": "__avibe_model_hub_probe__"},
+        request_body={},
         oauth_path="/backend-api/codex/responses",
         evidence_rules=_openai_evidence_rules(
             frozenset({"response"}),
@@ -353,7 +422,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     ),
     "openai_chat": _ProtocolObservationTaxonomy(
         request_path="/v1/chat/completions",
-        request_body={"model": "__avibe_model_hub_probe__"},
+        request_body={},
         oauth_path=None,
         evidence_rules=_openai_evidence_rules(
             frozenset({"chat.completion", "chat.completion.chunk"}),
@@ -493,13 +562,10 @@ def _parse_protocol_authenticated_evidence(
     vendor: str | None = None,
     request_root: str | None = None,
 ) -> _ProtocolEvidence:
-    """Classify response-shaped protocol proof and table-driven auth evidence.
+    """Classify protocol shape without treating schema validation as login.
 
-    This parser never upgrades a generic response into a protocol owner on its
-    own. ``observe_source()`` may later apply the September 4, 2026 owner-based
-    ladder for shipped vendor pins and concrete `custom` declarations after the
-    constrained path has responded. `custom` Auto detect still relies on this
-    parser's response evidence alone.
+    A missing-model error can precede authentication. Neither a declaration nor
+    a differently rejected credential can upgrade it into authentication proof.
     """
 
     def evidence(
@@ -550,7 +616,7 @@ def _parse_protocol_authenticated_evidence(
         if wrapperless == "accepted":
             return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
         if wrapperless == "rejected":
@@ -577,7 +643,7 @@ def _parse_protocol_authenticated_evidence(
         if wrapperless == "accepted":
             return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
         if isinstance(error, dict):
@@ -589,7 +655,7 @@ def _parse_protocol_authenticated_evidence(
             ):
                 return evidence(
                     protocol=_ProtocolProof.UNPROVEN,
-                    authentication=_AuthenticationEvidence.ACCEPTED,
+                    authentication=_AuthenticationEvidence.UNKNOWN,
                     shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
                 )
     if _response_shape_proves_protocol(protocol, payload):
@@ -636,7 +702,7 @@ async def _probe_protocol_response(
             "Accept": "application/json",
         }
     client_timeout = aiohttp.ClientTimeout(total=timeout)
-    try:
+    async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.post(
                 url,
@@ -646,12 +712,11 @@ async def _probe_protocol_response(
             ) as response:
                 body = await response.content.read(64 * 1024)
                 return _parse_protocol_authenticated_evidence(
-                    protocol,
-                    response.status,
-                    body,
-                    vendor=vendor,
-                    request_root=root,
+                    protocol, response.status, body, vendor=vendor, request_root=root,
                 )
+
+    try:
+        return await asyncio.wait_for(observe(), timeout=timeout)
     except asyncio.TimeoutError:
         raise EngineClientError("protocol observation timed out", error_type="timeout") from None
     except aiohttp.ClientError:
@@ -755,6 +820,17 @@ def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
     )
 
 
+def hub_subscription_serving_protocol(vendor: str) -> str | None:
+    """The protocol a hub-held subscription for this vendor is served on.
+
+    ``None`` for a vendor whose grant is proven by response instead of pinned,
+    which is why callers ask this before deciding to probe rather than after
+    failing to.
+    """
+
+    return _HUB_SUBSCRIPTION_PROTOCOLS.get(vendor.strip().lower())
+
+
 def _protocol_is_persistable_without_shape_proof(
     *,
     credential_kind: str,
@@ -762,12 +838,99 @@ def _protocol_is_persistable_without_shape_proof(
     protocol: str,
     protocol_order: Sequence[str],
 ) -> bool:
+    if credential_kind == "oauth":
+        # A hub subscription's protocol is pinned rather than proven, so there is
+        # no response shape to wait for. Nothing else about an OAuth credential
+        # is persistable this way: an unpinned vendor returns False here and
+        # stays on the probe.
+        return hub_subscription_serving_protocol(vendor) == protocol
     if credential_kind != "api_key":
         return False
     pinned_protocol = pinned_api_key_protocol(vendor)
     if pinned_protocol == protocol:
         return True
     return vendor == "custom" and len(protocol_order) == 1 and protocol_order[0] == protocol
+
+
+class _ModelsWitness(Enum):
+    """What an owned interface's model listing established about a credential."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+
+@dataclass(frozen=True)
+class _ModelsWitnessResult:
+    credential: _ModelsWitness
+    models: tuple[DiscoveredModel, ...] = ()
+
+
+async def _authenticate_with_models_witness(
+    *,
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    secret: str,
+) -> _ModelsWitnessResult:
+    """Read the owned interface's model listing as the authentication witness.
+
+    The protocol probe deliberately carries no ``model`` so observation never
+    enters a relay's scheduler, which is exactly why a conforming interface
+    answers it with a request error and leaves authentication unknown. The
+    listing this rung already fetches for inventory is the one call on that same
+    interface that a correct credential answers and a wrong one refuses, so it
+    carries the authentication the probe cannot: an authentication status
+    rejects the credential, and no listing route, an unparseable body, or a
+    transport failure proves nothing and leaves the observation exactly where
+    the probe left it.
+
+    A listing only accepts the credential once the same request without one is
+    refused. Some interfaces publish their catalogue to anybody, and there a
+    listing attests to whoever asked rather than to this key. Asking with no
+    credential settles which kind this is: unlike an altered or fabricated key,
+    an absent one cannot be wrong about a grammar nobody published or collide
+    with another valid key, so the answer is unambiguous. An open catalogue
+    therefore stays inconclusive and the source saves the way it does today.
+
+    Acceptance is bounded accordingly: the interface admits this credential and
+    refuses admission without one, which is not proof that it read the value.
+    An interface that requires a credential without reading it answers those two
+    requests identically, so it is admitted as well, and the third request that
+    would separate the two carries an altered credential and attests to nothing
+    in either direction. The first real call catches a credential nothing
+    validated, exactly where it catches one revoked after its add.
+
+    Only a catalog pin or a concrete declaration asks, because the answer names
+    no protocol; that owner supplies it. The accepted result carries the
+    listing, so one call both authenticates the source and populates it.
+    """
+
+    try:
+        models = await probe_models(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=secret,
+        )
+    except EngineClientError as exc:
+        if exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
+            return _ModelsWitnessResult(credential=_ModelsWitness.REJECTED)
+        return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
+    try:
+        await probe_models(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=None,
+        )
+    except EngineClientError as refusal:
+        if refusal.status_code in _AUTHENTICATION_ERROR_STATUSES:
+            return _ModelsWitnessResult(
+                credential=_ModelsWitness.ACCEPTED,
+                models=tuple(models),
+            )
+    return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
 
 
 def _anthropic_wrapperless_elimination_proof(
@@ -801,6 +964,24 @@ def _anthropic_wrapperless_elimination_proof(
     return None
 
 
+# The vendors whose finished OAuth grant is bound by *probing* it: the ones with
+# a public upstream URL and header set the probe below can synthesize a request
+# against, and read the protocol back out of the response.
+#
+# This is one of the two routes a grant binds by, not the whole admission. The
+# other is `_HUB_SUBSCRIPTION_PROTOCOLS`, where the protocol is pinned from the
+# engine's serving surface because there is no reachable upstream to ask. Every
+# vendor `_OAUTH_ENDPOINTS` can sign in takes exactly one of the two — a flow
+# that could start and then not bind would be a dead end — and
+# `tests/test_model_hub_runtime.py` asserts that partition rather than listing
+# the members, so a vendor added to the start table without a binding route
+# fails a test instead of shipping.
+#
+# That test also pins the probe's actual behaviour against this set, so widening
+# one without the other is a failure rather than a silent change.
+_OAUTH_OBSERVABLE_VENDORS = frozenset({"anthropic", "openai", "codex"})
+
+
 def _probe_oauth_protocol_response(
     *,
     client: EngineClient,
@@ -816,7 +997,6 @@ def _probe_oauth_protocol_response(
     if vendor == "anthropic" and protocol == "anthropic":
         url = f"https://api.anthropic.com{taxonomy.oauth_path or taxonomy.request_path}"
         headers = {
-            "Authorization": "Bearer $TOKEN$",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Anthropic-Version": "2023-06-01",
@@ -826,7 +1006,6 @@ def _probe_oauth_protocol_response(
     elif vendor in {"openai", "codex"} and protocol == "openai_responses":
         url = f"https://chatgpt.com{taxonomy.oauth_path or taxonomy.request_path}"
         headers = {
-            "Authorization": "Bearer $TOKEN$",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Originator": "codex-tui",
@@ -838,30 +1017,31 @@ def _probe_oauth_protocol_response(
             "OAuth credential does not support this protocol path",
             status_code=404,
         )
-    payload = client.management_request(
-        "POST",
-        "/api-call",
-        payload={
-            "auth_index": auth.auth_index,
-            "method": "POST",
-            "url": url,
-            "header": headers,
-            "data": json.dumps(taxonomy.request_body, separators=(",", ":")),
-        },
-    )
-    status = payload.get("status_code")
-    if not isinstance(status, int) or isinstance(status, bool):
-        raise EngineClientError(
-            "protocol observation returned an invalid status",
-            error_type="invalid_json",
+    headers["Authorization"] = "Bearer $TOKEN$"
+    def request(probe_headers: dict[str, str]) -> _ProtocolEvidence:
+        payload = client.management_request(
+            "POST",
+            "/api-call",
+            payload={
+                "auth_index": auth.auth_index,
+                "method": "POST",
+                "url": url,
+                "header": probe_headers,
+                "data": json.dumps(taxonomy.request_body, separators=(",", ":")),
+            },
         )
-    body = payload.get("body")
-    return _parse_protocol_authenticated_evidence(
-        protocol,
-        status,
-        body if isinstance(body, str) else "",
-        vendor=vendor,
-    )
+        status = payload.get("status_code")
+        if not isinstance(status, int) or isinstance(status, bool):
+            raise EngineClientError(
+                "protocol observation returned an invalid status",
+                error_type="invalid_json",
+            )
+        body = payload.get("body")
+        return _parse_protocol_authenticated_evidence(
+            protocol, status, body if isinstance(body, str) else "", vendor=vendor,
+        )
+
+    return request(headers)
 
 
 @dataclass
@@ -1575,15 +1755,20 @@ class CLIProxyEngineAdapter:
     ) -> SourceObservation:
         """Observe sequentially and stop at the first persistable proof.
 
-        ``protocol_order`` orders attempts only. A protocol-specific response
+        ``protocol_order`` orders attempts only, with one exception: a hub
+        subscription whose serving protocol the engine declares is answered by
+        that pin whenever the order contains it, because no other candidate
+        could be served. A protocol-specific response
         with accepted authentication proves the current attempt and terminates
         observation. A shipped vendor catalog pin or a concrete `custom`
-        declaration also terminates observation once that exact protocol path
-        returns an owner-scoped auth status: 401/403 reject, while 2xx and
-        request-error 400/404/422 accept even when the response shape stays
-        generic. A shaped credential rejection is recorded while later
-        candidates continue on Auto detect. Vendor, URL, and order never create
-        a conclusion on their own; `custom` Auto still requires response-backed
+        declaration also terminates observation after a shaped success, and,
+        because that interface's owner is already named, may take its
+        authentication from the model listing when the model-less probe leaves
+        it unknown. Schema errors that no listing answers remain unverified;
+        explicit unverified saving belongs to
+        Source creation, not this observation. A shaped rejection is
+        recorded while later candidates continue on Auto detect. Vendor, URL,
+        and order never create a conclusion on their own; `custom` Auto still requires response-backed
         proof, and exhausting that path without one remains ambiguous.
         """
 
@@ -1618,6 +1803,16 @@ class CLIProxyEngineAdapter:
         else:
             raise EngineStateError("credential does not match observation target")
 
+        if credential_kind == "oauth":
+            served_protocol = hub_subscription_serving_protocol(normalized_vendor)
+            if served_protocol is not None and served_protocol in protocol_order:
+                # A pinned subscription's protocol does not depend on the order it
+                # is asked in: the engine serves this auth kind on one surface,
+                # and every other candidate would only be attempted to be refused.
+                # A caller that asks for an order excluding the pin is left on the
+                # ordinary path, where it reaches that refusal for itself.
+                protocol_order = (served_protocol,)
+
         failures: list[EngineClientError] = []
         received_rejection = False
         received_proven_unknown = False
@@ -1628,6 +1823,12 @@ class CLIProxyEngineAdapter:
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
+            owner_scoped_protocol = _protocol_is_persistable_without_shape_proof(
+                credential_kind=str(credential_kind),
+                vendor=normalized_vendor,
+                protocol=protocol,
+                protocol_order=protocol_order,
+            )
             try:
                 if credential_kind == "api_key":
                     evidence = await _probe_protocol_response(
@@ -1636,6 +1837,14 @@ class CLIProxyEngineAdapter:
                         base_url=base_url,
                         secret=secret or "",
                     )
+                elif credential_kind == "oauth" and owner_scoped_protocol:
+                    # A pinned subscription has no upstream to probe: the engine
+                    # holds the credential and serves it on the surface
+                    # `_HUB_SUBSCRIPTION_PROTOCOLS` names. The completed grant is
+                    # the evidence, so this stands in for a response that was
+                    # accepted without narrowing the protocol by shape — which is
+                    # what the pin is there to narrow instead.
+                    evidence = _ENGINE_SERVED_SUBSCRIPTION_EVIDENCE
                 else:
                     assert oauth_auth is not None
                     evidence = await asyncio.to_thread(
@@ -1648,37 +1857,40 @@ class CLIProxyEngineAdapter:
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
-            owner_scoped_protocol = _protocol_is_persistable_without_shape_proof(
-                credential_kind=str(credential_kind),
-                vendor=normalized_vendor,
-                protocol=protocol,
-                protocol_order=protocol_order,
-            )
-            owner_rejected = (
-                owner_scoped_protocol
-                and evidence.status in _AUTHENTICATION_ERROR_STATUSES
-            )
-            owner_accepted = (
-                owner_scoped_protocol
-                and (
-                    evidence.status in _SUCCESS_STATUSES
-                    or evidence.status in _REQUEST_ERROR_STATUSES
-                )
-            )
-            if owner_rejected:
-                evidence = replace(
-                    evidence,
-                    authentication=_AuthenticationEvidence.REJECTED,
-                )
-            elif owner_accepted:
-                evidence = replace(
-                    evidence,
-                    authentication=_AuthenticationEvidence.ACCEPTED,
-                )
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
                 ruled_out_protocols.add(protocol)
                 continue
+            if (
+                credential_kind == "api_key"
+                and owner_scoped_protocol
+                and evidence.authentication is _AuthenticationEvidence.UNKNOWN
+            ):
+                # This interface already has an owner, so the only thing left to
+                # establish is whether it accepts the credential -- and the
+                # model-less probe just declined to say. Its model listing
+                # answers that, and is the inventory this rung would fetch next
+                # anyway, so a listing that turns out to be credential-gated
+                # both verifies the source and fills it in one pass.
+                witness = await _authenticate_with_models_witness(
+                    vendor=normalized_vendor,
+                    protocol=protocol,
+                    base_url=base_url,
+                    secret=secret or "",
+                )
+                if witness.credential is _ModelsWitness.REJECTED:
+                    received_rejection = True
+                    ruled_out_protocols.add(protocol)
+                    continue
+                if witness.credential is _ModelsWitness.ACCEPTED:
+                    return make_source_observation(
+                        outcome=ObservationOutcome.OBSERVED,
+                        reachable=True,
+                        authenticated=True,
+                        protocol=protocol,
+                        discovery=ObservationDiscovery.SUCCEEDED,
+                        models=witness.models,
+                    )
             proved_protocol: str | None = None
             if evidence.protocol is _ProtocolProof.PROVEN:
                 if evidence.authentication is _AuthenticationEvidence.UNKNOWN:
@@ -1777,15 +1989,6 @@ class CLIProxyEngineAdapter:
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 models=(),
             )
-        if received_rejection:
-            return make_source_observation(
-                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
-                reachable=True,
-                authenticated=False,
-                protocol=None,
-                discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                models=(),
-            )
         if received_proven_unknown:
             return make_source_observation(
                 outcome=ObservationOutcome.ADAPTER_ERROR,
@@ -1795,11 +1998,20 @@ class CLIProxyEngineAdapter:
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 models=(),
             )
-        if received_unproven_response:
+        if received_unproven_response and not considered_protocols.issubset(ruled_out_protocols):
             return make_source_observation(
                 outcome=ObservationOutcome.AMBIGUOUS,
                 reachable=True,
                 authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                models=(),
+            )
+        if received_rejection:
+            return make_source_observation(
+                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+                reachable=True,
+                authenticated=False,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 models=(),
@@ -1836,7 +2048,7 @@ class CLIProxyEngineAdapter:
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None:
-            raise EngineStateError("OAuth vendor lacks Model Hub response-backed observation")
+            raise EngineStateError("OAuth vendor lacks a Model Hub subscription flow")
         engine_endpoint, callback_provider, auth_provider = endpoint
         with self._oauth_lock:
             self._expire_oauth_flows_locked()
@@ -1850,7 +2062,12 @@ class CLIProxyEngineAdapter:
                 client.management_request,
                 "GET",
                 engine_endpoint,
-                query={"is_webui": "true"} if normalized_vendor in _WEBUI_OAUTH_VENDORS else None,
+                # Every start Avibe makes is Web-UI-originated, which is all this
+                # flag states. The engine decides what follows from it: a vendor
+                # whose grant comes back through a redirect starts a forwarder
+                # for it, and one that issues a device code has nothing to
+                # forward and ignores the flag.
+                query={"is_webui": "true"},
             )
             engine_state = str(payload.get("state") or "").strip()
             if not engine_state:

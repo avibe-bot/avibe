@@ -127,7 +127,7 @@ test('does not reuse an old Chat position when a later Search visit returns', as
   await scrollTo(page, 0);
   if (isMobile) await page.getByText(copy('workbench.search.entry'), { exact: true }).click();
   else await page.evaluate(() => { window.location.hash = '/search'; });
-  await expect(page.getByTestId('search-detail')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: copy('workbench.search.placeholder') })).toBeVisible();
   await page.goBack();
   await expect(rows(page)).toHaveCount(60);
   await expect.poll(async () => (await position(page)).top).toBe(0);

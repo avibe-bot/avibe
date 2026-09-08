@@ -113,6 +113,55 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
+  - id: AUTH-SETUP-112
+    name: API-key setup verifies from a credential-gated model list, or saves unverified with best-effort inventory, and never schedules a model
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_api_key_setup_does_not_schedule_a_model
+  - id: AUTH-SETUP-113
+    name: Hub OAuth retains completed credentials as unverified and preserves explicit rejection state
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_model_free_observation_closed_loop
+  - id: AUTH-SETUP-114
+    name: Auto policy responses neither reject credentials nor falsely exclude competing protocols
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_custom_auto_policy_response_cannot_reject_or_exclude_credentials
+  - id: AUTH-SETUP-115
+    name: Hub-only subscription vendors start a hub-channel flow carrying the engine-declared presentation form
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody
+  - id: AUTH-SETUP-116
+    name: Hub-only subscription vendors refuse native_cli custody before any CLI login starts
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody
+  - id: AUTH-SETUP-117
+    name: Unproven hub-only subscription grant refuses cleanly, revoking the credential and leaving no Source
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_unproven_hub_subscription_grant_refuses_and_leaves_no_source
+  - id: AUTH-SETUP-118
+    name: Hub-only subscription grant binds to a Gateway Source and supplies its models
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_subscription_grant_binds_a_source_and_supplies_its_models
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

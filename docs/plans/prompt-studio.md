@@ -14,7 +14,8 @@ The Git checkout is authoritative:
 - `core/prompt_registry.py` owns stable module identity, ordering, composition
   whitespace, and declared placeholders.
 - `core/prompts/*.md` owns the English System Prompt prose.
-- `skills/*/SKILL.md` owns built-in Skill prose.
+- `skills/*/SKILL.md` owns built-in Skill entry prose; `references/**/*.md`
+  under each Skill owns its on-demand operating details.
 - `vibe debug prompt export --format json` is the only supported extraction
   interface for Prompt Studio. Consumers do not parse Python source.
 
@@ -22,6 +23,21 @@ The exporter reads the current checkout or installed package. It does not fetch
 Git or choose a branch. A contributor reviews the branch they have checked out.
 Catalog order and revisions are content-derived and deterministic; the export
 contains no generation timestamp.
+
+Skill references are independent `kind: "skill"` documents immediately after
+their entry, ordered by relative path. `parent_id` identifies the owning Skill
+document and `relative_path` names the file inside it. Reference document IDs
+derive from Skill name and relative path, not contents or directory position.
+Each document has its own content revision, source-addressable Markdown blocks,
+translation cache, token count, and authored review history. Adding or editing
+a reference does not change the entry's revision. Non-Markdown files and symbolic
+links are not review documents. Exporting references does not inject them into
+the runtime prompt or eagerly load them with the Skill entry.
+
+Moving prose into another file does not rewrite saved reviews: existing authored
+blocks remain in the original document's removed-source section and revision
+history. A moved file starts its own review identity; migration of authored prose
+requires an explicit reviewed save, not an automatic fuzzy match.
 
 The registry defines production composition order, and Studio preserves that
 order without a display-only sort. Each rendered prompt is an ordered subset of

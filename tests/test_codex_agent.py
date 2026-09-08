@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.base import BaseAgent as RealBaseAgent
 from modules.agents.codex.transport import CodexRPCError
 
@@ -380,6 +381,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
                 "ephemeral": True,
+                "model": "gpt-5.4-mini",
                 "developerInstructions": (
                     "This is a connection probe. Do not use tools. "
                     "Reply with a short greeting."
@@ -437,7 +439,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
                 "app-server exited during the connection probe",
             ),
         ):
-            await agent.probe_connection(cwd)
+            await agent.probe_connection(cwd, model="gpt-fixture")
 
         self.assertEqual(agent._connection_probes, {})
         self.assertEqual(agent._connection_probe_turns, {})
@@ -473,7 +475,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
             "get_runtime_dir",
             return_value=Path(runtime_dir.name),
         ):
-            task = asyncio.create_task(agent.probe_connection(cwd))
+            task = asyncio.create_task(agent.probe_connection(cwd, model="gpt-fixture"))
             await turn_started.wait()
             await asyncio.sleep(0)
             task.cancel()
@@ -533,6 +535,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "returned no response"):
                 await agent.probe_connection(
                     cwd,
+                    model="gpt-fixture",
                     on_diagnostic=diagnostics.append,
                 )
 
@@ -547,7 +550,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         agent = self._agent(cwd, transport)
 
         with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
-            await agent.probe_connection(cwd)
+            await agent.probe_connection(cwd, model="gpt-fixture")
 
         self.assertEqual(agent._connection_probe_cwds, {})
 
@@ -560,7 +563,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
-            await agent.probe_connection(cwd)
+            await agent.probe_connection(cwd, model="gpt-fixture")
 
         agent._get_or_create_transport.assert_awaited_once_with(
             cwd,
@@ -1270,6 +1273,38 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/work", agent._transports)
         self.assertEqual(cleared_turns, [])
 
+    async def test_silent_owned_codex_turn_survives_both_reclamation_checks(self):
+        for ownership_arrives_during_check in (False, True):
+            with self.subTest(ownership_arrives_during_check=ownership_arrives_during_check):
+                agent, stops, invalidated, cleared = self._make_evict_agent(
+                    active_turn="turn-1", last_activity=0.0,
+                )
+
+                def snapshot(disposition):
+                    return RuntimeTargetOwnershipSnapshot(
+                        backend="codex",
+                        resource_key="/tmp/work",
+                        activity_runtime_keys=(),
+                        sessions=(),
+                        sessionless_active_activity_ids=(),
+                        sessionless_fallback_run_ids=(),
+                        disposition=disposition,
+                    )
+
+                active = snapshot(SessionRuntimeDisposition.ACTIVE)
+                snapshots = (
+                    [snapshot(SessionRuntimeDisposition.RECLAIMABLE), active]
+                    if ownership_arrives_during_check else [active]
+                )
+                agent._runtime_ownership_snapshot_for_cwd = Mock(side_effect=snapshots)
+                with patch.object(_MODULE.time, "monotonic", return_value=1_000_000.0):
+                    self.assertEqual(await agent.evict_idle_transports(600), 0)
+                self.assertEqual(stops, [])
+                self.assertEqual(invalidated, [])
+                self.assertEqual(cleared, [])
+                self.assertEqual(agent._turn_registry.get_active_turn("session-1"), "turn-1")
+                agent.controller.emit_agent_message.assert_not_awaited()
+
     async def test_hfr_143_observable_session_progress_wins_locked_recheck(self):
         """HFR-143: attributable progress keeps a productive turn alive."""
         agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
@@ -1969,7 +2004,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             developer_instructions,
         )
 
-    async def test_start_thread_omits_show_pages_prompt_when_disabled(self):
+    async def test_start_thread_includes_show_pages_despite_legacy_opt_out(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(
             config=SimpleNamespace(platform="slack", reply_enhancements=True, show_pages_prompt=False)
@@ -2003,7 +2038,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("# Avibe", developer_instructions)
         self.assertIn("## Quick-reply buttons", developer_instructions)
         self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
-        self.assertNotIn("## Show Pages", developer_instructions)
+        self.assertIn("## Show Pages", developer_instructions)
+        self.assertIn("load the `use-show-pages` Skill", developer_instructions)
         self.assertNotIn("vibe show path", developer_instructions)
 
     async def test_resume_thread_refreshes_developer_instructions_without_appending(self):

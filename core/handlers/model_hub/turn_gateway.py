@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import socket
 import tempfile
 from collections import deque
@@ -39,6 +40,7 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
+from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
@@ -829,18 +831,33 @@ class ModelHubTurnGateway:
                 translation = translate_opencode_tool_names(payload)
                 payload = translation.request
                 execution.response_tool_aliases = translation.response_aliases
-            resolved = await self.service.resolve(
-                backend=backend,
-                model_id=resolution_model,
-                request=ModelHubRequest(
-                    payload,
-                    protocol=_REQUEST_PROTOCOLS[endpoint],
-                    headers=protocol_headers,
-                ),
-                stream=stream,
-                supply_channel="hub",
-                attempt_observer=observe_attempt,
-            )
+            for retry in range(2):
+                try:
+                    resolved = await self.service.resolve(
+                        backend=backend,
+                        model_id=resolution_model,
+                        request=ModelHubRequest(
+                            payload,
+                            protocol=_REQUEST_PROTOCOLS[endpoint],
+                            headers=protocol_headers,
+                        ),
+                        stream=stream,
+                        supply_channel="hub",
+                        attempt_observer=observe_attempt,
+                    )
+                    break
+                except ModelHubError as exc:
+                    delay = self._cooldown_retry_delay(exc.turn_outcome)
+                    if (
+                        retry
+                        or delay is None
+                        or exc.turn_outcome is None
+                        or exc.turn_outcome.outcome != "no_candidate"
+                    ):
+                        raise
+                    # Native callers may ignore Retry-After. With no runnable
+                    # hop, wait for one known recovery before admission.
+                    await asyncio.sleep(delay)
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -1236,7 +1253,27 @@ class ModelHubTurnGateway:
             turn_outcome,
             fallback_code=code,
         )
-        return self._error_response(status=status, code=code, rendered=rendered)
+        delay = self._cooldown_retry_delay(turn_outcome)
+        if delay is not None and status == 409:
+            status = 503
+        return self._error_response(
+            status=status,
+            code=code,
+            rendered=rendered,
+            retry_after=math.ceil(delay) if delay is not None else None,
+        )
+
+    def _cooldown_retry_delay(
+        self,
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> float | None:
+        if turn_outcome is None or turn_outcome.outcome not in {"no_candidate", "exhausted"}:
+            return None
+        facts = turn_outcome.supply_facts
+        if facts is None or facts.supply_state != "waiting" or not facts.retry_at:
+            return None
+        retry_at = parse_model_hub_timestamp(facts.retry_at)
+        return max(0.0, (retry_at - self._now()).total_seconds())
 
     async def _settle_turn_handle(
         self,
@@ -1330,6 +1367,7 @@ class ModelHubTurnGateway:
         status: int,
         code: str,
         rendered: _RenderedTurnOutcome | None = None,
+        retry_after: int | None = None,
     ) -> web.Response:
         language = self._language_provider() or "en"
         message = rendered.message if rendered is not None else None
@@ -1338,6 +1376,9 @@ class ModelHubTurnGateway:
             message = i18n_t(message_key, language)
         if message == message_key:
             message = i18n_t("modelHub.errors.upstream_error", language)
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        if retry_after is not None and status in {429, 503}:
+            headers["Retry-After"] = str(max(1, retry_after))
         return web.json_response(
             {
                 "error": {
@@ -1347,5 +1388,5 @@ class ModelHubTurnGateway:
                 }
             },
             status=status,
-            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+            headers=headers,
         )

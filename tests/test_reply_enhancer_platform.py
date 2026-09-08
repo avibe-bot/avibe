@@ -229,7 +229,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("load the `use-avibe-harness` Skill", prompt)
         self.assertNotIn("No enabled Agents", prompt)
 
-    def test_prompt_can_exclude_show_pages(self):
+    def test_show_pages_remain_when_quick_replies_are_disabled(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -242,13 +242,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
         ):
             prompt = build_system_prompt_injection(
-                include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
                 skills_cwd=Path("/tmp/project"),
             )
 
-        self.assertNotIn("## Show Pages", prompt)
+        self.assertIn("## Show Pages", prompt)
+        self.assertNotIn("## Quick-reply buttons", prompt)
         self.assertIn("## Harness", prompt)
         self.assertNotIn("## Scheduled tasks, watches, and hooks", prompt)
         self.assertIn("Current session id: `sesk8m4q2p7x`", prompt)
@@ -1884,7 +1884,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Personal Memory", human_prompt)
         self.assertNotIn("## User Preferences and Project Context", human_prompt)
 
-    def test_show_page_runtime_state_selects_one_history_contract(self):
+    def test_show_page_history_is_skill_scoped_and_does_not_change_prompt(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1906,17 +1906,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ):
                 self_managed = build_system_prompt_injection(include_quick_replies=True, context=context)
 
-        self.assertIn("History is saved automatically around each turn", managed)
-        self.assertNotIn("Avibe's shadow history continues automatically", managed)
-        self.assertIn("Avibe's shadow history continues automatically", self_managed)
-        self.assertNotIn("History is saved automatically around each turn", self_managed)
+        self.assertEqual(managed, self_managed)
+        self.assertEqual(managed, unavailable)
         self.assertNotIn("History contract:", unavailable)
-        self.assertNotIn("History is saved automatically around each turn", unavailable)
+        self.assertIn("Before creating, updating, or restoring a Show Page", managed)
         skill = (Path(__file__).resolve().parents[1] / "skills" / "use-show-pages" / "SKILL.md").read_text()
-        self.assertNotIn("History is saved automatically around each turn", skill)
-        self.assertNotIn("Avibe's shadow history continues automatically in the background", skill)
-        self.assertNotIn("Automatic Show Page history is unavailable", skill)
-        self.assertIn("Follow the History contract in the current System Prompt", skill)
+        self.assertIn("### Show Page workspace history", skill)
+        self.assertIn("These rules apply only to this Session's Show Page workspace", skill)
+        self.assertIn("`history.mode` is `managed`", skill)
+        self.assertIn("`history.mode` is `self-managed`", skill)
+        self.assertIn("Separately entrusted repository work follows the user's mandate", skill)
+        self.assertNotIn("Follow the History contract in the current System Prompt", skill)
         self.assertIn("`vibe show status`", skill)
 
     def test_prompt_does_not_render_empty_agents_as_invokable_table_row(self):
@@ -1980,7 +1980,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("injects the current Cloud-availability guidance", skill)
         self.assertNotIn("Avibe Cloud is not connected", skill)
 
-    def test_disabled_show_pages_are_not_advertised_through_the_skill_catalog(self):
+    def test_show_pages_guidance_and_skill_catalog_are_advertised_together(self):
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -2007,14 +2007,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             patch("core.managed_skills.resolve_skills", return_value=skills),
         ):
             prompt = build_system_prompt_injection(
-                include_show_pages=False,
                 include_quick_replies=False,
                 context=context,
                 skills_cwd=Path("/tmp/project"),
             )
 
-        self.assertNotIn("load the `use-show-pages` Skill", prompt)
-        self.assertNotIn("- use-show-pages:", prompt)
+        self.assertIn("load the `use-show-pages` Skill", prompt)
+        self.assertIn("- use-show-pages:", prompt)
         self.assertIn("- use-avibe-vault:", prompt)
 
     def test_required_skill_routes_remain_when_catalog_entries_are_manual_only(self):

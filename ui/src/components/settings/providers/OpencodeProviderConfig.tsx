@@ -1562,7 +1562,6 @@ export const OpencodeProviderConfig: React.FC<{
                                     providerId={provider.id}
                                     providerName={provider.name}
                                     models={provider.models}
-                                    defaultModel={provider.default_model}
                                   />
                                 )}
                               </div>
@@ -1680,16 +1679,6 @@ export const OpencodeProviderConfig: React.FC<{
                                               <span className="text-[10px] text-muted">
                                                 {reasoningEfforts.join('/')}
                                               </span>
-                                            )}
-                                            {provider.default_model === model && (
-                                              <Badge
-                                                variant="success"
-                                                className={entry?.user_managed ? undefined : 'ml-auto'}
-                                              >
-                                                {t(
-                                                  'settings.backends.opencodeProviderDefaultModel'
-                                                )}
-                                              </Badge>
                                             )}
                                             {entry?.user_managed && (
                                               <Button

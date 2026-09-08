@@ -70,7 +70,6 @@ describe('isLocalOnlyMessagingField', () => {
   it('keeps machine-global controls owner-only without gating Replies', () => {
     expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
     expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
-    expect(isLocalOnlyMessagingField('show_pages_prompt')).toBe(true);
     expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
   });
 });

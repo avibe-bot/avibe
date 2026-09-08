@@ -13,6 +13,7 @@
     {"method": "POST", "path": "/api/models/sources/<id>/reauth", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/sources/src_subscribe01/reauth", "status": 200, "json": {"acknowledge_irreversible": true}}},
     {"method": "DELETE", "path": "/api/models/sources/<id>?force=<bool>", "response_schema": "SourceDeleteResponse", "exercise": {"path": "/api/models/sources/src_delete0001?force=false", "status": 200, "json": {}}},
     {"method": "POST", "path": "/api/models/sources/<id>/refresh", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/refresh", "status": 200, "json": {}}},
+    {"method": "POST", "path": "/api/models/sources/<id>/probe", "response_schema": "SourceProbeResponse", "exercise": {"path": "/api/models/sources/src_conform001/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
     {"method": "POST", "path": "/api/models/sources/<source_id>/models", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models", "status": 201, "json": {"model_id": "manual-contract-model", "reasoning_efforts": []}}},
     {"method": "PATCH", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {"reasoning_efforts": ["high"]}}},
     {"method": "DELETE", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {}}},
@@ -23,7 +24,7 @@
     {"method": "PATCH", "path": "/api/models/agents/<backend>/mode", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/mode", "status": 200, "json": {"mode": "hub"}}},
     {"method": "GET", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentCatalogResponse", "exercise": {"path": "/api/models/agents/claude/models", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/models/candidates", "response_schema": "AgentModelCandidatesResponse", "exercise": {"path": "/api/models/agents/claude/models/candidates", "status": 200}},
-    {"method": "PUT", "path": "/api/models/agents/<backend>/models", "response_schema": "AgentModelsResponse", "exercises": [{"path": "/api/models/agents/claude/models", "status": 200, "json": {"baseline": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}], "models": [{"id":"default","display_name":null,"origin":"builtin","models_dev_id":null,"context_window":null,"max_output_tokens":null,"input_modalities":[],"output_modalities":[],"supports_tools":null,"supports_reasoning":null,"reasoning_efforts":[],"locked":true,"routeable":false}]}}, {"path": "/api/models/agents/claude/models", "status": 409, "setup": "backend_model_guard"}, {"path": "/api/models/agents/claude/models", "status": 200, "setup": "backend_model_forced_removal"}, {"path": "/api/models/agents/claude/models", "status": 409, "setup": "candidate_suppliers_guard"}]},
+    {"method":"PUT","path":"/api/models/agents/<backend>/models","response_schema":"AgentModelsResponse","exercises":[{"path":"/api/models/agents/claude/models","status":200,"json":{"baseline":[],"models":[]}},{"path":"/api/models/agents/claude/models","status":409,"setup":"backend_model_guard"},{"path":"/api/models/agents/claude/models","status":200,"setup":"backend_model_forced_removal"},{"path":"/api/models/agents/claude/models","status":409,"setup":"candidate_suppliers_guard"}]},
     {"method": "GET", "path": "/api/models/catalog/models-dev?query=<text>", "response_schema": "ModelsDevResponse", "exercise": {"path": "/api/models/catalog/models-dev?query=contract-model", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chains", "response_schema": "ChainListResponse", "exercise": {"path": "/api/models/agents/claude/chains", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200}},
@@ -47,6 +48,16 @@
     {"method": "POST", "path": "/api/models/runtime/stop", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/stop", "status": 200}}
   ],
   "definitions": {
+    "SourceProbeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "contract_version", "probe"],
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 10},
+        "probe": {"$ref": "model-hub/source-probe-result.schema.json"}
+      }
+    },
     "SourceApi": {
       "allOf": [
         {"$ref": "model-hub/source.schema.json"},

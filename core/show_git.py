@@ -16,7 +16,6 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
-from core.prompt_registry import RenderedPromptBlock, prompt_text
 from vibe.message_types import input_author_type_pairs
 
 logger = logging.getLogger(__name__)
@@ -72,8 +71,7 @@ _INPUT_TURN_MESSAGE_TYPES = tuple(
     dict.fromkeys(message_type for _, message_type in input_author_type_pairs())
 )
 
-SHOW_GIT_AGENT_CONTRACT = tuple(prompt_text("show-history-managed").splitlines())
-SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT = tuple(prompt_text("show-history-self-managed").splitlines())
+
 class ShowGitError(RuntimeError):
     """A platform Git operation failed."""
 
@@ -178,39 +176,15 @@ def _workspace_is_self_managed(session_id: str) -> bool:
     return not managed
 
 
-def format_agent_contract(
-    *,
-    numbered: bool = False,
-    checkpointing_available: bool | None = None,
-    session_id: str | None = None,
-) -> str:
-    block = agent_contract_block(
-        numbered=numbered, checkpointing_available=checkpointing_available, session_id=session_id,
-    )
-    return block.text if block else ""
-
-
-def agent_contract_block(
-    *,
-    numbered: bool = False,
-    checkpointing_available: bool | None = None,
-    session_id: str | None = None,
-) -> RenderedPromptBlock | None:
-    if checkpointing_available is None:
-        checkpointing_available = show_git_checkpointing_active()
-    if not checkpointing_available:
-        return None
-    if session_id is not None and _workspace_is_self_managed(session_id):
-        lines = SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT
-        module_id = "show-history-self-managed"
-    else:
-        lines = SHOW_GIT_AGENT_CONTRACT
-        module_id = "show-history-managed"
-    if numbered:
-        text = "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
-    else:
-        text = "\n".join(f"- {line}" for line in lines)
-    return RenderedPromptBlock(module_id, text)
+def show_history_status(session_id: str) -> dict[str, Any]:
+    """Describe this page's history on demand without creating or changing it."""
+    if not _SESSION_ID_PATTERN.fullmatch(str(session_id or "")):
+        raise ValueError("Invalid Show Page session id")
+    return {
+        "mode": "self-managed" if _workspace_is_self_managed(session_id) else "managed",
+        "checkpointing_active": show_git_checkpointing_active(),
+        "git_dir": str(paths.get_show_git_dir(session_id)),
+    }
 
 
 def _single_line(value: Any) -> str:

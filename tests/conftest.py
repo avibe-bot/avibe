@@ -211,6 +211,16 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
         "AVIBE_CALLER_WORKSPACE_ID",
         "AVIBE_CALLER_REMOTE",
         "AVIBE_CALLER_RESOURCE_CONTEXT",
+        "VIBE_INTERNAL_DISPATCH_SOCKET",
+        "AVIBE_SKILL_WORKING_DIR",
+        "AVIBE_SKILL_PROJECT_BASE",
+        "AVIBE_SKILL_HOME",
+        "AVIBE_SKILL_CODEX_HOME",
+        "AVIBE_SKILL_CLAUDE_HOME",
+        "AVIBE_SKILL_CLAUDE_CLI_PATH",
+        "AVIBE_SKILL_XDG_CONFIG_HOME",
+        "AVIBE_BUILTIN_SKILLS_ROOT",
+        "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
     ):
         monkeypatch.delenv(name, raising=False)
     isolated_home = tmp_path / "home"

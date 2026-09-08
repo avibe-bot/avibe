@@ -185,6 +185,13 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
     ),
     (
         "openai_responses",
+        "response.reasoning_text.delta",
+        ("type",),
+        "response.reasoning_text.delta",
+        False,
+    ),
+    (
+        "openai_responses",
         "response.function_call_arguments.delta",
         ("type",),
         "response.function_call_arguments.delta",
@@ -198,6 +205,7 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
         False,
     ),
     ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
+    ("openai_chat", None, ("choices", "*", "delta", "reasoning_content"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "refusal"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "tool_calls"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "function_call"), None, True),
@@ -645,8 +653,14 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    assert len(meter_calls) == 1
-    assert meter_calls[0] in set(ast.walk(invoke))
+    # Explicit Source tests consume their own response rather than forwarding a
+    # Turn to the gateway. They reuse the same metering owner, exactly once.
+    consumers = (invoke, _functions(service_tree)["probe_source"])
+    assert len(meter_calls) == len(consumers)
+    assert all(
+        sum(call in set(ast.walk(consumer)) for call in meter_calls) == 1
+        for consumer in consumers
+    )
     # Any of the gateway's endings may report the forwarded call, so exactly-once
     # rests on the write it owns; a caller that pre-checks or clears that handle
     # would move the decision outside the owner. An ending may still need to know
@@ -1426,6 +1440,20 @@ def test_chat_role_metadata_does_not_cross_the_model_output_boundary() -> None:
     state = ProtocolSSEState("openai_chat")
     state.observe(b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n')
     assert state.model_output_started is False
+
+
+@pytest.mark.parametrize(
+    ("protocol", "payload"),
+    [
+        ("openai_responses", {"type": "response.reasoning_text.delta", "delta": "thinking"}),
+        ("openai_chat", {"choices": [{"delta": {"reasoning_content": "thinking"}}]}),
+    ],
+)
+def test_reasoning_is_model_output_before_any_answer_text(protocol: str, payload: dict) -> None:
+    state = ProtocolSSEState(protocol)
+    event = f"event: {payload['type']}\n".encode() if "type" in payload else b""
+    state.observe(event + b"data: " + json.dumps(payload).encode() + b"\n\n")
+    assert state.model_output_started is True
 
 
 def test_chat_any_nonempty_choice_crosses_the_model_output_boundary() -> None:

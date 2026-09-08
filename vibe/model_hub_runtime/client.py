@@ -22,6 +22,7 @@ from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    InvokeCancelledError,
     RawCallOutcome,
     RawOutcomeKind,
 )
@@ -384,6 +385,9 @@ class EngineClient:
             sock_connect=self.timeout,
             sock_read=None,
         )
+        # Connecting to the local engine is bounded. Once connected, headers
+        # and response bytes can wait on upstream inference for any duration;
+        # completion, transport failure, or owner cancellation ends that wait.
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         response: aiohttp.ClientResponse | None = None
         first_received = False
@@ -394,7 +398,7 @@ class EngineClient:
         # Held here rather than inside the prelude reader so every way out of this
         # call can still see what the wire already reported. A stream that reports
         # usage before its first model output — Anthropic's `message_start` does —
-        # and then times out has already been billed for those input tokens.
+        # and then fails has already been billed for those input tokens.
         wire_state: ProtocolSSEState | None = None
 
         def ended(outcome: RawCallOutcome) -> EngineInvokeHandle:
@@ -411,14 +415,11 @@ class EngineClient:
             return completed_handle(outcome)
 
         try:
-            response = await asyncio.wait_for(
-                session.post(
-                    self._url(endpoint),
-                    json=body,
-                    headers=headers,
-                    allow_redirects=False,
-                ),
-                timeout=self.timeout,
+            response = await session.post(
+                self._url(endpoint),
+                json=body,
+                headers=headers,
+                allow_redirects=False,
             )
             if response.status >= 300:
                 error_body = _StreamPrelude()
@@ -473,10 +474,7 @@ class EngineClient:
                 await session.close()
                 return ended(outcome)
 
-            first = await asyncio.wait_for(
-                response.content.read(_STREAM_CHUNK_BYTES),
-                timeout=self.timeout,
-            )
+            first = await response.content.read(_STREAM_CHUNK_BYTES)
             if not first:
                 response.close()
                 await session.close()
@@ -493,18 +491,14 @@ class EngineClient:
             if not stream:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
-                response_deadline = time.monotonic() + self.timeout
                 await buffered_body.write_async(first)
-                await asyncio.wait_for(
-                    _read_response_into(response.content, buffered_body),
-                    timeout=self.timeout,
-                )
+                await _read_response_into(response.content, buffered_body)
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
                     buffered_body,
                     machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
-                    deadline=response_deadline,
+                    deadline=time.monotonic() + self.timeout,
                 )
                 outcome = _reduce_protocol_observation(
                     observation,
@@ -535,7 +529,6 @@ class EngineClient:
                 wire_state=wire_state,
                 source=source,
                 model_id=model_id,
-                timeout=self.timeout,
             )
             model_output_started = wire_state.model_output_started
             if prelude_outcome is not None:
@@ -588,6 +581,10 @@ class EngineClient:
             ownership_transferred = True
             transport_transferred = True
             return handle
+        except asyncio.CancelledError as cancelled:
+            if wire_state is not None:
+                raise InvokeCancelledError(wire_state) from cancelled
+            raise
         except asyncio.TimeoutError:
             if response is not None:
                 response.close()
@@ -743,10 +740,16 @@ async def probe_models(
     vendor: str,
     protocol: str,
     base_url: str | None,
-    secret: str,
+    secret: str | None,
     timeout: float = 15.0,
 ) -> tuple[DiscoveredModel, ...]:
-    """Probe the one allowlisted models path without redirecting credentials."""
+    """Probe the one allowlisted models path without redirecting credentials.
+
+    ``secret=None`` sends no credential at all. It is not an altered or
+    fabricated one -- there is no token to guess wrong and no other valid key to
+    collide with -- so what it answers is unambiguous: a listing that still
+    arrives belongs to anyone who asks and therefore attests to no credential.
+    """
     normalized_vendor = vendor.strip().lower()
     root = base_url or _OFFICIAL_BASE_URLS.get(normalized_vendor)
     if not root:
@@ -756,13 +759,16 @@ async def probe_models(
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
-    headers = {"Authorization": f"Bearer {secret}", "Accept": "application/json"}
+    headers = {"Accept": "application/json"}
     if protocol == "anthropic":
-        headers = {
-            "x-api-key": secret,
-            "anthropic-version": "2023-06-01",
-            "Accept": "application/json",
-        }
+        # The version header is part of the interface, not the credential, so it
+        # stays on the uncredentialed request: it must differ in exactly one way.
+        headers["anthropic-version"] = "2023-06-01"
+    if secret is not None:
+        if protocol == "anthropic":
+            headers["x-api-key"] = secret
+        else:
+            headers["Authorization"] = f"Bearer {secret}"
     deadline = time.monotonic() + timeout
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:
@@ -1247,7 +1253,6 @@ async def _read_stream_prelude(
     wire_state: ProtocolSSEState,
     source: SourceRecord,
     model_id: str,
-    timeout: float,
 ) -> RawCallOutcome | None:
     """Buffer transport metadata until the sole first-model-output fact.
 
@@ -1257,7 +1262,6 @@ async def _read_stream_prelude(
     """
 
     await _received(first, prelude=prelude, wire_state=wire_state)
-    deadline = asyncio.get_running_loop().time() + timeout
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -1267,13 +1271,7 @@ async def _read_stream_prelude(
         )
         if outcome is not None:
             return outcome
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            raise asyncio.TimeoutError
-        chunk = await asyncio.wait_for(
-            response.content.read(_STREAM_CHUNK_BYTES),
-            timeout=remaining,
-        )
+        chunk = await response.content.read(_STREAM_CHUNK_BYTES)
         if not chunk:
             completion = _observed_stream_terminal_outcome(
                 wire_state,

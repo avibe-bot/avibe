@@ -233,6 +233,7 @@ def _primary_request(*, session_id: str = "avibe-session", backend: str) -> Agen
         base_session_id=session_id,
         composite_session_id="runtime-key",
         session_key="scope-key",
+        vibe_agent_model="fixture-provider/fixture-model" if backend == "opencode" else f"{backend}-fixture",
     )
 
 
@@ -1052,7 +1053,6 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -1232,7 +1232,6 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -1364,7 +1363,6 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(

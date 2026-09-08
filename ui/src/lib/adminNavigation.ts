@@ -38,7 +38,6 @@ export const OWNER_ONLY_ROUTES = [
 const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
   'agents.opencode.error_retry_limit',
   'agents.opencode.active_turn_timeout_seconds',
-  'show_pages_prompt',
 ]);
 
 export const isOwnerOnlyPath = (pathname: string): boolean =>

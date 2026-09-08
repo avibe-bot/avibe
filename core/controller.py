@@ -4109,10 +4109,13 @@ class Controller:
         from storage import agent_events_retention
         from storage.db import get_cached_sqlite_engine
 
+        # Skill privacy retention remains active when collection/tool retention
+        # is disabled; both policies share this bounded maintenance worker.
+        engine = get_cached_sqlite_engine()
+        agent_events_retention.run_skill_retention(engine, cancel_event=cancel_event)
         config = self._agent_events_retention_config()
         if config is None:
             return {"status": "disabled"}
-        engine = get_cached_sqlite_engine()
         return agent_events_retention.run_once(
             engine,
             retention_days=int(config["days"]),

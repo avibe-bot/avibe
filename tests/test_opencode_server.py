@@ -1334,6 +1334,24 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
+    async def test_explicit_subagent_model_is_independent_of_native_defaults(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        for native_model in (None, "openai/native-one", "anthropic/native-two"):
+            for declared in (None, "", "   ", {"id": "invalid"}, " provider/reviewer "):
+                with self.subTest(native_model=native_model, declared=declared):
+                    config = {
+                        "model": native_model,
+                        "agent": {
+                            "build": {"model": native_model},
+                            "reviewer": {"model": declared},
+                        },
+                    }
+                    with patch.object(manager, "_load_opencode_user_config", return_value=config):
+                        expected = (declared.strip() or None) if isinstance(declared, str) else None
+                        self.assertEqual(manager.get_explicit_subagent_model("reviewer"), expected)
+                        self.assertIsNone(manager.get_explicit_subagent_model("missing"))
+                        self.assertIsNone(manager.get_explicit_subagent_model(""))
+
     async def test_agent_reasoning_effort_reads_back_every_savable_variant(self):
         # A tier the save path can write must never be dropped here as unknown
         # (#1840: catalog-declared `ultra` was rejected by both halves).

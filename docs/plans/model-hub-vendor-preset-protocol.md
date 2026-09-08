@@ -49,31 +49,49 @@ contract_version bump). Dialog badges are local form state. After save,
 `Source.vendor` is the catalog id (`deepseek`, not `custom`), which is
 enough for source-detail identity.
 
+**The ladder is the only owner (amended 2026-09-08).** A rung's verdict is
+reached once, when the Source is saved, and nothing re-derives it afterwards.
+The engine projection used to re-check a stored Source's `protocol` against its
+vendor's current catalog pin, which contradicted the ladder twice: rung 2 can
+legitimately prove a protocol the pin does not name, and a pin is mutable
+product data, so repinning a vendor between releases retroactively invalidated
+the Sources that vendor's own earlier pin had admitted. `_validate_source_target`
+now asks only what the renderer downstream of it asks — can this Source's
+upstream be resolved — so a pin is read where a protocol is *decided* and never
+where one is replayed.
+
 ## First-wave catalog
 
-Authoritative table, shipped as `vibe/data/api_key_vendors.json`. Vendor
-ids reuse the `Source.vendor` pattern already named in
-`source.schema.json` (`anthropic|openai|zhipuai|kimi|xai|…`). Model-id
-prefix map in `vibe/data/model_vendors.json` is a different document
-(family → vendor for catalog backfill) and is not this picker.
+Mirror of `vibe/data/api_key_vendors.json`, which is the shipped artifact
+and the authority: on any drift — a cell, a missing row, or the row order —
+the JSON wins and this table is what gets corrected (last synced 2026-09-08,
+#1938). A data change belongs in the same PR as its row here. Vendor ids
+reuse the `Source.vendor` pattern already named in `source.schema.json`
+(`anthropic|openai|zhipuai|kimi|xai|…`). Model-id prefix map in
+`vibe/data/model_vendors.json` is a different document (family → vendor for
+catalog backfill) and is not this picker.
 
 | id | Label | Official Base URL | Pinned protocol |
 | --- | --- | --- | --- |
+| `openai` | OpenAI | `https://api.openai.com/v1` | `openai_responses` |
+| `anthropic` | Anthropic | `https://api.anthropic.com` | `anthropic` |
+| `xai` | xAI | `https://api.x.ai/v1` | `openai_responses` |
+| `gemini` | Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `openai_chat` |
 | `deepseek` | DeepSeek | `https://api.deepseek.com` | `openai_chat` |
 | `qwen` | Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `openai_chat` |
 | `kimi` | Kimi | `https://api.moonshot.cn/v1` | `openai_chat` |
-| `zhipuai` | Zhipu AI | `https://open.bigmodel.cn/api/paas/v4` | `openai_chat` |
-| `openai` | OpenAI | `https://api.openai.com/v1` | `openai_responses` |
-| `anthropic` | Anthropic | `https://api.anthropic.com` | `anthropic` |
 | `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openai_chat` |
-| `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
+| `zhipuai` | Zhipu AI | `https://open.bigmodel.cn/api/paas/v4` | `openai_chat` |
 | `mistral` | Mistral | `https://api.mistral.ai/v1` | `openai_chat` |
-| `xai` | xAI | `https://api.x.ai/v1` | `openai_chat` |
+| `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
 | `together` | Together | `https://api.together.xyz/v1` | `openai_chat` |
 | `fireworks` | Fireworks | `https://api.fireworks.ai/inference/v1` | `openai_chat` |
 
-`custom` is the dropdown default, not a catalog row. Gemini native is
-deferred (not in the three-protocol vocabulary).
+`custom` is the dropdown default, not a catalog row. The `gemini` row is
+Gemini's OpenAI-compatible surface, reached on that vendor's own
+`/v1beta/openai` base URL; Gemini **native** stays deferred (not in the
+three-protocol vocabulary, and still Out of scope below). The row and the
+deferral are about different wire formats, not a contradiction.
 
 Engine `_OFFICIAL_BASE_URLS` today only lists anthropic/openai/codex.
 This table is the replacement for api-key observation: look up by
@@ -147,8 +165,123 @@ invariants change.
 - G-18 / G-27 rows: probe constraint language is now only the Auto
   branch on `custom`.
 
+## Model-independent observation (2026-09-07)
+
+Protocol observation omits `model` for every interface. A fabricated model can
+enter a relay's scheduler and return capacity or upstream errors before request
+validation, making valid credentials impossible to add. A model-free request
+keeps observation independent of model availability and generation. The shared
+request taxonomy applies to API-key and OAuth observation alike.
+
+The owner's 2026-09-07 ruling separates configuration from verification. The
+protocol owners remain catalog pins, custom declarations and response evidence;
+explicit `save_unverified: true` may save either of the first two without an
+upstream request as its gate; the bounded inventory discovery it then attempts
+fills the Source and answers no credential question. Custom Auto cannot invent
+an owner. Canonical input validation,
+credential custody, nonce reconciliation and rollback remain unchanged.
+
+Schema errors never authenticate: they can precede key lookup. Synthetic controls
+were removed because unknown token grammar/checksums and collisions with another
+valid key make their results inconclusive. A public model list cannot repair
+that proof, and the inventory waiver does not waive authentication. Bare 401/403
+responses remain unknown for every owner; only shaped authentication evidence
+rejects a candidate. An unknown Auto sibling is not eliminated by another
+candidate's rejection. API-key observation remains model-free, non-redirecting
+and bounded by its deadline.
+
+Every newly stored Hub credential carries an opaque `verification_pending` marker
+independently of routing health, including observed creates and native-config imports.
+Inventory refresh never clears it. Any actual successful invocation whose captured
+marker and credential still match the fresh Source clears it inside the shared config
+transaction. Later same-credential attempts do not negate proof. Credential/endpoint
+replacement generates a new marker, including same-handle OAuth reauthentication.
+The Source remains configurable and invokable, but list/detail surfaces do not
+claim healthy/in-use status while verification is pending. The normal verified
+save path still requires response-backed authentication and protocol ownership.
+
+Completed Hub OAuth consent may retain its engine-bound credential under the fixed
+vendor protocol with verification pending. Explicit upstream authentication
+rejection keeps the existing needs-action state. The existing allowlisted
+auth-index transport substitutes the engine-held token; no private-token reader
+or fabricated OAuth control is needed. Native CLI OAuth is unchanged.
+
+`AUTH-SETUP-112` covers every catalog pin and concrete custom protocol against
+isolated HTTP middleware with both authentication/schema orders, public/protected
+inventory and alphanumeric/punctuation-only credentials. Unknown validation cannot
+authenticate, while explicit saving makes no request that could admit a Source.
+`AUTH-SETUP-113` covers completed Hub OAuth admission, fixed protocol ownership,
+pending verification and idempotent polling across credential shapes and upstream
+outcomes. `AUTH-SETUP-114` covers Auto policy responses that must remain unknown
+and cannot permit unverified saving without a concrete protocol declaration.
+
+## Authentication witness on an owned interface (2026-09-07, amends the section above)
+
+The model-independent ruling above left catalog pins and concrete `custom`
+declarations with no way to verify anything at add time. Its probes deliberately
+carry no `model`, so a strict interface answers them with a request-level schema
+error, which that ruling classifies as authentication-unknown — correctly, since a
+schema error can precede key lookup. Because the probe can therefore never succeed,
+every API-key add funnelled into the explicit unverified save, valid credential and
+healthy relay included.
+
+The owner's ruling closes that gap without restoring status-based acceptance: where
+the interface already has an owner, authentication is read from that owner's model
+listing.
+
+- The model-less probe still runs first and still owns reachability, protocol shape
+  and immediate rejection. Its evidence table is unchanged.
+- Only a probe that left authentication unknown asks further, and only for rung 1
+  and rung 3 with an API-key credential. Custom Auto never asks: a listing names no
+  protocol, so it cannot supply the owner Auto is missing.
+- A listing accepts the credential only once the identical request carrying no
+  credential is refused. An absent credential is not an altered one — no grammar to
+  guess wrong, no other valid key to collide with — so the synthetic-control
+  objection does not reach it, and what it answers is unambiguous: a listing that
+  serves an uncredentialed request belongs to anyone who asks and attests to no
+  credential. A public model list still repairs no proof.
+- What that establishes is bounded, and no further evidence lifts the bound: the
+  interface admits this credential and refuses admission without one. It is not
+  proof that the interface read the value. Observation may make two requests —
+  one carrying the credential and one carrying none — and a gate on the value
+  and a gate on presence alone answer that pair identically, the second
+  admitting a key it never validated because its probe answers out of a schema
+  check that precedes the lookup it never performs. Separating them requires a
+  third request carrying a different value, and an altered credential attests to
+  nothing in either direction, so this ladder declines it. A credential an
+  interface never validated therefore adds as verified and is caught by the
+  first real call through the existing needs-action path, where a credential
+  revoked after its add is already caught. Withholding verification for that
+  case withholds it for every case, which is the state this ruling ends.
+- `401`/`403` on that listing rejects the candidate. The shaped-evidence requirement
+  exists so that a status cannot establish a *protocol*; this rung holds its protocol
+  from its owner already, so the listing's refusal speaks about the credential alone.
+- Every other answer — no listing, a non-JSON body, a timeout, a listing open to
+  anyone — leaves the observation exactly where the model-independent ruling put it,
+  explicit unverified-save exit included. The witness can only add verified adds; it
+  can never remove one.
+- An accepting listing is also the inventory this rung would fetch next, so the one
+  request both verifies the Source and fills it.
+
+`verification_pending` marks a Source that nothing upstream has accepted yet. An
+add-time observation that authenticated the credential is that acceptance, so an
+API-key create through the observed path stores no marker; for that path this
+supersedes the "including observed creates" rule above. Explicit unverified saves,
+Hub OAuth admission, native-config imports and every credential or endpoint
+replacement still mark, and the first-successful-call clearing, its identity matching
+and its shared transaction are unchanged. Inventory still never clears it, and
+discovery on a replacement path is still not a witness: it asks no uncredentialed
+control and answers no ownership question.
+
+`AUTH-SETUP-112` covers both branches for every shipped catalog vendor and every
+concrete custom protocol: a credential-gated listing verifies, populates and leaves
+no marker, while a public listing keeps the credential unproven and leaves the
+explicit unverified save as the only exit.
+
 ## Acceptance
 
+- A relay that answers the model-less probe with a canonical `400` schema error and
+  gates `GET /v1/models` on the key adds as verified — the owner's reported case.
 - DeepSeek official URL + valid key, vendor `deepseek`, adds as
   `openai_chat` without a shaped proof. Same for a recorded DeepSeek
   `param: null` / identical-three-path fixture.

@@ -1549,7 +1549,10 @@ describe('Demand-driven shell bootstrap', () => {
         getWorkbenchProjectsBootstrap: bootstrap,
         listSessions,
         connectWorkbenchEvents: vi.fn(() => vi.fn()),
-        createProject: vi.fn().mockResolvedValue(newProject),
+        createProject: vi.fn().mockImplementation(async () => {
+          bootstrap.mockResolvedValue({ projects: [project, newProject], sessions: {} });
+          return newProject;
+        }),
       };
       let tree: WorkbenchProjectsTree | null = null;
       const captureTree = (next: WorkbenchProjectsTree) => {
@@ -1565,8 +1568,8 @@ describe('Demand-driven shell bootstrap', () => {
       await settle();
       expect(tree?.projects).toEqual([project]);
 
-      // Opening a tracked folder hoists the project and asks for its sessions in the
-      // same statement.
+      // Opening a new folder appends the project and asks for its sessions in the
+      // same statement. Subsequent reads observe the completed creation.
       await act(async () => {
         await tree?.createProject({ folder_path: newProject.folder_path });
       });
@@ -1574,6 +1577,7 @@ describe('Demand-driven shell bootstrap', () => {
 
       expect(listSessions).toHaveBeenCalledTimes(1);
       expect(listSessions.mock.calls[0][0]).toMatchObject({ projectId: newProject.id });
+      expect(tree?.projects).toEqual([project, newProject]);
       expect(tree?.sessionsOf(newProject.id).sessions).toEqual([newSession]);
     });
 

@@ -9275,6 +9275,7 @@ def test_boot_publishes_app_then_waits_for_controller_recovery(
     controller = SimpleNamespace(
         session_turns=manager,
         _delivery_recovery_complete=recovery_complete,
+        skill_observability=SimpleNamespace(close=AsyncMock()),
     )
 
     class _Server:
@@ -9314,6 +9315,7 @@ def test_boot_publishes_app_then_waits_for_controller_recovery(
     asyncio.run(_run())
 
     assert calls == ["app", "serve", "close"]
+    controller.skill_observability.close.assert_awaited_once()
 
 
 def _seed_slack_dm_session(conn, tmp_path, *, dm_chat_id: str, user_id: str = "U_DM"):

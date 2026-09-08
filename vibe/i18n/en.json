@@ -1,4 +1,8 @@
 {
+  "errors": {
+    "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
+    "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
+  },
   "status": {
     "backendUnresponsive": "backend not responding",
     "done": "done",
@@ -7,6 +11,10 @@
     "claudeRefusalFallback": "Claude's safety checks triggered for this request. It switched from {originalModel} to {fallbackModel} and retried. This session will continue on {fallbackModel}.",
     "steps": "{count} st",
     "tokens": "{count} tok"
+  },
+  "projects": {
+    "orderInvalid": "Project order could not be saved. Refresh the list and try again.",
+    "orderConflict": "Project order changed elsewhere. Refresh the list and move the project again."
   },
   "fork": {
     "title": "Fork {title}",
@@ -1466,6 +1474,14 @@
   "data": {
     "helpCommand": "Inspect Avibe data, and run explicit trace-retention maintenance",
     "helpDescription": "Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
+    "skillUsage": {
+      "ownerRequired": "Instance Owner access is required.",
+      "confirmationRequired": "Clearing Skill statistics requires --yes.",
+      "clearRequired": "--yes requires --clear.",
+      "helpCommand": "Inspect or clear local Skill statistics (Instance Owner only)",
+      "helpClear": "Clear Skill events and daily statistics.",
+      "helpYes": "Confirm clearing Skill statistics."
+    },
     "retention": {
       "invalidDays": "--days must be between {minimum} and {maximum}; refusing to run instead of silently clamping the window.",
       "helpCommand": "Show or run bounded retention for internal agent trace events",

@@ -178,47 +178,14 @@ DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS = 1800
 # three: a session actively recovering its queue keeps touching the row.
 DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS = 3600
 
-# Absolute-time backstop for evicting a Codex transport whose turn is stuck
-# "active" forever (e.g. the ``codex app-server`` wedged or silently
-# disconnected after ``turn/start`` but before ``turn/completed``, so
-# ``_active_turns`` is never cleared). Without this, ``evict_idle_transports``
-# treats an active turn as an ABSOLUTE veto and the wedged app-server process
-# leaks until service restart (mirrors the Claude leak in #622/#623).
-#
-# A transport with an active turn is force-evicted once it has been idle for
-# ``max(idle_timeout * MULTIPLIER, FLOOR_SECONDS)``. Set the multiplier <= 0 to
-# disable the backstop entirely.
-#
-# TRADE-OFF: this cap is driven purely by ``last_activity`` (refreshed on every
-# Codex notification), so it CANNOT distinguish a genuinely wedged turn from a
-# legitimately long, fully-silent one. A single tool/MCP run or model "thinking"
-# phase that emits no notifications for longer than the cap will be misjudged as
-# stuck and have its transport torn down. The multiplier defaults higher than a
-# typical tool-run assumption, and the floor guarantees a >= 30 min window even
-# when ``idle_timeout`` is configured small, to keep that false-positive rare.
+# Repair stale Codex adapter-local active flags only after durable ownership
+# allows reclamation. Silence never overrides an owned Turn or Activity.
+# The repair threshold is max(idle_timeout * multiplier, floor); a nonpositive
+# multiplier disables stale-flag repair.
 DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 
-# Absolute-age backstop for idle eviction. A Claude session that is still
-# flagged ``active`` (its per-turn receiver never released the flag, e.g. a
-# long-lived receiver blocked on ``receive_messages`` with no stream EOF) is
-# force-evicted once its ``last_activity`` is older than
-# ``max(idle_timeout * STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER, FLOOR_SECONDS)``.
-# This decouples eviction from the receiver's flag-release logic, so a
-# stuck-active session can no longer pin its ~220MB ``claude`` subprocess until
-# the next service restart. A genuine in-flight turn keeps touching
-# ``last_activity`` (assistant/tool messages), so it normally stays well under
-# this cap. Set the multiplier to 0 to disable the backstop.
-#
-# Trade-off: ``last_activity`` is only refreshed when an SDK message arrives.
-# Because a stuck (blocked-receiver) session and a session running a single
-# silent tool call are indistinguishable from ``last_activity`` alone, a real
-# turn whose ONE tool invocation runs silently for longer than
-# the cap would be force-evicted mid-turn. The default cap is at least 30min
-# because Claude Code's Bash tool caps at 10min, so a single 30min-silent turn
-# is not expected in practice; raise the multiplier if your deployment runs
-# longer silent tools (e.g. long builds via custom/MCP tools that emit no
-# intermediate messages).
+# Claude uses the same ownership-first policy for its receiver's active flag.
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
@@ -1014,7 +981,7 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
         if not path.startswith(prefix):
             return None
         field_name = path[len(prefix) :].split(".", 1)[0]
-        return field_name if field_name in _RUNTIME_RETENTION_FIELDS else None
+        return field_name if field_name in _RUNTIME_RETENTION_FIELDS or field_name == "skill_observability_enabled" else None
     if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return None
     match = re.search(r"Config '([^']+)'", str(error))
@@ -1181,13 +1148,16 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
 
 
 def _recover_runtime_field(payload: dict, field_name: Optional[str]) -> bool:
-    """Repair one retention field without discarding the runtime section."""
+    """Repair one retention or collection field without discarding runtime."""
 
-    if field_name not in _RUNTIME_RETENTION_FIELDS:
+    if field_name not in _RUNTIME_RETENTION_FIELDS and field_name != "skill_observability_enabled":
         return False
     runtime = payload.get("runtime")
     if not isinstance(runtime, dict):
         return False
+    if field_name == "skill_observability_enabled":
+        runtime[field_name] = False
+        return True
     # A recovered policy is disabled even if the other retention field looked
     # valid. The warning attached by ``V2Config.load`` keeps all automatic and
     # status consumers fail-closed until the operator repairs the file.
@@ -1275,7 +1245,6 @@ def _reset_recoverable_config_section(
         "include_time_info",
         "include_user_info",
         "reply_enhancements",
-        "show_pages_prompt",
         "setup_completed",
     }:
         payload[section] = {
@@ -1283,7 +1252,6 @@ def _reset_recoverable_config_section(
             "include_time_info": True,
             "include_user_info": True,
             "reply_enhancements": True,
-            "show_pages_prompt": True,
             "setup_completed": False,
         }[section]
         return True
@@ -2417,8 +2385,11 @@ class RuntimeConfig:
     # ``vibe data retention`` section of the CLI reference (avibe-docs).
     agent_events_trace_retention_enabled: bool = True
     agent_events_trace_retention_days: int = 30
+    skill_observability_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.skill_observability_enabled, bool):
+            raise ValueError("Config 'runtime.skill_observability_enabled' must be a boolean")
         self.show_page_api_timeout_seconds = _named_value(
             "runtime.show_page_api_timeout_seconds",
             float,
@@ -2829,6 +2800,7 @@ class ModelHubSourceConfig:
     credential_ref: Optional[str] = None
     account_label: Optional[str] = None
     masked_credential: Optional[str] = None
+    verification_pending: Optional[str] = None
 
     @classmethod
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
@@ -2852,6 +2824,7 @@ class ModelHubSourceConfig:
             "credential_ref",
             "account_label",
             "masked_credential",
+            "verification_pending",
         }
         if set(payload) - allowed_fields:
             raise ValueError("Config 'model_hub.sources' contains unknown fields")
@@ -2899,6 +2872,12 @@ class ModelHubSourceConfig:
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
+        verification_pending = payload.get("verification_pending")
+        if verification_pending is not None and (
+            not isinstance(verification_pending, str)
+            or re.fullmatch(r"vp_[0-9a-f]{32}", verification_pending) is None
+        ):
+            raise ValueError("Config 'model_hub.sources.verification_pending' must be a verification marker")
         created_at = payload.get("created_at")
         client_nonce = (
             validate_model_hub_source_client_nonce(payload.get("client_nonce"))
@@ -2952,6 +2931,7 @@ class ModelHubSourceConfig:
             credential_ref=credential_ref,
             account_label=account_label,
             masked_credential=masked_credential,
+            verification_pending=verification_pending,
         )
 
     def to_payload(self) -> dict:
@@ -2974,6 +2954,8 @@ class ModelHubSourceConfig:
         }
         if self.client_nonce is not None:
             payload["client_nonce"] = self.client_nonce
+        if self.verification_pending:
+            payload["verification_pending"] = self.verification_pending
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
         return payload
@@ -3850,7 +3832,6 @@ class V2Config:
     include_time_info: bool = True  # Prepend current local time to agent messages
     include_user_info: bool = True  # Prepend user identity to agent messages
     reply_enhancements: bool = True  # Enable quick-reply buttons
-    show_pages_prompt: bool = True  # Inject Show Pages capability guidance into agent prompts
     language: str = "en"  # Global language setting (see vibe/i18n)
     # Progress UX for editing platforms (Slack/Discord):
     #   "off" (default) no process bubble, "concise" one self-updating bubble,
@@ -4299,7 +4280,6 @@ class V2Config:
         include_user_info = _declared_bool("include_user_info", True)
         include_time_info = _declared_bool("include_time_info", True)
         reply_enhancements = _declared_bool("reply_enhancements", True)
-        show_pages_prompt = _declared_bool("show_pages_prompt", True)
 
         language = normalize_language(payload.get("language"), default="en")
 
@@ -4356,7 +4336,6 @@ class V2Config:
             include_time_info=include_time_info,
             include_user_info=include_user_info,
             reply_enhancements=reply_enhancements,
-            show_pages_prompt=show_pages_prompt,
             language=language,
             agent_progress_style=agent_progress_style,
             agent_status_heartbeat_ms=agent_status_heartbeat_ms,
@@ -4438,6 +4417,7 @@ class V2Config:
                 "harness_prompt_echo": self.runtime.harness_prompt_echo,
                 "agent_events_trace_retention_enabled": self.runtime.agent_events_trace_retention_enabled,
                 "agent_events_trace_retention_days": self.runtime.agent_events_trace_retention_days,
+                "skill_observability_enabled": self.runtime.skill_observability_enabled,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,
@@ -4464,7 +4444,6 @@ class V2Config:
             "include_time_info": self.include_time_info,
             "include_user_info": self.include_user_info,
             "reply_enhancements": self.reply_enhancements,
-            "show_pages_prompt": self.show_pages_prompt,
             "language": self.language,
             "agent_progress_style": self.agent_progress_style,
             "agent_status_heartbeat_ms": self.agent_status_heartbeat_ms,

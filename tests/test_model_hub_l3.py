@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import inspect
 import json
+import re
 import tempfile
 import threading
 from collections import deque
@@ -16,7 +18,9 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
+import jwt
 import pytest
+import yaml
 from aiohttp import web
 from jsonschema import Draft7Validator, FormatChecker
 from sqlalchemy import create_engine, delete, select
@@ -41,6 +45,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
     SOURCE_PROTOCOLS,
+    SourceBinding,
 )
 from core.handlers.model_hub.classification import ResolutionDecision, classify_outcome
 from core.handlers.model_hub.events import (
@@ -70,6 +75,7 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     ResolvedInvocation,
     project_opencode_public_model,
+    seeded_source_name,
 )
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
@@ -98,6 +104,9 @@ from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
     _AuthenticationEvidence,
     CLIProxyEngineAdapter,
+    hub_subscription_serving_protocol,
+    _HUB_SUBSCRIPTION_PROTOCOLS,
+    _OAUTH_ENDPOINTS,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
@@ -105,7 +114,10 @@ from vibe.model_hub_runtime.adapter import (
     _ProtocolObservationShape,
     _ProtocolProof,
 )
-from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+from vibe.model_hub_runtime.api_key_vendors import (
+    api_key_vendor_catalog,
+    catalog_api_key_vendor_label,
+)
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore
 
@@ -740,6 +752,11 @@ class MemoryStore:
 
     def requested_model(self, backend: str) -> str:
         return self.requested_models.get(backend, "")
+
+    def mutate(self, mutator):
+        config = copy.deepcopy(self.config)
+        if mutator(config):
+            self.save(config)
 
 
 class _EngineObservation:
@@ -1388,6 +1405,72 @@ def test_stopped_settlement_cannot_erase_committed_served_history(
     assert record["served"]["source_id"] == "src_primary01"
     assert record["canceled_attempt"] is None
     assert "Ignored stopped settlement" in caplog.text
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+@pytest.mark.parametrize(
+    ("previous_decision", "variant"),
+    [
+        (decision, variant)
+        for decision, rule in TURN_OUTCOME_RENDERING_AUTHORITY.items()
+        if rule.outcome in {"no_candidate", "exhausted"}
+        for variant, _key in rule.copy_keys
+    ],
+)
+@pytest.mark.parametrize("ending", ["served", "exhausted", "failed_terminal", "canceled"])
+def test_admitted_retry_supersedes_earlier_supply_failure(tmp_path, previous_decision, variant, ending):
+    store = BoundedProvenanceStore(tmp_path / "records.json")
+    registry = TurnCorrelationRegistry(store)
+    turn_id = _begin_hub_attempt(registry, turn_id="turn-retry")
+    previous_failure = _outcome(RawOutcomeKind.HTTP_ERROR, status=503)
+    registry.finish_attempt(turn_id, outcome=previous_failure, decision=classify_outcome(previous_failure))
+    source = _source(
+        "src_recovered01", "Recovering",
+        status="cooldown" if variant == "waiting" else "standby",
+        retry_at=(NOW + timedelta(seconds=30)).isoformat() if variant == "waiting" else None,
+    )
+    config = _config([] if previous_decision == "turn.no_candidate.unconfigured" else [source])
+    projection = produce_turn_outcome(
+        previous_decision,
+        config=config,
+        resolution=_terminal_resolution_facts(
+            config,
+            supply_status="degraded" if variant == "waiting_without_retry" else variant,
+            structural_reason="route_unconfigured" if previous_decision == "turn.no_candidate.unconfigured" else None,
+            next_hop=(source.id, "shared-model") if variant == "waiting_without_retry" else None,
+        ),
+    )
+    if projection.outcome == "no_candidate":
+        registry.mark_gateway_no_candidate(
+            turn_id, projection.supply_facts.supply_state,
+            blockers=(ExactHopBlocker(source.id, "shared-model", "server_error"),),
+        )
+    registry.record_turn_outcome(turn_id, projection)
+    registry.begin_attempt(
+        turn_id, source_id=source.id, resolved_model_id="shared-model", channel="hub", via_mapping=False,
+        request_id="recovered-request",
+    )
+    if ending != "canceled":
+        outcome = _outcome(
+            RawOutcomeKind.SUCCESS if ending == "served" else RawOutcomeKind.HTTP_ERROR,
+            status={"served": 200, "exhausted": 503, "failed_terminal": 400}[ending],
+            code="invalid_parameter" if ending == "failed_terminal" else None,
+            source_id=source.id,
+        )
+        registry.finish_attempt(
+            turn_id, outcome=outcome, decision=classify_outcome(outcome), request_id="recovered-request",
+        )
+    settled_by = SETTLED_BY_STOPPED if ending == "canceled" else SETTLED_BY_TERMINAL_RESULT
+    registry.close_turn_admission(turn_id, settled_by=settled_by)
+    registry.settle(turn_id, settled_by=settled_by)
+    record = store.get(turn_id)
+    assert record["outcome"] == ending
+    assert record["model_supply_state"] is None
+    assert record["blockers"] == []
+    assert record["failed_attempts"][0]["source_id"] == previous_failure.source_id
+    assert len(record["failed_attempts"]) == (2 if ending == "exhausted" else 1)
+    if ending == "canceled":
+        assert record["canceled_attempt"]["source_id"] == source.id
     _assert_valid("turn-provenance.schema.json", record)
 
 
@@ -2868,6 +2951,262 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("already_cooling", [False, True])
+@pytest.mark.parametrize("ending", ["recover", "fail", "config_change", "cancel", "extend_recover", "admitted_cancel"])
+@pytest.mark.parametrize(
+    ("backend", "endpoint", "protocol"),
+    [
+        ("codex", "responses", "openai_responses"),
+        ("claude", "messages", "anthropic"),
+        ("opencode", "chat/completions", "openai_chat"),
+    ],
+)
+def test_gateway_cooldown_is_one_cancellable_retry(
+    tmp_path: Path,
+    already_cooling: bool,
+    ending: str,
+    backend: str,
+    endpoint: str,
+    protocol: str,
+) -> None:
+    """MH-RUNTIME-009: known recovery, not caller retry speed, owns cooldown waiting."""
+
+    async def exercise() -> None:
+        source = _source(
+            "src_retrycool01",
+            "Recovering",
+            status="cooldown" if already_cooling else "standby",
+            retry_at=(NOW + timedelta(seconds=30)).isoformat().replace("+00:00", "Z") if already_cooling else None,
+            vendor="anthropic" if backend == "claude" else "openai",
+            protocol=protocol,
+        )
+        failure = _outcome(RawOutcomeKind.HTTP_ERROR, status=503, source_id=source.id)
+        final = failure if ending == "fail" else _outcome(RawOutcomeKind.SUCCESS, source_id=source.id)
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=([failure] if not already_cooling else []) + [final],
+        )
+        fixed = _canonicalize_fixed_test_routes(service)
+        model = fixed[backend] if backend in fixed else "shared-model"
+        payload = {"model": "shared-model", "stream": False}
+        if endpoint == "responses":
+            payload["input"] = "ping"
+        else:
+            payload["messages"] = [{"role": "user", "content": "ping"}]
+        clock = {"now": NOW}
+        service.now = lambda: clock["now"]
+        gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
+        waiting = asyncio.Event()
+        release = asyncio.Event()
+        wait_ended = asyncio.Event()
+        admitted = asyncio.Event()
+        upstream_canceled = asyncio.Event()
+        delays = []
+
+        async def wait_for_recovery(delay: float) -> None:
+            delays.append(delay)
+            waiting.set()
+            try:
+                await release.wait()
+                clock["now"] += timedelta(seconds=delay)
+            finally:
+                wait_ended.set()
+
+        async def invoke_until_stopped(source_id, model_id, request, stream, origin, *, on_admitted=None):
+            on_admitted()
+            service.adapter.invocations.append((source_id, model_id, origin))
+            admitted.set()
+            try:
+                await asyncio.Future()
+            finally:
+                upstream_canceled.set()
+
+        base_url, token = await gateway.endpoint(
+            backend,
+            process_scope="/repo",
+            turn_id="turn_cooldown_retry",
+            requested_model_id=model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+                async with aiohttp.ClientSession(trust_env=False) as client:
+                    if not already_cooling:
+                        first = await client.post(
+                            f"{base_url}/v1/{endpoint}",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                        await first.read()
+                        assert first.status == 503
+                        assert first.headers["Retry-After"] == "30"
+                    if ending == "admitted_cancel":
+                        service.adapter.invoke = invoke_until_stopped
+                    request = asyncio.create_task(client.post(
+                        f"{base_url}/v1/{endpoint}",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {token}"},
+                    ))
+                    try:
+                        await asyncio.wait_for(waiting.wait(), timeout=2)
+                        assert not request.done()
+                        assert len(service.adapter.invocations) == (0 if already_cooling else 1)
+                        if ending == "cancel":
+                            request.cancel()
+                            with pytest.raises(asyncio.CancelledError):
+                                await request
+                            await asyncio.wait_for(wait_ended.wait(), timeout=2)
+                        elif ending == "admitted_cancel":
+                            release.set()
+                            await asyncio.wait_for(admitted.wait(), timeout=2)
+                            gateway.correlation.close_turn_admission(
+                                "turn_cooldown_retry", settled_by=SETTLED_BY_STOPPED,
+                            )
+                            request.cancel()
+                            with pytest.raises(asyncio.CancelledError):
+                                await request
+                            await asyncio.wait_for(upstream_canceled.wait(), timeout=2)
+                        else:
+                            if ending == "config_change":
+                                service.store.config.sources[0].state = ModelHubSourceStateConfig(
+                                    status="needs_action",
+                                    detail_key="models.source.needs_action.credential_revoked",
+                                )
+                            elif ending == "extend_recover":
+                                service.store.config.sources[0].state.retry_at = (
+                                    NOW + timedelta(seconds=60)
+                                ).isoformat().replace("+00:00", "Z")
+                            release.set()
+                            response = await asyncio.wait_for(request, timeout=2)
+                            await response.read()
+                            assert response.status == {
+                                "recover": 200, "fail": 503, "config_change": 409, "extend_recover": 503,
+                            }[ending]
+                            if ending in {"fail", "extend_recover"}:
+                                assert response.headers["Retry-After"] == "30"
+                            else:
+                                assert "Retry-After" not in response.headers
+                            if ending == "extend_recover":
+                                clock["now"] += timedelta(seconds=30)
+                                recovered = await client.post(
+                                    f"{base_url}/v1/{endpoint}",
+                                    json=payload,
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
+                                await recovered.read()
+                                assert recovered.status == 200
+                        assert delays == [30.0]
+                        expected = (0 if already_cooling else 1) + (
+                            ending in {"recover", "fail", "extend_recover", "admitted_cancel"}
+                        )
+                        assert len(service.adapter.invocations) == expected
+                    finally:
+                        if not request.done():
+                            request.cancel()
+                        await asyncio.gather(request, return_exceptions=True)
+        finally:
+            release.set()
+            await gateway.close()
+        if ending in {"extend_recover", "admitted_cancel"} and backend != "opencode":
+            gateway.correlation.settle(
+                "turn_cooldown_retry",
+                settled_by=SETTLED_BY_STOPPED if ending == "admitted_cancel" else SETTLED_BY_TERMINAL_RESULT,
+            )
+            record = service.provenance.get("turn_cooldown_retry")
+            assert record["outcome"] == ("canceled" if ending == "admitted_cancel" else "served")
+            assert record["model_supply_state"] is None
+            assert record["blockers"] == []
+            assert len(record["failed_attempts"]) == (0 if already_cooling else 1)
+            if ending == "admitted_cancel":
+                assert record["canceled_attempt"]["source_id"] == source.id
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("suffix", ["Z", "+00:00", ""])
+def test_gateway_parses_supported_cooldown_timestamps_on_python310(tmp_path, suffix):
+    class Python310Datetime(datetime):
+        @classmethod
+        def fromisoformat(cls, value):
+            if value.endswith("Z"):
+                raise ValueError("Python 3.10 requires a numeric UTC offset")
+            return super().fromisoformat(value)
+
+    retry_at = (NOW + timedelta(seconds=30)).replace(tzinfo=None).isoformat() + suffix
+    source = _source(
+        "src_timestamp01", "Cooling", status="cooldown", retry_at=retry_at,
+    )
+    service = _service(tmp_path, sources=[source])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    gateway = ModelHubTurnGateway(service, now=lambda: NOW)
+    with patch("core.handlers.model_hub.resolver.datetime", Python310Datetime):
+        with pytest.raises(ModelHubError) as failed:
+            asyncio.run(service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub"))
+        assert gateway._cooldown_retry_delay(failed.value.turn_outcome) == 30
+
+
+@pytest.mark.parametrize("reverse_route", [False, True])
+@pytest.mark.parametrize(
+    ("early", "late", "delay"),
+    [
+        ("2026-07-29T17:00:30.125+05:00", "2026-07-29T12:01:00Z", 30.125),
+        ("2026-07-29T12:00:30Z", "2026-07-29T05:01:00-07:00", 30),
+        ("2026-07-29T12:00:30Z", "2026-07-29T12:00:30.125Z", 30),
+    ],
+)
+def test_cooldown_selection_uses_instants_through_probe_and_gateway(tmp_path, reverse_route, early, late, delay):
+    async def exercise():
+        first = _source("src_earliest01", "First recovery", status="cooldown", retry_at=early)
+        second = _source("src_later0001", "Later recovery", status="cooldown", retry_at=late)
+        service = _service(
+            tmp_path,
+            sources=[second, first] if reverse_route else [first, second],
+            outcomes=[_outcome(RawOutcomeKind.SUCCESS, source_id=first.id)],
+        )
+        model = _canonicalize_fixed_test_routes(service)["codex"]
+        clock = {"now": NOW}
+        service.now = lambda: clock["now"]
+        with pytest.raises(ModelHubError) as probe:
+            await service.probe_agent("codex", model)
+        assert probe.value.code == "probe_no_candidate"
+        assert probe.value.data["supply"]["retry_at"] == early
+        with pytest.raises(ModelHubError) as failed:
+            await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
+        assert failed.value.turn_outcome.supply_facts.retry_at == early
+
+        gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
+        assert gateway._cooldown_retry_delay(failed.value.turn_outcome) == delay
+        delays = []
+
+        async def wait_for_recovery(seconds):
+            delays.append(seconds)
+            clock["now"] += timedelta(seconds=seconds)
+
+        base_url, token = await gateway.endpoint(
+            "codex", process_scope="/repo", turn_id="turn_earliest_recovery",
+            requested_model_id=model, resolved_model_id="shared-model", source_id=first.id,
+        )
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+                async with aiohttp.ClientSession(trust_env=False) as client:
+                    response = await client.post(
+                        f"{base_url}/v1/responses",
+                        json={"model": "shared-model", "input": "ping", "stream": False},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    await response.read()
+                    assert response.status == 200
+            assert delays == [delay]
+            assert service.adapter.invocations == [(first.id, "shared-model", "codex")]
+            assert service.store.load().sources[0 if reverse_route else 1].state.retry_at == late
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_exhaustion_uses_no_time_copy_when_an_earlier_hop_recovers(
     tmp_path: Path,
 ) -> None:
@@ -4073,13 +4412,16 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         invoke_started = asyncio.Event()
         release_invoke = asyncio.Event()
+        handle_ready = asyncio.Event()
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
             kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
-            return await invoke(*args, **kwargs)
+            handle = await invoke(*args, **kwargs)
+            handle_ready.set()
+            return handle
 
         service.adapter.invoke = blocked_invoke
         task = asyncio.create_task(
@@ -4092,8 +4434,9 @@ def test_resolver_settles_a_bodyless_attempt_that_beats_cancellation(
             )
         )
         await asyncio.wait_for(invoke_started.wait(), timeout=1)
-        task.cancel()
         release_invoke.set()
+        await asyncio.wait_for(handle_ready.wait(), timeout=1)
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
@@ -4125,13 +4468,16 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         invoke_started = asyncio.Event()
         release_invoke = asyncio.Event()
+        handle_ready = asyncio.Event()
         invoke = service.adapter.invoke
 
         async def blocked_invoke(*args, **kwargs):
             kwargs.pop("on_admitted")()
             invoke_started.set()
             await release_invoke.wait()
-            return await invoke(*args, **kwargs)
+            result = await invoke(*args, **kwargs)
+            handle_ready.set()
+            return result
 
         service.adapter.invoke = blocked_invoke
         task = asyncio.create_task(
@@ -4144,8 +4490,9 @@ def test_resolver_meters_an_observed_stream_that_beats_cancellation(
             )
         )
         await asyncio.wait_for(invoke_started.wait(), timeout=1)
-        task.cancel()
         release_invoke.set()
+        await asyncio.wait_for(handle_ready.wait(), timeout=1)
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
@@ -6675,7 +7022,7 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
     assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
 
 
-def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validation_response(
+def test_qwen_catalog_pin_validation_remains_unverified(
     tmp_path: Path,
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state")
@@ -6695,6 +7042,8 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
 
         async def capture_probe(request: web.Request) -> web.Response:
             requests.append(request.path)
+            if request.headers.get("Authorization") != "Bearer test-qwen-key":
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.path == _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_path:
                 return web.json_response(
                     {
@@ -6722,8 +7071,13 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
                     clear=False,
                 ),
                 patch(
+                    # This interface publishes no model listing, so nothing on
+                    # it can speak for the credential the wrapperless
+                    # validation error left unknown.
                     "vibe.model_hub_runtime.adapter.probe_models",
-                    new=AsyncMock(return_value=(DiscoveredModel(id="qwen-plus"),)),
+                    new=AsyncMock(
+                        side_effect=EngineClientError("no listing", status_code=404)
+                    ),
                 ) as inventory_probe,
             ):
                 observed = await adapter.observe_source(
@@ -6732,7 +7086,6 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
                     credential_ref,
                     SOURCE_PROTOCOLS,
                 )
-                assert inventory_probe.await_args is not None
                 inventory_kwargs = dict(inventory_probe.await_args.kwargs)
         finally:
             await runner.cleanup()
@@ -6740,20 +7093,18 @@ def test_qwen_catalog_pin_observation_accepts_wrapperless_authenticated_validati
 
     requests, observed, inventory_kwargs = asyncio.run(scenario())
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == "openai_chat"
-    assert observed.authenticated is True
-    assert observed.model_ids == ("qwen-plus",)
+    assert observed.outcome.value == "ambiguous"
+    assert observed.protocol is None
+    assert observed.authenticated is None
+    assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
         for protocol in SOURCE_PROTOCOLS
     ]
-    assert inventory_kwargs["vendor"] == "qwen"
     assert inventory_kwargs["protocol"] == "openai_chat"
-    assert inventory_kwargs["base_url"] is None
 
 
-def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated_validation_response(
+def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
     tmp_path: Path,
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state")
@@ -6773,6 +7124,8 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
 
         async def capture_probe(request: web.Request) -> web.Response:
             requests.append(request.path)
+            if request.headers.get("Authorization") != "Bearer test-openrouter-key":
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.path == _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_path:
                 return web.json_response(
                     {
@@ -6802,8 +7155,13 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
                     clear=False,
                 ),
                 patch(
+                    # This interface publishes no model listing, so nothing on
+                    # it can speak for the credential the numeric validation
+                    # error left unknown.
                     "vibe.model_hub_runtime.adapter.probe_models",
-                    new=AsyncMock(return_value=(DiscoveredModel(id="openrouter/auto"),)),
+                    new=AsyncMock(
+                        side_effect=EngineClientError("no listing", status_code=404)
+                    ),
                 ) as inventory_probe,
             ):
                 observed = await adapter.observe_source(
@@ -6812,7 +7170,6 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
                     credential_ref,
                     SOURCE_PROTOCOLS,
                 )
-                assert inventory_probe.await_args is not None
                 inventory_kwargs = dict(inventory_probe.await_args.kwargs)
         finally:
             await runner.cleanup()
@@ -6820,17 +7177,15 @@ def test_openrouter_catalog_pin_observation_accepts_nested_numeric_authenticated
 
     requests, observed, inventory_kwargs = asyncio.run(scenario())
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == "openai_chat"
-    assert observed.authenticated is True
-    assert observed.model_ids == ("openrouter/auto",)
+    assert observed.outcome.value == "ambiguous"
+    assert observed.protocol is None
+    assert observed.authenticated is None
+    assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
         for protocol in SOURCE_PROTOCOLS
     ]
-    assert inventory_kwargs["vendor"] == "openrouter"
     assert inventory_kwargs["protocol"] == "openai_chat"
-    assert inventory_kwargs["base_url"] is None
 
 
 def _catalog_owner_status_body(vendor: str, status: int) -> dict[str, object]:
@@ -6852,7 +7207,7 @@ def _catalog_owner_status_body(vendor: str, status: int) -> dict[str, object]:
         return {
             "error": {
                 "code": 400,
-                "message": "invalid API key",
+                "message": "messages is required",
             }
         }
     return {
@@ -6870,10 +7225,27 @@ def _run_catalog_pin_observation(
     protocol: str,
     status: int,
     body: dict[str, object],
-) -> tuple[list[str], object, dict[str, object] | None]:
+    listing: str,
+    interface_key: str | None = None,
+) -> tuple[list[tuple[str, str]], object]:
+    """Observe a pinned vendor whose probe answers `status` and whose model
+    listing behaves as `listing`.
+
+    ``listing`` names what the interface does with ``GET /v1/models``:
+    ``gated`` answers the stored credential and refuses an uncredentialed
+    caller, ``open`` answers anybody, ``rejects`` refuses every caller,
+    ``absent`` publishes no listing at all, and ``presence`` requires a
+    credential without ever reading its value.
+
+    ``interface_key`` is the credential this interface would actually accept,
+    which the stored one matches unless a caller says otherwise.
+    """
+
+    key = f"test-{vendor}-{status}"
+    accepted_key = key if interface_key is None else interface_key
     state_store = EngineStateStore(tmp_path / f"engine-state-{vendor}-{status}")
     credential_ref = state_store.store_api_key(
-        f"test-{vendor}-{status}",
+        key,
         vendor=vendor,
         protocol=protocol,
         base_url=None,
@@ -6883,14 +7255,39 @@ def _run_catalog_pin_observation(
         state_store=state_store,
     )
 
-    async def scenario() -> tuple[list[str], object, dict[str, object] | None]:
-        requests: list[str] = []
+    def supplied_credential(request: web.Request) -> str:
+        return request.headers.get("x-api-key") or request.headers.get(
+            "Authorization", ""
+        ).removeprefix("Bearer ")
+
+    async def scenario() -> tuple[list[tuple[str, str]], object]:
+        requests: list[tuple[str, str]] = []
 
         async def capture_probe(request: web.Request) -> web.Response:
-            requests.append(request.path)
+            requests.append((request.method, request.path))
+            # An interface that never reads the credential's value answers the
+            # model-less probe out of its schema check, which precedes any key
+            # lookup, so the probe leaves a key it never validated unknown.
+            if listing != "presence" and supplied_credential(request) != accepted_key:
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             return web.json_response(body, status=status)
 
+        async def capture_listing(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path))
+            if listing == "absent":
+                return web.json_response({"error": "unknown route"}, status=404)
+            if listing == "presence":
+                refused = not supplied_credential(request)
+            else:
+                refused = listing == "rejects" or (
+                    listing == "gated" and supplied_credential(request) != accepted_key
+                )
+            if refused:
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            return web.json_response({"data": [{"id": f"{vendor}/listed"}]})
+
         app = web.Application()
+        app.router.add_get("/v1/models", capture_listing)
         app.router.add_post("/{tail:.*}", capture_probe)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -6900,16 +7297,10 @@ def _run_catalog_pin_observation(
         port = site._server.sockets[0].getsockname()[1]
         origin = f"http://127.0.0.1:{port}"
         try:
-            with (
-                patch.dict(
-                    "vibe.model_hub_runtime.adapter._OFFICIAL_BASE_URLS",
-                    {vendor: origin},
-                    clear=False,
-                ),
-                patch(
-                    "vibe.model_hub_runtime.adapter.probe_models",
-                    new=AsyncMock(return_value=(DiscoveredModel(id=f"{vendor}/auto"),)),
-                ) as inventory_probe,
+            with patch.dict(
+                "vibe.model_hub_runtime.adapter._OFFICIAL_BASE_URLS",
+                {vendor: origin},
+                clear=False,
             ):
                 observed = await adapter.observe_source(
                     vendor,
@@ -6917,63 +7308,116 @@ def _run_catalog_pin_observation(
                     credential_ref,
                     (protocol,),
                 )
-                inventory_kwargs = (
-                    dict(inventory_probe.await_args.kwargs)
-                    if inventory_probe.await_args is not None
-                    else None
-                )
         finally:
             await runner.cleanup()
-        return requests, observed, inventory_kwargs
+        return requests, observed
 
     return asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("listing", ["gated", "open", "rejects", "absent"])
+@pytest.mark.parametrize("status", [400, 401])
 @pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_observation_accepts_any_nonempty_json_400_response(
+def test_catalog_pin_authentication_comes_from_a_credential_gated_listing(
+    tmp_path: Path,
+    vendor: str,
+    protocol: str,
+    status: int,
+    listing: str,
+) -> None:
+    """A pin's authentication is whatever its model listing attests.
+
+    The model-less probe cannot speak for the credential: neither its request
+    error nor a bare authentication status without a shaped identifier decides
+    anything, for any vendor. So the listing on the pinned interface answers
+    instead, and only a listing that is gated by the credential attests to it --
+    an open catalogue answers whoever asks and therefore names no key.
+    """
+
+    requests, observed = _run_catalog_pin_observation(
+        tmp_path,
+        vendor=vendor,
+        protocol=protocol,
+        status=status,
+        body=_catalog_owner_status_body(vendor, status),
+        listing=listing,
+    )
+
+    if listing == "gated":
+        assert observed.outcome.value == "observed"
+        assert observed.protocol == protocol
+        assert observed.authenticated is True
+        assert observed.model_ids == (f"{vendor}/listed",)
+    elif listing == "rejects":
+        assert observed.outcome.value == "authentication_failed"
+        assert observed.protocol is None
+        assert observed.authenticated is False
+        assert observed.model_ids == ()
+    else:
+        assert observed.outcome.value == "ambiguous"
+        assert observed.protocol is None
+        assert observed.authenticated is None
+        assert observed.model_ids == ()
+    assert requests[0] == ("POST", _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path)
+    assert set(requests[1:]) <= {("GET", "/v1/models")}
+
+
+@pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
+def test_a_listing_gate_on_presence_answers_exactly_like_one_on_the_key(
     tmp_path: Path,
     vendor: str,
     protocol: str,
 ) -> None:
-    requests, observed, inventory_kwargs = _run_catalog_pin_observation(
-        tmp_path,
+    """Add-time verification cannot see which of the two an interface is doing.
+
+    Observation may make exactly two requests: one carrying the stored
+    credential and one carrying none. An interface that reads the value answers
+    a credential it accepts with its catalogue and an uncredentialed caller
+    with a refusal. An interface that only requires the header to be there
+    answers *any* credential with the same catalogue and that same refusal --
+    including one it would never have accepted, since its probe answers out of
+    a schema check that precedes the key lookup it never performs. Both worlds
+    hand back an identical pair of responses, so no reading of that pair
+    separates them; only a third request carrying a different value could, and
+    an altered credential attests to nothing in either direction, which is why
+    this ladder has no synthetic credential control.
+
+    So the witness admits both, and a credential an interface never validated
+    is left to the first real call and the existing needs-action path -- the
+    same place a credential revoked after it was added is caught.
+    """
+
+    validated = _run_catalog_pin_observation(
+        tmp_path / "validated",
         vendor=vendor,
         protocol=protocol,
         status=400,
         body=_catalog_owner_status_body(vendor, 400),
+        listing="gated",
     )
-
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == protocol
-    assert observed.authenticated is True
-    assert observed.model_ids == (f"{vendor}/auto",)
-    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
-    assert inventory_kwargs is not None
-    assert inventory_kwargs["vendor"] == vendor
-    assert inventory_kwargs["protocol"] == protocol
-    assert inventory_kwargs["base_url"] is None
-
-
-@pytest.mark.parametrize(("vendor", "protocol"), CATALOG_API_KEY_VENDOR_PROTOCOL_CASES)
-def test_catalog_pin_observation_rejects_any_json_401_response(
-    tmp_path: Path,
-    vendor: str,
-    protocol: str,
-) -> None:
-    requests, observed, inventory_kwargs = _run_catalog_pin_observation(
-        tmp_path,
+    unread = _run_catalog_pin_observation(
+        tmp_path / "unread",
         vendor=vendor,
         protocol=protocol,
-        status=401,
-        body=_catalog_owner_status_body(vendor, 401),
+        status=400,
+        body=_catalog_owner_status_body(vendor, 400),
+        listing="presence",
+        interface_key="a-credential-this-source-does-not-carry",
     )
 
-    assert observed.outcome.value == "authentication_failed"
-    assert observed.protocol is None
-    assert observed.authenticated is False
-    assert observed.model_ids == ()
-    assert requests == [_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path]
-    assert inventory_kwargs is None
+    def observation(result: tuple[list[tuple[str, str]], object]) -> tuple[object, ...]:
+        requests, observed = result
+        return (
+            requests,
+            observed.outcome,
+            observed.protocol,
+            observed.authenticated,
+            observed.model_ids,
+        )
+
+    assert observation(validated) == observation(unread)
+    assert unread[1].outcome.value == "observed"
+    assert unread[1].authenticated is True
 
 
 def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(
@@ -7110,17 +7554,19 @@ def test_source_observation_catalog_pin_and_declaration_still_require_authentica
 @pytest.mark.parametrize(
     ("status", "initial_authentication", "expected_outcome", "expected_authenticated"),
     [
-        (400, _AuthenticationEvidence.REJECTED, "observed", True),
-        (401, _AuthenticationEvidence.ACCEPTED, "authentication_failed", False),
+        (400, _AuthenticationEvidence.REJECTED, "authentication_failed", False),
+        (400, _AuthenticationEvidence.UNKNOWN, "ambiguous", None),
+        (401, _AuthenticationEvidence.REJECTED, "authentication_failed", False),
+        (400, _AuthenticationEvidence.ACCEPTED, "observed", True),
     ],
-    ids=("request_error_accepts", "auth_error_rejects"),
+    ids=("explicit_rejection", "unverified_validation", "auth_error_rejects", "verified_validation"),
 )
-def test_custom_declared_observation_uses_owner_status_before_parser_verdict(
+def test_custom_declared_observation_preserves_transport_authentication_verdict(
     tmp_path: Path,
     status: int,
     initial_authentication: _AuthenticationEvidence,
     expected_outcome: str,
-    expected_authenticated: bool,
+    expected_authenticated: bool | None,
 ) -> None:
     base_url = "https://relay.example/v1"
     state_store = EngineStateStore(tmp_path / f"engine-state-custom-declared-{status}")
@@ -7147,6 +7593,8 @@ def test_custom_declared_observation_uses_owner_status_before_parser_verdict(
             new=AsyncMock(return_value=parser_evidence),
         ) as protocol_probe,
         patch(
+            # This listing answers with or without a credential, so it attests
+            # to nobody and cannot repair an unknown verdict.
             "vibe.model_hub_runtime.adapter.probe_models",
             new=AsyncMock(return_value=(DiscoveredModel(id="declared-model"),)),
         ) as inventory_probe,
@@ -7170,16 +7618,171 @@ def test_custom_declared_observation_uses_owner_status_before_parser_verdict(
         assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
     else:
         assert observed.protocol is None
-        inventory_probe.assert_not_awaited()
+        # An unknown verdict is the only one the listing may still answer: a
+        # rejection is already decided, so nothing further is asked.
+        asked_listing = initial_authentication is _AuthenticationEvidence.UNKNOWN
+        assert (inventory_probe.await_count > 0) is asked_listing
 
 
+@pytest.mark.parametrize("stored_key", ["relay-live-key", "relay-wrong-key"])
+def test_declared_custom_anthropic_relay_verifies_from_its_models_listing(
+    tmp_path: Path,
+    stored_key: str,
+) -> None:
+    """The reported relay, recorded from a live one: a declared `anthropic`
+    endpoint that answers the model-less probe with Anthropic's own 400
+    envelope -- which proves the interface and says nothing about the key --
+    and gates `GET /v1/models` on that key.
+
+    The listing is therefore what separates the working credential from the
+    wrong one, on an interface whose probe can only ever be a request error.
+    """
+
+    live_key = "relay-live-key"
+    state_store = EngineStateStore(tmp_path / f"engine-state-relay-{stored_key}")
+    adapter = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+
+    async def scenario() -> tuple[list[tuple[str, str, str]], list[dict], object]:
+        requests: list[tuple[str, str, str]] = []
+        probe_bodies: list[dict] = []
+
+        def supplied(request: web.Request) -> str:
+            return request.headers.get("x-api-key", "")
+
+        async def relay_messages(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path, supplied(request)))
+            probe_bodies.append(await request.json())
+            if supplied(request) != live_key:
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "authentication_error",
+                            "message": "invalid x-api-key",
+                        },
+                    },
+                    status=401,
+                )
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "model: Field required",
+                    },
+                },
+                status=400,
+            )
+
+        async def relay_models(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path, supplied(request)))
+            if supplied(request) != live_key:
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "authentication_error",
+                            "message": "invalid x-api-key",
+                        },
+                    },
+                    status=401,
+                )
+            return web.json_response(
+                {"data": [{"id": "claude-sonnet-4-5"}, {"id": "claude-opus-4-6"}]}
+            )
+
+        app = web.Application()
+        app.router.add_get("/v1/models", relay_models)
+        app.router.add_post("/{tail:.*}", relay_messages)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        origin = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        credential_ref = state_store.store_api_key(
+            stored_key,
+            vendor="custom",
+            protocol="anthropic",
+            base_url=origin,
+        )
+        try:
+            observed = await adapter.observe_source(
+                "custom",
+                origin,
+                credential_ref,
+                ("anthropic",),
+            )
+        finally:
+            await runner.cleanup()
+        return requests, probe_bodies, observed
+
+    requests, probe_bodies, observed = asyncio.run(scenario())
+
+    probe_path = _PROTOCOL_OBSERVATION_TAXONOMY["anthropic"].request_path
+    assert all("model" not in body for body in probe_bodies)
+    if stored_key == live_key:
+        assert observed.outcome.value == "observed"
+        assert observed.protocol == "anthropic"
+        assert observed.authenticated is True
+        assert observed.model_ids == ("claude-sonnet-4-5", "claude-opus-4-6")
+        assert requests == [
+            ("POST", probe_path, live_key),
+            ("GET", "/v1/models", live_key),
+            # The control carries no credential at all, which is how an
+            # answered listing is told apart from a published one.
+            ("GET", "/v1/models", ""),
+        ]
+    else:
+        assert observed.outcome.value == "authentication_failed"
+        assert observed.authenticated is False
+        assert observed.protocol is None
+        assert observed.model_ids == ()
+        assert requests == [("POST", probe_path, stored_key)]
+
+
+def test_auth_setup_executable_scenarios_are_registered() -> None:
+    root = Path(__file__).parent / "scenarios/auth_setup"
+    catalog = yaml.safe_load((root / "catalog.yaml").read_text())
+    registered = {entry["id"]: entry for entry in catalog["scenarios"]}
+    tree = ast.parse((root / "test_auth_setup_scenarios.py").read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        doc = ast.get_docstring(node) or ""
+        match = re.match(r"Scenario:\s+(AUTH-SETUP-\d+)\b", doc)
+        if match:
+            scenario_id = match.group(1)
+            assert scenario_id in registered, (scenario_id, node.name)
+            assert registered[scenario_id]["test"].endswith("::" + node.name)
+
+
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("body", ['{"message":"Regional policy"}', '{"error":{"code":"invalid_api_key"}}'])
+def test_authentication_status_interpretation_preserves_evidence_role(
+    protocol, status, body,
+) -> None:
+    evidence = _parse_protocol_authenticated_evidence(protocol, status, body)
+    expected = (
+        _AuthenticationEvidence.REJECTED
+        if "invalid_api_key" in body
+        else _AuthenticationEvidence.UNKNOWN
+    )
+    assert evidence.authentication is expected
+
+
+@pytest.mark.parametrize("vendor", ["openai", "codex"])
+@pytest.mark.parametrize("error_param", ["input", "model", None])
 def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof(
     tmp_path: Path,
+    vendor: str,
+    error_param: str | None,
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state")
     credential_ref = state_store.bind_oauth_credential(
         "src_oauthproof",
-        "openai",
+        vendor,
         "codex-test.json",
     )
     client = Mock()
@@ -7200,6 +7803,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
             }
         if path == "/api-call":
             api_calls.append(payload)
+            assert payload["header"]["Authorization"] == "Bearer $TOKEN$"
             return {
                 "status_code": 400,
                 "header": {},
@@ -7207,7 +7811,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
                     {
                         "error": {
                             "type": "invalid_request_error",
-                            "param": "input",
+                            "param": error_param,
                         }
                     }
                 ),
@@ -7227,16 +7831,17 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
 
     observed = asyncio.run(
         adapter.observe_source(
-            "openai",
+            vendor,
             None,
             credential_ref,
             SOURCE_PROTOCOLS,
         )
     )
 
-    assert observed.outcome.value == "observed"
-    assert observed.protocol == "openai_responses"
-    assert observed.model_ids == ("gpt-5.6",)
+    assert observed.outcome.value == ("adapter_error" if error_param == "input" else "ambiguous")
+    assert observed.authenticated is None
+    assert observed.protocol is None
+    assert observed.model_ids == ()
     assert len(api_calls) == 1
     assert api_calls[0]["auth_index"] == "auth-index-test"
     assert api_calls[0]["header"]["Chatgpt-Account-Id"] == "account-test"
@@ -7249,22 +7854,27 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         if path == "/auth-files":
             return management_request(method, path, query=query, payload=payload)
         if path == "/api-call":
-            return {"status_code": 200, "header": {}, "body": '{"ok":true}'}
+            return {"status_code": unknown_status, "header": {}, "body": unknown_body}
         raise AssertionError((method, path))
 
     client.management_request.side_effect = ambiguous_management_request
-    ambiguous = asyncio.run(
-        adapter.observe_source(
-            "openai",
-            None,
-            credential_ref,
-            SOURCE_PROTOCOLS,
+    for unknown_status, unknown_body in (
+        (200, '{"ok":true}'),
+        (401, "<html>Request blocked</html>"),
+        (403, '{"message":"Regional policy"}'),
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                vendor,
+                None,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
         )
-    )
 
-    assert ambiguous.outcome.value == "ambiguous"
-    assert ambiguous.protocol is None
-    assert ambiguous.authenticated is None
+        assert ambiguous.outcome.value == "ambiguous"
+        assert ambiguous.protocol is None
+        assert ambiguous.authenticated is None
 
 
 def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof(
@@ -7330,6 +7940,139 @@ def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof
     assert ambiguous.authenticated is True
     discover_models.assert_not_awaited()
     assert [call.kwargs["protocol"] for call in oauth_probe.call_args_list] == list(SOURCE_PROTOCOLS)
+
+
+@pytest.mark.parametrize("vendor", sorted(_HUB_SUBSCRIPTION_PROTOCOLS))
+def test_hub_subscription_observation_binds_on_the_engine_declared_protocol(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    """A pinned subscription binds without a probe, and asks for nothing else.
+
+    The engine holds the credential and serves it on one surface, so there is no
+    upstream Avibe may synthesize a request against — the completed grant is the
+    reachability and authentication evidence, and the pin supplies the protocol.
+    Seeding the whole pin table keeps a vendor added later covered without
+    editing this test.
+    """
+
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.bind_oauth_credential(
+        "src_hubsubscript",
+        vendor,
+        f"{vendor}-test.json",
+    )
+    client = Mock()
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {
+                "files": [
+                    {
+                        "id": f"{vendor}-test",
+                        "auth_index": "auth-index-test",
+                        "name": f"{vendor}-test.json",
+                        "provider": vendor,
+                    }
+                ]
+            }
+        raise AssertionError((method, path))
+
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    adapter = CLIProxyEngineAdapter(
+        supervisor=supervisor,
+        state_store=state_store,
+    )
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_oauth_protocol_response",
+            side_effect=AssertionError("a pinned subscription must not be probed"),
+        ),
+        patch.object(
+            adapter,
+            "discover_models",
+            new=AsyncMock(return_value=(DiscoveredModel(id=f"{vendor}-model"),)),
+        ) as discover_models,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                vendor,
+                None,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    pinned = hub_subscription_serving_protocol(vendor)
+    assert observed.outcome.value == "observed"
+    assert observed.reachable is True
+    assert observed.authenticated is True
+    assert observed.protocol == pinned
+    assert observed.model_ids == (f"{vendor}-model",)
+    assert discover_models.await_args.args[:3] == (vendor, pinned, None)
+
+
+@pytest.mark.parametrize("vendor", sorted(_HUB_SUBSCRIPTION_PROTOCOLS))
+def test_hub_subscription_projects_on_its_pin_whatever_the_api_key_pin_is(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    """A pinned subscription projects on its own protocol, with no base URL.
+
+    The engine holds the credential and serves it on the surface this table
+    names, so nothing about the projection depends on the api-key catalog: that
+    describes the other channel, Avibe calling the vendor's public API with a
+    key it holds, and the two may legitimately disagree for one vendor id.
+    Seeding the whole pin table asserts every row projects on its own terms
+    rather than by agreeing with its sibling — and because the projection is
+    atomic, a row that stopped being admissible would take every other Source
+    down with it rather than fail alone.
+    """
+
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.bind_oauth_credential(
+        "src_hubsubscript",
+        vendor,
+        f"{vendor}-test.json",
+    )
+    protocol = hub_subscription_serving_protocol(vendor)
+    assert protocol in SOURCE_PROTOCOLS
+
+    projected = state_store.sync_sources(
+        [
+            SourceBinding(
+                source_id="src_hubsubscript",
+                vendor=vendor,
+                protocol=protocol,
+                base_url=None,
+                credential_ref=credential_ref,
+                allowed_origins=("main",),
+                model_ids=(f"{vendor}-model",),
+            )
+        ]
+    )
+
+    assert [(record.vendor, record.protocol, record.base_url) for record in projected] == [
+        (vendor, protocol, None)
+    ]
+
+
+@pytest.mark.parametrize("vendor", sorted(_OAUTH_ENDPOINTS))
+def test_oauth_source_is_seeded_with_its_vendors_catalog_label(vendor: str) -> None:
+    """A vendor id is a routing key, so no Source may be named by one we can name.
+
+    Seeded over the whole start table rather than the vendors this change adds:
+    an OAuth vendor the catalog already lists cannot be admitted and then ship
+    named `xai` beside an api-key Source of the same vendor reading `xAI`. The
+    id survives as the seed only for a vendor the catalog does not list, which
+    is the only name that channel has for it.
+    """
+
+    label = catalog_api_key_vendor_label(vendor)
+    assert seeded_source_name(vendor) == (label if label is not None else vendor)
 
 
 DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD = {
@@ -7410,7 +8153,7 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
         json.dumps(request_error_body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
     )
     assert _parse_protocol_authenticated_evidence(
         protocol,
@@ -7439,7 +8182,7 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
             ANTHROPIC_RELAY_REQUEST_ERROR_PAYLOAD,
             _ProtocolEvidence(
                 protocol=_ProtocolProof.UNPROVEN,
-                authentication=_AuthenticationEvidence.ACCEPTED,
+                authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             ),
         ),
@@ -7548,7 +8291,7 @@ def test_protocol_evidence_table_defaults_shaped_non_auth_rows_to_unknown(
         ),
     ],
 )
-def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
+def test_anthropic_protocol_model_errors_leave_authentication_unknown(
     protocol: str,
     status: int,
     body: dict,
@@ -7559,7 +8302,7 @@ def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
         json.dumps(body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
     )
 
 
@@ -7598,7 +8341,7 @@ def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
         ),
     ],
 )
-def test_openai_model_errors_without_family_param_record_accepted_but_unproven_evidence(
+def test_openai_model_errors_without_family_param_leave_authentication_unknown(
     protocol: str,
     status: int,
     body: dict,
@@ -7609,13 +8352,13 @@ def test_openai_model_errors_without_family_param_record_accepted_but_unproven_e
         json.dumps(body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
 
 @pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
-def test_openai_request_error_without_family_param_records_accepted_but_unproven_evidence(
+def test_openai_request_error_without_family_param_leaves_authentication_unknown(
     protocol: str,
 ) -> None:
     assert _parse_protocol_authenticated_evidence(
@@ -7631,12 +8374,12 @@ def test_openai_request_error_without_family_param_records_accepted_but_unproven
         ),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
 
-def test_qwen_wrapperless_invalid_parameter_request_error_counts_as_authenticated_openai_chat() -> None:
+def test_qwen_wrapperless_validation_leaves_authentication_unknown() -> None:
     assert _parse_protocol_authenticated_evidence(
         "openai_chat",
         400,
@@ -7648,7 +8391,7 @@ def test_qwen_wrapperless_invalid_parameter_request_error_counts_as_authenticate
         ),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
-        authentication=_AuthenticationEvidence.ACCEPTED,
+        authentication=_AuthenticationEvidence.UNKNOWN,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
@@ -7837,12 +8580,10 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
     assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_path != _PROTOCOL_OBSERVATION_TAXONOMY[
         "openai_chat"
     ].request_path
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_body == {
-        "model": "__avibe_model_hub_probe__"
-    }
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_body == {
-        "model": "__avibe_model_hub_probe__"
-    }
+    assert all(
+        "model" not in taxonomy.request_body
+        for taxonomy in _PROTOCOL_OBSERVATION_TAXONOMY.values()
+    )
     consumers = {
         node.name: node
         for node in ast.walk(tree)
@@ -7882,7 +8623,9 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
         node
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name != "_parse_protocol_authenticated_evidence"
+        and node.name not in {
+            "_parse_protocol_authenticated_evidence",
+        }
     ):
         for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):
             condition = ast.unparse(branch.test)

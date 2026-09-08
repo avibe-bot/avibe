@@ -30,7 +30,7 @@ from config.v2_config import (
     V2Config,
     is_model_hub_enabled,
 )
-from core.handlers.model_hub.service import CONTRACT_VERSION
+from core.handlers.model_hub.service import CONTRACT_VERSION, ModelHubService
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
@@ -102,6 +102,24 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
         Draft7Validator(_schema("source.schema.json")).validate(example)
     with pytest.raises(ValueError):
         ModelHubSourceConfig.from_payload(example)
+
+
+def test_auto_detect_asks_for_responses_before_chat():
+    """Auto-detect reaches a Responses implementation before the chat fallback.
+
+    OpenAI has signalled Chat Completions is legacy, so a compat provider that
+    genuinely implements Responses should be detected as one rather than get
+    labelled by the older surface it also still serves. Elimination consumes
+    this sequence pairwise, so the relative position is a contract rather than
+    an accident of how the tuple was typed: asserting it here makes a reorder a
+    deliberate change instead of a silent one. The whole vocabulary is asserted
+    to stay in the sequence so a protocol cannot drop out of detection either.
+    """
+
+    auto_sequence = ModelHubService._observation_protocols("custom", {})
+    assert set(auto_sequence) == set(SOURCE_PROTOCOLS)
+    assert len(auto_sequence) == len(set(auto_sequence))
+    assert auto_sequence.index("openai_responses") < auto_sequence.index("openai_chat")
 
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
@@ -1462,6 +1480,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         "supply_channel": "hub",
         "credential_ref": "cred_serializer_test",
         "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        "verification_pending": "vp_0123456789abcdef0123456789abcdef",
     }
     hub_payload = {
         "sources": [source_example],

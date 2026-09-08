@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { ArrowUpRight, Brain, Loader2, MoreHorizontal, RotateCw, ShieldAlert } from 'lucide-react';
 
 import { SettingsPageShell } from './SettingsPageShell';
+import { dependencyHasInstallAction, memoryDependencyForDisplay } from './SettingsDependenciesPage.logic';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { InfoHint } from '../ui/info-hint';
@@ -50,7 +51,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [waking, setWaking] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
-  const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
+  const [runtimeRequired, setRuntimeRequired] = useState<boolean | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
   const [deleteResult, setDeleteResult] = useState<MemoryDataOperationResult | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
@@ -92,21 +93,13 @@ export const SettingsMemoryPage: React.FC = () => {
   const loadDependency = useCallback(async () => {
     try {
       const res = await api.listDependencies({ ids: ['memory-package', 'memory-runtime'] });
-      const memoryPackage = res.deps?.find((item) => item.id === 'memory-package');
-      const memoryRuntime = res.deps?.find((item) => item.id === 'memory-runtime');
-      if (memoryPackage?.action_class === 'repairable' && memoryPackage.installed !== true) {
-        setRuntimeInstalled(false);
-      } else if (memoryRuntime) {
-        setRuntimeInstalled(
-          memoryRuntime.status === 'not_required'
-            ? null
-            : memoryRuntime.installed === true,
-        );
-      } else {
-        setRuntimeInstalled(true);
-      }
+      const dependency = memoryDependencyForDisplay(
+        res.deps?.find((item) => item.id === 'memory-package') ?? null,
+        res.deps?.find((item) => item.id === 'memory-runtime') ?? null,
+      );
+      setRuntimeRequired(dependency?.installed === false && dependencyHasInstallAction(dependency));
     } catch {
-      setRuntimeInstalled(true);
+      setRuntimeRequired(false);
     }
   }, [api]);
 
@@ -200,7 +193,7 @@ export const SettingsMemoryPage: React.FC = () => {
     ...(canAdminister ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }] : []),
   ], [canAdminister, t]);
   const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'processingRecord';
-  const runtimeAction = !remoteUnavailable && canAdminister && settings?.enabled === true
+  const runtimeAction = runtimeRequired === false && !remoteUnavailable && canAdminister && settings?.enabled === true
     ? runtimeState === 'degraded' ? (
         <Button variant="secondary" size="xs" onClick={() => void runMemoryRuntimeAction()} disabled={mutationBusy}>
           {waking ? <Loader2 className="animate-spin" /> : <RotateCw />}
@@ -281,7 +274,21 @@ export const SettingsMemoryPage: React.FC = () => {
           <span className="text-[14px] font-semibold text-foreground">{t('memory.remoteUnavailable.title')}</span>
           <span className="max-w-md text-[12.5px] text-muted">{t('memory.remoteUnavailable.description')}</span>
         </div>
-      ) : !settings ? (
+      ) : runtimeRequired === true ? (
+        <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
+          <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+            <Brain className="size-4 text-violet-ink" />
+            {t('memory.setup.runtimeRequired')}
+          </div>
+          <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
+          <Button asChild variant="secondary" size="sm">
+            <Link to="/settings/dependencies">
+              {t('memory.settings.goToDependencies')}
+              <ArrowUpRight className="size-3.5" />
+            </Link>
+          </Button>
+        </div>
+      ) : runtimeRequired === null || !settings ? (
         settingsRead.error ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{settingsRead.error}</div>
         ) : (
@@ -292,21 +299,6 @@ export const SettingsMemoryPage: React.FC = () => {
         )
       ) : (
         <>
-          {runtimeInstalled === false ? (
-            <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
-              <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-                <Brain className="size-4 text-violet-ink" />
-                {t('memory.setup.runtimeRequired')}
-              </div>
-              <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
-              <Button asChild variant="secondary" size="sm">
-                <Link to="/settings/dependencies">
-                  {t('memory.settings.goToDependencies')}
-                  <ArrowUpRight className="size-3.5" />
-                </Link>
-              </Button>
-            </div>
-          ) : null}
           <div data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1">
             <div className="min-w-max">
               <SegmentedRadio value={activeTab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />

@@ -398,7 +398,7 @@ export const labelledButton = (scope: Locator, name: string): Locator =>
  * `vendor` is the label a vendor is offered under and goes FIRST, because
  * choosing one rewrites the Base URL and retires whatever interface was selected
  * — filling those before it would fill them into a form the next click resets.
- * It also removes the manual disclosure, so `vendor` and `protocol` are
+ * It also removes the protocol selector, so `vendor` and `protocol` are
  * alternatives, not a pair: the pin IS the interface, and there is no control
  * left for `protocol` to press.
  *
@@ -423,7 +423,6 @@ export const fillApiKeyForm = async (
     await dialog.getByLabel(hub('addKey.field.name'), { exact: true }).fill(values.name);
   }
   if (values.protocol) {
-    await dialog.getByRole('button', { name: hub('addKey.protocol.manual'), exact: true }).click();
     await dialog.getByRole('button', { name: values.protocol, exact: true }).click();
   }
   await dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true }).fill(values.baseUrl);

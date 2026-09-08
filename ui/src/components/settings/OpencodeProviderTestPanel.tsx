@@ -14,7 +14,6 @@ export type OpencodeProviderTestPanelProps = {
   providerId: string;
   providerName: string;
   models: string[];
-  defaultModel?: string | null;
 };
 
 /**
@@ -29,19 +28,13 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
   providerId,
   providerName,
   models,
-  defaultModel,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const [testing, setTesting] = useState(false);
   const [lastResult, setLastResult] = useState<BackendAuthTestResult | null>(null);
-  // Default the dropdown to the provider's default model so first-time
-  // testers don't have to scroll a long list to pick something.
-  const initialModel = useMemo(() => {
-    if (defaultModel && models.includes(defaultModel)) return defaultModel;
-    return '';
-  }, [defaultModel, models]);
+  const initialModel = useMemo(() => models[0] ?? '', [models]);
   const [selectedModel, setSelectedModel] = useState<string>(initialModel);
 
   // Reset selected model when the catalog changes (provider remount /

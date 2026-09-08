@@ -15,6 +15,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
+import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
@@ -328,8 +329,7 @@ describe('SettingsModelsPage surface branches', () => {
     await user.click(trigger);
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
     await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
-    await user.click(screen.getByRole('button', { name: /^Detect$|^检测$/ }));
-    await user.click(await screen.findByRole('button', { name: /Confirm & add|确认添加/ }));
+    await user.click(await screen.findByRole('button', { name: /Add provider|添加供应商/ }));
 
     const detail = await screen.findByRole('dialog', { name: 'Created API key' });
     await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
@@ -601,7 +601,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeNull();
   });
 
-  it('keeps tier-editor Escape local to the provider dialog', async () => {
+  it('keeps manual-model draft Escape local to the provider dialog', async () => {
     const editableSource: Source = {
       ...retainedSource,
       models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'], reasoning_efforts_source: 'user' }],
@@ -612,31 +612,14 @@ describe('SettingsModelsPage surface branches', () => {
     const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
     await user.click(sourceOpener);
     const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
-    await user.click(within(sourceDialog).getByRole('button', { name: /high/i }));
-    const tierInput = within(sourceDialog).getByPlaceholderText(/Enter to add|回车添加/i);
-    await user.type(tierInput, 'draft');
-    await user.keyboard('{Escape}');
-
-    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
-    expect(within(sourceDialog).queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
-
     await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
-    let manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    const manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
     const modelIdInput = within(manualDraft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     await user.type(modelIdInput, 'draft-model');
     await user.keyboard('{Escape}');
 
     expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
     expect(sourceDialog.querySelector('[data-manual-model-draft]')).toBeNull();
-
-    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
-    manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
-    const draftTierInput = within(manualDraft as HTMLElement).getByPlaceholderText(/Enter to add|回车添加/i);
-    await user.type(draftTierInput, 'draft');
-    await user.keyboard('{Escape}');
-
-    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
-    expect((draftTierInput as HTMLInputElement).value).toBe('');
 
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Retained source' })).toBeNull());
@@ -674,6 +657,58 @@ describe('SettingsModelsPage surface branches', () => {
     expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
   });
 
+  it('lists every offered subscription vendor in frame 13 order, with a mark and only the badge it earns', async () => {
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    const picker = await screen.findByRole('menu');
+    const rows = within(picker).getAllByRole('menuitem');
+    // The property: the menu offers exactly the vocabulary §1.4 can start a flow
+    // for, in that vocabulary's order — read off the rendered rows, so a vendor
+    // added to `SUBSCRIPTION_VENDORS` appears here without this test naming it.
+    const rowLabels = rows.map((row) => row.querySelector('span[title]')?.getAttribute('title'));
+    expect(rowLabels).toEqual(
+      SUBSCRIPTION_VENDORS.map((vendor) => i18n.t(`settings.models.subscriptionPicker.vendor.${vendor}`)),
+    );
+    for (const row of rows) {
+      // Each row carries the vendor's mark, consistent with the api-key picker.
+      expect(row.querySelector('svg'), `${row.textContent} has no mark`).toBeTruthy();
+    }
+    // A hub-held vendor recommends nothing — its only custody is the hub — so it
+    // draws no recommendation badge, while the two with a channel choice do.
+    const badges = rows.map((row) => /Native recommended|Gateway recommended|推荐由/i.test(row.textContent ?? ''));
+    expect(badges).toEqual(SUBSCRIPTION_VENDORS.map(hasNativeSubscriptionCustody));
+  });
+
+  it('opens a hub-only subscription straight into its flow, posted as a hub source', async () => {
+    // A vendor no sanctioned CLI holds custody of has no channel choice, so §1.4
+    // skips its chooser phase and starts the flow on open. The gesture that
+    // allocated the provider tab was the menu item, not a 去登录 inside the dialog.
+    const started = {
+      flow_id: 'flow_hub_only',
+      client_nonce: 'ofn_hub_only',
+      vendor: 'gemini',
+      channel: 'hub' as const,
+      state: 'awaiting_action' as const,
+      presentation: { expects: 'paste_callback_url' as const, auth_url: 'https://example.test/oauth' },
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    const start = vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: started, created: null, repaired: null });
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: /^Gemini$/i }));
+
+    // No chooser: no channel radio group rendered between the menu and the flow.
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    expect(start.mock.calls[0]![0]).toBe('gemini');
+    expect(start.mock.calls[0]![1]).toBe('hub');
+  });
+
   it('supports roving keyboard navigation in the subscription vendor picker', async () => {
     renderPage([retainedSource]);
 
@@ -682,20 +717,29 @@ describe('SettingsModelsPage surface branches', () => {
     const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
     await user.click(trigger);
     const picker = await screen.findByRole('menu');
-    const claude = within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i });
-    const chatgpt = within(picker).getByRole('menuitem', { name: /ChatGPT subscription|ChatGPT 订阅/i });
+    // Roving focus is a property of the row LIST, not of which vendor sits at
+    // either end, so it is read off the rendered menuitems: first, second and
+    // last. Hardcoding `chatgpt` as the End target held only while the menu had
+    // two rows; naming the positions keeps it true for however many ship.
+    const rows = within(picker).getAllByRole('menuitem');
+    expect(rows.length).toBeGreaterThan(1);
+    const [first, second] = rows;
+    const last = rows[rows.length - 1]!;
 
-    await waitFor(() => expect(document.activeElement).toBe(claude));
-    expect(claude.getAttribute('tabindex')).toBe('0');
-    expect(chatgpt.getAttribute('tabindex')).toBe('-1');
+    await waitFor(() => expect(document.activeElement).toBe(first));
+    expect(first!.getAttribute('tabindex')).toBe('0');
+    expect(second!.getAttribute('tabindex')).toBe('-1');
     await user.keyboard('{ArrowDown}');
-    expect(document.activeElement).toBe(chatgpt);
+    expect(document.activeElement).toBe(second);
     await user.keyboard('{Home}');
-    expect(document.activeElement).toBe(claude);
+    expect(document.activeElement).toBe(first);
     await user.keyboard('{End}');
-    expect(document.activeElement).toBe(chatgpt);
+    expect(document.activeElement).toBe(last);
     await user.keyboard('{ArrowUp}');
-    expect(document.activeElement).toBe(claude);
+    // From the last row, ArrowUp lands on the one before it — which is `first`
+    // only when the menu has exactly two rows, so assert the neighbour, not the
+    // head.
+    expect(document.activeElement).toBe(rows[rows.length - 2]);
   });
 
   it('restores the Add subscription trigger when the vendor picker is dismissed', async () => {

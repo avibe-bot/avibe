@@ -1,5 +1,14 @@
 # Model Hub — Product Spec
 
+## Save-first API-key amendment — 2026-09-08
+
+`model-hub-save-first-testing.md` records the owner's replacement for add-time
+automatic-detection admission in the UI: save configuration, attempt optional
+inventory discovery, and offer a separate real-model test. Test failure does
+not block saving or condemn the provider. Discovery is not invocation proof;
+the existing credential-identity-bound verification marker remains authoritative.
+Older explicit observation clients and subscription OAuth admission are unchanged.
+
 Status: **Routing modes, contract_version 10** (2026-09-06).
 Owner-approved implementation contract: `model-hub-routing-modes.md`, frozen before
 implementation at `2db273891`, with API-key scope/synchronization decision `c1d398d5f`
@@ -355,10 +364,72 @@ rungs, documented in `docs/plans/model-hub-vendor-preset-protocol.md`:
    prove reachability and authentication on that protocol's path. Shape proof
    is not required. A wrong declaration fails on a later real call.
 
+**Owner ruling 2026-09-07: configuration and verification are independent.**
+The three owners above still determine the interface, but explicit API-key
+`save_unverified: true` no longer requires a successful observation. It saves only
+a catalog-pinned or user-declared protocol, with canonical validation, credential
+custody, nonce reconciliation and rollback unchanged. Custom Auto without a
+declaration is refused before credential work. No upstream probe gates this explicit
+save path. It attempts one bounded inventory discovery with the provisioned
+credential, which fills the Source without answering the credential question and
+never blocks the save or replaces manual entries; supplied manual models remain
+manual.
+
+Schema errors may precede authentication and never authenticate a key. There is no
+synthetic credential control: unknown grammar/checksums and other valid credentials
+make both rejection and acceptance of an altered token inconclusive. Bare 401/403
+statuses likewise do not prove credential rejection. The ordinary non-persisting
+observation still reports response-backed evidence without inventing certainty.
+
+**Owner ruling 2026-09-07, later the same day, superseding the paragraph above
+wherever the two conflict: an owned interface's model listing is the authentication
+witness.** A model-less probe cannot succeed by construction, so the ruling above
+left rungs 1 and 3 with no add-time verification at all and funnelled every API-key
+add into the explicit unverified save. When a probe leaves authentication unknown on
+an API-key candidate whose protocol already has an owner — a catalog pin or a
+concrete `custom` declaration — observation reads that protocol's `GET /v1/models`.
+A listing that answers the credential and refuses the identical request carrying no
+credential authenticates it, and is reused as the discovered inventory rather than
+fetched twice. `401`/`403` there rejects the candidate: the shaped-evidence rule
+guards protocol claims, and this rung's protocol comes from its owner, so the refusal
+speaks only about the credential. Every other answer — no listing, a non-JSON body, a
+timeout, a listing open to anyone — leaves the outcome the paragraph above would have
+produced, unverified-save exit included. There is still no synthetic credential
+control: the control request carries no credential at all, and a public list still
+repairs no proof. What the witness establishes is bounded there — the interface
+admits this credential and refuses admission without one, not that it read the
+value, since a gate on presence alone answers those two requests identically and
+the third request that would separate them is the altered credential this ladder
+declines. A credential no interface validated is caught by the first real call,
+like one revoked after its add. Custom Auto is never asked, because a listing names no protocol.
+
+Completed Hub OAuth consent may retain its bound credential as an unverified Source
+under the fixed vendor protocol. The engine retains OAuth token custody; optional
+model-free observation uses the existing allowlisted auth-index transport and token
+substitution, not private-token reads. Explicit upstream credential rejection retains
+the existing needs-action state. Native CLI OAuth is unchanged.
+
+`Source.verification_pending` is one optional persisted opaque identity, independent
+of health and routing eligibility. It marks a credential nothing upstream has
+accepted yet, so an API-key create whose add-time observation authenticated the
+credential stores none — superseding, for that path only, the earlier rule that every
+observed create is marked. Native-config imports, Hub OAuth admission and every
+credential or endpoint replacement still get one. Source list/detail use the
+existing advisory treatment instead of healthy/in-use copy. Inventory never clears it.
+A call captures the marker before invocation; any successful same-credential call
+with that marker, including the existing backend probe, clears it in a fresh shared
+config transaction. Later same-credential attempts do not invalidate success.
+Credential/endpoint replacement generates a new marker even when OAuth reuses the
+same handle, so old calls cannot verify replacement material across processes.
+Legacy Sources retain their existing
+state without retroactive verification claims. Successful verification of one call
+does not promise that every model or operation is supported.
+
 The form exposes a vendor select first (V4 06r / 模型网关 05). Auto detect plus
-the three supported protocols remain on `custom`. A failed observation still
-stores nothing rather than guessing. Unreachable, rejected, timeout, and
-adapter-error paths still cannot save.
+the three supported protocols remain on `custom`. Observation alone never saves
+anything. The explicit unverified-save exit is available after an observation failure
+or directly from a valid declared/pinned draft; it does not turn that failure into
+proof or silently select the first Auto candidate.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
@@ -500,7 +571,7 @@ for hop in C, in effective-plan order:
         continue
 
     attempted = true
-    result = invoke_exact(hop.source_id, hop.model_id, exact_reasoning_effort(hop))
+    result = invoke_exact(hop.source_id, hop.model_id, original_request)
     if result == served: return SERVED(hop)
     if result == canceled: return CANCELED
     if result is terminal_request_error: return FAILED_TERMINAL(result)
@@ -525,9 +596,14 @@ repairs or rewrites configuration.
 
 `invoke_exact` preserves chain order. A `native_cli` hop uses the sanctioned backend's
 singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
-system never prepends native supply or chooses a model. If the requested reasoning
-effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
-value; otherwise omit the effort field, with no approximation or downgrade.
+system never prepends native supply or chooses a model. Owner amendment (2026-09-08):
+the shared resolver passes the original reasoning intent to the adapter on every
+attempt, including credential retries and provider fallback. Source inventory
+capability metadata is not a forwarding allowlist: an absent declaration does not
+establish unsupported reasoning. The resolver neither removes nor approximates the
+requested value. Protocol translation remains the managed adapter's responsibility;
+the separate engine boundary and remaining compatibility limitations are recorded in
+[Reasoning intent](model-hub-reasoning-intent.md).
 
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
@@ -1142,8 +1218,16 @@ under one commit lock. Inventory disappearance can change an automatic matching 
 it never invalidates an explicit API-key manual invocation by itself. Subscription
 model-membership admission remains unchanged. Explicit retirement
 excludes the exact pair, while manual inventory deletion removes matching evidence
-without deleting explicit API-key hops; subscription admission remains unchanged. Refusals report complete effective removals and protected
-supply loss in the existing arrays. Forced success must match both echoed arrays and
+without deleting explicit API-key hops; subscription admission remains unchanged.
+When inventory evidence changes an inherited plan from `passthrough` to `automatic`,
+displaced speculative candidates are not destructive removals and are excluded from
+`would_remove_hops` / `removed_hops`. This applies equally to active Hub plans and
+dormant Direct plans: learning a model list does not delete saved route intent.
+Explicit manual-hop invalidations, disappearance of existing inventory matches, and
+new protected-supply loss remain guarded. Other mutation guards, including Source
+deletion, default membership and Restore, continue to compare all effective removals.
+Refusals report complete destructive removals and protected supply loss in the
+existing arrays. Forced success must match both echoed arrays and
 preserves surviving nonempty manual intent; Source deletion removes its actual references.
 Every final-hop removal, including catalog reconciliation, uses the same normalized
 planner. Normal saves persist the canonical sparse map; pure reads/preview never write.
@@ -1398,8 +1482,9 @@ moment; it never infers a removal or tombstone. Each snapshot change adds, but n
 removes, missing built-ins not in the set, in snapshot order among built-ins already present
 (or at the menu tail when none remain), seeds snapshot label and reasoning efforts, and
 leaves each new row automatic without seeding route keys. Remote-catalog payload, validators, success, failure,
-and backoff state are keyed by the configured catalog source. Claude's locked `default` row
-is excluded.
+and backoff state are keyed by the configured catalog source. Model catalogs contain
+explicit models only; backend-native default selections are not projected. See
+`avibe-owned-model-selection.md` for the model-selection contract.
 
 A write validates every newly introduced or changed exact pair before commit. An exact
 pair already present in the persisted array may be retained or reordered even when a

@@ -1,5 +1,20 @@
 # Model Hub — UI & Interaction Spec (gateway frames)
 
+## Save-first provider revision — 2026-09-08
+
+The owner-approved `model-hub-save-first-testing.md` supersedes the automatic
+observation gate in the API-key add dialog and the always-visible Source-model
+capability column below. Add saves a concrete protocol configuration and
+attempts inventory discovery, without requiring either discovery or a model
+test to succeed. An independent Test dialog selects a real saved model and
+reports only that invocation. The owner's 12:33 amendment removes the provider
+reasoning column, all provenance badges, its editors and the now-empty Advanced
+settings toggle. This supersedes the older tier-editor frames and decisions below;
+the provider inventory is not a reasoning configuration surface. Stored capability
+metadata and model-menu reasoning selection remain separate. See
+`model-hub-reasoning-intent.md`. Ordinary model addition never fetches upstream inventory.
+Subscription OAuth and credential replacement retain their existing lifecycle.
+
 Companion to `model-hub.md`. That file is the **behaviour** authority; this one is
 the **surface** authority: what each frame shows, which states it can be in, the
 exact words it says in both locales, and what it does when the data is ugly.
@@ -3243,6 +3258,39 @@ Stated as the property rather than as three call sites: **an interface this dial
 not detect says where it came from, and the row that says it also says what detection
 is still for.**
 
+**2026-09-07 owner-approved unverified-save exit.** An explicit catalog pin or
+concrete custom declaration permits `Save unverified` (`addKey.saveUnverified`)
+from the valid initial form and observation failure/undetermined states. Reuse the
+outline footer action with the Save icon; enter the existing persisting phase with
+`save_unverified: true`. Custom Auto has no such exit until an interface is selected.
+Unknown-write reconciliation retains this consent and the nonce. Draft edits retire
+held evidence as before. The footer wraps on narrow screens. This supersedes the
+observation prerequisite in the earlier state tables, not cancellation, settlement
+or focus ownership. No upstream observation gates this exit; the bounded inventory
+request it attempts fills the model list and can never admit the Source.
+Source list/detail show `sourceDetail.status.unverified` in existing advisory ink;
+error/cooldown states retain visual precedence. Adoption and model discovery cannot
+replace this label with healthy/in-use copy. Only an actual successful model call
+retires verification as defined by the Source contract. Ambiguity copy must not
+claim authentication success.
+
+**2026-09-07 owner ruling, later the same day — ①″ is reachable again under a pin or
+a declaration.** The model-independent probe the ruling above introduced cannot
+succeed by construction, so a pinned or declared draft could only land in ③/④/⑤ or
+leave through 未验证保存, a valid key and a healthy relay included. 检测 now reads the
+established interface's own model list whenever the probe leaves the credential
+unknown: a list that answers this key while refusing the identical request carrying
+no key authenticates it, and that same response is the inventory ①″ reports — one
+request, both facts. A list that refuses this key lands ③ on `addKey.fail.auth`.
+Anything else — no list, an unreadable body, a list open to anyone — lands exactly
+where it landed before, 未验证保存 included. This adds no state, no string and no
+footer action: `addKey.protocol.catalogPinned.hint` still says the pin is not
+credential proof, `addKey.pull.result` counts the models that list returned, and the
+unverified exit becomes the fallback rather than the only way out. A Source that left
+through ①″ has nothing pending, so list/detail do not label it
+`sourceDetail.status.unverified`; that label keeps its meaning — nothing upstream has
+accepted this credential yet.
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
@@ -3262,7 +3310,7 @@ is still for.**
 | `WZyA8` selector | the same four interface choices, expanded in place, glyphs on concrete options | selection | yes, Auto detect remains selected until changed | Select one concrete interface; enables 重试 |
 | `Nak7y` ④ foot | 取消 / 重试 (dimmed until a concrete interface is picked) | selection | yes | — |
 | `d6bFlX` state ⑤ strip | the interface *was* identified, and the model list did not come back | observation result | no | — |
-| `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — **three** buttons, the only foot in the product with three | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
+| `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — three buttons | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
 | `sqZa9` success note | that the dialog closes straight into 06 | static | no | — |
 
 **Metrics** `[frame]`: dialog 560 wide, height auto in all five states — the frame

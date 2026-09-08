@@ -43,7 +43,6 @@ const baseConfig = {
   include_time_info: true,
   include_user_info: false,
   reply_enhancements: true,
-  show_pages_prompt: true,
   agent_progress_style: 'off',
   audio_asr: { enabled: true, echo_transcript: true, enabled_configured: true },
   remote_access: { vibe_cloud: { paired: true } },
@@ -164,7 +163,7 @@ describe('SettingsMessagingPage locality gating', () => {
 
     expect(await screen.findByText('dashboard.errorRetryLimit')).toBeTruthy();
     expect(screen.getByText('dashboard.opencodeActiveTurnTimeout')).toBeTruthy();
-    expect(screen.getByText('dashboard.showPagesPrompt')).toBeTruthy();
+    expect(screen.queryByText('dashboard.showPagesPrompt')).toBeNull();
   });
 
   it('keeps owner-only runtime messaging controls hidden from an Editor', async () => {

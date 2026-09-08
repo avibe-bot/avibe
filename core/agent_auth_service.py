@@ -40,7 +40,6 @@ from modules.agents.opencode.message_processor import (
 )
 from modules.agents.opencode.utils import (
     find_opencode_model_info,
-    resolve_opencode_configured_default_model,
     resolve_opencode_model_id,
     resolve_opencode_reasoning_effort,
 )
@@ -613,14 +612,24 @@ class AgentAuthService:
         )
 
     async def _resolve_opencode_provider(self, context: MessageContext) -> str:
-        override_agent = None
         override_model = None
         get_overrides = getattr(self.controller, "get_opencode_overrides", None)
         if callable(get_overrides):
-            override_agent, override_model, _ = get_overrides(context)
+            _, override_model, _ = get_overrides(context)
+
+        if not override_model:
+            resolve_agent = getattr(self.controller, "resolve_vibe_agent_for_context", None)
+            if callable(resolve_agent):
+                agent = resolve_agent(context, required=False)
+                if agent is not None and agent.backend == "opencode":
+                    override_model = agent.model
 
         if isinstance(override_model, str) and "/" in override_model:
             return override_model.split("/", 1)[0]
+
+        configured_provider = getattr(self._resolve_backend_config("opencode"), "default_provider", None)
+        if isinstance(configured_provider, str) and configured_provider.strip():
+            return configured_provider.strip()
 
         agent_service = getattr(self.controller, "agent_service", None)
         opencode_agent = getattr(agent_service, "agents", {}).get("opencode") if agent_service else None
@@ -630,10 +639,6 @@ class AgentAuthService:
                 runtime_provider = await self._resolve_opencode_provider_from_existing_session(context, server)
                 if runtime_provider:
                     return runtime_provider
-                agent_to_use = override_agent or server.get_default_agent_from_config()
-                model_str = server.get_agent_model_from_config(agent_to_use)
-                if isinstance(model_str, str) and "/" in model_str:
-                    return model_str.split("/", 1)[0]
             except Exception as err:  # noqa: BLE001
                 logger.info("Falling back to default OpenCode provider after lookup failure: %s", err)
 
@@ -2503,6 +2508,10 @@ class AgentAuthService:
         if backend not in {"claude", "codex"}:
             return {"ok": False, "error": "unsupported_backend"}
 
+        from core.agent_model_selection import require_agent_model
+        from core.vibe_agents import recommended_agent_model
+
+        model = require_agent_model(model or recommended_agent_model(backend), backend)
         binary = self._get_cli_binary(backend)
         probe_cwd = self._resolve_backend_probe_cwd(
             backend,
@@ -2617,8 +2626,9 @@ class AgentAuthService:
         }
         if binary and binary != "claude":
             option_kwargs["cli_path"] = os.path.expanduser(binary)
-        if isinstance(model, str) and model.strip():
-            option_kwargs["extra_args"] = {"model": model.strip()}
+        from core.agent_model_selection import require_agent_model
+
+        option_kwargs["extra_args"] = {"model": require_agent_model(model, "claude")}
 
         client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
         assistant_text = ""
@@ -2812,8 +2822,8 @@ class AgentAuthService:
 
         ``model`` is the model id (e.g. ``"gpt-4o-mini"``); we wrap it
         into the ``{providerID, modelID}`` shape OpenCode expects. When
-        ``None``, the probe prefers Avibe's effective Agent default only
-        when the provider's native catalog confirms that model.
+        ``None``, Avibe chooses a model from this provider's catalog and sends
+        it explicitly; backend-native defaults never participate.
         """
         provider_id = (provider_id or "").strip()
         if not provider_id:
@@ -2833,81 +2843,26 @@ class AgentAuthService:
         # must come from the native catalog even when the selected Agent uses
         # a public model projected by Model Hub.
         chosen_model = (model or "").strip()
-        backend_config = self._resolve_backend_config("opencode")
-        default_provider = getattr(backend_config, "default_provider", None)
-        if not chosen_model:
-            try:
-                default_agent = server.get_default_agent_from_config()
-                runtime_agent_model = server.get_agent_model_from_config(default_agent)
-            except Exception:  # noqa: BLE001
-                runtime_agent_model = None
-            inferred_model = (
-                resolve_opencode_configured_default_model(
-                    runtime_agent_model,
-                    default_provider=default_provider,
-                    provider_id=provider_id,
-                )
-                or ""
-            )
-            if inferred_model and isinstance(catalog, dict):
-                resolved_inferred_model = resolve_opencode_model_id(
-                    catalog,
-                    provider_id,
-                    inferred_model,
-                )
-                if (
-                    resolved_inferred_model
-                    and find_opencode_model_info(
-                        catalog,
-                        provider_id,
-                        resolved_inferred_model,
-                    )
-                    is not None
-                ):
-                    chosen_model = resolved_inferred_model
-        if not chosen_model:
-            if isinstance(catalog, dict):
-                default_map = catalog.get("default") or {}
-                if isinstance(default_map, dict):
-                    raw_default = default_map.get(provider_id)
-                    if isinstance(raw_default, str) and raw_default.strip():
-                        resolved_default = resolve_opencode_model_id(
-                            catalog,
-                            provider_id,
-                            raw_default.strip(),
-                        )
-                        if (
-                            resolved_default
-                            and find_opencode_model_info(
-                                catalog,
-                                provider_id,
-                                resolved_default,
-                            )
-                            is not None
-                        ):
-                            chosen_model = resolved_default
-                if not chosen_model:
-                    providers = catalog.get("providers") or []
-                    if isinstance(providers, list):
-                        for entry in providers:
-                            if not isinstance(entry, dict):
-                                continue
-                            if entry.get("id") != provider_id:
-                                continue
-                            models_field = entry.get("models")
-                            if isinstance(models_field, dict):
-                                keys = sorted(models_field.keys())
-                                if keys:
-                                    chosen_model = keys[0]
-                            elif isinstance(models_field, list):
-                                for m in models_field:
-                                    if isinstance(m, dict) and isinstance(m.get("id"), str):
-                                        chosen_model = m["id"]
-                                        break
-                                    if isinstance(m, str):
-                                        chosen_model = m
-                                        break
-                            break
+        if not chosen_model and isinstance(catalog, dict):
+            providers = catalog.get("providers") or []
+            if isinstance(providers, list):
+                for entry in providers:
+                    if not isinstance(entry, dict) or entry.get("id") != provider_id:
+                        continue
+                    models_field = entry.get("models")
+                    if isinstance(models_field, dict):
+                        keys = sorted(models_field.keys())
+                        if keys:
+                            chosen_model = keys[0]
+                    elif isinstance(models_field, list):
+                        for item in models_field:
+                            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                                chosen_model = item["id"]
+                                break
+                            if isinstance(item, str):
+                                chosen_model = item
+                                break
+                    break
         if not chosen_model:
             return {"ok": False, "error": "no_models_available"}
 

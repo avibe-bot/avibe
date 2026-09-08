@@ -35,7 +35,6 @@ from modules.agents.opencode.utils import (
     build_reasoning_effort_options,
     resolve_model_reasoning_options,
     resolve_opencode_allowed_providers,
-    resolve_opencode_default_model,
     resolve_opencode_provider_preferences,
 )
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
@@ -1658,12 +1657,7 @@ class DiscordBot(BaseIMClient):
 
                 if self.selected_backend == "opencode":
                     opencode_agent_names = _unique_agent_names(opencode_agents)
-                    default_model_str = resolve_opencode_default_model(
-                        opencode_default_config,
-                        opencode_agents,
-                        self.oc_agent if self.oc_agent not in ("__default__", None) else None,
-                    )
-                    target_model = self.oc_model if self.oc_model not in (None, "__default__") else default_model_str
+                    target_model = self.oc_model if self.oc_model not in (None, "__default__") else None
                     preferred_providers = resolve_opencode_provider_preferences(
                         opencode_default_config,
                         target_model,
@@ -1708,8 +1702,6 @@ class DiscordBot(BaseIMClient):
                     self.add_item(agent_select)
 
                     default_label = self.outer._t("common.default")
-                    if default_model_str:
-                        default_label = f"{default_label} - {default_model_str}"
                     model_options = [
                         discord.SelectOption(
                             label=_prefixed_label("discord.labels.model", default_label),

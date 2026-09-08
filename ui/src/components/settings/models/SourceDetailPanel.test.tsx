@@ -22,13 +22,10 @@ import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceMutationReport } from './SourceMutationReport';
-import { MANAGED_TIER_SOURCES, type ManagedTierSource } from './tierMutation';
-import { TIER_SUGGESTIONS } from './tierSuggestions';
 import {
   COOLDOWN_DETAIL_KEYS,
   ERROR_DETAIL_KEYS,
   NEEDS_ACTION_DETAIL_KEYS,
-  SOURCE_PROTOCOLS,
   SOURCE_STATUSES,
 } from './types';
 import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
@@ -151,14 +148,6 @@ const ReportOwnedPanel: React.FC<ReportOwnedPanelProps> = (props) => {
   );
 };
 type MutationScheduler = <T>(work: () => Promise<T>) => Promise<T>;
-const serializedTrack = (): MutationScheduler => {
-  const writes = createPendingWrites(() => {});
-  return async <T,>(work: () => Promise<T>): Promise<T> => {
-    let result!: T;
-    await writes.track(source.id, async () => { result = await work(); });
-    return result;
-  };
-};
 
 const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   <ToastProvider>
@@ -175,22 +164,6 @@ const renderProtocol = (protocol: SourceProtocol, models: Source['models'] = sou
     </I18nextProvider>
   </ToastProvider>,
 );
-/** Read by the class the stylesheet owns: the ghost chip has no other identity. */
-const suggestedTiers = () => Array.from(document.querySelectorAll('.model-hub-source-tier-suggest'))
-  .map((chip) => chip.textContent?.trim() ?? '');
-/** The tiers the row actually carries, in either branch that draws them. */
-const chipTiers = () => Array.from(document.querySelectorAll('.model-hub-source-tier-chip'))
-  .map((chip) => chip.textContent?.trim() ?? '');
-/**
- * What the badge on a locked row says, per rung. Spelled out rather than read
- * back through `i18n.t`: a bundle missing the entry returns the key from both
- * sides of that comparison, so it would pass while the user reads
- * 「settings.models.sourceDetail.tiers.managed.upstream」.
- */
-const MANAGED_BADGE: Readonly<Record<ManagedTierSource, RegExp>> = {
-  upstream: /^From provider$|^供应商声明$/,
-  catalog: /^Built-in catalog$|^内置目录$/,
-};
 
 const EchoPanel: React.FC<{
   reconcile?: () => Promise<SourceMutationLanding['verdict'] | void> | SourceMutationLanding['verdict'] | void;
@@ -245,6 +218,53 @@ afterEach(() => {
 });
 
 describe('SourceDetailPanel', () => {
+  it.each(['upstream', 'catalog', 'user', null] as const)('keeps provider inventory independent of %s reasoning metadata', async (provenance) => {
+    const model = { ...source.models[0], reasoning_efforts_source: provenance };
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts');
+    renderProtocol('anthropic', [model]);
+    const row = screen.getByText('model-a').closest('.model-hub-source-table-row')!;
+    expect(row.textContent).not.toMatch(/high|preset|预置|声明/);
+    expect(screen.queryByRole('button', { name: /Advanced settings|高级设置/ })).toBeNull();
+    expect(row.querySelector('[data-tier-provenance]')).toBeNull();
+    expect(within(row as HTMLElement).getByRole('button', { name: /Remove|移除/ })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]')!;
+    expect(within(draft as HTMLElement).getAllByRole('textbox')).toHaveLength(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(model.reasoning_efforts).toEqual(['high']);
+  });
+
+  it('never presents a manual model write as an upstream refetch', async () => {
+    const pending = new Promise<Source>(() => {});
+    const add = vi.spyOn(modelsApi, 'addCustomModel').mockReturnValue(pending);
+    const refetch = vi.spyOn(modelsApi, 'refreshSource');
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Add model|添加模型/ }));
+    await user.type(screen.getByPlaceholderText(/Model ID|模型 ID/), 'manual-model');
+    await user.click(screen.getAllByRole('button', { name: /Add model|添加模型/ }).at(-1)!);
+    expect(add).toHaveBeenCalledOnce();
+    expect(refetch).not.toHaveBeenCalled();
+    const button = screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i });
+    expect(button.getAttribute('aria-busy')).toBe('false');
+    expect(button.querySelector('.animate-spin')).toBeNull();
+  });
+
+  it('shows refetch progress only on refetch while a manual draft is open', async () => {
+    vi.spyOn(modelsApi, 'refreshSource').mockReturnValue(new Promise(() => {}));
+    const add = vi.spyOn(modelsApi, 'addCustomModel');
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
+    await userEvent.click(screen.getByRole('button', { name: /Add model|添加模型/ }));
+    const refetch = screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i });
+    await userEvent.click(refetch);
+    expect(refetch.getAttribute('aria-busy')).toBe('true');
+    expect(refetch.querySelector('.animate-spin')).toBeTruthy();
+    for (const button of screen.getAllByRole('button', { name: /Add model|添加模型/ })) {
+      expect(button.querySelector('.animate-spin')).toBeNull();
+    }
+    expect(add).not.toHaveBeenCalled();
+  });
+
   it('exposes a stable, programmatically focusable heading for committed navigation', () => {
     const headingRef = React.createRef<HTMLHeadingElement>();
     render(
@@ -272,26 +292,7 @@ describe('SourceDetailPanel', () => {
     expect(filteredRow.hidden).toBe(false);
   });
 
-  it('keeps a row-local tier failure answerable while search filters the row', async () => {
-    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
-    renderPanel();
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'draft{Enter}');
-    const failure = await screen.findByText(/tier was not saved|档位没保存上/i);
-    const row = failure.closest('.model-hub-source-table-row') as HTMLElement;
-
-    const search = screen.getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i });
-    await userEvent.type(search, 'missing-model');
-    expect(row.hidden).toBe(true);
-    expect(document.activeElement).toBe(search);
-
-    await userEvent.clear(search);
-    expect(row.hidden).toBe(false);
-    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
-    expect(document.activeElement).toBe(search);
-  });
-
-  it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
+  it('keeps the detail surface focused on model inventory and provider management', () => {
     renderPanel();
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();
     expect(screen.queryByText(/^Standby$|^待命$/i)).toBeNull();
@@ -885,14 +886,6 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
-  it('discards an uncommitted tier on Escape', async () => {
-    renderPanel();
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    const input = screen.getByPlaceholderText(/Enter to add|回车添加/i);
-    await userEvent.type(input, 'draft{Escape}');
-    expect(screen.queryByDisplayValue('draft')).toBeNull();
-  });
-
   it('opens the manual model draft in the table and keeps Add disabled while blank', async () => {
     renderPanel();
     await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
@@ -917,9 +910,9 @@ describe('SourceDetailPanel', () => {
       .closest('[data-manual-model-draft]') as HTMLElement;
     await userEvent.type(within(draft).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
     await userEvent.click(within(draft).getByRole('button', { name: /^Add model$|^添加模型$/i }));
-    // The failure line is the fourth cell, and the only one that has to be
+    // The failure line is the third cell, and the only one that has to be
     // waited for; the count is what proves the band is fully seeded.
-    await waitFor(() => { expect(draft.children.length).toBe(4); });
+    await waitFor(() => { expect(draft.children.length).toBe(3); });
 
     const cells = Array.from(draft.children).map((cell) => cell.className);
     expect(cells.filter((name) => /(?:col|row)-(?:span|start|end)-/.test(name))).toEqual([]);
@@ -961,41 +954,17 @@ describe('SourceDetailPanel', () => {
     expect(reconcile).toHaveBeenCalledOnce();
   });
 
-  it('serializes a tier write and a refetch for the same Source', async () => {
-    const tierResponse = deferred<Source>();
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockReturnValueOnce(tierResponse.promise);
-    const refreshed = {
-      ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }],
-    };
-    const refetch = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: refreshed, discovered: refreshed.models.length });
-    renderEchoPanel(vi.fn(), serializedTrack());
-
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
-    await waitFor(() => expect(update).toHaveBeenCalledOnce());
-    await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
-    expect(refetch).not.toHaveBeenCalled();
-
-    tierResponse.resolve({
-      ...source,
-      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
-    });
-    await waitFor(() => expect(refetch).toHaveBeenCalledOnce());
-    expect(await screen.findByText('model-b')).toBeTruthy();
-  });
-
   it('orders every full-Source mutation family through the same Source queue', async () => {
     const writes = createPendingWrites(() => {});
     const started: string[] = [];
-    const families = ['tier', 'refetch', 'add', 'remove', 'edit', 'delete'];
+    const families = ['refetch', 'add', 'remove', 'edit', 'delete'];
     const gates = families.map(() => deferred<void>());
     const runs = families.map((name, index) => writes.track(source.id, async () => {
       started.push(name);
       await gates[index].promise;
     }));
 
-    await waitFor(() => expect(started).toEqual(['tier']));
+    await waitFor(() => expect(started).toEqual(['refetch']));
     for (let index = 0; index < gates.length; index += 1) {
       gates[index].resolve();
       await waitFor(() => expect(started).toEqual(families.slice(0, index + 2)));
@@ -1010,7 +979,6 @@ describe('SourceDetailPanel', () => {
     expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const submitEdit = \(draft: SourceEditDraft, patch: SourcePatch, plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const submitDelete = \(plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
-    expect(detail).toMatch(/const commit = async[\s\S]*?setSaving\(true\)[\s\S]*?trackMutation\(async \(latest, settlement\)[\s\S]*?tierMutationPayload\(latest/);
   });
 
   it('routes every JSX management gesture through the stage authority', () => {
@@ -1062,341 +1030,11 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(screen.queryByText('model-a')).toBeNull());
   });
 
-  it('keeps a rejected tier draft and offers an inline retry', async () => {
-    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
-    renderPanel();
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    const input = screen.getByPlaceholderText(/Enter to add|回车添加/i);
-    await userEvent.type(input, 'draft{Enter}');
-    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
-    expect((input as HTMLInputElement).value).toBe('draft');
-    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
-  });
-
-  it('keeps an existing tier removal clickable while the editor input has focus', async () => {
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
-      ...source,
-      models: [{ ...source.models[0], reasoning_efforts: [] }],
-    });
-    renderPanel();
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'draft');
-    await userEvent.click(screen.getByRole('button', { name: /Remove high|移除 high/i }));
-
-    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', []));
-  });
-
-  it('leaves a resting row to its model and the tiers it already carries', () => {
-    renderProtocol('openai_responses');
-    expect(suggestedTiers()).toEqual([]);
-    expect(screen.queryByText(/sent exactly as typed|按你输入的原样发送/i)).toBeNull();
-    // The add affordance is not absent from the row, only from what a resting row
-    // draws — keeping the box it reserves is what lets revealing it move nothing.
-    const cell = screen.getByRole('button', { name: /high/i });
-    expect(cell.querySelector('.model-hub-source-tier-add.model-hub-source-tier-reveal')).toBeTruthy();
-  });
-
-  // The suggestion set is discovered from its total protocol Record, so a protocol
-  // added later fails here until that table decides what it offers — and what it
-  // decides is what the open editor draws, minus whatever the model already has.
-  it('offers exactly the tiers its proved protocol names, and only while editing', async () => {
-    for (const protocol of SOURCE_PROTOCOLS) {
-      renderProtocol(protocol);
-      expect(suggestedTiers()).toEqual([]);
-      await userEvent.click(screen.getByRole('button', { name: /high/i }));
-      expect(suggestedTiers()).toEqual(TIER_SUGGESTIONS[protocol].filter((tier) => tier !== 'high'));
-      cleanup();
-    }
-  });
-
-  // Rungs 1 and 2 of the provenance ladder are the server's own declaration,
-  // re-applied on every refresh. There is nothing to add and nothing to delete,
-  // so the cell stops being a way in rather than becoming a disabled one — and
-  // it says which rung, because a row that just refused to open would leave
-  // "why" as the user's problem.
-  it.each(MANAGED_TIER_SOURCES)('locks a %s-declared row down to what it already carries', async (provenance) => {
-    renderProtocol('anthropic', [{ ...source.models[0], reasoning_efforts_source: provenance }]);
-
-    const cell = document.querySelector(`[data-tier-provenance="${provenance}"]`) as HTMLElement | null;
-    expect(cell).toBeTruthy();
-    expect(chipTiers()).toEqual(['high']);
-    expect(within(cell as HTMLElement).getByText(MANAGED_BADGE[provenance])).toBeTruthy();
-
-    // No door in, and none of the affordances the editor would have brought.
-    await userEvent.click(cell as HTMLElement);
-    expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
-    expect(document.querySelector('.model-hub-source-tier-add')).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Remove high$|^移除 high$/ })).toBeNull();
-    expect(suggestedTiers()).toEqual([]);
-  });
-
-  it('keeps a locked row legible when the server declared no tiers at all', () => {
-    renderProtocol('anthropic', [{ ...source.models[0], reasoning_efforts: [], reasoning_efforts_source: 'upstream' }]);
-
-    const cell = document.querySelector('[data-tier-provenance="upstream"]') as HTMLElement | null;
-    expect(within(cell as HTMLElement).getByText(/No tiers set|未设置档位/i)).toBeTruthy();
-    expect(within(cell as HTMLElement).getByText(MANAGED_BADGE.upstream)).toBeTruthy();
-  });
-
-  // The pencil is a second door into the same editor, so a locked row has to
-  // close it too — a manual entry whose id matches a catalog model is locked
-  // exactly like a discovered one. Removing the model is a different question.
-  it('closes the pencil on a locked manual model while removal stays offered', () => {
-    renderProtocol('anthropic', [{ ...source.models[0], origin: 'manual', reasoning_efforts_source: 'catalog' }]);
-
-    expect(screen.queryByRole('button', { name: /reasoning tiers for model-a|model-a 的推理强度/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i })).toBeTruthy();
-  });
-
-  it.each([
-    ['a user-declared list', 'user' as const],
-    ['an explicitly unclaimed list', null],
-    ['a server that predates the field', undefined],
-  ])('leaves %s editable, suggestions and all', async (_case, provenance) => {
-    renderProtocol('anthropic', [{
-      ...source.models[0],
-      ...(provenance === undefined ? {} : { reasoning_efforts_source: provenance }),
-    }]);
-
-    expect(document.querySelector('[data-tier-provenance]')).toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    expect(suggestedTiers()).toEqual(TIER_SUGGESTIONS.anthropic.filter((tier) => tier !== 'high'));
-  });
-
-  // Defensive, and reachable: a refresh can apply a rung while the editor is
-  // open, another surface can change the source, and the call can come from
-  // outside this page. The generic "The tier was not saved" would offer a retry
-  // that cannot succeed, which is the one thing this user must not be invited to do.
-  it('explains a refusal that says the server owns the list, and offers no retry', async () => {
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(
-      new ApiCallError('bad_request', 'modelHub.errors.source_model_tiers_managed', true, [], [], [], 409),
-    );
-    renderPanel();
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
-
-    await waitFor(() => expect(update).toHaveBeenCalled());
-    expect(await screen.findByText(/tiers are set automatically|档位是自动确定的/i)).toBeTruthy();
-    expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
-    expect(chipTiers()).toEqual(['high']);
-  });
-
-  // The same conclusion by the other road: the write failed for its own reasons
-  // and the row was managed by the time the rollback's re-read came back. "Try
-  // again" would replay a write `tierMutationPayload` now declines, so the notice
-  // that survives is the one that explains the lock — and it goes back to being a
-  // retry if the server ever hands the list back, which is why the branch reads
-  // provenance instead of freezing a verdict when the write failed.
-  it('turns a pending retry into the locked explanation when provenance arrives after the failure', async () => {
-    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
-    const panel = (models: Source['models']) => (
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <ReportOwnedPanel source={{ ...source, models }} trackMutation={immediateTrack} onReauth={noReauth} />
-        </I18nextProvider>
-      </ToastProvider>
-    );
-    const { rerender } = render(panel(source.models));
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
-    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
-
-    rerender(panel([{ ...source.models[0], reasoning_efforts_source: 'upstream' }]));
-
-    expect(document.querySelector('[data-tier-provenance="upstream"]')).toBeTruthy();
-    expect(await screen.findByText(/tiers are set automatically|档位是自动确定的/i)).toBeTruthy();
-    expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
-
-    rerender(panel([{ ...source.models[0], reasoning_efforts_source: 'user' }]));
-
-    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
-  });
-
-  // The copy obligation checked where the copy is actually read. A bundle
-  // missing an entry reaches the user as the key itself, and these four strings
-  // are the only thing on the surface that says why an edit is unavailable.
-  it.each(['en', 'zh'] as const)('renders provenance and refusal copy as sentences in %s', async (lng) => {
-    const spoken = i18n.language;
-    await i18n.changeLanguage(lng);
-    try {
-      vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(
-        new ApiCallError('bad_request', 'modelHub.errors.source_model_tiers_managed', true, [], [], [], 409),
-      );
-      renderProtocol('anthropic', [
-        source.models[0],
-        { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: ['high'], reasoning_efforts_source: 'upstream' },
-        { id: 'model-c', display_name: null, origin: 'discovered', reasoning_efforts: ['high'], reasoning_efforts_source: 'catalog' },
-      ]);
-
-      expect(screen.getByText(lng === 'en' ? 'From provider' : '供应商声明')).toBeTruthy();
-      expect(screen.getByText(lng === 'en' ? 'Built-in catalog' : '内置目录')).toBeTruthy();
-
-      await userEvent.click(screen.getByRole('button', { name: /high/i }));
-      await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
-      const refusal = await screen.findByText(
-        lng === 'en'
-          ? "This model's tiers are set automatically, so the change was not saved"
-          : '这个模型的档位是自动确定的，这次改动没有保存',
-      );
-      expect(refusal).toBeTruthy();
-    } finally {
-      cleanup();
-      await i18n.changeLanguage(spoken);
-    }
-  });
-
-  it('adds a suggested tier through the same write typing it would take', async () => {
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
-      ...source,
-      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
-    });
-    renderProtocol('openai_responses');
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Add low$|^添加 low$/ }));
-
-    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', 'low']));
-  });
-
-  it('keeps a suggestion out of the draft and off the wire until it is clicked', async () => {
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts');
-    renderProtocol('openai_chat');
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-
-    expect(suggestedTiers().length).toBeGreaterThan(0);
-    expect((screen.getByPlaceholderText(/Enter to add|回车添加/i) as HTMLInputElement).value).toBe('');
-    expect(update).not.toHaveBeenCalled();
-  });
-
-  it('collapses the editor on Escape and on a click elsewhere', async () => {
-    renderProtocol('openai_responses');
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
-    expect(suggestedTiers()).toEqual([]);
-
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.click(screen.getByRole('heading', { name: source.display_name as string }));
-    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
-  });
-
-  it('hands the editor to the row that was clicked instead of opening a second one', async () => {
-    renderProtocol('openai_responses', [
-      source.models[0],
-      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
-    ]);
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
-
-    await userEvent.click(screen.getByRole('button', { name: /No tiers set|未设置档位/i }));
-
-    const inputs = screen.getAllByPlaceholderText(/Enter to add|回车添加/i);
-    expect(inputs).toHaveLength(1);
-    expect(document.activeElement).toBe(inputs[0]);
-  });
-
-  // An editor is a place the keyboard moves around in, not only lands in. Keyed
-  // to the input's own blur, the collapse made every control inside it
-  // pointer-only: Tab left the field and took the editor with it.
-  it('lets the keyboard reach a suggestion and stays open around the write', async () => {
-    // Whichever tier the protocol happens to offer first: what is under test is
-    // that Tab lands on a suggestion at all, so naming one would make this fail
-    // for a vocabulary change that never touched the focus rule.
-    const [first] = TIER_SUGGESTIONS.openai_responses.filter((tier) => tier !== 'high');
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
-      ...source,
-      models: [{ ...source.models[0], reasoning_efforts: ['high', first] }],
-    });
-    renderProtocol('openai_responses');
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.tab();
-    const suggestion = screen.getByRole('button', { name: new RegExp(`^Add ${first}$|^添加 ${first}$`) });
-    expect(document.activeElement).toBe(suggestion);
-
-    await userEvent.keyboard('{Enter}');
-    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', first]));
-    // The chip it was standing on is gone; focus is back on the one control the
-    // edit state cannot lose, not on the body with the editor closed behind it.
-    const input = screen.getByPlaceholderText(/Enter to add|回车添加/i);
-    expect(document.activeElement).toBe(input);
-  });
-
-  it('returns focus to the row it collapsed when Escape asked for it', async () => {
-    renderProtocol('openai_responses');
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /high/i }));
-  });
-
-  // A write that was rolled back is the row's unfinished business, and "Try again"
-  // is the only answer to it — so moving the editor elsewhere, which answers
-  // nothing, cannot be what takes the answer away.
-  it('keeps a failed write answerable after the editor moves to another row', async () => {
-    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
-    renderProtocol('openai_responses', [
-      source.models[0],
-      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
-    ]);
-    await userEvent.click(screen.getByRole('button', { name: /high/i }));
-    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
-    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
-
-    await userEvent.click(screen.getByRole('button', { name: /No tiers set|未设置档位/i }));
-    expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
-    expect(screen.getByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
-
-    update.mockResolvedValueOnce({ ...source, models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }] });
-    await userEvent.click(screen.getByRole('button', { name: /^Try again$|^重试$/i }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(source.id, 'model-a', ['high', 'low']));
-    await waitFor(() => expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull());
-  });
-
-  // Hover is a reveal, not a layout change, and the row answers it with fill
-  // alone. Asserted against the stylesheet because jsdom resolves neither a media
-  // query nor a hover state, and this half of the interaction is CSS-owned.
-  it('reveals the add affordance on hover without moving the row', () => {
-    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
-    const pointer = css.slice(css.indexOf('@media (hover: hover)'), css.indexOf('@media (hover: none)'));
-    const touch = css.slice(css.indexOf('@media (hover: none)'));
-    expect(pointer).toMatch(/\.model-hub-source-table-row:hover \{ background: var\(--model-hub-wash-0a\); \}/);
-    expect(pointer).toMatch(/\.model-hub-source-tier-reveal \{ opacity: 0;/);
-    expect(pointer).toMatch(/\.model-hub-source-table-row:hover \.model-hub-source-tier-reveal,[\s\S]*?opacity: 1;/);
-    expect(pointer).not.toMatch(/display: none|height|padding|margin|border/);
-    expect(pointer).toMatch(/\.model-hub-source-row-action \{ opacity: 0;/);
-    expect(pointer).not.toMatch(/\.model-hub-source-row-actions \{ opacity: 0;/);
-    expect(touch).toMatch(/\.model-hub-source-tier-reveal \{ display: none; \}/);
-  });
-
   it('bounds refetch notices inside the fixed-height detail dialog', () => {
     const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
     const notices = css.match(/\.model-hub-source-notices\s*\{([^}]*)\}/)?.[1] ?? '';
     expect(notices).toContain('max-height: var(--model-hub-source-notices-max-height)');
     expect(notices).toContain('overflow-y: auto');
-  });
-
-  // The reveal is a paint, so what a tap has to find cannot be part of it: the
-  // cell owns the row's band whatever it is drawing, which is what lets the pill
-  // be removed on touch and lets a model with no tiers still be a target at all.
-  it('gives the tier cell the row band to be tapped in, whichever branch is drawing', () => {
-    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
-    const base = css.slice(0, css.indexOf('@media (hover: hover)'));
-    expect(base).toMatch(/\.model-hub-source-tier-cell \{\s*min-height: calc\(var\(--model-hub-source-table-row-height\) - 2 \* var\(--model-hub-source-table-padding-y\)\);\s*\}/);
-    const pointer = css.slice(css.indexOf('@media (hover: hover)'), css.indexOf('@media (hover: none)'));
-    const touch = css.slice(css.indexOf('@media (hover: none)'), css.indexOf('.model-hub-source-tier-empty'));
-    for (const branch of [pointer, touch]) expect(branch).not.toMatch(/height/);
-
-    // And the class is on the control the tap opens, for a model with tiers and
-    // for one without — CSS nobody wears is not a hit area.
-    renderProtocol('openai_responses', [
-      source.models[0],
-      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
-    ]);
-    for (const name of [/high/i, /No tiers set|未设置档位/i]) {
-      expect(screen.getByRole('button', { name }).className).toContain('model-hub-source-tier-cell');
-    }
   });
 
   it('explains standby beside the label rather than in a place the reader must find', async () => {

@@ -1,8 +1,8 @@
 ---
 name: use-show-pages
 slug: use-show-pages
-description: Build, inspect, update, or share an Avibe Show Page when a visual explanation, diagram, dashboard, report, or interactive prototype would materially help.
-version: 0.2.1
+description: Build, inspect, update, restore, or share Avibe Show Pages for visual explanations, diagrams, reports, or interactive prototypes. Covers the page workspace and its Git history.
+version: 0.3.0
 ---
 
 # Use Show Pages
@@ -35,9 +35,45 @@ For more usage details, run `vibe show --help` or a subcommand help such as `vib
 - After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.
 - Inspect/withdraw: `vibe show marks` / `vibe show unmark <id|target> ...`; toggle the user's annotation mode: `vibe show annotate --on|--off [--mode smart|screenshot]`.
 
-Follow the History contract in the current System Prompt when Avibe supplies
-one. For live runtime, visibility, and URL availability, treat
+For live runtime, visibility, and URL availability, treat
 `vibe show status` and the relevant command output as authoritative.
+
+### Show Page workspace history
+
+These rules apply only to this Session's Show Page workspace and its Avibe
+history. Avibe manages page checkpoints automatically; do not create versions
+manually for page edits.
+
+Before operating on history, run `vibe show status --json`. Use its `path`
+as `<show-workspace>` and inspect `history.mode`, `history.checkpointing_active`,
+and `history.git_dir`. Status is read-only; it does not initialize a repository.
+If checkpointing is inactive, do not assume new edits have automatic checkpoints
+or start managing Avibe history yourself. Existing history can still be inspected
+and restored when requested.
+
+When `history.mode` is `managed`:
+- Before using `git -C`, check that `git -C <show-workspace> rev-parse --absolute-git-dir`
+  resolves to `history.git_dir`. If it does not, do not use an enclosing repository
+  or initialize one in its place.
+- Read freely with `git -C <show-workspace> status / log / diff / show`.
+- Restore files with `git -C <show-workspace> restore --source=<ref> -- <path>`.
+  When checkpointing is active, Avibe records the restored files in a new forward
+  checkpoint. Do not move HEAD, switch branches, rewrite history, run gc, or
+  commit checkpoints yourself, regardless of checkpoint availability.
+- Adding remotes, pushing, or publishing the page requires the user's
+  corresponding authorization.
+
+When `history.mode` is `self-managed`, the workspace has the user's own Git
+repository, separate from Avibe's shadow history:
+- `git -C <show-workspace>` addresses the user's repository, not Avibe history.
+  Do not commit or modify that repository to manage Avibe page checkpoints.
+- Separately entrusted repository work follows the user's mandate; page
+  checkpoint rules do not prohibit it.
+- Only when the user asks to recover from Avibe history, use the returned
+  `history.git_dir` as `<shadow-git-dir>` with explicit paths:
+  `git --git-dir=<shadow-git-dir> --work-tree=<show-workspace> log` to inspect,
+  and `git --git-dir=<shadow-git-dir> --work-tree=<show-workspace> restore --source=<ref> -- <path>`
+  to restore files. Do not commit to or otherwise mutate the shadow history.
 
 Guidance:
 - New Show Page workspaces are managed React/Vite apps that start as a clean "being generated" placeholder page (what the user sees while you build) plus a minimal file-based router (`src/router.tsx`) and one example page. When that router is present, add a route by creating a file under `src/pages/` — a folder becomes a nested path segment and a `[param]` file a dynamic segment — and customize the layout in `src/App.tsx`, styles in `src/styles.css`, and optional `api/*.ts` handlers. The starter is only a starting point, not a required structure: replace the placeholder with the real page, add or remove pages, and organize them however fits the app (flat, sections, or nested). Built-in UI is available to import, e.g. `@/components/ui/card`, `@/components/ui/button`, `@/components/ui/badge`.

@@ -1471,6 +1471,7 @@ def config_to_payload(
             # here would revert a user's retention opt-out on unrelated saves.
             "agent_events_trace_retention_enabled": config.runtime.agent_events_trace_retention_enabled,
             "agent_events_trace_retention_days": config.runtime.agent_events_trace_retention_days,
+            "skill_observability_enabled": config.runtime.skill_observability_enabled,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,
@@ -1514,7 +1515,6 @@ def config_to_payload(
         "include_time_info": config.include_time_info,
         "include_user_info": config.include_user_info,
         "reply_enhancements": config.reply_enhancements,
-        "show_pages_prompt": config.show_pages_prompt,
         "agent_progress_style": config.agent_progress_style,
         "agent_status_heartbeat_ms": config.agent_status_heartbeat_ms,
         "agent_status_no_output_ms": config.agent_status_no_output_ms,
@@ -6906,7 +6906,6 @@ def _opencode_model_options(
     data = raw.get("data") or {}
     models_block = data.get("models") if isinstance(data.get("models"), dict) else {}
     reasoning_map = data.get("reasoning_options") or {}
-    default_block = models_block.get("default") if isinstance(models_block.get("default"), dict) else {}
     providers_raw = models_block.get("providers") if isinstance(models_block.get("providers"), list) else []
 
     try:
@@ -6958,7 +6957,6 @@ def _opencode_model_options(
                 source = "user"
             row = {
                 "value": value,
-                "default": default_block.get(pid) == model_id,
                 "source": source,
                 "reasoning_efforts": _effort_values(reasoning_map.get(value)),
             }
@@ -12286,12 +12284,6 @@ def _merge_opencode_user_models(
         return models
 
     providers = []
-    defaults = dict(models.get("default")) if isinstance(models.get("default"), dict) else {}
-
-    def _seed_default(pid: str, user_models: dict[str, dict]) -> None:
-        if pid not in defaults and user_models:
-            defaults[pid] = sorted(user_models.keys())[0]
-
     seen: set[str] = set()
     for provider in providers_raw:
         if not isinstance(provider, dict):
@@ -12307,7 +12299,6 @@ def _merge_opencode_user_models(
         seen.add(pid)
         provider_models = provider.get("models")
         user_models = user_model_index.get(pid) or {}
-        _seed_default(pid, user_models)
         if isinstance(provider_models, dict):
             merged_models = {**provider_models, **user_models}
         elif isinstance(provider_models, list):
@@ -12326,10 +12317,9 @@ def _merge_opencode_user_models(
             continue
         if allowed_provider_ids is not None and pid not in allowed_provider_ids:
             continue
-        _seed_default(pid, user_models)
         providers.append({"id": pid, "models": dict(user_models)})
 
-    return {**models, "providers": providers, "default": defaults}
+    return {**models, "providers": providers, "default": {}}
 
 
 def _opencode_provider_id(entry: dict) -> str | None:
@@ -12516,12 +12506,6 @@ async def _get_opencode_providers_async() -> dict:
 
     auth_index = auth_raw if isinstance(auth_raw, dict) else {}
 
-    try:
-        default_agent = server.get_default_agent_from_config()
-        runtime_agent_model = server.get_agent_model_from_config(default_agent)
-    except Exception:  # noqa: BLE001
-        runtime_agent_model = None
-
     # Resolve the user-configured default provider. ``None`` means
     # the user has not picked one — the UI surfaces that as "no
     # default selected" so clicking a provider actually persists the
@@ -12628,11 +12612,6 @@ async def _get_opencode_providers_async() -> dict:
         api_key_mask_index[pid_key] = masked
         active_auth_type_index[pid_key] = "api"
 
-    from modules.agents.opencode.utils import (
-        resolve_opencode_configured_default_model,
-        resolve_opencode_model_id,
-    )
-
     out_providers = []
     for pid, entry in all_providers.items():
         if not isinstance(entry, dict):
@@ -12702,25 +12681,6 @@ async def _get_opencode_providers_async() -> dict:
                     "reasoning_efforts": reasoning_efforts,
                 }
             )
-        default_model = None
-        defaults_block = config_raw.get("default") if isinstance(config_raw, dict) else None
-        if isinstance(defaults_block, dict):
-            raw_default = defaults_block.get(pid)
-            if isinstance(raw_default, str):
-                default_model = raw_default
-        preferred_model = resolve_opencode_configured_default_model(
-            runtime_agent_model,
-            default_provider=default_provider,
-            provider_id=pid,
-        )
-        if preferred_model:
-            preferred_model = resolve_opencode_model_id(
-                config_raw,
-                pid,
-                preferred_model,
-            )
-            default_model = preferred_model
-
         out_providers.append(
             {
                 "id": pid,
@@ -12734,7 +12694,6 @@ async def _get_opencode_providers_async() -> dict:
                 "adapter": adapter if isinstance(adapter, str) else None,
                 "models": model_ids,
                 "model_entries": model_entries,
-                "default_model": default_model,
                 "base_url": base_url_index.get(pid),
                 "api_key_masked": api_key_mask_index.get(pid),
                 # ``api`` / ``oauth`` / null — the type the daemon will

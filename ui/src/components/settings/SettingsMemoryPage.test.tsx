@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
@@ -177,10 +177,75 @@ describe('SettingsMemoryPage', () => {
 
     renderPage();
 
-    await screen.findByText('repair-supported');
-    expect(screen.getByText('memory.setup.runtimeRequired')).toBeTruthy();
+    await screen.findByText('memory.setup.runtimeRequired');
     expect(screen.getByRole('link', { name: /memory.settings.goToDependencies/ })).toBeTruthy();
+    expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+    expect(screen.queryByText('repair-supported')).toBeNull();
+    expect(screen.queryByText('open-delete')).toBeNull();
   });
+
+  it.each(['running', 'degraded', 'needs_repair'] as const)(
+    'shows only installation guidance for a missing runtime even with stale %s status',
+    async (state) => {
+      api.getMemoryStatus.mockResolvedValue(status(state));
+      api.listDependencies.mockResolvedValue({
+        deps: [{ id: 'memory-runtime', installed: false, status: 'missing' }],
+      });
+      renderPage();
+
+      await screen.findByText('memory.setup.runtimeRequired');
+      expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+      expect(screen.queryByTestId('memory-failures-message')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'memory.runtimeAction.retryButton' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'memory.runtimeAction.moreActions' })).toBeNull();
+      expect(api.wakeMemory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps configuration hidden until dependency inspection has finished', async () => {
+    let finish!: (value: unknown) => void;
+    api.listDependencies.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    renderPage();
+
+    await waitFor(() => expect(api.getMemorySettings).toHaveBeenCalled());
+    expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+    await act(async () => finish({ deps: [{ id: 'memory-runtime', installed: true, status: 'ready' }] }));
+    expect(await screen.findByTestId('memory-tabs-scroll')).toBeTruthy();
+  });
+
+  it('shows installation guidance when a missing package also prevents settings from loading', async () => {
+    api.getMemorySettings.mockRejectedValue(new Error('Memory package unavailable'));
+    api.listDependencies.mockResolvedValue({
+      deps: [{ id: 'memory-package', installed: false, status: 'missing', action_class: 'repairable' }],
+    });
+    renderPage();
+
+    await screen.findByText('memory.setup.runtimeRequired');
+    expect(screen.queryByText('memory.settings.loadFailed')).toBeNull();
+    expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+  });
+
+  it.each(['memory-package', 'memory-runtime'])(
+    'keeps administration available when the %s entry has no admitted installation action',
+    async (id) => {
+      for (const evidence of [
+        { installed: false, status: 'unsupported', action_class: 'none' },
+        { installed: false, status: 'error', action_class: 'operator_only' },
+        { installed: null, status: 'unknown', action_class: 'operator_only' },
+        { installed: null, status: 'missing', action_class: 'repairable' },
+        { installed: null, status: 'not_required', action_class: 'none' },
+      ]) {
+        api.listDependencies.mockResolvedValue({ deps: [{ id, ...evidence }] });
+        const view = renderPage();
+
+        await screen.findByTestId('memory-tabs-scroll');
+        expect(screen.queryByText('memory.setup.runtimeRequired')).toBeNull();
+        await userEvent.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+        expect(screen.getByText('open-delete')).toBeTruthy();
+        view.unmount();
+      }
+    },
+  );
 
   it('offers Retry startup for degraded Memory', async () => {
     api.getMemoryStatus.mockResolvedValue(status('degraded'));

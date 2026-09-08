@@ -229,9 +229,10 @@ The prompt should mention useful reference libraries without limiting the
 agent: native HTML/CSS/JavaScript, Excalidraw-style static SVG/PNG diagrams,
 React Flow, Mermaid, Markmap, Chart.js, and Cytoscape.js.
 
-The Web UI setting `show_pages_prompt` controls this prompt section only. It
-does not disable `vibe show`, the local workspace, private serving, or public
-sharing.
+Show Page guidance is always included in the shared system prompt for every
+agent backend. There is no configuration toggle or Web UI setting for it;
+legacy configurations containing `show_pages_prompt` are accepted and the
+retired field is ignored and omitted on the next save.
 
 ## State Model
 

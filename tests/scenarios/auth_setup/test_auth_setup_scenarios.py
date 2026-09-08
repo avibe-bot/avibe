@@ -1,20 +1,23 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
 import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import jwt
 import pytest
 import yaml
+from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,7 +38,12 @@ from config.v2_config import (
     V2Config,
 )
 from core.agent_auth_service import AgentAuthService
-from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
+from core.handlers.model_hub.service import (
+    ModelHubError,
+    _NATIVE_VENDOR_BACKENDS,
+    seeded_source_name,
+)
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
@@ -44,7 +52,10 @@ from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_sess
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
+    HubOAuthStartForm,
     NativeOAuthScenarioHarness,
+    engine_served_observation,
+    hub_only_subscription_vendors,
 )
 from vibe.api import (
     get_claude_auth,
@@ -58,6 +69,12 @@ from vibe.claude_config import (
 )
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+from vibe.model_hub_runtime.adapter import (
+    _OAUTH_ENDPOINTS,
+    _OAUTH_OBSERVABLE_VENDORS,
+    hub_subscription_serving_protocol,
+)
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -1030,6 +1047,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                         "approvalPolicy": "never",
                         "sandbox": "read-only",
                         "ephemeral": True,
+                        "model": "gpt-5.4-mini",
                         "developerInstructions": (
                             "This is a connection probe. Do not use tools. "
                             "Reply with a short greeting."
@@ -1439,6 +1457,236 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         agent = harness.service.get_agent_sources("claude")
         self.assertEqual(agent["sources"]["order"], [source.id])
         self.assertEqual(agent["supply_status"], "ok")
+
+    async def test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody(self):
+        """Scenario: AUTH-SETUP-115, AUTH-SETUP-116.
+
+        The three hub-only subscription vendors take the same two-step journey
+        the shipped ones do, only through the hub adapter: a start reaches the
+        engine's own OAuth endpoint and comes back with the presentation form the
+        engine declared, and the native channel refuses them before it would
+        spawn any CLI login.
+
+        Both halves are properties of the derived hub-only vocabulary, not of a
+        list of vendor names, so a vendor that becomes hub-only later is covered
+        by this case without editing it. The refusal is checked against the
+        ``native_cli`` gate's own table too: a vendor that the native bridge
+        cannot hand to a CLI is refused there, and if the two tables ever
+        disagreed about who owns custody, this case would name the disagreement
+        instead of quietly starting a CLI login.
+        """
+        vendors = hub_only_subscription_vendors()
+        # Deriving the set proves nothing if it came back empty, and the two
+        # shipped subscriptions are the rows that must stay out of it.
+        self.assertTrue(vendors)
+        self.assertFalse(set(vendors) & set(_NATIVE_VENDOR_BACKENDS))
+        self.assertIn("anthropic", _NATIVE_VENDOR_BACKENDS)
+        self.assertIn("openai", _NATIVE_VENDOR_BACKENDS)
+
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+
+        for form in (
+            # Form C: the grant comes back through a redirect, so the flow asks
+            # the user to paste the callback URL the provider landed on.
+            HubOAuthStartForm(
+                expects="paste_callback_url",
+                auth_url="https://example.test/oauth",
+                device_code=None,
+                instructions_key=None,
+            ),
+            # Form B: the provider issued a device code, so there is nothing to
+            # paste and the flow only has to be watched.
+            HubOAuthStartForm(
+                expects="none",
+                auth_url="https://example.test/device",
+                device_code="ABCD-1234",
+                instructions_key=None,
+            ),
+        ):
+            hub = HubOAuthScenarioHarness(Path(state_dir.name))
+            hub.adapter.start_form = form
+            native = NativeOAuthScenarioHarness(Path(state_dir.name))
+
+            for vendor in vendors:
+                with self.subTest(vendor=vendor, expects=form.expects):
+                    started = await hub.service.oauth_start(
+                        {"vendor": vendor, "channel": "hub"}
+                    )
+
+                    flow = started["flow"]
+                    self.assertEqual(flow["vendor"], vendor)
+                    self.assertEqual(flow["channel"], "hub")
+                    self.assertEqual(flow["intent"], "create")
+                    self.assertEqual(flow["state"], "awaiting_action")
+                    self.assertEqual(flow["presentation"]["expects"], form.expects)
+                    self.assertEqual(flow["presentation"]["auth_url"], form.auth_url)
+                    self.assertEqual(flow["presentation"]["device_code"], form.device_code)
+                    # The start reached the hub adapter — the engine's own OAuth
+                    # endpoint — and not a CLI login.
+                    self.assertEqual(hub.adapter.start_calls, [vendor])
+                    # Nothing persisted yet: a started flow is a claim on the
+                    # engine, not a Source.
+                    self.assertEqual(hub.store.config.sources, [])
+                    hub.adapter.start_calls.clear()
+
+                    with self.assertRaises(ModelHubError) as refused:
+                        await native.service.oauth_start(
+                            {"vendor": vendor, "channel": "native_cli"}
+                        )
+
+                    self.assertEqual(refused.exception.code, "engine_down")
+                    self.assertEqual(refused.exception.status, 503)
+                    self.assertEqual(native.agent_auth.start_calls, [])
+
+    async def test_unproven_hub_subscription_grant_refuses_and_leaves_no_source(self):
+        """Scenario: AUTH-SETUP-117.
+
+        A finished grant is not a Source. Persisting one needs an interface to
+        talk to the upstream over, and the hub path can learn it three ways: a
+        response-backed protocol observation, an engine-declared serving pin, or
+        a protocol fixed by the vendor's native backend. A grant that reaches
+        none of them ends in an honest refusal, and, just as importantly, in a
+        clean one: the credential the grant produced is revoked and the flow is
+        forgotten, so a retry starts from nothing.
+
+        This is the negative that guards the whole start table rather than any
+        vendor in it. The refusal is driven by an observation the fake adapter is
+        told to return — the same terminal product the real adapter reaches when
+        it can neither probe an upstream nor read a pin — so the case states what
+        the service does with an unbindable grant, which is exactly what a start
+        row added without a binding route would produce. That such a row cannot
+        exist today is asserted separately, as a partition over the start table,
+        in ``tests/test_model_hub_runtime.py``; the happy path the three shipped
+        vendors actually take is AUTH-SETUP-118.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = HubOAuthScenarioHarness(Path(state_dir.name))
+        # The default observation is the unproven one, so this case needs no
+        # setup at all; stating it keeps the intent visible next to the refusal.
+        self.assertEqual(harness.adapter.observation.protocol, None)
+
+        for vendor in hub_only_subscription_vendors():
+            with self.subTest(vendor=vendor):
+                started = await harness.service.oauth_start(
+                    {"vendor": vendor, "channel": "hub"}
+                )
+                flow_id = started["flow"]["flow_id"]
+                source_id = started["flow"]["source_id"]
+                harness.adapter.complete(flow_id)
+
+                with self.assertRaises(ModelHubError) as refused:
+                    await harness.service.oauth_status(flow_id)
+
+                self.assertEqual(refused.exception.code, "discovery_failed")
+                self.assertEqual(refused.exception.status, 400)
+                self.assertEqual(
+                    refused.exception.detail, "modelHub.errors.discovery_failed"
+                )
+                # Observation was attempted for the finished grant, across the
+                # whole protocol order: the refusal is a proof that failed, not
+                # a path that was never taken.
+                self.assertEqual(
+                    harness.adapter.observation_calls,
+                    [(vendor, None, SOURCE_PROTOCOLS)],
+                )
+                # Clean: no Source, credential revoked and unjournaled, flow
+                # forgotten so the same vendor can be started again.
+                self.assertEqual(harness.store.config.sources, [])
+                self.assertEqual(harness.adapter.revoked, ["cred_consent01"])
+                self.assertEqual(harness.service.revocations.list(), [])
+                with self.assertRaises(ModelHubError) as forgotten:
+                    await harness.service.oauth_status(flow_id)
+                self.assertEqual(forgotten.exception.code, "flow_not_found")
+                self.assertEqual(forgotten.exception.status, 404)
+
+                retried = await harness.service.oauth_start(
+                    {"vendor": vendor, "channel": "hub"}
+                )
+                self.assertNotEqual(retried["flow"]["flow_id"], flow_id)
+                self.assertNotEqual(retried["flow"]["source_id"], source_id)
+
+                harness.adapter.start_calls.clear()
+                harness.adapter.observation_calls.clear()
+                harness.adapter.revoked.clear()
+
+    async def test_hub_subscription_grant_binds_a_source_and_supplies_its_models(self):
+        """Scenario: AUTH-SETUP-118.
+
+        The happy path, end to end through the generic §1.4 states: authorize
+        against a stubbed engine, and the finished grant becomes a hub Gateway
+        Source carrying the engine-declared serving protocol, with the models
+        that subscription supplies attached to it.
+
+        The protocol is never named here. It comes from the same pin the adapter
+        reads, so a pin the engine changes at the next bump flows into this case
+        instead of being asserted against a frozen copy of it — and a vendor
+        added to the pin table is covered without editing the case. The models
+        are named, because a Source that binds and supplies nothing is not the
+        outcome this scenario exists to prove.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+
+        for vendor in hub_only_subscription_vendors():
+            with self.subTest(vendor=vendor):
+                harness = HubOAuthScenarioHarness(Path(state_dir.name))
+                harness.adapter.observation = engine_served_observation(
+                    vendor,
+                    models=(f"{vendor}-plan-model",),
+                )
+
+                started = await harness.service.oauth_start(
+                    {"vendor": vendor, "channel": "hub"}
+                )
+                flow_id = started["flow"]["flow_id"]
+                harness.adapter.complete(flow_id)
+                terminal = await harness.service.oauth_status(flow_id)
+
+                self.assertEqual(terminal["flow"]["state"], "success")
+                self.assertEqual(terminal["flow"]["intent"], "create")
+
+                source = terminal["source"]
+                self.assertEqual(source, harness.service.list_sources()[0])
+                self.assertEqual(source["vendor"], vendor)
+                self.assertEqual(source["supply_channel"], "hub")
+                self.assertEqual(source["billing"], "monthly")
+                self.assertIsNone(source["base_url"])
+                self.assertEqual(
+                    source["protocol"],
+                    hub_subscription_serving_protocol(vendor),
+                )
+                # A name the user can read, not the routing key. Taken from the
+                # same seed the api-key path uses, so this reads `xAI` and not
+                # `xai` — asserted through the seed rather than a literal, for
+                # the same reason as the protocol above.
+                self.assertEqual(source["display_name"], seeded_source_name(vendor))
+                self.assertEqual(source["credential_ref"], "cred_consent01")
+                self.assertEqual(
+                    [model["id"] for model in source["models"]],
+                    [f"{vendor}-plan-model"],
+                )
+                self.assertEqual(
+                    [model["origin"] for model in source["models"]],
+                    ["discovered"],
+                )
+                # The grant was observed once, and the credential it produced was
+                # kept: a bound Source is the opposite of AUTH-SETUP-117's clean
+                # refusal, which revokes.
+                self.assertEqual(len(harness.adapter.observation_calls), 1)
+                observed_vendor, observed_base_url, _order = (
+                    harness.adapter.observation_calls[0]
+                )
+                self.assertEqual((observed_vendor, observed_base_url), (vendor, None))
+                self.assertEqual(harness.adapter.revoked, [])
+                self.assertEqual(harness.service.revocations.list(), [])
+                # The Source reached the Gateway as an upstream, not just the
+                # config file.
+                self.assertEqual(
+                    [binding.source_id for binding in harness.adapter.synced[-1]],
+                    [source["id"]],
+                )
 
     async def test_lost_model_hub_oauth_start_response_reuses_nonce_flow(self):
         """Scenario: AUTH-SETUP-210.
@@ -2683,6 +2931,385 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
             "create_auth_failure",
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("vendor", "protocol"),
+    [(entry.id, entry.protocol) for entry in api_key_vendor_catalog()]
+    + [("custom", protocol) for protocol in SOURCE_PROTOCOLS],
+)
+@pytest.mark.parametrize("auth_before_validation", [True, False])
+@pytest.mark.parametrize("public_inventory", [False, True])
+@pytest.mark.parametrize("valid_key", ["test-model-free-key", "!@#$%^&*"])
+def test_api_key_setup_does_not_schedule_a_model(
+    monkeypatch, tmp_path, vendor, protocol, auth_before_validation, public_inventory, valid_key,
+):
+    """Scenario: AUTH-SETUP-112"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Keep engine lifecycle simulated; exercise real credential custody, HTTP
+    # observation, inventory discovery, and Source admission together.
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    async def scenario():
+        requests = []
+        observed_credentials = set()
+        key_syntax = r"[a-z-]+" if valid_key[0].isalpha() else r"[^\w\s]+"
+        paths = {
+            "anthropic": "/v1/messages",
+            "openai_responses": "/v1/responses",
+            "openai_chat": "/v1/chat/completions",
+        }
+
+        async def upstream(request):
+            body = await request.json() if request.method == "POST" else None
+            requests.append((request.method, request.path, body))
+            supplied_key = (
+                request.headers.get("x-api-key")
+                if protocol == "anthropic"
+                else request.headers.get("Authorization", "").removeprefix("Bearer ")
+            ) or ""
+            observed_credentials.add(supplied_key)
+            if not supplied_key:
+                # An absent credential is not a malformed one: a public
+                # inventory answers it and every protected surface refuses it.
+                if not (request.method == "GET" and public_inventory):
+                    return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            elif not re.fullmatch(key_syntax, supplied_key):
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            if request.method == "POST" and not auth_before_validation and "model" not in body:
+                return web.json_response(
+                    {"error": {"type": "invalid_request_error", "message": "model is required"}},
+                    status=400,
+                )
+            if supplied_key != valid_key and not (request.method == "GET" and public_inventory):
+                return web.json_response({"code": "INVALID_API_KEY"}, status=401)
+            if request.method == "GET":
+                return web.json_response({"data": [{"id": "relay-model"}]})
+            if "model" in body:
+                return web.json_response(
+                    {"error": {"type": "rate_limit_error", "message": "No available model capacity"}},
+                    status=429,
+                )
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": "model is required"}},
+                status=400,
+            )
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post(paths[protocol], upstream)
+        upstream_app.router.add_get("/v1/models", upstream)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        draft = {
+            "vendor": vendor,
+            "protocol": protocol,
+            "base_url": f"http://127.0.0.1:{port}",
+            "key": valid_key,
+        }
+        harness = SimpleNamespace()
+        runner = ScenarioRunner(harness)
+        # The interface has an owner either way, so the only open question is
+        # the credential -- and the model-less probe never answers it. The
+        # listing does, but only while it is gated by that credential: a public
+        # inventory answers whoever asks and so names no key.
+        gated_inventory = not public_inventory
+
+        async def observe(h):
+            result = await service.observe_source(draft)
+            observation = result["observation"]
+            if gated_inventory:
+                assert observation["outcome"] == "observed"
+                assert observation["authenticated"] == "authenticated"
+                assert observation["protocol"] == protocol
+                assert observation["models"] == ["relay-model"]
+            else:
+                assert observation["outcome"] != "observed"
+                assert observation["authenticated"] == "unknown"
+            assert not store.config.sources
+
+        async def confirm(h):
+            if gated_inventory:
+                created = (await service.create_source({"kind": "api_key", **draft}))["source"]
+                assert "verification_pending" not in created
+            else:
+                with pytest.raises(ModelHubError):
+                    await service.create_source({
+                        "kind": "api_key", **draft, "accept_unavailable_inventory": True,
+                    })
+                before = len(requests)
+                await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+                # The explicit save observes nothing. Its one request is the
+                # best-effort inventory, which fills the Source without
+                # answering the credential question the listing left open.
+                assert requests[before:] == [("GET", "/v1/models", None)]
+            assert len(store.config.sources) == 1
+            h.source = store.config.sources[0].to_payload()
+            assert h.source["protocol"] == protocol
+            # Both paths end up holding the listing's inventory; only the one
+            # the listing authenticated ends up without the pending marker.
+            assert [model["id"] for model in h.source["models"]] == ["relay-model"]
+            assert bool(h.source.get("verification_pending")) is not gated_inventory
+            assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
+
+        async def reject_invalid_key(h):
+            invalid = {**draft, "key": "invalid-test-key" if valid_key[0].isalpha() else "!!??"}
+            result = await service.observe_source(invalid)
+            assert result["observation"]["outcome"] != "observed"
+            assert result["observation"]["authenticated"] != "authenticated"
+            with pytest.raises(ModelHubError):
+                await service.create_source({
+                    "kind": "api_key", **invalid, "accept_unavailable_inventory": True,
+                })
+            assert [source.to_payload() for source in store.config.sources] == ([h.source] if h.source else [])
+
+        try:
+            await runner.run(
+                ScenarioStep("observe", observe),
+                ScenarioStep("confirm", confirm),
+                ScenarioStep("reject_invalid_key", reject_invalid_key),
+            )
+            ScenarioExpect.step_history(runner, ["observe", "confirm", "reject_invalid_key"])
+            assert observed_credentials == {
+                valid_key,
+                "invalid-test-key" if valid_key[0].isalpha() else "!!??",
+                # Reading the listing as a witness also asks it with nothing at
+                # all, which is what tells a gated inventory from a public one.
+                "",
+            }
+            assert all(
+                path == (paths[protocol] if method == "POST" else "/v1/models")
+                for method, path, _ in requests
+            )
+            assert all("model" not in body for _, _, body in requests if body is not None)
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"error": {"type": "invalid_request_error", "param": "model"}}),
+        (401, {"error": {"code": "invalid_api_key"}}),
+        (403, {"message": "Request blocked by regional policy"}),
+        (429, {"error": {"type": "rate_limit_error"}}),
+        (502, {"error": {"type": "upstream_error"}}),
+        (200, {"ok": True}),
+    ],
+)
+@pytest.mark.parametrize("validation_before_auth", [False, True])
+@pytest.mark.parametrize("vendor", sorted(_OAUTH_OBSERVABLE_VENDORS))
+@pytest.mark.parametrize("credential_valid", [True, False])
+def test_hub_oauth_model_free_observation_closed_loop(
+    monkeypatch, tmp_path, caplog, status, body, validation_before_auth, vendor, credential_valid,
+):
+    """Scenario: AUTH-SETUP-113
+
+    Scoped to the vendors whose protocol is proved by a response, because what
+    this asserts is a property of the request that proves it: no `model` field.
+    A vendor bound by an engine-declared serving pin issues no such request at
+    all — the completed grant is its evidence — so its closed loop is
+    AUTH-SETUP-118. `_OAUTH_OBSERVABLE_VENDORS` keeps the routes apart rather
+    than a list here.
+    """
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    api_calls = []
+    inventory_calls = []
+    rejected = status == 401 or (not credential_valid and not (validation_before_auth and status == 400))
+    is_openai = vendor in {"openai", "codex"}
+    protocol = "openai_responses" if is_openai else "anthropic"
+    if vendor == "anthropic" and "error" in body:
+        body = {"type": "error", **body}
+    signing_key = "test-oauth-signature-key-with-32-bytes"
+    bound_token = (
+        jwt.encode({"sub": "account-test", "exp": time.time() + (3600 if credential_valid else -3600)}, signing_key)
+        if is_openai
+        else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
+    )
+    auth_name = "oauth-test.json"
+    state_store._secure_write_json(state_store.auth_dir / auth_name, {"access_token": bound_token})
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": [{
+                "id": "codex-test", "auth_index": "auth-index-test",
+                "name": auth_name, "provider": "codex" if is_openai else "claude",
+                "id_token": {"chatgpt_account_id": "account-test"},
+            }]}
+        if path == "/api-call":
+            assert method == "POST"
+            assert payload["auth_index"] == "auth-index-test"
+            assert payload["url"] == (
+                "https://chatgpt.com/backend-api/codex/responses" if is_openai
+                else "https://api.anthropic.com/v1/messages?beta=true"
+            )
+            if is_openai:
+                assert payload["header"]["Chatgpt-Account-Id"] == "account-test"
+            assert "model" not in json.loads(payload["data"])
+            api_calls.append(payload)
+            token = payload["header"]["Authorization"].removeprefix("Bearer ").replace("$TOKEN$", bound_token)
+            try:
+                if is_openai:
+                    jwt.decode(token, options={"verify_signature": False})
+                elif not re.fullmatch(r"sk-ant-oat01-[a-z-]+", token):
+                    raise ValueError("Malformed opaque token")
+            except (jwt.PyJWTError, ValueError):
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
+            if validation_before_auth and status == 400:
+                return {"status_code": status, "body": json.dumps(body)}
+            try:
+                if is_openai:
+                    jwt.decode(token, signing_key, algorithms=["HS256"])
+                elif token != "sk-ant-oat01-test-valid":
+                    raise ValueError("Invalid opaque token")
+            except (jwt.PyJWTError, ValueError):
+                return {"status_code": 401, "body": '{"error":{"code":"invalid_api_key"}}'}
+            return {"status_code": status, "body": json.dumps(body)}
+        if path == "/auth-files/models":
+            assert query == {"name": auth_name}
+            inventory_calls.append(query)
+            return {"models": [{"id": "gpt-5.6"}]}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Simulate consent and engine lifecycle, but run the actual bound-credential
+    # probe, evidence parser, discovery, and terminal Source materialization.
+    monkeypatch.setattr(adapter, "observe_source", transport.observe_source)
+    monkeypatch.setattr(adapter, "discover_models", transport.discover_models)
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": vendor, "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        assert not store.config.sources
+
+    async def complete_consent(h):
+        flow = adapter.flows[h.flow_id]
+        h.credential_ref = state_store.bind_oauth_credential(flow.source_id, vendor, auth_name)
+        adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
+
+    async def materialize_source(h):
+        terminal = await service.oauth_status(h.flow_id)
+        source = terminal["source"]
+        assert terminal["flow"]["state"] == "success"
+        assert source["protocol"] == protocol
+        assert source["supply_channel"] == "hub"
+        assert source["credential_ref"] == h.credential_ref
+        assert source["verification_pending"]
+        assert source["state"]["status"] == ("needs_action" if rejected else "standby")
+        assert [model["id"] for model in source["models"]] == ([] if rejected else ["gpt-5.6"])
+        assert service.list_sources() == [source]
+        assert bound_token not in json.dumps(terminal)
+        assert (await service.oauth_status(h.flow_id))["source"] == source
+        assert adapter.revoked == []
+        assert len(api_calls) == 1
+        assert api_calls[0]["header"]["Authorization"] == "Bearer $TOKEN$"
+        assert len(inventory_calls) == int(not rejected)
+        assert json.loads((state_store.auth_dir / auth_name).read_text())["access_token"] == bound_token
+        assert bound_token not in caplog.text
+
+    asyncio.run(runner.run(
+        ScenarioStep("start_login", start_login),
+        ScenarioStep("complete_consent", complete_consent),
+        ScenarioStep("materialize_source", materialize_source),
+    ))
+    ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("policy_body", ["<html>Request blocked</html>", '{"message":"Regional policy"}'])
+@pytest.mark.parametrize("competing_protocol", [False, True])
+def test_custom_auto_policy_response_cannot_reject_or_exclude_credentials(
+    monkeypatch, tmp_path, status, policy_body, competing_protocol,
+):
+    """Scenario: AUTH-SETUP-114"""
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    transport = CLIProxyEngineAdapter(
+        supervisor=Mock(), state_store=EngineStateStore(tmp_path / "engine-state"),
+    )
+    service, store, adapter = _service(tmp_path)
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    async def scenario():
+        paths = []
+
+        async def upstream(request):
+            assert request.method == "POST", "Unknown protocol evidence must not reach model discovery"
+            assert "model" not in await request.json()
+            paths.append(request.path)
+            if competing_protocol and request.path == "/v1/responses":
+                if request.headers.get("Authorization") != "Bearer test-policy-key":
+                    return web.Response(status=401, text="Invalid control")
+                return web.json_response(
+                    {"error": {"type": "invalid_request_error", "param": "model"}}, status=400,
+                )
+            if competing_protocol and request.path == "/v1/chat/completions":
+                return web.Response(status=404)
+            return web.Response(status=status, text=policy_body)
+
+        upstream_app = web.Application()
+        upstream_app.router.add_route("*", "/{path:.*}", upstream)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        draft = {"vendor": "custom", "base_url": f"http://127.0.0.1:{port}", "key": "test-policy-key"}
+        runner = ScenarioRunner(SimpleNamespace())
+
+        async def observe(h):
+            result = await service.observe_source(draft)
+            observation = result["observation"]
+            assert observation["outcome"] == "ambiguous"
+            assert observation["protocol"] is None
+            assert observation["authenticated"] == "unknown"
+            assert not store.config.sources
+
+        async def confirm(h):
+            with pytest.raises(ModelHubError):
+                await service.create_source({"kind": "api_key", **draft, "accept_unavailable_inventory": True})
+            before = len(paths)
+            with pytest.raises(ModelHubError):
+                await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
+            assert len(paths) == before
+            assert not store.config.sources
+
+        try:
+            await runner.run(ScenarioStep("observe", observe), ScenarioStep("confirm", confirm))
+            ScenarioExpect.step_history(runner, ["observe", "confirm"])
+            assert set(paths) == {"/v1/messages", "/v1/responses", "/v1/chat/completions"}
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
 
 
 if __name__ == "__main__":

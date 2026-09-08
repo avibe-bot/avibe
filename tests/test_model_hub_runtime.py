@@ -29,6 +29,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
+    SOURCE_PROTOCOLS,
     SourceBinding,
 )
 from core.handlers.model_hub.classification import (
@@ -168,7 +169,6 @@ def test_stream_prelude_replays_large_keepalive_history_before_output() -> None:
             wire_state=state,
             source=source,
             model_id="claude-sonnet-4-5",
-            timeout=1,
         )
         payload = b"".join([chunk async for chunk in prelude.chunks()])
         prelude.close()
@@ -569,12 +569,17 @@ def test_engine_error_projection_does_not_materialize_unrelated_payload(
     assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
 
 
-def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
+def test_stream_prelude_retains_metadata_until_model_output() -> None:
     async def run() -> None:
+        output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
+
         class Content:
+            reads = 0
+
             async def read(self, _size: int) -> bytes:
-                await asyncio.sleep(0.02)
-                return b": keepalive\n\n"
+                self.reads += 1
+                await asyncio.sleep(0)
+                return b": keepalive\n\n" if self.reads < 3 else output
 
         response = SimpleNamespace(content=Content(), status=200)
         source = SourceRecord(
@@ -590,17 +595,22 @@ def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
         prelude = client_module._StreamPrelude(memory_limit=64)
         state = client_module.ProtocolSSEState("anthropic")
 
-        with pytest.raises(asyncio.TimeoutError):
-            await client_module._read_stream_prelude(
+        try:
+            outcome = await client_module._read_stream_prelude(
                 response=response,
                 first=b": first\n\n",
                 prelude=prelude,
                 wire_state=state,
                 source=source,
                 model_id="claude-sonnet-4-5",
-                timeout=0.01,
             )
-        prelude.close()
+            assert outcome is None
+            assert state.model_output_started
+            assert b"".join([chunk async for chunk in prelude.chunks()]) == (
+                b": first\n\n" + b": keepalive\n\n" * 2 + output
+            )
+        finally:
+            prelude.close()
 
     asyncio.run(run())
 
@@ -1780,6 +1790,55 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+def test_a_persisted_key_source_survives_a_repin_of_its_vendor(tmp_path: Path) -> None:
+    """A stored api-key Source is judged by its upstream, not by today's pin.
+
+    A released Avibe persisted api-key Sources whose Base URL the user left empty:
+    their upstream is the official URL their vendor's catalog row holds, which is
+    why the runtime keeps a fallback for it. A row's ``protocol`` is product data
+    that moves between releases — `xai` moved from `openai_chat` to
+    `openai_responses` — and moving it must not retroactively invalidate the
+    Sources the earlier value admitted. The projection is atomic, so a Source that
+    stopped being admissible would take every other Source down with it rather
+    than fail alone.
+
+    Seeded from the catalog on the one protocol each row does *not* pin, so the
+    property covers every vendor rather than the row that happened to move, and a
+    vendor added or repinned later is covered without editing this test.
+    """
+
+    store = EngineStateStore(tmp_path / "state")
+    store.prepare_instance("install-repin")
+    bindings = []
+    for index, entry in enumerate(api_key_vendor_catalog()):
+        off_pin_protocol = next(
+            protocol for protocol in SOURCE_PROTOCOLS if protocol != entry.protocol
+        )
+        credential_ref = store.store_api_key(
+            "secret",
+            vendor=entry.id,
+            protocol=off_pin_protocol,
+            base_url=None,
+        )
+        bindings.append(
+            SourceBinding(
+                source_id=f"src_repin{index:08d}",
+                vendor=entry.id,
+                protocol=off_pin_protocol,
+                base_url=None,
+                credential_ref=credential_ref,
+                allowed_origins=("main",),
+                model_ids=(f"{entry.id}-model",),
+            )
+        )
+
+    projected = store.sync_sources(bindings)
+
+    assert [(record.vendor, record.protocol, record.base_url) for record in projected] == [
+        (binding.vendor, binding.protocol, None) for binding in bindings
+    ]
+
+
 def test_source_record_requires_valid_reasoning_state() -> None:
     payload = {
         "source_id": "src_fixture123",
@@ -1968,6 +2027,45 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert payload["openai-compatibility"][0]["base-url"] == expected_base_url
+
+
+@pytest.mark.parametrize(
+    ("official_base_url", "protocol"),
+    [
+        pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
+        for entry in api_key_vendor_catalog()
+    ],
+)
+def test_catalog_official_base_url_composes_one_probe_endpoint(
+    official_base_url: str,
+    protocol: str,
+) -> None:
+    """Every shipped row probes its own API root plus exactly one endpoint.
+
+    A vendor documents its root however it likes: an origin (DeepSeek), an
+    origin plus ``/v1`` (most of them), or a versioned compatibility prefix
+    (Gemini's ``/v1beta/openai``). The protocol taxonomy states its path from
+    the origin instead, so composition has to reach the endpoint without
+    repeating a version segment or dropping part of the root — and a row whose
+    root shape nobody checked would silently probe an address the vendor 404s.
+    """
+
+    taxonomy = runtime_adapter_module._PROTOCOL_OBSERVATION_TAXONOMY[protocol]
+    composed = client_module.upstream_api_url(official_base_url, taxonomy.request_path)
+
+    # The root is carried verbatim — nothing rewritten, nothing dropped.
+    assert composed.startswith(f"{official_base_url}/")
+    # The endpoint's resource is reached: the taxonomy path past its version.
+    resource = f"/{taxonomy.request_path.strip('/').split('/', 1)[1]}"
+    assert composed.endswith(resource)
+    # And one version segment in the whole path, whichever side supplied it.
+    segments = urlsplit(composed).path.strip("/").split("/")
+    versions = [
+        segment
+        for segment in segments
+        if segment.startswith("v") and segment[1:2].isdigit()
+    ]
+    assert len(versions) == 1, composed
 
 
 @pytest.mark.parametrize(
@@ -5981,39 +6079,21 @@ def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope()
     assert candidates == ("api_error",)
 
 
-@pytest.mark.parametrize(
-    ("phase", "stream", "expected_kind", "expected_status", "stream_started"),
-    [
-        ("first_byte", True, RawOutcomeKind.TIMEOUT, None, False),
-        ("error_body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
-        ("non_stream", False, RawOutcomeKind.TIMEOUT, 200, False),
-    ],
-)
-def test_engine_client_times_out_before_completion(
+def test_engine_client_bounds_reading_an_already_failed_response(
     monkeypatch: pytest.MonkeyPatch,
-    phase: str,
-    stream: bool,
-    expected_kind: RawOutcomeKind,
-    expected_status: int | None,
-    stream_started: bool,
 ) -> None:
     async def run() -> None:
         blocked_phase = asyncio.Event()
         never_release = asyncio.Event()
 
         class Content:
-            reads = 0
-
             async def read(self, _size: int) -> bytes:
-                self.reads += 1
-                if phase == "non_stream" and self.reads == 1:
-                    return b"{"
                 blocked_phase.set()
                 await never_release.wait()
                 return b""
 
         class Response:
-            status = 429 if phase == "error_body" else 200
+            status = 429
             content = Content()
             headers = {"Content-Type": "text/event-stream"}
 
@@ -6045,15 +6125,15 @@ def test_engine_client_times_out_before_completion(
             source,
             "model-a",
             {},
-            stream=stream,
+            stream=True,
         )
 
         assert blocked_phase.is_set()
         assert handle.stream is None
         outcome = await handle.outcome()
-        assert outcome.kind is expected_kind
-        assert outcome.http_status == expected_status
-        assert outcome.stream_started is stream_started
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.http_status == 429
+        assert outcome.stream_started is False
 
     asyncio.run(run())
 
@@ -6473,57 +6553,139 @@ def test_model_discovery_translates_local_spool_failures(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    ("vendor", "endpoint"),
-    [
-        ("anthropic", "/anthropic-auth-url"),
-        ("openai", "/codex-auth-url"),
-        ("codex", "/codex-auth-url"),
-    ],
-)
-def test_oauth_start_uses_webui_callback_for_observable_vendors(
+class _OAuthStartClient:
+    """One engine client that answers whichever start endpoint it is asked for."""
+
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+        self.start_path: str | None = None
+        self.start_query: object = None
+
+    def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+        if path == "/auth-files":
+            return {"files": []}
+        if path.endswith("-auth-url"):
+            self.start_path = path
+            self.start_query = query
+            return dict(self.response)
+        raise AssertionError((method, path, query, payload, timeout))
+
+
+class _OAuthStartSupervisor:
+    def __init__(self, store: EngineStateStore, client: _OAuthStartClient) -> None:
+        self.state_store = store
+        self._client = client
+
+    def client(self) -> _OAuthStartClient:
+        return self._client
+
+
+def _start_oauth_against(
     tmp_path: Path,
     vendor: str,
-    endpoint: str,
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.start_query = None
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if path == "/auth-files":
-                return {"files": []}
-            if path == endpoint:
-                self.start_query = query
-                return {"state": "engine-state", "url": "https://example.test/oauth"}
-            raise AssertionError((method, path, query, payload, timeout))
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self._client = client
-
-        def client(self):
-            return self._client
-
-    async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        client = Client()
+    response: dict[str, object],
+) -> tuple[_OAuthStartClient, object]:
+    async def run():
+        store = EngineStateStore(tmp_path / f"state-{vendor}")
+        client = _OAuthStartClient(response)
         adapter = CLIProxyEngineAdapter(
-            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            supervisor=_OAuthStartSupervisor(store, client),  # type: ignore[arg-type]
             state_store=store,
         )
+        return client, await adapter.start_oauth("src_fixture123", vendor)
 
-        flow = await adapter.start_oauth("src_fixture123", vendor)
-
-        assert client.start_query == {"is_webui": "true"}
-        assert flow.expects == "paste_callback_url"
-
-    asyncio.run(run())
+    return asyncio.run(run())
 
 
-@pytest.mark.parametrize("vendor", ["antigravity", "kimi", "xai"])
-def test_oauth_start_rejects_engine_only_vendors_before_engine_work(
+@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
+def test_oauth_start_calls_the_endpoint_its_vendor_row_declares(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    """Admission and routing are the vendor row's job, for every row.
+
+    Seeding the whole table rather than a list of vendor names keeps a row added
+    later covered without editing this test.
+    """
+
+    endpoint, _callback_provider, _auth_provider = runtime_adapter_module._OAUTH_ENDPOINTS[vendor]
+
+    client, _flow = _start_oauth_against(
+        tmp_path,
+        vendor,
+        {"state": "engine-state", "url": "https://example.test/oauth"},
+    )
+
+    assert client.start_path == endpoint
+    assert client.start_query == {"is_webui": "true"}
+
+
+@pytest.mark.parametrize(
+    ("response", "expects", "auth_url", "device_code"),
+    [
+        pytest.param(
+            {"state": "engine-state", "url": "https://example.test/oauth"},
+            "paste_callback_url",
+            "https://example.test/oauth",
+            None,
+            id="redirect-callback",
+        ),
+        pytest.param(
+            {
+                "state": "engine-state",
+                "flow": "device",
+                "url": "https://example.test/device",
+                "user_code": "ABCD-1234",
+                "expires_in": 600,
+            },
+            "none",
+            "https://example.test/device",
+            "ABCD-1234",
+            id="device-code",
+        ),
+        pytest.param(
+            # xAI and Kimi omit `user_code` when the upstream returned none, so
+            # `flow` alone has to carry the form.
+            {"state": "engine-state", "flow": "device", "verification_uri": "https://example.test/device"},
+            "none",
+            "https://example.test/device",
+            None,
+            id="device-flow-without-a-code",
+        ),
+    ],
+)
+@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
+def test_oauth_start_reads_the_presentation_form_from_the_engine_response(
+    tmp_path: Path,
+    vendor: str,
+    response: dict[str, object],
+    expects: str,
+    auth_url: str,
+    device_code: str | None,
+) -> None:
+    """What the flow asks of the user comes from the response, never the vendor.
+
+    Every vendor is driven through every response shape on purpose: the form is a
+    property of what the engine answered, so no vendor may carry its own table of
+    what to render. That is also why the per-vendor forms observed at the pinned
+    engine commit are recorded in the PR rather than frozen here — a form is only
+    as current as the response that carried it.
+    """
+
+    _client, flow = _start_oauth_against(tmp_path, vendor, response)
+
+    assert flow.expects == expects
+    assert flow.auth_url == auth_url
+    assert flow.device_code == device_code
+
+
+@pytest.mark.parametrize(
+    "vendor",
+    # `antigravity`, `claude`, and `grok` are names the engine answers to. None of
+    # them is an Avibe vendor id, so admission by engine vocabulary is refused.
+    ["antigravity", "claude", "grok", "qwen", "iflow", ""],
+)
+def test_oauth_start_rejects_vendors_no_row_admits_before_engine_work(
     tmp_path: Path,
     vendor: str,
 ) -> None:
@@ -6540,11 +6702,75 @@ def test_oauth_start_rejects_engine_only_vendors_before_engine_work(
 
         with pytest.raises(
             EngineStateError,
-            match="lacks Model Hub response-backed observation",
+            match="lacks a Model Hub subscription flow",
         ):
             await adapter.start_oauth("src_fixture123", vendor)
 
+    assert vendor not in runtime_adapter_module._OAUTH_ENDPOINTS
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
+def test_every_oauth_start_vendor_binds_by_exactly_one_route(
+    vendor: str,
+) -> None:
+    """A flow that can start must be able to end, by one route or the other.
+
+    A finished grant becomes a hub Source only once a protocol is established,
+    and there are exactly two ways to establish one: probe the upstream and read
+    the protocol out of the response, or take the engine-declared serving pin for
+    a vendor whose credential never leaves the engine. This asserts the partition
+    over the whole start table — every row takes one route, none takes both, none
+    takes neither — so a vendor admitted to `_OAUTH_ENDPOINTS` without a binding
+    route fails here instead of shipping a flow that authorizes and then dies in
+    `discovery_failed`.
+
+    The probe's own reach is pinned against `_OAUTH_OBSERVABLE_VENDORS` at the
+    same time, by driving the real probe rather than restating the set: widening
+    one without the other is a failure, not a silent change.
+    """
+
+    auth = runtime_adapter_module._AuthRecord(
+        identity="account.json",
+        auth_index="0",
+        name="account.json",
+        provider=vendor,
+        fingerprint="fp",
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            self.calls.append(path)
+            return {"status_code": 200, "body": json.dumps({"type": "message"})}
+
+    observed: set[str] = set()
+    for protocol in SOURCE_PROTOCOLS:
+        client = Client()
+        try:
+            runtime_adapter_module._probe_oauth_protocol_response(
+                client=client,  # type: ignore[arg-type]
+                auth=auth,
+                vendor=vendor,
+                protocol=protocol,
+            )
+        except EngineClientError as refused:
+            assert refused.status_code == 404
+            assert client.calls == []
+            continue
+        assert client.calls == ["/api-call"]
+        observed.add(protocol)
+
+    assert bool(observed) is (vendor in runtime_adapter_module._OAUTH_OBSERVABLE_VENDORS)
+
+    pinned = runtime_adapter_module.hub_subscription_serving_protocol(vendor)
+    assert (pinned is not None) != bool(observed), (
+        f"{vendor} must bind by exactly one of a response probe or an engine-declared pin"
+    )
+    if pinned is not None:
+        assert pinned in SOURCE_PROTOCOLS
 
 
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
@@ -6913,11 +7139,15 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
             state_store=store,
         )
 
+        # An unadmitted vendor must not consume the provider slot. Named with an
+        # engine-side name rather than an Avibe vendor id, because an Avibe id
+        # that is unadmitted today is exactly what a vendor expansion admits
+        # tomorrow — and then this stops testing a refusal at all.
         with pytest.raises(
             EngineStateError,
-            match="lacks Model Hub response-backed observation",
+            match="lacks a Model Hub subscription flow",
         ):
-            await adapter.start_oauth("src_fixture123", "gemini")
+            await adapter.start_oauth("src_fixture123", "antigravity")
 
         failed_flow = await adapter.start_oauth("src_fixture123", "anthropic")
         supervisor.unavailable = True

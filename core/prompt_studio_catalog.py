@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import re
+from pathlib import Path
 from typing import Any, get_type_hints
 
 from markdown_it import MarkdownIt
@@ -141,7 +142,36 @@ def _skill_documents() -> list[dict[str, Any]]:
                 "blocks": blocks,
             }
         )
+        references = skill_file.parent / "references"
+        if references.is_symlink():
+            continue
+        for reference in sorted(references.rglob("*"), key=lambda path: path.relative_to(references).as_posix()):
+            if reference.suffix.lower() != ".md" or reference.is_symlink() or not reference.is_file():
+                continue
+            if any(parent.is_symlink() for parent in reference.parents if parent != references and references in parent.parents):
+                continue
+            documents.append(_reference_document(reference, skill_file.parent, skill.name))
     return documents
+
+
+def _reference_document(path: Path, skill_directory: Path, skill_name: str) -> dict[str, Any]:
+    relative = path.relative_to(skill_directory).as_posix()
+    logical_path = f"skills/{skill_directory.name}/{relative}"
+    # File identity survives edits and newly added neighboring references. Keep
+    # IDs command-safe for the existing Studio translation and review stores.
+    identity = f"{skill_name}-ref-{_digest_text(relative)}"
+    raw = path.read_text(encoding="utf-8")
+    return {
+        "id": f"skill-{identity}",
+        "name": f"{skill_name} / {relative}",
+        "kind": "skill",
+        "parent_id": f"skill-{skill_name}",
+        "relative_path": relative,
+        "source_path": logical_path,
+        "description": f"Reference Markdown for {skill_name}.",
+        "revision": _digest_text(raw),
+        "blocks": _markdown_blocks(raw, id_prefix=identity, first_line=1, source_path=logical_path),
+    }
 
 
 class PromptRenderInputError(ValueError):

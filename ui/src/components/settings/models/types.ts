@@ -130,6 +130,8 @@ export type Source = {
   supply_channel: SupplyChannel;
   billing: 'monthly' | 'metered';
   state: SourceState;
+  /** Opaque pending-verification identity; presence means no successful model call yet. */
+  verification_pending?: string | null;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */
@@ -415,7 +417,7 @@ export type AgentSupply = {
   routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
    *  and whenever `selected_model_id` is null. This is not a backend-wide
-   *  rollup; group summaries derive from `named_agents`. */
+   *  rollup; gateway coverage derives from the catalog's `model_supply`. */
   supply_status?: SupplyStatus | null;
   /** Supply depth per selectable model. null when mode=direct. */
   model_supply?: ModelSupply[] | null;
@@ -851,7 +853,16 @@ export type ApiKeySourceObservation = {
   protocol?: SourceProtocol;
 };
 
-/** POST /api/models/sources — api_key create observes again before persisting. */
+export type SourceProbeResult = {
+  source_id: string;
+  model_id: string;
+  protocol: SourceProtocol;
+  reachable: boolean;
+  latency_ms: number;
+  error: string | null;
+};
+
+/** POST /api/models/sources — the UI always uses save-first configuration. */
 export type ApiKeySourceCreate = {
   kind: 'api_key';
   vendor: string;
@@ -864,6 +875,8 @@ export type ApiKeySourceCreate = {
   protocol?: SourceProtocol;
   /** Explicit consent for a repeated, protocol-proven inventory failure. */
   accept_unavailable_inventory?: boolean;
+  /** Save independently of verification; inventory discovery is best-effort. */
+  save_unverified?: boolean;
 };
 
 /**

@@ -157,6 +157,11 @@
   },
   "projects": {
     "title": "项目",
+    "reorderInstructions": "按空格键抓取项目，方向键移动，空格键放下，Escape 取消。",
+    "reorderPickedUp": "已抓取 {{name}}。",
+    "reorderPosition": "{{name}}，第 {{position}} 项，共 {{count}} 项。",
+    "reorderDropped": "已放下 {{name}}。",
+    "reorderCancelled": "已取消移动项目。",
     "empty": "还没有项目",
     "newProject": "新建项目",
     "noSessions": "暂无会话",
@@ -432,10 +437,6 @@
           "label": "Node.js",
           "detail": "上述运行时的共同前置依赖。"
         },
-        "memory-package": {
-          "label": "记忆 Python 包",
-          "detail": "与当前 Avibe 版本匹配的可选记忆实现。"
-        },
         "memory-runtime": {
           "label": "记忆运行时",
           "detail": "在本机运行记忆提炼与搜索。"
@@ -646,7 +647,6 @@
       "opencodeProviderModelsCount": "{{count}} 个模型",
       "opencodeProviderModelsEmpty": "暂无模型。可以在上方手动添加 Model ID。",
       "opencodeProviderModels": "模型列表",
-      "opencodeProviderDefaultModel": "默认",
       "opencodeProviderAddModel": "添加模型",
       "opencodeProviderModelPlaceholder": "model-id，不要带 provider/",
       "opencodeProviderModelAdd": "添加模型",
@@ -928,6 +928,23 @@
         "moreModels_other": "还有 {{count}} 个模型",
         "collapse": "收起",
         "retry": "重试",
+        "routeStatus": {
+          "empty": "未配置模型",
+          "unknown": "路由状态待确认",
+          "unconfigured": "未配置模型路由",
+          "available": "路由可用",
+          "partial": "部分路由不可用",
+          "unavailable": "路由不可用"
+        },
+        "agentIssues": {
+          "summary_one": "{{count}} 个 Agent 需关注",
+          "summary_other": "{{count}} 个 Agent 需关注",
+          "modelMissing": "未选择模型",
+          "routeMissing": "此模型未配置路由",
+          "degraded": "模型供应已降级",
+          "waiting": "等待供应商恢复",
+          "interrupted": "此模型没有可用供应商"
+        },
         "supply": {
           "none": "没有可用供应商",
           "unread": "路由状态暂时不可用 · 模型网关本身正常"
@@ -964,7 +981,6 @@
           "columnActions": "操作",
           "columnState": "状态",
           "lockedBadge": "默认",
-          "systemDefault": "Claude Code 默认模型",
           "edit": "编辑 {{model}}",
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
@@ -1137,7 +1153,10 @@
       "subscriptionPicker": {
         "vendor": {
           "anthropic": "Claude 订阅",
-          "openai": "ChatGPT 订阅"
+          "openai": "ChatGPT 订阅",
+          "gemini": "Gemini",
+          "kimi": "Kimi",
+          "xai": "xAI"
         },
         "recommendation": {
           "native": "推荐由 Agent 管理",
@@ -1422,8 +1441,9 @@
         "deletedSource": "已删除"
       },
       "addKey": {
+        "saveFirstHint": "保存供应商时会尝试拉取模型列表。测试是可选的，可在添加后进行。",
         "title": "添加 API Key",
-        "subtitle": "先检测连接与接口，确认后添加",
+        "subtitle": "API Key 与模型接口",
         "field": {
           "vendor": "服务商",
           "vendor.custom": "自定义 · 兼容端点",
@@ -1432,7 +1452,7 @@
           "vendor.empty": "没有同名的服务商",
           "name": "名称(可选)",
           "protocol": "接口类型",
-          "protocol.hint": "不确定时用自动探测；已知类型时可直接声明所选接口。该路径鉴权成功即可添加；选错了运行时可能失败，而且保存后不可更改",
+          "protocol.hint": "指定接口不代表凭证有效，也不代表实际模型调用兼容",
           "baseUrl": "Base URL",
           "baseUrl.hint": "填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径",
           "apiKey": "API Key",
@@ -1445,13 +1465,13 @@
           "empty": "已经连接，但这个供应商没有可用模型"
         },
         "detect": "检测",
-        "confirm": "确认添加",
+        "confirm": "添加供应商",
         "adding": "连接中…",
         "adding.detail": "连接 + 验证接口 + 首次拉取模型列表 · 通常 1–3 秒",
         "saving": "保存中…",
         "saving.detail": "正在保存这个供应商",
         "fail": {
-          "subtitle": "认出接口是「添加」的前置条件 · 先按下面这条修,再重试",
+          "subtitle": "实际模型调用仍未验证",
           "auth": "供应商拒绝了这个凭据",
           "auth.detail": "检查 API Key、接口类型和 Base URL 的 API 根路径",
           "address": "地址不对:404 Not Found",
@@ -1464,10 +1484,11 @@
         },
         "retry": "重试",
         "undetermined": {
-          "title": "连上了、也通过了鉴权 —— 但认不出它说哪种接口",
-          "detail": "这次返回结构对不上任何一种已知接口。请选择一个明确类型后重试：只要该路径鉴权成功即可添加；但选错了运行时可能失败，而且保存后不可更改"
+          "title": "已连接，但尚未完成验证",
+          "detail": "这次响应不足以同时确认接口类型和凭证有效性"
         },
         "protocol": {
+          "saveFirstHint": "选择供应商使用的 API 格式，无需检测或测试通过即可保存。",
           "auto": "自动探测",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
@@ -1476,13 +1497,14 @@
           "detecting": "识别接口中…",
           "manual": "手动指定接口类型",
           "catalogPinned": "内置目录",
-          "catalogPinned.hint": "检测会验证密钥并拉取模型；不再需要靠返回结构证明接口",
+          "catalogPinned.hint": "接口由内置目录指定；凭证是否有效仍需单独验证",
           "declared": "手动指定"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"
         },
         "addAnyway": "仍要添加",
+        "saveUnverified": "未验证保存",
         "success": {
           "title": "添加成功，接下来进入供应商详情",
           "detail": "模型列表、重新拉取和推理强度档位都在那里维护"
@@ -1543,6 +1565,9 @@
         "title": {
           "anthropic": "连接 Claude 订阅",
           "openai": "连接 ChatGPT 订阅",
+          "gemini": "连接 Gemini 订阅",
+          "kimi": "连接 Kimi 订阅",
+          "xai": "连接 xAI 订阅",
           "generic": "连接订阅",
           "reauth": "重新登录「{{name}}」"
         },
@@ -1644,7 +1669,21 @@
         "codex": "Codex",
         "opencode": "OpenCode"
       },
+      "sourceTest": {
+        "open": "测试",
+        "title": "测试 {{source}}",
+        "hint": "使用此供应商和选中的模型发送一次简短请求，可能产生少量费用。结果仅代表这个模型。",
+        "model": "测试模型",
+        "empty": "暂无模型。关闭此窗口后，可拉取列表或手动添加模型 ID。",
+        "run": "开始测试",
+        "running": "测试中…",
+        "success": "{{model}} 调用成功 · {{ms}} 毫秒",
+        "failure": "{{model}} 本次测试未通过：{{reason}}",
+        "unknown": "模型请求失败。",
+        "requestFailed": "暂时无法确认测试结果，供应商配置仍已保存。"
+      },
       "sourceDetail": {
+        "advanced": "高级设置",
         "back": "返回模型供应商列表",
         "close": "关闭供应商详情",
         "modelsHeading": "模型",
@@ -1670,6 +1709,7 @@
           "error": "异常",
           "standbyHintLabel": "这个状态是什么意思",
           "standbyHint": "这个供应商当前可用。当模型网关中的某个后端通过它调用模型时，它就会显示为使用中。",
+          "unverified": "尚未验证",
           "listUpdated": "· 模型列表更新于 {{time}}"
         },
         "summary_one": "{{host}} · {{count}} 个模型",
@@ -1764,7 +1804,7 @@
           "managedHint": "自动确定，不能添加或移除",
           "managed": {
             "upstream": "供应商声明",
-            "catalog": "内置目录"
+            "catalog": "Avibe 预置档位"
           }
         },
         "addRow": {
@@ -2054,6 +2094,8 @@
     "project_no_folder": "这个项目没有配置本地文件夹。",
     "project_not_found": "找不到这个项目。",
     "project_agent_conflict": "该项目的 Agent 已在别处变更，正在重新加载，请再次修改。",
+    "project_order_conflict": "项目顺序已在别处变更，列表已刷新，请重新拖动。",
+    "invalid_project_order": "无法保存项目顺序，请刷新列表后重试。",
     "remote_access_host_mismatch": "这个地址无法打开 Avibe 控制台。请用你的 https://<你的子域>.avibe.bot 链接打开，或在运行 Avibe 的机器上访问 http://127.0.0.1:5123。",
     "remote_access_config_unavailable": "Avibe 无法读取配置。请确认服务运行正常后重试。",
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
@@ -3220,8 +3262,6 @@
     "includeUserInfoHint": "在发给 Agent 的消息前添加 [用户名<用户ID>]",
     "replyEnhancements": "快捷回复按钮",
     "replyEnhancementsHint": "允许 Agent 在结果消息末尾添加可点击的快捷回复按钮",
-    "showPagesPrompt": "Show Page 引导",
-    "showPagesPromptHint": "提示 Agent 何时以及如何使用可视化 Show Page。关闭后 vibe show CLI 仍然可用。",
     "agentProgressStyle": "进度显示（Slack/Discord/飞书）",
     "agentProgressStyleHint": "Agent 进度的呈现方式：关闭 / 精简状态条(最终变成结果) / 详细过程日志。",
     "agentProgressStyleConcise": "精简",
@@ -4573,7 +4613,7 @@
     },
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
-      "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或删除已存储的数据。"
+      "runtimeRequiredHint": "请前往依赖页面安装记忆运行时，完成后即可配置和使用记忆。"
     },
     "tabs": {
       "processingRecord": "处理记录",

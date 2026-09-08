@@ -4491,6 +4491,17 @@ async def model_hub_sources_patch(source_id):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/sources/<source_id>/probe", methods=["POST"])
+async def model_hub_source_probe(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().probe_source(source_id, _model_hub_json_object())
+        return _model_hub_success(probe=result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/sources/<source_id>/credential", methods=["PUT"])
 async def model_hub_source_credential_put(source_id):
     from core.handlers.model_hub import ModelHubError
@@ -8120,7 +8131,7 @@ async def backend_opencode_providers():
 
     Fans out to the live OpenCode daemon's ``/provider``, ``/provider/auth``,
     and ``/config/providers`` endpoints and merges them into a list of
-    ``{id, name, configured, oauth_available, local, models, default_model}``.
+    ``{id, name, configured, oauth_available, local, models}``.
     """
     from vibe import api
 
@@ -8331,6 +8342,30 @@ def projects_create():
         # reusing, reviving, or duplicating it.
         return jsonify({"error": str(err)}), 404
     return jsonify(project), 201
+
+
+@app.route("/api/projects/order", methods=["PUT"])
+def projects_order_put():
+    from storage import projects_service
+    from vibe.sse_broker import broker
+
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return _coded_error_response("invalid_project_order", t("projects.orderInvalid", _request_ui_language()), 400)
+    try:
+        with _projects_engine().begin() as conn:
+            projects = projects_service.reorder_projects(
+                conn,
+                payload.get("order"),
+                expected_order=payload.get("expected_order"),
+                authorization_context=getattr(g, "authorization_context", None),
+            )
+    except projects_service.ProjectOrderConflict:
+        return _coded_error_response("project_order_conflict", t("projects.orderConflict", _request_ui_language()), 409)
+    except ValueError:
+        return _coded_error_response("invalid_project_order", t("projects.orderInvalid", _request_ui_language()), 400)
+    broker.publish("projects.changed", {})
+    return jsonify({"projects": projects})
 
 
 @app.route("/api/projects/<project_id>", methods=["GET"])
@@ -8909,6 +8944,7 @@ def workbench_projects_bootstrap():
         projects = projects_service.list_projects(
             conn,
             include_archived=include_archived,
+            navigation_order=True,
             authorization_context=authorization_context,
         )
         project_id_set = {project["id"] for project in projects}
@@ -11831,6 +11867,9 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
         return True
     data = _workbench_event_data(payload)
+    if event_type == "projects.changed":
+        # This global invalidation is safe only while it carries no project data.
+        return context.has_role("viewer") and data == {}
     if data is None:
         return False
 

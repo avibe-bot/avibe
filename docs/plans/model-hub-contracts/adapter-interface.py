@@ -10,6 +10,7 @@ orchestrator and land with every affected consumer on the same tested head.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
@@ -87,6 +88,14 @@ class OriginNotAllowedError(Exception):
     """Raised by the adapter when ``invoke(origin=...)`` violates the source's
     ``allowed_origins``. A programming/policy error — never converted into a
     ``RawCallOutcome`` and never triggers fallback."""
+
+
+class InvokeCancelledError(asyncio.CancelledError):
+    """Owner cancellation carrying wire facts observed before transport cleanup."""
+
+    def __init__(self, observed: ProtocolSSEState) -> None:
+        super().__init__()
+        self.observed = observed
 
 
 class RawOutcomeKind(str, Enum):
@@ -510,11 +519,14 @@ class EngineAdapter(Protocol):
         ``protocol_order`` either enumerates Auto-detect probes or names one
         owner-constrained protocol. A returned protocol may be established by
         a protocol-shaped upstream response, by a shipped API-key vendor pin,
-        or by a concrete `custom` declaration. The latter two require a
-        response from that exact path plus the September 4, 2026 auth ladder:
-        401/403 reject, while 2xx and request-error 400/404/422 accept even
-        if the response shape itself stays generic. `custom` Auto detect still
+        or by a concrete `custom` declaration. Schema-validation errors,
+        altered-credential controls and public inventory cannot establish
+        authentication. A shaped success can; a bare status cannot. Auto still
         requires response-backed proof; order alone never proves a protocol.
+        Explicit unverified API-key saving and completed Hub OAuth admission
+        belong to Source creation, not this non-persisting evidence result.
+        They retain a fixed protocol owner with verification pending and do
+        not turn an unknown/rejected observation into authentication proof.
         """
         ...
 
@@ -550,5 +562,7 @@ class EngineAdapter(Protocol):
         ``on_admitted`` exactly once before any network wait. Callback failure
         releases the lease without invoking upstream. Transport completion,
         close, or cancellation releases the lease independently of settlement.
+        Cancellation before handle return raises ``InvokeCancelledError`` when
+        wire facts were observed, so L2 can meter them without inventing failure.
         """
         ...

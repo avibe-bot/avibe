@@ -1522,12 +1522,14 @@ class SessionHandler(BaseHandler):
         # Always append avibe system prompt injection so transport
         # capabilities remain available; reply_enhancements only controls
         # quick-reply button instructions.
+        skill_catalog_sink: list[dict] = []
         final_system_prompt = await self._build_claude_system_prompt(
             context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            skill_catalog_sink=skill_catalog_sink,
             working_path=working_path,
         )
 
@@ -1636,6 +1638,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_pending_skill_catalog", skill_catalog_sink[0] if skill_catalog_sink else None)
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(
@@ -1744,6 +1747,7 @@ class SessionHandler(BaseHandler):
         session_anchor: str,
         agent_system_prompt: Optional[str],
         working_path: Optional[str] = None,
+        skill_catalog_sink: list[dict] | None = None,
     ) -> str | Dict[str, str]:
         base_prompt = agent_system_prompt or self.config.claude.system_prompt
         quick_replies_on = getattr(self.config, "reply_enhancements", True)
@@ -1764,7 +1768,6 @@ class SessionHandler(BaseHandler):
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
             include_quick_replies=quick_replies_on and platform != "wechat",
-            include_show_pages=getattr(self.config, "show_pages_prompt", True),
             memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
             context=context,
             fallback_platform=platform,
@@ -1772,6 +1775,7 @@ class SessionHandler(BaseHandler):
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
             skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
+            skill_catalog_sink=skill_catalog_sink,
         )
 
         if base_prompt:
@@ -2429,24 +2433,12 @@ class SessionHandler(BaseHandler):
     ) -> int:
         """Disconnect Claude sessions that have been idle beyond the timeout.
 
-        A session is normally exempt from eviction while it is flagged
-        ``active`` (a turn is in flight). That veto is **not** absolute: if the
-        receiver coroutine never releases the flag (e.g. it stays alive but
-        blocked on ``receive_messages`` with no stream EOF), the session would
-        otherwise be pinned forever and its ``claude`` subprocess would survive
-        until the next service restart. As an independent backstop, a session
-        that is ``active`` but whose ``last_activity`` is older than
-        ``max(idle_timeout * stuck_active_multiplier,
-        stuck_active_floor_seconds)`` is force-evicted regardless of why the
-        flag was not cleared. A genuine in-flight turn keeps touching
-        ``last_activity`` via assistant/tool messages, so it normally stays well
-        under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
-        backstop. Caveat: a real turn whose single tool call runs silently for
-        longer than the cap is indistinguishable from a stuck session and would
-        be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
+        Durable Turn and Activity ownership always vetoes reclamation, even
+        during silent inference or tools. The age backstop repairs an
+        adapter-local active flag only after durable ownership independently
+        allows reclamation. Pass ``stuck_active_multiplier <= 0`` to disable
+        that stale-flag repair.
         """
-        from core.runtime_ownership import SessionRuntimeDisposition
-
         if idle_timeout <= 0:
             return 0
 
@@ -2502,13 +2494,11 @@ class SessionHandler(BaseHandler):
                 continue
             idle_for = now - last_activity
             if composite_key in self.active_sessions:
-                # Stuck-active backstop: only evict once well past the cap.
-                if stuck_threshold is not None and idle_for >= stuck_threshold:
-                    if ownership.disposition in {
-                        SessionRuntimeDisposition.TRANSITIONING,
-                        SessionRuntimeDisposition.UNKNOWN,
-                    }:
-                        continue
+                if (
+                    not ownership.blocks_reclamation
+                    and stuck_threshold is not None
+                    and idle_for >= stuck_threshold
+                ):
                     expired.append((composite_key, idle_for))
                 continue
             if not ownership.blocks_reclamation and idle_for >= idle_timeout:
@@ -2566,11 +2556,7 @@ class SessionHandler(BaseHandler):
                             allowed = bool(
                                 stuck_threshold is not None
                                 and recheck_idle >= stuck_threshold
-                                and ownership.disposition
-                                not in {
-                                    SessionRuntimeDisposition.TRANSITIONING,
-                                    SessionRuntimeDisposition.UNKNOWN,
-                                }
+                                and not ownership.blocks_reclamation
                             )
                         else:
                             allowed = bool(

@@ -12,7 +12,6 @@ from typing import Any, Iterable, Optional
 from config import paths
 from core.message_context import resolve_context_platform
 from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, order_prompt_blocks, render_prompt, render_prompt_block
-from core.show_git import agent_contract_block
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -26,6 +25,8 @@ logger = logging.getLogger(__name__)
 #   health. Runtime policy belongs in the enforcing layer, not in its description.
 # - Keep every generated collection deterministic, including Agent and Skill order.
 # - Required built-in Skill routing is unconditional; installation guarantees it.
+# - Show Page history rules live in its Skill; inspect workspace ownership only
+#   on demand, never while composing the conversation's stable prompt.
 # - Working principles are a static, unconditional prefix before Session and
 #   capability details; never gate them on a backend, Skill, or Turn.
 # - Author all injected prose in the registry. Production text and debug JSON
@@ -191,7 +192,6 @@ def _context_block(
 def build_system_prompt_blocks(
     *,
     include_quick_replies: bool = True,
-    include_show_pages: bool = True,
     include_codex_generated_images: bool = False,
     include_context_guidance: bool = True,
     memory_enabled: bool = False,
@@ -201,6 +201,7 @@ def build_system_prompt_blocks(
     skills_cwd: str | Path | None = None,
     skills_project_base: str | Path | None = None,
     skills_claude_cli_path: str | None = None,
+    skill_catalog_sink: list[dict[str, Any]] | None = None,
 ) -> list[RenderedPromptBlock]:
     """The production composition, also exported by the debug command."""
 
@@ -213,8 +214,6 @@ def build_system_prompt_blocks(
             project_base=skills_project_base,
             claude_cli_path=skills_claude_cli_path,
         )
-        if not include_show_pages:
-            skills = [skill for skill in skills if skill.name != "use-show-pages"]
 
     advertisable_skills = [] if skills is None else [skill for skill in skills if not skill.disable_model_invocation]
     vault_skill_available = any(
@@ -233,12 +232,7 @@ def build_system_prompt_blocks(
     blocks.append(render_prompt_block("base-capabilities-body"))
     if include_codex_generated_images:
         blocks.append(_codex_generated_images_block())
-    if include_show_pages and context is not None:
-        blocks.append(render_prompt_block("show-pages-prompt"))
-        history = agent_contract_block(numbered=True, session_id=_extract_default_session_id(context))
-        if history:
-            blocks.append(render_prompt_block("show-history-heading"))
-            blocks.append(RenderedPromptBlock(history.module_id, history.text + "\n"))
+    blocks.append(render_prompt_block("show-pages-prompt"))
     if include_quick_replies:
         blocks.append(render_prompt_block("quick-replies-prompt"))
     if vault_skill_available:
@@ -258,6 +252,13 @@ def build_system_prompt_blocks(
         from core.managed_skills import render_skill_catalog_blocks
 
         blocks.extend(render_skill_catalog_blocks(skills))
+        if skill_catalog_sink is not None:
+            try:
+                from core.skill_observability import catalog_result
+
+                skill_catalog_sink.append(catalog_result(skills, entry_point="runtime_prompt"))
+            except Exception:
+                logger.info("Skill catalog observation unavailable during prompt preparation")
     if context is not None:
         platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
         if _is_web_platform(platform):

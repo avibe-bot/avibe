@@ -254,6 +254,9 @@ class CodexAgent(BaseAgent):
     ) -> str:
         """Run a read-only ephemeral turn on the normal persistent app-server."""
 
+        from core.agent_model_selection import require_agent_model
+
+        model = require_agent_model(model, "codex")
         probe_cwd = paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR
         probe_cwd.mkdir(parents=True, exist_ok=True)
         transport: CodexTransport | None = None
@@ -284,6 +287,7 @@ class CodexAgent(BaseAgent):
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "ephemeral": True,
+                    "model": model,
                     "developerInstructions": (
                         "This is a connection probe. Do not use tools. "
                         "Reply with a short greeting."
@@ -307,9 +311,8 @@ class CodexAgent(BaseAgent):
                 "approvalPolicy": "never",
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                 "effort": "low",
+                "model": model,
             }
-            if isinstance(model, str) and model.strip():
-                turn_params["model"] = model.strip()
             turn_response = await transport.send_request("turn/start", turn_params)
             turn = turn_response.get("turn")
             turn_id = turn_response.get("id") or (
@@ -1342,10 +1345,7 @@ class CodexAgent(BaseAgent):
                 and not has_active
                 and idle_for >= idle_timeout
             )
-            stuck_candidate = bool(stuck_sessions) and ownership.disposition not in {
-                SessionRuntimeDisposition.TRANSITIONING,
-                SessionRuntimeDisposition.UNKNOWN,
-            }
+            stuck_candidate = bool(stuck_sessions) and not ownership.blocks_reclamation
             if not ordinary_candidate and not stuck_candidate:
                 continue
 
@@ -1367,12 +1367,10 @@ class CodexAgent(BaseAgent):
                     now=current_now,
                     cap=stuck_active_cap,
                 )
-                if ownership.disposition in {
-                    SessionRuntimeDisposition.TRANSITIONING,
-                    SessionRuntimeDisposition.UNKNOWN,
-                }:
-                    continue
-                if ownership.blocks_reclamation and not stuck_sessions:
+                # Silence cannot revoke a durable Turn or Activity owner.
+                # The age backstop only repairs stale adapter-local flags once
+                # durable ownership independently allows reclamation.
+                if ownership.blocks_reclamation:
                     continue
 
                 settled_stuck_sessions: set[str] = set()
@@ -1511,13 +1509,11 @@ class CodexAgent(BaseAgent):
             release(context)
 
     def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
-        """Idle cap after which an *active* transport is force-evicted.
+        """Age threshold for repairing an unowned adapter-local active flag.
 
         Returns ``None`` when the backstop is disabled (multiplier <= 0), in
-        which case an active turn remains an absolute veto. Otherwise a
-        transport with an active turn is force-evicted once it has been idle for
-        ``max(idle_timeout * multiplier, floor)`` — the floor keeps the window
-        sane even when ``idle_timeout`` is configured very small.
+        which case an active flag remains an absolute veto. Durable ownership
+        always vetoes reclamation regardless of this threshold.
         """
         multiplier = DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
         if multiplier <= 0:
@@ -2518,12 +2514,12 @@ class CodexAgent(BaseAgent):
         # that write.
         configure_memory_cli_access(self.controller, request.context)
 
+        skill_catalog_sink: list[dict] = []
         instruction_parts.append(
             await asyncio.to_thread(
                 build_system_prompt_injection,
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
-                include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
                 include_codex_generated_images=True,
                 memory_enabled=bool(
                     getattr(getattr(self.controller.config, "memory", None), "enabled", False)
@@ -2536,9 +2532,11 @@ class CodexAgent(BaseAgent):
                 skills_claude_cli_path=managed_skill_claude_cli_path(
                     getattr(getattr(self, "controller", None), "config", None)
                 ),
+                skill_catalog_sink=skill_catalog_sink,
             )
         )
 
+        request.skill_catalog_observation = skill_catalog_sink[0] if skill_catalog_sink else None
         return "".join(part for part in instruction_parts if part) or None
 
     async def _inject_forked_session_correction(
@@ -2885,6 +2883,11 @@ class CodexAgent(BaseAgent):
             raise CodexPromptRefreshUnavailableError(
                 "Codex rejected developer prompt injection; check app-server API compatibility"
             ) from exc
+        from core.skill_observability import accept_catalog
+
+        candidate = getattr(request, "skill_catalog_observation", None)
+        if candidate is not None:
+            accept_catalog(self.controller, request.context, candidate, backend="codex")
         if not self._persist_prompt_strategy(
             request,
             thread_id,

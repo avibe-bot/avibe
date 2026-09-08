@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from config.v2_config import (
@@ -104,11 +104,18 @@ def source_eligible_for_backend(source: ModelHubSourceConfig, backend: str) -> b
     return ModelHubConfig.source_eligible_for_backend(source, backend)
 
 
+def parse_model_hub_timestamp(value: str) -> datetime:
+    """Compare ISO instants, interpreting older naive records as UTC."""
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
 def source_retry_ready(source: ModelHubSourceConfig, now: datetime | None) -> bool:
     if source.state.status != "cooldown" or now is None:
         return False
     try:
-        retry_at = datetime.fromisoformat((source.state.retry_at or "").replace("Z", "+00:00"))
+        retry_at = parse_model_hub_timestamp(source.state.retry_at or "")
     except ValueError:
         return False
     return retry_at <= now

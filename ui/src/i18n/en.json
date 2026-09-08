@@ -157,6 +157,11 @@
   },
   "projects": {
     "title": "Projects",
+    "reorderInstructions": "Press Space to pick up a project, use arrow keys to move it, Space to drop, or Escape to cancel.",
+    "reorderPickedUp": "Picked up {{name}}.",
+    "reorderPosition": "{{name}}, position {{position}} of {{count}}.",
+    "reorderDropped": "Dropped {{name}}.",
+    "reorderCancelled": "Project move cancelled.",
     "empty": "No projects yet",
     "newProject": "New project",
     "noSessions": "No sessions",
@@ -432,10 +437,6 @@
           "label": "Node.js",
           "detail": "Shared prerequisite for the runtimes above."
         },
-        "memory-package": {
-          "label": "Memory Python package",
-          "detail": "Optional Memory implementation matched to this Avibe release."
-        },
         "memory-runtime": {
           "label": "Memory runtime",
           "detail": "Runs local memory distillation and search on your machine."
@@ -646,7 +647,6 @@
       "opencodeProviderModelsCount": "{{count}} models",
       "opencodeProviderModelsEmpty": "No models yet. Add a model ID above to use this provider.",
       "opencodeProviderModels": "Models",
-      "opencodeProviderDefaultModel": "Default",
       "opencodeProviderAddModel": "Add model",
       "opencodeProviderModelPlaceholder": "model-id, without provider/",
       "opencodeProviderModelAdd": "Add model",
@@ -928,6 +928,23 @@
         "moreModels_other": "{{count}} more models",
         "collapse": "Collapse",
         "retry": "Retry",
+        "routeStatus": {
+          "empty": "No models",
+          "unknown": "Unknown",
+          "unconfigured": "No routes",
+          "available": "Ready",
+          "partial": "Partial",
+          "unavailable": "Unavailable"
+        },
+        "agentIssues": {
+          "summary_one": "{{count}} Agent needs attention",
+          "summary_other": "{{count}} Agents need attention",
+          "modelMissing": "No model selected",
+          "routeMissing": "No route configured for this model",
+          "degraded": "Model supply degraded",
+          "waiting": "Waiting for a source to recover",
+          "interrupted": "No source is available for this model"
+        },
         "supply": {
           "none": "No usable source",
           "unread": "Could not read this backend's supply · the gateway itself is fine"
@@ -964,7 +981,6 @@
           "columnActions": "Actions",
           "columnState": "State",
           "lockedBadge": "Default",
-          "systemDefault": "Claude Code default",
           "edit": "Edit {{model}}",
           "remove": "Remove {{model}}",
           "reorder": "Reorder {{model}}",
@@ -1137,7 +1153,10 @@
       "subscriptionPicker": {
         "vendor": {
           "anthropic": "Claude subscription",
-          "openai": "ChatGPT subscription"
+          "openai": "ChatGPT subscription",
+          "gemini": "Gemini",
+          "kimi": "Kimi",
+          "xai": "xAI"
         },
         "recommendation": {
           "native": "Native recommended",
@@ -1422,8 +1441,9 @@
         "deletedSource": "deleted"
       },
       "addKey": {
+        "saveFirstHint": "Save your provider and try fetching its models. Testing is optional and can be done afterwards.",
         "title": "Add API key",
-        "subtitle": "Detect the connection and interface first, then confirm to add",
+        "subtitle": "API key and model interface",
         "field": {
           "vendor": "Vendor",
           "vendor.custom": "Custom · compatible endpoint",
@@ -1432,7 +1452,7 @@
           "vendor.empty": "No vendor by that name",
           "name": "Name (optional)",
           "protocol": "Interface type",
-          "protocol.hint": "Use Auto detect when unsure; choose a type to declare that interface. If authentication succeeds it can be added, a wrong choice can fail at runtime, and the saved type cannot be changed",
+          "protocol.hint": "A declared interface is not proof of credential validity or model compatibility",
           "baseUrl": "Base URL",
           "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
           "apiKey": "API key",
@@ -1445,13 +1465,13 @@
           "empty": "Connected, but this source lists no models"
         },
         "detect": "Detect",
-        "confirm": "Confirm & add",
+        "confirm": "Add provider",
         "adding": "Connecting…",
         "adding.detail": "Connect, validate the interface, fetch the model list · usually 1–3s",
         "saving": "Saving…",
         "saving.detail": "Saving this source",
         "fail": {
-          "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
+          "subtitle": "Model-call verification is still pending",
           "auth": "The upstream rejected this credential",
           "auth.detail": "Check the API key, interface type, and the Base URL's API root path",
           "address": "Wrong address: 404 Not Found",
@@ -1464,10 +1484,11 @@
         },
         "retry": "Retry",
         "undetermined": {
-          "title": "Connected and authenticated — but we cannot tell which interface it speaks",
-          "detail": "This response shape matches no interface we know. Choose a concrete type and retry: if authentication succeeds on that path it can be added, but a wrong choice can fail at runtime and the saved type cannot be changed"
+          "title": "Connected, but not fully verified",
+          "detail": "The response does not establish both the interface and credential validity"
         },
         "protocol": {
+          "saveFirstHint": "Choose the provider's API format. Saving does not require successful detection or a model test.",
           "auto": "Auto detect",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
@@ -1476,13 +1497,14 @@
           "detecting": "Identifying the interface…",
           "manual": "Manually specify interface type",
           "catalogPinned": "Built-in catalog",
-          "catalogPinned.hint": "Detection authenticates the key and fetches models; it no longer has to prove the interface by its response shape",
+          "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
           "declared": "Manually specified"
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"
         },
         "addAnyway": "Add anyway",
+        "saveUnverified": "Save unverified",
         "success": {
           "title": "Done → the dialog closes and you land on Source details · Models",
           "detail": "The model list, refetch and reasoning tiers are all maintained there"
@@ -1543,6 +1565,9 @@
         "title": {
           "anthropic": "Connect Claude subscription",
           "openai": "Connect ChatGPT subscription",
+          "gemini": "Connect Gemini subscription",
+          "kimi": "Connect Kimi subscription",
+          "xai": "Connect xAI subscription",
           "generic": "Connect subscription",
           "reauth": "Sign in to “{{name}}” again"
         },
@@ -1644,7 +1669,21 @@
         "codex": "Codex",
         "opencode": "OpenCode"
       },
+      "sourceTest": {
+        "open": "Test",
+        "title": "Test {{source}}",
+        "hint": "Send one short request using this provider and the selected model. This can incur a small charge. The result applies only to this model.",
+        "model": "Test model",
+        "empty": "No models available. Close this dialog to fetch the list or add a model ID manually.",
+        "run": "Run test",
+        "running": "Testing…",
+        "success": "{{model}} responded successfully · {{ms}} ms",
+        "failure": "{{model}} did not pass this test: {{reason}}",
+        "unknown": "The model request failed.",
+        "requestFailed": "The test result could not be confirmed. Your provider is still saved."
+      },
       "sourceDetail": {
+        "advanced": "Advanced settings",
         "back": "Back to sources",
         "close": "Close provider details",
         "modelsHeading": "Models",
@@ -1670,6 +1709,7 @@
           "error": "Error",
           "standbyHintLabel": "What this status means",
           "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
+          "unverified": "Not yet verified",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",
@@ -1764,7 +1804,7 @@
           "managedHint": "Set automatically — these cannot be added or removed",
           "managed": {
             "upstream": "From provider",
-            "catalog": "Built-in catalog"
+            "catalog": "Avibe preset levels"
           }
         },
         "addRow": {
@@ -2054,6 +2094,8 @@
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
     "project_agent_conflict": "The project's Agent changed elsewhere. Reloading it — apply your change again.",
+    "project_order_conflict": "Project order changed elsewhere. The list has been refreshed; move the project again.",
+    "invalid_project_order": "Project order could not be saved. Refresh the list and try again.",
     "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
     "remote_access_config_unavailable": "Avibe couldn't read its configuration. Check that the service is healthy and try again.",
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
@@ -3220,8 +3262,6 @@
     "includeUserInfoHint": "Prepend [username<user_id>] to messages sent to agents",
     "replyEnhancements": "Quick-reply Buttons",
     "replyEnhancementsHint": "Allow agents to add clickable quick-reply buttons at the end of result messages",
-    "showPagesPrompt": "Show Page Guidance",
-    "showPagesPromptHint": "Tell agents when and how to use visual Show Pages. The vibe show CLI remains available when this is off.",
     "agentProgressStyle": "Progress display (Slack/Discord/Lark)",
     "agentProgressStyleHint": "How agent progress is shown: off, a single concise status bubble that becomes the result, or the verbose process log.",
     "agentProgressStyleConcise": "Concise",
@@ -4573,7 +4613,7 @@
     },
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
-      "runtimeRequiredHint": "Install or repair the Memory runtime from Dependencies. You can still disable Memory or delete stored data below."
+      "runtimeRequiredHint": "Install the Memory runtime from Dependencies, then return here to configure and use Memory."
     },
     "tabs": {
       "processingRecord": "Processing Record",

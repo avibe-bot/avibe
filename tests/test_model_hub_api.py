@@ -120,6 +120,11 @@ class MemoryStore:
     def save(self, config):
         self.config = config
 
+    def mutate(self, mutator):
+        config = copy.deepcopy(self.config)
+        if mutator(config):
+            self.save(config)
+
     def ensure_writable(self):
         if self.recovery:
             raise ModelHubError("config_recovery", status=409)
@@ -142,6 +147,9 @@ class FakeInvokeHandle:
 
     async def outcome(self):
         return self._outcome
+
+    async def close_stream(self):
+        pass
 
 
 class FakeAdapter:
@@ -2110,23 +2118,10 @@ def test_agents_project_one_shared_backend_catalog_contract(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     claude_models = agents["claude"]["catalog_models"]
-    assert claude_models[0] == {
-        "id": "default",
-        "display_name": None,
-        "origin": "builtin",
-        "models_dev_id": None,
-        "context_window": None,
-        "max_output_tokens": None,
-        "input_modalities": [],
-        "output_modalities": [],
-        "supports_tools": None,
-        "supports_reasoning": None,
-        "reasoning_efforts": [],
-        "locked": True,
-        "routeable": False,
-    }
-    assert all(model["locked"] is False for model in claude_models[1:])
-    assert all(model["routeable"] is True for model in claude_models[1:])
+    assert claude_models
+    assert all(model["id"] != "default" for model in claude_models)
+    assert all(model["locked"] is False for model in claude_models)
+    assert all(model["routeable"] is True for model in claude_models)
     assert agents["codex"]["catalog_models"]
     assert agents["opencode"]["catalog_models"] == []
 
@@ -3618,37 +3613,25 @@ def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline
     assert raised.value.code == "backend_model_id_prefix"
 
 
-def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
+def test_backend_catalog_saves_claude_models_without_native_default(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(service.set_agent_models("claude", baseline, baseline[1:]))
-
-    assert raised.value.code == "backend_model_locked"
-    assert raised.value.status == 409
+    result = asyncio.run(service.set_agent_models("claude", baseline, baseline))
+    assert result["agent"]["catalog_models"] == baseline
+    assert all(model["id"] != "default" for model in baseline)
 
 
-@pytest.mark.parametrize("mutation", ["edit", "duplicate", "reorder"])
-def test_backend_catalog_rejects_any_claude_locked_default_mutation(
-    tmp_path,
-    mutation,
-):
+def test_backend_catalog_rejects_claude_native_default_selection(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     desired = copy.deepcopy(baseline)
-    if mutation == "edit":
-        desired[0]["display_name"] = "Not the server sentinel"
-    elif mutation == "duplicate":
-        desired.insert(1, copy.deepcopy(desired[0]))
-    else:
-        desired[0], desired[1] = desired[1], desired[0]
+    desired.append({**desired[0], "id": "default"})
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("claude", baseline, desired))
 
-    assert raised.value.code == "backend_model_locked"
-    assert raised.value.status == 409
+    assert raised.value.code == "backend_model_id_invalid"
 
 
 def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):
@@ -5641,6 +5624,45 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         assert body["error"] == error
 
 
+@pytest.mark.parametrize("mode", ["hub", "direct"])
+def test_refresh_empty_inventory_returns_success_without_route_removal_confirmation(monkeypatch, tmp_path, mode):
+    service, store, adapter = _service(tmp_path)
+    for vendor, protocol in (("anthropic", "anthropic"), ("openai", "openai_responses")):
+        store.config.sources.append(ModelHubSourceConfig(
+            id=f"src_{vendor}01", kind="api_key", vendor=vendor, display_name=vendor,
+            protocol=protocol, supply_channel="hub", billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")] if vendor == "anthropic" else [],
+            credential_ref=f"cred_{vendor}01",
+        ))
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id for source in store.config.sources]
+        agent.routes = {}
+    store.config.agents["codex"].mode = mode
+    models = [model.id for model in store.config.agents["codex"].models]
+
+    async def discover(*_args):
+        return tuple(DiscoveredModel(id=model) for model in models)
+
+    adapter.discover_models = discover
+    before = store.config.to_payload()
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/src_openai01/refresh", json={},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    _assert_envelope(body, ok=True)
+    assert body["removed_hops"] == body["interrupted"] == []
+    assert [model["id"] for model in body["source"]["models"]] == models
+    after = store.config.to_payload()
+    assert after["agents"] == before["agents"]
+    assert after["sources"][0] == before["sources"][0]
+
+
 def test_discovered_source_model_delete_persists_retirement_tombstone(
     monkeypatch,
     tmp_path,
@@ -7564,7 +7586,8 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
     assert adapter.revoked == []
 
 
-def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_path):
+@pytest.mark.parametrize("observed", [False, True])
+def test_completed_hub_oauth_saves_fixed_protocol_as_unverified(tmp_path, observed):
     service, store, adapter = _service(tmp_path)
     flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
@@ -7575,22 +7598,20 @@ def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_pa
         }
     )
     adapter.observation = SourceObservation(
-        outcome=ObservationOutcome.AMBIGUOUS,
+        outcome=ObservationOutcome.OBSERVED if observed else ObservationOutcome.AMBIGUOUS,
         reachable=True,
         authenticated=True,
-        protocol=None,
-        discovery=ObservationDiscovery.NOT_ATTEMPTED,
+        protocol="openai_responses" if observed else None,
+        discovery=ObservationDiscovery.SUCCEEDED if observed else ObservationDiscovery.NOT_ATTEMPTED,
         models=(),
     )
 
-    with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.oauth_status(flow["flow_id"]))
-
-    assert exc_info.value.code == "discovery_failed"
-    assert exc_info.value.status == 422
-    assert store.config.sources == []
-    assert adapter.revoked == ["cred_oauth_unproven"]
-    assert service.oauth_flows.binding(flow["flow_id"]) is None
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    assert result["source"]["protocol"] == "openai_responses"
+    assert result["source"]["verification_pending"]
+    assert store.config.sources[0].credential_ref == "cred_oauth_unproven"
+    assert adapter.revoked == []
+    assert asyncio.run(service.oauth_status(flow["flow_id"]))["source"] == result["source"]
 
 
 def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_path):
@@ -8483,11 +8504,33 @@ def test_source_edit_validation_contract_fixture(tmp_path, field, case):
 )
 def test_source_empty_target_contract_fixture(case):
     if case["server_valid"]:
-        _validate_source_target(case["vendor"], case["protocol"], None)
+        _validate_source_target(case["vendor"], case["protocol"], None, credential_kind="api_key")
         return
 
     with pytest.raises(EngineStateError):
-        _validate_source_target(case["vendor"], case["protocol"], None)
+        _validate_source_target(case["vendor"], case["protocol"], None, credential_kind="api_key")
+
+
+def test_an_emptied_endpoint_is_judged_by_the_vendor_alone():
+    """Whether an emptied endpoint is admissible cannot depend on the protocol.
+
+    An emptied endpoint asks one question — does this runtime have an upstream to
+    reach the vendor over — and the answer is the official URL the shipped catalog
+    holds for it. Which protocols that vendor may be added as is the create path's
+    proof ladder to decide, and it decided when the Source was saved. A verdict
+    that also read the vendor's current protocol pin would revisit that decision on
+    every projection, so repinning a vendor between releases would invalidate the
+    Sources its own earlier pin admitted.
+
+    Asserted as agreement across each vendor's rows rather than by naming the
+    protocols, so a fourth protocol joins the property instead of escaping it.
+    """
+
+    by_vendor: dict[str, set[bool]] = {}
+    for case in SOURCE_EDIT_VALIDATION_CASES["empty_targets"]:
+        by_vendor.setdefault(case["vendor"], set()).add(case["server_valid"])
+    assert by_vendor
+    assert {vendor: verdicts for vendor, verdicts in by_vendor.items() if len(verdicts) != 1} == {}
 
 
 def test_source_display_names_reject_credential_material(tmp_path):

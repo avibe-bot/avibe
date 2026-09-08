@@ -25,13 +25,14 @@ remain readable; ephemeral envelopes use only the terminal version.
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
-| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. On `custom`, omitted `protocol` auto-detects and still requires matching response proof. A shipped vendor catalog pin collapses omission to that one protocol. A supplied value restricts observation to one interface and is established when authentication succeeds and either `vendor` has a shipped catalog pin, the client declared the protocol on `custom`, or a matching protocol-shaped response proves it. No credential reference is returned. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. On `custom`, omitted `protocol` auto-detects and still requires matching response proof. A shipped vendor catalog pin collapses omission to that one protocol. A supplied value restricts observation to one interface and is established when authentication succeeds and either `vendor` has a shipped catalog pin, the client declared the protocol on `custom`, or a matching protocol-shaped response proves it. On a catalog pin or a `custom` declaration, an `api_key` whose probe left authentication unknown is settled by that protocol's model listing: authenticated when the listing answers the credential and refuses the identical uncredentialed request, in which case the same response is the reported inventory; rejected on `401`/`403`; otherwise unchanged. Auto is never offered the listing. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Default placement is committed before effective adoption is projected; manual overrides are unchanged. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated observation that established a protocol owner but whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | Both Hub OAuth and `native_cli` Sources require the acknowledgement before OAuth starts. Missing or false acknowledgement returns `reauth_confirmation_required` before any adapter call. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. A nonempty destructive plan commits only when the body exactly echoes the current refusal plan. |
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
+| POST `/api/models/sources/<id>/probe` | `{model}` → `{probe: SourceProbeResult}` | Explicit API-key test through the managed invocation adapter, using this exact Source/model/protocol. The model must be a non-retired saved inventory row. No Agent routing, fallback, discovery, credential refresh or Source-health change. Only a successful matching credential invocation clears pending verification. Usage is metered; the total invocation deadline is 60 seconds. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list only when `reasoning_efforts_source` is `user` or null, without changing identity, origin, or Routes. An `upstream` or `catalog` declaration returns HTTP 409 `source_model_tiers_managed` with its provenance in the `reasoning_efforts_source` sibling. |
 | DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
@@ -92,23 +93,47 @@ response. A supplied protocol is established when authentication succeeds and ei
 `vendor` has a shipped catalog pin, the client declared that protocol on `custom`, or
 a matching protocol-shaped response proves it. The protocol probe is deliberately
 schema-invalid and names no synthetic model, so a relay can authenticate and classify it
-without selecting or invoking an upstream model. A bare-origin Base URL uses the
+without selecting or invoking an upstream model. Schema validation does not prove
+authentication. Synthetic altered credentials are not used: unknown token grammars
+and middleware ordering make their rejection inconclusive. Public inventory and
+`accept_unavailable_inventory` never supply authentication proof.
+A bare-origin Base URL uses the
 standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
 root. The endpoint provisions an unbound engine credential only for this operation,
 returns `observation-result.schema.json`, then revokes the transient reference before
 settling. A revoke failure remains in the existing pending-revocation journal. The
 response never contains that reference or any persisted Source.
 
-For an API-key `POST /api/models/sources`, the server performs the same
+For an API-key `POST /api/models/sources` without `save_unverified: true`, the server performs the same
 server-owned observation internally before its independent committed credential
 provisioning. It accepts the create fields and optional protocol constraint, but never
 accepts protocol proof or inventory results from the caller. A null protocol
 produces no Source. A repeated observation that establishes a protocol owner but ends
 with failed inventory discovery produces no Source unless this request explicitly carries
 `accept_unavailable_inventory: true`; the accepted Source has `models: []` and the
-existing uncertain health projection. Subscription OAuth creation follows its
-vendor-specific observation flow before commit. Saved Sources use the stored protocol for
-every later operation.
+existing uncertain health projection.
+
+The add dialog always uses `save_unverified: true`: it saves the catalog-pinned or user-declared
+interface without upstream observation as an admission gate. It attempts one bounded
+inventory discovery with the provisioned credential before committing the new Source;
+failure preserves manual entries and does not block saving. Custom Auto without a declaration
+is rejected before credential provisioning. Manual models remain manual; no inventory
+is invented. The Source carries an opaque `verification_pending` marker, independently of its
+routing health, and may be configured and invoked. List/detail surfaces label it
+unverified, not healthy/in use. Successful inventory discovery never clears this flag.
+A newly stored Hub credential starts pending unless an add-time observation
+authenticated it, so an explicit unverified save and a native-config import always
+start pending while an observed api-key create does not. A call captures the persisted marker before invocation; any
+successful call using the same current credential and marker clears it through a
+fresh cross-process config transaction. Newer same-credential attempts do not negate
+success. Credential/endpoint replacement generates a new marker, including same-handle
+OAuth reauthentication; old calls and failed calls cannot verify that replacement.
+Existing Sources lacking the optional marker retain their existing state.
+
+Completed Hub OAuth consent can likewise retain its bound credential under the fixed
+vendor protocol with verification pending. An explicit authentication rejection keeps
+the existing needs-action state. Native CLI OAuth is unchanged. Saved Sources use the
+stored protocol for every later operation. No create path performs a model invocation.
 
 `source-create.schema.json` is the complete `SourceCreate` request. Its field table is
 authoritative; no Source response field may be inferred backwards into the request:
@@ -187,9 +212,12 @@ The observation result has six terminal outcomes: `observed`, `ambiguous`,
 `protocol` is non-null only when authentication succeeds and one rung establishes the
 transport contract for the attempted path: a shipped vendor catalog pin, an explicit
 `custom` declaration, or a matching upstream response shape. Authentication is accepted only by a
-shaped success or a shaped request-level error that occurs after authentication;
-shaped authentication errors are rejected. Shaped server and rate-limit errors
-prove reachability but not authentication, so they settle as `adapter_error` with
+shaped success, a shaped request-level error that occurs after authentication, or —
+where a pin or declaration already owns the protocol — a model listing that answers
+the credential and refuses the identical uncredentialed request;
+shaped authentication errors are rejected, as is that listing answering `401`/`403`.
+Shaped server and rate-limit errors
+prove reachability but not authentication, so absent an accepting listing they settle as `adapter_error` with
 `reachable: true`, `authenticated: unknown`, and `protocol: null`. A local adapter
 failure may use the same outcome with `reachable: null`. A bare HTTP status proves
 reachability, but proves neither protocol nor authentication. Consequently,
@@ -580,6 +608,13 @@ The guard evaluates each protected `(backend, model)` against the post-mutation
 state. It counts only runnable exact hops in that model's effective Route chain, never
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
+
+Inventory updates that refine an inherited `passthrough` plan into `automatic`
+matching do not report displaced speculative candidates as `would_remove_hops` or
+`removed_hops`, in either Hub or Direct mode. They leave saved route intent unchanged.
+Explicit manual-hop invalidations, lost inventory matches, and newly introduced
+protected-supply gaps still use the exact-plan guard. This exception does not apply
+to Source deletion, default-membership changes, or Restore.
 
 Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the complete
 `guard-refusal.schema.json` shape. The first refusal is:
@@ -1093,12 +1128,12 @@ An unknown `turn_id` returns `turn_not_found`. The server derives ambiguous abse
 live from “known turn, no exact record”; it does not persist a placeholder and never
 guesses which attempt belonged to the turn.
 
-When exact-match forwarding removes a requested reasoning effort, that exact attempted
-hop carries both `stripped_reasoning_efforts` and the declaration consulted in
-`declared_reasoning_efforts`. The paired fields appear only on the failed, served,
-terminal, or canceled attempt where a strip actually occurred; they never leak onto a
-fallback hop or another turn. The same redacted source/model, stripped effort, and
-declared-tier facts are written to the application logger without changing chat copy.
+Historical exact-match forwarding records can carry `stripped_reasoning_efforts`
+and `declared_reasoning_efforts` on the exact attempt that stripped them. These
+paired fields remain readable. The owner amendment of 2026-09-08 removes the
+resolver's inventory-based effort filtering: new attempts preserve caller intent
+and do not emit stripping fields or logs. Engine translation is a separate boundary,
+documented in `../model-hub-reasoning-intent.md`, not inferred from this telemetry.
 
 ## Resolution events
 

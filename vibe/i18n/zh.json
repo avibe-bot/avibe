@@ -1,4 +1,8 @@
 {
+  "errors": {
+    "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
+    "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"
+  },
   "status": {
     "backendUnresponsive": "后端无响应",
     "done": "完成",
@@ -7,6 +11,10 @@
     "claudeRefusalFallback": "本次请求触发了 Claude 的安全检查，已从 {originalModel} 切换到 {fallbackModel} 并重试。本会话后续将继续使用 {fallbackModel}。",
     "steps": "{count} 步",
     "tokens": "{count} tok"
+  },
+  "projects": {
+    "orderInvalid": "无法保存项目顺序。请刷新列表后重试。",
+    "orderConflict": "项目顺序已在其他地方修改。请刷新列表后重新拖动。"
   },
   "fork": {
     "title": "复刻 {title}",
@@ -1466,6 +1474,14 @@
   "data": {
     "helpCommand": "\u67e5\u770b Avibe \u6570\u636e,\u6216\u6267\u884c\u663e\u5f0f\u7684 trace \u4fdd\u7559\u7ef4\u62a4",
     "helpDescription": "\u901a\u8fc7\u53d7\u4fdd\u62a4\u7684\u53ea\u8bfb SQL \u67e5\u770b\u672c\u5730 Avibe SQLite \u72b6\u6001,\u6216\u6267\u884c\u663e\u5f0f\u7ef4\u62a4:`query` \u4e3a\u53ea\u8bfb;`retention --run` \u4f1a\u5220\u9664\u65e7\u7684\u5185\u90e8 trace \u4e8b\u4ef6\u5e76\u53ef\u80fd\u538b\u5b9e\u6570\u636e\u5e93\u3002",
+    "skillUsage": {
+      "ownerRequired": "需要实例所有者权限。",
+      "confirmationRequired": "清除 Skill 统计需要使用 --yes 确认。",
+      "clearRequired": "--yes 必须与 --clear 一起使用。",
+      "helpCommand": "查看或清除本地 Skill 统计（仅限实例所有者）",
+      "helpClear": "清除 Skill 事件及每日统计。",
+      "helpYes": "确认清除 Skill 统计。"
+    },
     "retention": {
       "invalidDays": "--days \u5fc5\u987b\u5728 {minimum} \u5230 {maximum} \u4e4b\u95f4;\u62d2\u7edd\u8fd0\u884c\u800c\u4e0d\u662f\u9759\u9ed8\u6536\u7a84\u7a97\u53e3\u3002",
       "helpCommand": "\u67e5\u770b\u6216\u6267\u884c\u5185\u90e8 agent trace \u4e8b\u4ef6\u7684\u6709\u754c\u4fdd\u7559",

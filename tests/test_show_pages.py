@@ -3076,6 +3076,40 @@ def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, cap
     assert payload["code"] == "not_shared"
 
 
+@pytest.mark.parametrize("mode", ["managed", "self-managed"])
+@pytest.mark.parametrize("active", [False, True])
+def test_show_status_exposes_history_without_modifying_either_repository(monkeypatch, tmp_path, capsys, mode, active):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesHistory")
+    paths.ensure_data_dirs()
+    _save_config()
+    store = ShowPageStore()
+    try:
+        store.ensure("sesHistory")
+    finally:
+        store.close()
+    workspace = paths.get_show_page_dir("sesHistory")
+    workspace.mkdir(parents=True, exist_ok=True)
+    if mode == "self-managed":
+        (workspace / ".git").mkdir()
+        (workspace / ".git" / "HEAD").write_text("ref: refs/heads/user-branch\n")
+    before = {str(path.relative_to(workspace)): path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
+    monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: active)
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+    parser = cli.build_parser()
+
+    assert cli.cmd_show_status(parser.parse_args(["show", "status", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["path"] == str(workspace)
+    assert payload["history"] == {
+        "mode": mode,
+        "checkpointing_active": active,
+        "git_dir": str(paths.get_show_git_dir("sesHistory")),
+    }
+    assert not paths.get_show_git_dir("sesHistory").exists()
+    assert {str(path.relative_to(workspace)): path.read_bytes() for path in workspace.rglob("*") if path.is_file()} == before
+
+
 def _seed_show_cli_session(session_id: str = "ses123") -> None:
     from storage import messages_service
     from storage.db import create_sqlite_engine

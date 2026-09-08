@@ -368,6 +368,20 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
+            from core.agent_model_selection import require_agent_model
+            from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+
+            if agent.name in SUPPORTED_AGENT_BACKENDS:
+                has_subagent_model = request.subagent_model is not None
+                selected_model = require_agent_model(
+                    request.subagent_model if has_subagent_model else request.vibe_agent_model,
+                    agent.name,
+                    getattr(getattr(self.controller, "config", None), "language", "en"),
+                )
+                if has_subagent_model:
+                    request.subagent_model = selected_model
+                else:
+                    request.vibe_agent_model = selected_model
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a

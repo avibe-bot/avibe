@@ -160,6 +160,75 @@ the Catalog. Adding, editing, or deleting a Skill is therefore visible in an
 existing Session without restarting Avibe or creating a new Session. Existing
 conversation history is not rewritten.
 
+#### Local Skill statistics and privacy
+
+Skill statistics are **enabled by default**, including after an upgrade when
+`runtime.skill_observability_enabled` is absent from the configuration. Avibe
+records catalog offers and load outcomes locally for future Harness optimization;
+an offer or load does not prove that the Agent followed a Skill or completed a task.
+
+The records include Skill names (including private project/global Skills), source
+categories, SHA-256 identity/descriptor/content-version hashes, timestamps,
+load results, durations, body byte counts, and available Session/project/Turn,
+backend/platform, and Avibe-version associations. Names and Session links remain
+identifiable: hashing does not make these statistics anonymous. Unknown execution
+attribution stays unknown. Statistics are stored in the local SQLite database,
+using `agent_events` and `skill_usage_daily`; there is no statistics dashboard or
+cloud upload. This feature adds no stored copies of Skill bodies, descriptions,
+prompts, credentials, or plaintext filesystem paths. Normal delivery of a loaded
+Skill to your configured Agent/model is unchanged.
+
+To stop new recording, set `runtime.skill_observability_enabled` to JSON `false`
+in the active `config/config.json` under the Avibe state root. That root is
+`$AVIBE_HOME` when explicitly configured, otherwise `$HOME/.avibe` (or the
+legacy `$HOME/.vibe_remote` when the new root is absent). Merge this field into
+the existing configuration; do not replace the whole file with this fragment:
+
+```json
+{
+  "runtime": {
+    "skill_observability_enabled": false
+  }
+}
+```
+
+The recorder rereads this setting before writing, so a restart is not required.
+Disabling statistics does not disable Skill discovery/loading or delete history.
+If you do not want future records or retained history, disable first, then clear.
+
+### `vibe data skill-usage`
+
+Instance Owner-only local maintenance; these commands return JSON diagnostics,
+not a Skill popularity ranking. The same owner boundary applies to reading these
+statistics through `vibe data query`.
+
+```bash
+vibe data skill-usage --json
+vibe data skill-usage --clear --yes --json
+```
+
+The first command reports `enabled`, raw-event and daily-row counts, retention
+windows, the first-observation marker, and `cleared_through`. After opting out,
+confirm `enabled` is `false`. The clear command requires both `--clear` and
+`--yes`; it deletes only Skill statistics, leaves conversations and other event
+types intact, and reports deleted row counts. A clear watermark rejects delayed
+pre-clear observations. Clearing does not disable collection: new activity can
+immediately create new records while the setting remains enabled.
+
+Raw Skill events have a 90-day retention window; daily statistics retain 365 UTC
+dates including today. Daily rows are still Session-associated, not anonymous
+global totals. Cleanup runs in bounded background batches while the controller
+runs, so expired rows can remain until maintenance catches up. These windows
+apply independently of the Skill-collection and tool-trace-retention switches.
+Archiving a Session does not delete its statistics; physically purging the
+Session removes its associated Skill events and daily rows.
+
+Clear and retention are logical deletion, not secure erasure or guaranteed disk
+space reclamation: old data may remain in SQLite WAL/free pages or backups.
+Restoring a database backup also restores its historical statistics and clear
+watermark; clear again after a restore when needed. No historical conversation
+scan or backfill is performed by this feature.
+
 ### `vibe memory`
 
 Read scoped local Memory or submit context for best-effort, process-local capture — facts the user explicitly asked to remember, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. Acceptance does not guarantee provider delivery or persistence. This command does not start a service and has no clear, configuration, export, or delete subcommands.

@@ -500,9 +500,16 @@ agent_events = Table(
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
-    # Retention scan index: bounded age scan over the only rows the retention
-    # service may ever delete (storage/agent_events_retention.py owns the
-    # matching predicate; keep the two in sync).
+    Index(
+        "ix_agent_events_skill_created_id",
+        "created_at",
+        "id",
+        sqlite_where=text(
+            "visibility = 'trace' and event_type in ('skill.catalog_result', 'skill.load_result')"
+        ),
+    ),
+    # Tool retention has its own allowlist, independent of Skill retention.
+    # Keep this index aligned with storage/agent_events_retention.py.
     Index(
         "ix_agent_events_trace_retention",
         "created_at",
@@ -511,6 +518,98 @@ agent_events = Table(
             "and datetime(created_at) is not null"
         ),
     ),
+)
+
+skill_usage_daily = Table(
+    "skill_usage_daily",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("day", Text, nullable=False),
+    Column("scope_id", Text, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
+    Column("session_id", Text, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=True),
+    Column("skill_key", Text, nullable=False),
+    Column("skill_name", Text, nullable=False),
+    Column("source_kind", Text, nullable=False),
+    Column("skill_revision", Text, nullable=False, server_default=""),
+    Column("backend", Text, nullable=False, server_default=""),
+    Column("model", Text, nullable=False, server_default=""),
+    Column("trigger_kind", Text, nullable=False, server_default="unknown"),
+    Column("platform", Text, nullable=False, server_default="unknown"),
+    Column("avibe_version", Text, nullable=False),
+    Column("catalog_offer_count", Integer, nullable=False, server_default=text("0")),
+    Column("load_success_count", Integer, nullable=False, server_default=text("0")),
+    Column("load_failure_count", Integer, nullable=False, server_default=text("0")),
+    Column("load_duration_samples", Integer, nullable=False, server_default=text("0")),
+    Column("load_duration_ms_sum", Integer, nullable=False, server_default=text("0")),
+    Column("load_duration_ms_max", Integer, nullable=False, server_default=text("0")),
+    Column("loaded_body_bytes_sum", Integer, nullable=False, server_default=text("0")),
+    Column("first_observed_at", Text, nullable=False),
+    Column("last_observed_at", Text, nullable=False),
+    CheckConstraint(
+        "day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'",
+        name="ck_skill_usage_day",
+    ),
+    CheckConstraint(
+        "(scope_id is null or length(scope_id) > 0) and "
+        "(session_id is null or length(session_id) > 0)",
+        name="ck_skill_usage_ids",
+    ),
+    CheckConstraint(
+        "length(skill_key) = 64 and skill_key not glob '*[^0-9a-f]*'",
+        name="ck_skill_usage_key",
+    ),
+    CheckConstraint("length(skill_name) between 1 and 64", name="ck_skill_usage_name"),
+    CheckConstraint(
+        "source_kind in ('builtin', 'project', 'global', 'unresolved')",
+        name="ck_skill_usage_source",
+    ),
+    CheckConstraint(
+        "skill_revision = '' or (length(skill_revision) = 64 and skill_revision not glob '*[^0-9a-f]*')",
+        name="ck_skill_usage_revision",
+    ),
+    CheckConstraint(
+        "trigger_kind in ('human', 'task', 'watch', 'agent_run', 'callback', 'standalone', 'unknown')",
+        name="ck_skill_usage_trigger",
+    ),
+    CheckConstraint(
+        "typeof(catalog_offer_count) = 'integer' and catalog_offer_count >= 0 "
+        "and typeof(load_success_count) = 'integer' and load_success_count >= 0 "
+        "and typeof(load_failure_count) = 'integer' and load_failure_count >= 0 "
+        "and catalog_offer_count + load_success_count + load_failure_count > 0 "
+        "and (load_success_count = 0 or skill_revision <> '') "
+        "and (catalog_offer_count = 0 or skill_revision = '')",
+        name="ck_skill_usage_counts",
+    ),
+    CheckConstraint(
+        "typeof(load_duration_samples) = 'integer' "
+        "and load_duration_samples between 0 and load_success_count + load_failure_count "
+        "and typeof(load_duration_ms_sum) = 'integer' and load_duration_ms_sum >= 0 "
+        "and typeof(load_duration_ms_max) = 'integer' "
+        "and load_duration_ms_max between 0 and load_duration_ms_sum "
+        "and (load_duration_samples > 0 or load_duration_ms_sum = 0)",
+        name="ck_skill_usage_duration",
+    ),
+    CheckConstraint(
+        "typeof(loaded_body_bytes_sum) = 'integer' and loaded_body_bytes_sum >= 0 "
+        "and (load_success_count > 0 or loaded_body_bytes_sum = 0)",
+        name="ck_skill_usage_bytes",
+    ),
+    CheckConstraint(
+        "length(first_observed_at) = 27 and length(last_observed_at) = 27 "
+        "and substr(first_observed_at, 1, 10) = day "
+        "and substr(last_observed_at, 1, 10) = day "
+        "and first_observed_at <= last_observed_at",
+        name="ck_skill_usage_observed",
+    ),
+    Index(
+        "uq_skill_usage_daily_grain",
+        "day", text("coalesce(scope_id, '')"), text("coalesce(session_id, '')"),
+        "skill_key", "skill_revision", "backend", "model", "trigger_kind", "platform", "avibe_version",
+        unique=True,
+    ),
+    Index("ix_skill_usage_daily_skill_day", "skill_key", "day"),
+    Index("ix_skill_usage_daily_session_day", "session_id", "day"),
+    Index("ix_skill_usage_daily_scope_day", "scope_id", "day"),
 )
 
 # Platform-agnostic chat message store. Every IM adapter (Slack, Discord,

@@ -20,7 +20,7 @@ from config.v2_settings import RoutingSettings
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
-from core.runtime_ownership import SessionRuntimeDisposition
+from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 
@@ -629,7 +629,7 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
     assert "Use the release-reviewer Vibe Agent policy." in prompt
 
 
-def test_session_handler_omits_show_pages_prompt_when_disabled(
+def test_session_handler_includes_show_pages_despite_legacy_opt_out(
     monkeypatch, tmp_path: Path
 ) -> None:
     captured: dict[str, Any] = {}
@@ -656,7 +656,8 @@ def test_session_handler_omits_show_pages_prompt_when_disabled(
     assert captured["connected"] is True
     assert "# Avibe" in prompt
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "## Show Pages" not in prompt
+    assert "## Show Pages" in prompt
+    assert "load the `use-show-pages` Skill" in prompt
     assert "vibe show path" not in prompt
 
 
@@ -2175,6 +2176,51 @@ def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path
 
     assert evicted == 0
     assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+
+
+@pytest.mark.parametrize("ownership_arrives_during_check", [False, True])
+def test_silent_owned_claude_turn_survives_both_reclamation_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ownership_arrives_during_check: bool,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = 0.0
+    handler.active_sessions.add(composite_key)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1_000_000.0)
+
+    def snapshot(target, disposition=SessionRuntimeDisposition.ACTIVE):
+        return RuntimeTargetOwnershipSnapshot(
+            backend="claude",
+            resource_key=target.resource_key,
+            activity_runtime_keys=(),
+            sessions=(),
+            sessionless_active_activity_ids=(),
+            sessionless_fallback_run_ids=(),
+            disposition=disposition,
+        )
+
+    controller.runtime_ownership = SimpleNamespace(
+        snapshot=snapshot,
+        snapshot_many=lambda targets: tuple(
+            snapshot(
+                target,
+                SessionRuntimeDisposition.RECLAIMABLE
+                if ownership_arrives_during_check else SessionRuntimeDisposition.ACTIVE,
+            )
+            for target in targets
+        ),
+    )
+    assert asyncio.run(handler.evict_idle_sessions(600)) == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in handler.active_sessions
     assert composite_key in controller.claude_sessions
 
 

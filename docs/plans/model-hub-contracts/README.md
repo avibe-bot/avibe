@@ -69,10 +69,20 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    api-key vendor catalog pin, a user declaration on `custom`, or a matching
    protocol-shaped upstream response. `POST /api/models/sources/observe` is the
    non-persisting API-key observation surface; API-key `POST /api/models/sources`
-   performs the same observation before its independent committed credential
-   provisioning, while subscription OAuth uses its vendor-specific observation flow.
-   A typed Base URL never creates a saved protocol value. Catalog pin and declaration
-   still require reachability and authentication; they never bypass those failures.
+   normally repeats observation before committed credential provisioning. Explicit
+   `save_unverified: true` permits a catalog pin or declaration without observation;
+   custom Auto still cannot be guessed. Completed Hub OAuth consent can retain its
+   bound credential under the fixed vendor protocol. A newly stored Hub credential
+   that no add-time observation authenticated — an explicit unverified save, a
+   native-config import, Hub OAuth admission, any credential or endpoint replacement —
+   carries an opaque `verification_pending` identity until an actual
+   matching-credential model call succeeds. Its clearing is a fresh cross-process
+   field mutation; model discovery never clears it. A typed Base URL never
+   supplies protocol ownership. Model-free validation, altered-credential controls
+   and publicly readable model lists do not prove authentication; on a protocol that
+   already has an owner, a model listing that answers the credential while refusing
+   the identical uncredentialed request does. See the 2026-09-07 rulings
+   in `docs/plans/model-hub.md` and the create/Source schemas for the complete policy.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs
    must validate Source existence/eligibility, canonical identifiers and explicit retirement.
@@ -169,6 +179,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `backend-model.schema.json` | Backend Agent model identity, editable capability metadata, and server-owned lock/routeability projection. |
 | `agent-chain.schema.json` | Effective route, manual override and origin projection plus current execution position, runnability, blockers, live connection backoff, retry metadata, and model supply state. |
 | `probe-result.schema.json` | Saved recovery probes and route probes over the shared effective plan, including the live connection-backoff reason without persistent network health. |
+| `source-probe-result.schema.json` | Explicit API-key Source/model test, without Agent routing, fallback or provider-wide health mutation. |
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, protocol-establishment, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |

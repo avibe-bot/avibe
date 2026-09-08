@@ -64,16 +64,20 @@ import {
 import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, runtimeIsRunning, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { useSourceMutationReport } from './useSourceMutationReport';
+import { handOffProviderTab } from './providerTab';
+import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
+import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
 import { USAGE_DEFAULT_WINDOW_DAYS, type AgentBackend, type AgentSupply, type ResolutionEvent, type RuntimeDependency, type Source, type UsageSummary } from './types';
 import type { UsageWindowOption } from './usageProjection';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
-const SUBSCRIPTION_PICKER_OPTIONS = [
-  { vendor: 'anthropic', recommendation: 'native' },
-  { vendor: 'openai', recommendation: 'gateway' },
-] as const;
+// Frame 13's rows, derived from the one subscription-vendor vocabulary rather
+// than restated here. `subscriptionOptions.ts` owns which vendors are offered and
+// what custody each has, so this menu cannot drift out of the same order the
+// dialog's chooser reads.
+const SUBSCRIPTION_PICKER_OPTIONS = SUBSCRIPTION_MENU_ROWS;
 type SubscriptionPickerVendor = (typeof SUBSCRIPTION_PICKER_OPTIONS)[number]['vendor'];
 
 const readChainRequests = async (requests: readonly ModelChainRequest[]): Promise<ModelChainIndex> => Object.fromEntries(
@@ -1290,7 +1294,11 @@ export const SettingsModelsPage: React.FC = () => {
                           >
                             {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor, recommendation }, index) => {
                               const vendorLabel = t(`settings.models.subscriptionPicker.vendor.${vendor}`);
-                              const recommendationLabel = t(`settings.models.subscriptionPicker.recommendation.${recommendation}`);
+                              // A hub-only vendor has no native channel to recommend against, so
+                              // it carries no badge rather than a 网关推荐 over its only custody.
+                              const recommendationLabel = recommendation
+                                ? t(`settings.models.subscriptionPicker.recommendation.${recommendation}`)
+                                : null;
                               return (
                                 <Button
                                   key={vendor}
@@ -1306,21 +1314,30 @@ export const SettingsModelsPage: React.FC = () => {
                                   tabIndex={subscriptionPickerIndex === index ? 0 : -1}
                                   onClick={() => {
                                     subscriptionPickerHandoffRef.current = true;
+                                    // A hub-only vendor opens §1.4 straight into its flow — no
+                                    // chooser phase, so no 去登录 gesture inside the dialog to
+                                    // allocate the provider tab. This click is the journey's only
+                                    // gesture, exactly as the re-auth confirm is, so the tab is
+                                    // handed off here or the handoff is popup-blocked (PD-1).
+                                    if (!hasNativeSubscriptionCustody(vendor)) handOffProviderTab();
                                     setSubscriptionPickerOpen(false);
                                     setSubscriptionVendor(vendor);
                                   }}
                                 >
+                                  <VendorGlyph vendor={vendor} />
                                   <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={vendorLabel}>{vendorLabel}</span>
-                                  <Badge
-                                    variant="recommendation"
-                                    className={cn(
-                                      recommendation === 'native'
-                                        ? 'model-hub-accent-tile--mint model-hub-accent-ink--mint border-transparent'
-                                        : 'model-hub-accent-pill--neutral',
-                                    )}
-                                  >
-                                    {recommendationLabel}
-                                  </Badge>
+                                  {recommendationLabel && (
+                                    <Badge
+                                      variant="recommendation"
+                                      className={cn(
+                                        recommendation === 'native'
+                                          ? 'model-hub-accent-tile--mint model-hub-accent-ink--mint border-transparent'
+                                          : 'model-hub-accent-pill--neutral',
+                                      )}
+                                    >
+                                      {recommendationLabel}
+                                    </Badge>
+                                  )}
                                 </Button>
                               );
                             })}

@@ -128,7 +128,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           cliPath = saved.cli_path;
         }
         // Spread the full persisted backend so provider-level fields the modal
-        // may have changed (e.g. opencode default_provider / default_model) are
+        // may have changed (e.g. opencode default_provider) are
         // refreshed too — not just enabled / cli_path.
         const merged: AgentState = {
           ...agents[name],

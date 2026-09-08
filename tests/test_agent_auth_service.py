@@ -760,12 +760,51 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
     async def test_resolve_opencode_provider_prefers_override_model(self):
         controller = _StubController()
         controller.get_opencode_overrides = lambda context: ("build", "openai/gpt-5.4", None)
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="opencode", model="anthropic/claude-fixture")
+        )
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 
         provider = await service._resolve_opencode_provider(context)
 
         self.assertEqual(provider, "openai")
+        controller.resolve_vibe_agent_for_context.assert_not_called()
+
+    async def test_resolve_opencode_provider_inherits_selected_avibe_agent(self):
+        controller = _StubController()
+        controller.get_opencode_overrides = lambda context: (None, None, None)
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="opencode", model="openai/gpt-fixture")
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        self.assertEqual(await service._resolve_opencode_provider(context), "openai")
+        controller.resolve_vibe_agent_for_context.assert_called_once_with(context, required=False)
+
+    async def test_resolve_opencode_provider_uses_avibe_provider_for_bare_model(self):
+        controller = _StubController()
+        controller.get_opencode_overrides = lambda context: (None, "local-model", None)
+        controller.config.agents.opencode.default_provider = "local-provider"
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="opencode", model="openai/other-model")
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        self.assertEqual(await service._resolve_opencode_provider(context), "local-provider")
+        controller.resolve_vibe_agent_for_context.assert_not_called()
+
+    async def test_resolve_opencode_provider_does_not_use_other_backends_agent_model(self):
+        controller = _StubController()
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="codex", model="other/provider-model")
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        self.assertEqual(await service._resolve_opencode_provider(context), "opencode")
 
     async def test_resolve_opencode_provider_prefers_existing_session_runtime_provider(self):
         controller = _StubController()

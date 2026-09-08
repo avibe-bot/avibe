@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import copy
 import json
 from collections import deque
 from datetime import datetime, timezone
@@ -42,7 +42,6 @@ from core.handlers.model_hub.classification import (
 )
 from core.handlers.model_hub.events import (
     BoundedEventLog,
-    redact_credential_material,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.provenance import (
@@ -90,6 +89,11 @@ class MemoryStore:
 
     def requested_model(self, backend: str) -> str:
         return self.requested_models.get(backend, "")
+
+    def mutate(self, mutator):
+        config = copy.deepcopy(self.config)
+        if mutator(config):
+            self.save(config)
 
 
 def test_source_settlement_authority_never_downgrades_a_decided_error() -> None:
@@ -826,12 +830,17 @@ def test_401_retry_depends_on_credential_capability_not_source_kind(tmp_path):
         )
     )
     service, store, _ = _service(tmp_path, config, adapter)
+    request = ModelHubRequest(
+        {"reasoning": {"effort": "high", "summary": "auto"}},
+        protocol="openai_responses",
+        headers={"x-test": "preserved"},
+    )
 
     resolved = asyncio.run(
         service.resolve(
             backend="claude",
             model_id="claude-opus-4-6",
-            request={},
+            request=request,
         )
     )
 
@@ -840,15 +849,26 @@ def test_401_retry_depends_on_credential_capability_not_source_kind(tmp_path):
         (source.id, "claude-opus-4-6"),
     ]
     assert adapter.capability_queries == ["cred_refresh401"]
+    assert len(adapter.invocation_requests) == 2
+    for attempt in adapter.invocation_requests:
+        assert attempt == request
+        assert attempt.protocol == request.protocol
+        assert attempt.headers == request.headers
     assert resolved.source_id == source.id
     assert store.load().sources[0].state.status == "standby"
 
 
-def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
+@pytest.mark.parametrize(("efforts", "provenance"), [
+    ([], None), ([], "catalog"),
+    *[(efforts, provenance) for efforts in (["low"], ["high"])
+      for provenance in ("user", "catalog", "upstream")],
+])
+def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, efforts, provenance):
     first = _source("src_effort001", ("upstream-first",))
     second = _source("src_effort002", ("upstream-second",))
     first.models[0].reasoning_efforts = ["high"]
-    second.models[0].reasoning_efforts = ["low"]
+    second.models[0].reasoning_efforts = efforts
+    second.models[0].reasoning_efforts_source = provenance
     config = _config([first, second])
     config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
         hops=(
@@ -901,16 +921,26 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
         "effort": "high",
         "summary": "auto",
     }
-    assert adapter.invocation_requests[1]["reasoning"] == {"summary": "auto"}
+    assert adapter.invocation_requests[1] == request
+    assert request["reasoning"] == {"effort": "high", "summary": "auto"}
     assert adapter.invocation_requests[1].protocol == "openai_responses"
     assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
     started = [attempt for attempt in observed_attempts if attempt[4] is None]
     assert [attempt[0] for attempt in started] == [first.id, second.id]
     assert started[0][6:] == ((), ())
-    assert started[1][6:] == (("high",), ("low",))
+    assert started[1][6:] == ((), ())
 
 
-def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
+@pytest.mark.parametrize("payload", [
+    {"reasoning_effort": "high"},
+    {"reasoning_effort": "future-tier"},
+    {"reasoning": {"effort": "high", "summary": "auto"}},
+    {"thinking": {"type": "enabled", "budget_tokens": 4096}},
+    {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}},
+    {"reasoning": {"summary": "auto"}},
+    {},
+])
+def test_runtime_preserves_request_when_provider_capability_is_unknown(tmp_path, payload):
     source = _source("src_effort003", ("upstream-model",))
     config = _config([source])
     config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
@@ -930,7 +960,7 @@ def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
     )
     service, _store, _ = _service(tmp_path, config, adapter)
     request = ModelHubRequest(
-        {"reasoning_effort": "high"},
+        copy.deepcopy(payload),
         protocol="openai_chat",
         headers={"x-test": "preserved"},
     )
@@ -944,160 +974,13 @@ def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
     )
 
     assert resolved.source_id == source.id
-    assert "reasoning_effort" not in adapter.invocation_requests[0]
+    assert adapter.invocation_requests[0] == payload
+    assert request == payload
     assert adapter.invocation_requests[0].protocol == "openai_chat"
     assert adapter.invocation_requests[0].headers == {"x-test": "preserved"}
 
 
-def test_reasoning_effort_strip_log_redacts_values_and_names_declared_tiers(
-    tmp_path,
-    caplog,
-):
-    source = _source("src_effortlog1", ("upstream-model",))
-    source.models[0].reasoning_efforts = ["low", "high"]
-    config = _config([source])
-    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
-    )
-    adapter = FakeAdapter()
-    adapter.outcomes.append(
-        RawCallOutcome(
-            kind=RawOutcomeKind.SUCCESS,
-            http_status=200,
-            error_code=None,
-            redacted_message=None,
-            stream_started=False,
-            model_id="upstream-model",
-            source_id=source.id,
-        )
-    )
-    service, _store, _ = _service(tmp_path, config, adapter)
-
-    with caplog.at_level("INFO", logger="core.handlers.model_hub.service"):
-        asyncio.run(
-            service.resolve(
-                backend="claude",
-                model_id="claude-opus-4-6",
-                request={
-                    "reasoning_effort": (
-                        "authorization: sk-test-strip-secret-material"
-                    )
-                },
-            )
-        )
-
-    assert "sk-test-strip-secret-material" not in caplog.text
-    assert "[redacted]" in caplog.text
-    assert "declared tiers: ['low', 'high']" in caplog.text
-
-
-def test_reasoning_effort_telemetry_is_utf8_bounded_after_redaction(caplog):
-    source = _source("src_effortbound", ("upstream-model",))
-    long_declared = "层级" * 200
-    source.models[0].reasoning_efforts = ["low", long_declared]
-    long_stripped = (
-        "深度" * 200 + " authorization: sk-test-strip-secret-material"
-    )
-
-    with caplog.at_level("INFO", logger="core.handlers.model_hub.service"):
-        result = ModelHubService._request_for_exact_reasoning_effort(
-            {"reasoning_effort": long_stripped},
-            source,
-            "upstream-model",
-        )
-
-    [stripped] = result.stripped_efforts
-    [declared] = result.declared_efforts
-    safe_stripped = redact_credential_material(long_stripped)
-    stripped_digest = hashlib.sha256(safe_stripped.encode("utf-8")).hexdigest()
-    declared_payload = json.dumps(
-        ("low", long_declared),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    declared_digest = hashlib.sha256(declared_payload.encode("utf-8")).hexdigest()
-    assert len(stripped.encode("utf-8")) <= 256
-    assert len(declared.encode("utf-8")) <= 256
-    assert stripped.endswith(f"[sha256:{stripped_digest}]")
-    assert declared.endswith(f"[sha256:{declared_digest}]")
-    assert hashlib.sha256(long_stripped.encode("utf-8")).hexdigest() not in stripped
-    assert long_stripped not in caplog.text
-    assert long_declared not in caplog.text
-    assert "sk-test-strip-secret-material" not in caplog.text
-    assert stripped in caplog.text
-    assert declared in caplog.text
-
-
-def test_reasoning_effort_telemetry_bounds_many_short_declared_tiers():
-    source = _source("src_effortmany", ("upstream-model",))
-    source.models[0].reasoning_efforts = [
-        f"tier-{index:04d}" for index in range(1_000)
-    ]
-
-    result = ModelHubService._request_for_exact_reasoning_effort(
-        {"reasoning_effort": "undeclared"},
-        source,
-        "upstream-model",
-    )
-
-    [declared] = result.declared_efforts
-    assert len(declared.encode("utf-8")) <= 256
-    assert declared.endswith("]")
-    assert "[sha256:" in declared
-
-
-def test_reasoning_effort_telemetry_preserves_short_values_exactly():
-    source = _source("src_effortshort", ("upstream-model",))
-    source.models[0].reasoning_efforts = ["low", "high"]
-
-    result = ModelHubService._request_for_exact_reasoning_effort(
-        {"reasoning_effort": "ultra"},
-        source,
-        "upstream-model",
-    )
-
-    assert result.stripped_efforts == ("ultra",)
-    assert result.declared_efforts == ("low", "high")
-
-
-@pytest.mark.parametrize(
-    ("request_payload", "expected_request", "expected_stripped"),
-    [
-        ({"reasoning_effort": ""}, {}, ("",)),
-        ({"reasoning_effort": 7}, {}, ("<int>",)),
-        (
-            {"reasoning": {"effort": ["high"], "summary": "auto"}},
-            {"reasoning": {"summary": "auto"}},
-            ("<list>",),
-        ),
-        (
-            {"reasoning": {"effort": None}},
-            {},
-            ("<null>",),
-        ),
-    ],
-    ids=("direct-empty", "direct-int", "nested-list", "nested-null"),
-)
-def test_reasoning_effort_telemetry_records_every_stripped_value(
-    request_payload,
-    expected_request,
-    expected_stripped,
-):
-    source = _source("src_efforttype", ("upstream-model",))
-    source.models[0].reasoning_efforts = ["high"]
-
-    result = ModelHubService._request_for_exact_reasoning_effort(
-        request_payload,
-        source,
-        "upstream-model",
-    )
-
-    assert result.request == expected_request
-    assert result.stripped_efforts == expected_stripped
-    assert result.declared_efforts == ("high",)
-
-
-def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
+def test_runtime_leaves_protocol_reasoning_validation_to_the_adapter(tmp_path):
     source = _source("src_effort004", ("upstream-model",))
     source.models[0].reasoning_efforts = ["high"]
     config = _config([source])
@@ -1136,7 +1019,7 @@ def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
 
     assert resolved.source_id == source.id
     assert adapter.invocation_requests[0]["reasoning_effort"] == "high"
-    assert adapter.invocation_requests[0]["reasoning"] == {"summary": "auto"}
+    assert adapter.invocation_requests[0]["reasoning"] == {"effort": "ultra", "summary": "auto"}
 
 
 def test_runtime_inherits_exact_passthrough_without_aliasing_api_inventory():
@@ -1995,7 +1878,7 @@ def test_credential_cleanup_settlement_has_one_durable_boundary():
     assert raw_cleanup_callers == {"_require_credential_cleanup"}
 
 
-def test_every_persisting_source_path_requires_response_backed_protocol_evidence():
+def test_source_admission_uses_explicit_owners_and_keeps_verified_paths_proven():
     from ast import AsyncFunctionDef, Attribute, Call, Name, parse, walk
     from pathlib import Path
 
@@ -2051,9 +1934,11 @@ def test_every_persisting_source_path_requires_response_backed_protocol_evidence
     assert "_require_proven_source_payload" in calls(
         migration_functions["apply_native_migration"]
     )
-    assert "_require_proven_observation" in calls(
-        service_functions["_create_oauth_source"]
-    )
+    oauth_calls = calls(service_functions["_create_oauth_source"])
+    assert "_observe_provisioned_credential" in oauth_calls
+    assert "_mark_source_unverified" in oauth_calls
+    assert "_mark_source_unverified" in calls(service_functions["create_source"])
+    assert "_mark_source_unverified" in calls(migration_functions["apply_native_migration"])
 
 
 def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):

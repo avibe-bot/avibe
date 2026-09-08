@@ -8,6 +8,7 @@ capability:
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
+    - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_local_deps.py
@@ -19,6 +20,7 @@ capability:
     - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
     - ui/src/components/settings/models/RouteChainDialog.test.tsx
     - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
+    - ui/src/components/settings/models/AgentCard.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
@@ -137,6 +139,15 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::finds an already-added model by its supplier and shows it as already added
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::asks which row a typed ID names as the ID it would be saved as
+  - id: MH-GATEWAY-STATUS-001
+    name: Gateway route coverage stays independent of Agent selections and attributes Agent issues below the catalog
+    status: covered
+    kind: presentation
+    layer: unit
+    test: "ui/src/components/settings/models/AgentCard.test.tsx::MH-GATEWAY-STATUS-001: keeps Agent issues in an expandable footer, outside the mode trigger in en"
+    related_tests:
+      - ui/src/components/settings/models/supply.test.ts
+      - ui/e2e/model-catalog/gateway-status.spec.ts
   - id: MH-SRC-DELETE-001
     name: Source deletion removes every reference while preserving survivor order
     status: covered
@@ -167,6 +178,9 @@ scenarios:
     kind: persistence
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reload
+    partial_evidence:
+      covers: Inventory gains refine inherited candidates without destructive confirmations or saved-intent changes in Hub and Direct modes
+      test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_refresh_refines_inherited_candidates_without_removing_saved_routes
   - id: MH-ROUTING-004
     name: Restore and undo previews are inert and committed restore deletes the override idempotently
     status: covered
@@ -313,6 +327,12 @@ scenarios:
     kind: lifecycle
     layer: unit
     test: tests/test_local_deps.py::test_reconcile_startup_dependencies_uses_automatic_runtime_admission
+  - id: MH-RUNTIME-009
+    name: Connected inference remains live until completion, transport failure, or owner cancellation
+    status: covered
+    kind: timeout_cancel
+    layer: contract
+    test: tests/test_model_hub_inference_wait.py::test_connected_inference_waits_for_its_owner
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered
@@ -572,11 +592,11 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_static_credential_failure_does_not_retry_or_claim_takeover
   - id: MH-EFFORT-001
-    name: An undeclared requested effort is omitted from the exact-hop request and the turn still completes
+    name: Unknown Source capability preserves requested reasoning intent
     status: covered
     kind: compatibility
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes
   - id: MH-TURN-RESULT-001
     name: All terminal outcomes are closed schema-valid provenance products
     status: covered
@@ -825,11 +845,11 @@ scenarios:
     owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D10
-    name: Stripped reasoning effort is attributed to the exact fallback attempt
+    name: Reasoning intent survives exact-provider fallback without strip telemetry
     status: assert
     kind: compatibility
     layer: e2e-auto
-    test: tests/e2e/test_model_hub_routing.py::test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop
+    test: tests/e2e/test_model_hub_routing.py::test_d10_reasoning_intent_survives_exact_provider_fallback
   - id: D11
     name: Claude token counting behavior is documented at the gateway
     status: skip
