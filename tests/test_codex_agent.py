@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.base import BaseAgent as RealBaseAgent
 from modules.agents.codex.transport import CodexRPCError
 
@@ -1269,6 +1270,38 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop_calls, [])
         self.assertIn("/tmp/work", agent._transports)
         self.assertEqual(cleared_turns, [])
+
+    async def test_silent_owned_codex_turn_survives_both_reclamation_checks(self):
+        for ownership_arrives_during_check in (False, True):
+            with self.subTest(ownership_arrives_during_check=ownership_arrives_during_check):
+                agent, stops, invalidated, cleared = self._make_evict_agent(
+                    active_turn="turn-1", last_activity=0.0,
+                )
+
+                def snapshot(disposition):
+                    return RuntimeTargetOwnershipSnapshot(
+                        backend="codex",
+                        resource_key="/tmp/work",
+                        activity_runtime_keys=(),
+                        sessions=(),
+                        sessionless_active_activity_ids=(),
+                        sessionless_fallback_run_ids=(),
+                        disposition=disposition,
+                    )
+
+                active = snapshot(SessionRuntimeDisposition.ACTIVE)
+                snapshots = (
+                    [snapshot(SessionRuntimeDisposition.RECLAIMABLE), active]
+                    if ownership_arrives_during_check else [active]
+                )
+                agent._runtime_ownership_snapshot_for_cwd = Mock(side_effect=snapshots)
+                with patch.object(_MODULE.time, "monotonic", return_value=1_000_000.0):
+                    self.assertEqual(await agent.evict_idle_transports(600), 0)
+                self.assertEqual(stops, [])
+                self.assertEqual(invalidated, [])
+                self.assertEqual(cleared, [])
+                self.assertEqual(agent._turn_registry.get_active_turn("session-1"), "turn-1")
+                agent.controller.emit_agent_message.assert_not_awaited()
 
     async def test_hfr_143_observable_session_progress_wins_locked_recheck(self):
         """HFR-143: attributable progress keeps a productive turn alive."""

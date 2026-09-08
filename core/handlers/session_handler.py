@@ -2433,24 +2433,12 @@ class SessionHandler(BaseHandler):
     ) -> int:
         """Disconnect Claude sessions that have been idle beyond the timeout.
 
-        A session is normally exempt from eviction while it is flagged
-        ``active`` (a turn is in flight). That veto is **not** absolute: if the
-        receiver coroutine never releases the flag (e.g. it stays alive but
-        blocked on ``receive_messages`` with no stream EOF), the session would
-        otherwise be pinned forever and its ``claude`` subprocess would survive
-        until the next service restart. As an independent backstop, a session
-        that is ``active`` but whose ``last_activity`` is older than
-        ``max(idle_timeout * stuck_active_multiplier,
-        stuck_active_floor_seconds)`` is force-evicted regardless of why the
-        flag was not cleared. A genuine in-flight turn keeps touching
-        ``last_activity`` via assistant/tool messages, so it normally stays well
-        under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
-        backstop. Caveat: a real turn whose single tool call runs silently for
-        longer than the cap is indistinguishable from a stuck session and would
-        be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
+        Durable Turn and Activity ownership always vetoes reclamation, even
+        during silent inference or tools. The age backstop repairs an
+        adapter-local active flag only after durable ownership independently
+        allows reclamation. Pass ``stuck_active_multiplier <= 0`` to disable
+        that stale-flag repair.
         """
-        from core.runtime_ownership import SessionRuntimeDisposition
-
         if idle_timeout <= 0:
             return 0
 
@@ -2506,13 +2494,11 @@ class SessionHandler(BaseHandler):
                 continue
             idle_for = now - last_activity
             if composite_key in self.active_sessions:
-                # Stuck-active backstop: only evict once well past the cap.
-                if stuck_threshold is not None and idle_for >= stuck_threshold:
-                    if ownership.disposition in {
-                        SessionRuntimeDisposition.TRANSITIONING,
-                        SessionRuntimeDisposition.UNKNOWN,
-                    }:
-                        continue
+                if (
+                    not ownership.blocks_reclamation
+                    and stuck_threshold is not None
+                    and idle_for >= stuck_threshold
+                ):
                     expired.append((composite_key, idle_for))
                 continue
             if not ownership.blocks_reclamation and idle_for >= idle_timeout:
@@ -2570,11 +2556,7 @@ class SessionHandler(BaseHandler):
                             allowed = bool(
                                 stuck_threshold is not None
                                 and recheck_idle >= stuck_threshold
-                                and ownership.disposition
-                                not in {
-                                    SessionRuntimeDisposition.TRANSITIONING,
-                                    SessionRuntimeDisposition.UNKNOWN,
-                                }
+                                and not ownership.blocks_reclamation
                             )
                         else:
                             allowed = bool(

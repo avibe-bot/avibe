@@ -169,7 +169,6 @@ def test_stream_prelude_replays_large_keepalive_history_before_output() -> None:
             wire_state=state,
             source=source,
             model_id="claude-sonnet-4-5",
-            timeout=1,
         )
         payload = b"".join([chunk async for chunk in prelude.chunks()])
         prelude.close()
@@ -570,12 +569,17 @@ def test_engine_error_projection_does_not_materialize_unrelated_payload(
     assert reads and all(size == client_module._STREAM_CHUNK_BYTES for size in reads)
 
 
-def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
+def test_stream_prelude_retains_metadata_until_model_output() -> None:
     async def run() -> None:
+        output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
+
         class Content:
+            reads = 0
+
             async def read(self, _size: int) -> bytes:
-                await asyncio.sleep(0.02)
-                return b": keepalive\n\n"
+                self.reads += 1
+                await asyncio.sleep(0)
+                return b": keepalive\n\n" if self.reads < 3 else output
 
         response = SimpleNamespace(content=Content(), status=200)
         source = SourceRecord(
@@ -591,17 +595,22 @@ def test_stream_prelude_uses_one_absolute_pre_output_deadline() -> None:
         prelude = client_module._StreamPrelude(memory_limit=64)
         state = client_module.ProtocolSSEState("anthropic")
 
-        with pytest.raises(asyncio.TimeoutError):
-            await client_module._read_stream_prelude(
+        try:
+            outcome = await client_module._read_stream_prelude(
                 response=response,
                 first=b": first\n\n",
                 prelude=prelude,
                 wire_state=state,
                 source=source,
                 model_id="claude-sonnet-4-5",
-                timeout=0.01,
             )
-        prelude.close()
+            assert outcome is None
+            assert state.model_output_started
+            assert b"".join([chunk async for chunk in prelude.chunks()]) == (
+                b": first\n\n" + b": keepalive\n\n" * 2 + output
+            )
+        finally:
+            prelude.close()
 
     asyncio.run(run())
 
@@ -6021,39 +6030,21 @@ def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope()
     assert candidates == ("api_error",)
 
 
-@pytest.mark.parametrize(
-    ("phase", "stream", "expected_kind", "expected_status", "stream_started"),
-    [
-        ("first_byte", True, RawOutcomeKind.TIMEOUT, None, False),
-        ("error_body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
-        ("non_stream", False, RawOutcomeKind.TIMEOUT, 200, False),
-    ],
-)
-def test_engine_client_times_out_before_completion(
+def test_engine_client_bounds_reading_an_already_failed_response(
     monkeypatch: pytest.MonkeyPatch,
-    phase: str,
-    stream: bool,
-    expected_kind: RawOutcomeKind,
-    expected_status: int | None,
-    stream_started: bool,
 ) -> None:
     async def run() -> None:
         blocked_phase = asyncio.Event()
         never_release = asyncio.Event()
 
         class Content:
-            reads = 0
-
             async def read(self, _size: int) -> bytes:
-                self.reads += 1
-                if phase == "non_stream" and self.reads == 1:
-                    return b"{"
                 blocked_phase.set()
                 await never_release.wait()
                 return b""
 
         class Response:
-            status = 429 if phase == "error_body" else 200
+            status = 429
             content = Content()
             headers = {"Content-Type": "text/event-stream"}
 
@@ -6085,15 +6076,15 @@ def test_engine_client_times_out_before_completion(
             source,
             "model-a",
             {},
-            stream=stream,
+            stream=True,
         )
 
         assert blocked_phase.is_set()
         assert handle.stream is None
         outcome = await handle.outcome()
-        assert outcome.kind is expected_kind
-        assert outcome.http_status == expected_status
-        assert outcome.stream_started is stream_started
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.http_status == 429
+        assert outcome.stream_started is False
 
     asyncio.run(run())
 

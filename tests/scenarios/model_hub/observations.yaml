@@ -1,6 +1,11 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-008
+    source: local-codex-gateway-investigation-2026-09-08
+    summary: A shared transport budget also limited response headers, first bytes, first model output, and buffered inference completion. Prior tests explicitly required these premature timeouts. Delayed loopback HTTP fixtures now assert completion and cancellation across all supported protocols independently of the connection budget.
+    affects:
+      - MH-RUNTIME-009
   - id: MH-OBS-007
     source: opencode-1.18.18-codex-0.153.2-local-http-regression-2026-09-06
     summary: OpenCode inline config deep-merges provider and model headers, allowing native Authorization headers to replace the Hub token even when baseURL and apiKey are pinned. The managed runtime config hook must replace complete Hub provider definitions. Codex native and same-name provider fixtures retained the configured Source credential and upstream model on the wire.

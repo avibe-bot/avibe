@@ -1342,10 +1342,7 @@ class CodexAgent(BaseAgent):
                 and not has_active
                 and idle_for >= idle_timeout
             )
-            stuck_candidate = bool(stuck_sessions) and ownership.disposition not in {
-                SessionRuntimeDisposition.TRANSITIONING,
-                SessionRuntimeDisposition.UNKNOWN,
-            }
+            stuck_candidate = bool(stuck_sessions) and not ownership.blocks_reclamation
             if not ordinary_candidate and not stuck_candidate:
                 continue
 
@@ -1367,12 +1364,10 @@ class CodexAgent(BaseAgent):
                     now=current_now,
                     cap=stuck_active_cap,
                 )
-                if ownership.disposition in {
-                    SessionRuntimeDisposition.TRANSITIONING,
-                    SessionRuntimeDisposition.UNKNOWN,
-                }:
-                    continue
-                if ownership.blocks_reclamation and not stuck_sessions:
+                # Silence cannot revoke a durable Turn or Activity owner.
+                # The age backstop only repairs stale adapter-local flags once
+                # durable ownership independently allows reclamation.
+                if ownership.blocks_reclamation:
                     continue
 
                 settled_stuck_sessions: set[str] = set()
@@ -1511,13 +1506,11 @@ class CodexAgent(BaseAgent):
             release(context)
 
     def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
-        """Idle cap after which an *active* transport is force-evicted.
+        """Age threshold for repairing an unowned adapter-local active flag.
 
         Returns ``None`` when the backstop is disabled (multiplier <= 0), in
-        which case an active turn remains an absolute veto. Otherwise a
-        transport with an active turn is force-evicted once it has been idle for
-        ``max(idle_timeout * multiplier, floor)`` — the floor keeps the window
-        sane even when ``idle_timeout`` is configured very small.
+        which case an active flag remains an absolute veto. Durable ownership
+        always vetoes reclamation regardless of this threshold.
         """
         multiplier = DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
         if multiplier <= 0:

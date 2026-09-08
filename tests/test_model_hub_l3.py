@@ -2885,6 +2885,128 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("already_cooling", [False, True])
+@pytest.mark.parametrize("ending", ["recover", "fail", "config_change", "cancel"])
+@pytest.mark.parametrize(
+    ("backend", "endpoint", "protocol"),
+    [
+        ("codex", "responses", "openai_responses"),
+        ("claude", "messages", "anthropic"),
+        ("opencode", "chat/completions", "openai_chat"),
+    ],
+)
+def test_gateway_cooldown_is_one_cancellable_retry(
+    tmp_path: Path,
+    already_cooling: bool,
+    ending: str,
+    backend: str,
+    endpoint: str,
+    protocol: str,
+) -> None:
+    """MH-RUNTIME-009: known recovery, not caller retry speed, owns cooldown waiting."""
+
+    async def exercise() -> None:
+        source = _source(
+            "src_retrycool01",
+            "Recovering",
+            status="cooldown" if already_cooling else "standby",
+            retry_at=(NOW + timedelta(seconds=30)).isoformat() if already_cooling else None,
+            vendor="anthropic" if backend == "claude" else "openai",
+            protocol=protocol,
+        )
+        failure = _outcome(RawOutcomeKind.HTTP_ERROR, status=503, source_id=source.id)
+        final = failure if ending == "fail" else _outcome(RawOutcomeKind.SUCCESS, source_id=source.id)
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=([failure] if not already_cooling else []) + [final],
+        )
+        fixed = _canonicalize_fixed_test_routes(service)
+        model = fixed[backend] if backend in fixed else "shared-model"
+        payload = {"model": "shared-model", "stream": False}
+        if endpoint == "responses":
+            payload["input"] = "ping"
+        else:
+            payload["messages"] = [{"role": "user", "content": "ping"}]
+        clock = {"now": NOW}
+        service.now = lambda: clock["now"]
+        gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
+        waiting = asyncio.Event()
+        release = asyncio.Event()
+        wait_ended = asyncio.Event()
+        delays = []
+
+        async def wait_for_recovery(delay: float) -> None:
+            delays.append(delay)
+            waiting.set()
+            try:
+                await release.wait()
+                clock["now"] += timedelta(seconds=delay)
+            finally:
+                wait_ended.set()
+
+        base_url, token = await gateway.endpoint(
+            backend,
+            process_scope="/repo",
+            turn_id="turn_cooldown_retry",
+            requested_model_id=model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+                async with aiohttp.ClientSession(trust_env=False) as client:
+                    if not already_cooling:
+                        first = await client.post(
+                            f"{base_url}/v1/{endpoint}",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                        await first.read()
+                        assert first.status == 503
+                        assert first.headers["Retry-After"] == "30"
+                    request = asyncio.create_task(client.post(
+                        f"{base_url}/v1/{endpoint}",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {token}"},
+                    ))
+                    try:
+                        await asyncio.wait_for(waiting.wait(), timeout=2)
+                        assert not request.done()
+                        assert len(service.adapter.invocations) == (0 if already_cooling else 1)
+                        if ending == "cancel":
+                            request.cancel()
+                            with pytest.raises(asyncio.CancelledError):
+                                await request
+                            await asyncio.wait_for(wait_ended.wait(), timeout=2)
+                        else:
+                            if ending == "config_change":
+                                service.store.config.sources[0].state = ModelHubSourceStateConfig(
+                                    status="needs_action",
+                                    detail_key="models.source.needs_action.credential_revoked",
+                                )
+                            release.set()
+                            response = await asyncio.wait_for(request, timeout=2)
+                            await response.read()
+                            assert response.status == {"recover": 200, "fail": 503, "config_change": 409}[ending]
+                            if ending == "fail":
+                                assert response.headers["Retry-After"] == "30"
+                            else:
+                                assert "Retry-After" not in response.headers
+                        assert delays == [30.0]
+                        expected = (0 if already_cooling else 1) + (ending in {"recover", "fail"})
+                        assert len(service.adapter.invocations) == expected
+                    finally:
+                        if not request.done():
+                            request.cancel()
+                        await asyncio.gather(request, return_exceptions=True)
+        finally:
+            release.set()
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_exhaustion_uses_no_time_copy_when_an_earlier_hop_recovers(
     tmp_path: Path,
 ) -> None:
