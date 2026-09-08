@@ -28,10 +28,11 @@ export const badgeVariants = cva(
   }
 );
 
-// Native buttons styled as badges remain compact on desktop, but every mobile
-// projection needs a complete touch target rather than the visual chip alone.
+// Keep the painted badge compact on every screen. On mobile, a transparent
+// pseudo-element expands the native button's hit area without stretching its
+// border/background or the surrounding layout. Consumers must leave room for it.
 export const interactiveBadgeTriggerClassName =
-  'min-h-11 min-w-11 cursor-pointer justify-center md:min-h-0 md:min-w-0';
+  "relative cursor-pointer justify-center before:absolute before:left-1/2 before:top-1/2 before:h-full before:min-h-11 before:w-full before:min-w-11 before:-translate-x-1/2 before:-translate-y-1/2 before:content-[''] md:before:hidden";
 
 // Mobile badge popovers sit below shell headers and must reserve the notch area
 // in both their origin and their available height.
