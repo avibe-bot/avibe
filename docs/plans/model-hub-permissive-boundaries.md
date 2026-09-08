@@ -4,14 +4,19 @@
 
 Owner approval on 2026-09-09 authorizes implementation and parallel Codex
 delegation following the preceding request-path audit. The user-started Session
-remains the orchestrator and final reviewer. This is not authorization to merge,
-publish an engine or application release, deploy, update/restart the running
-local Avibe, mutate user configuration, or advance the primary checkout.
+remains the orchestrator and final reviewer. On 2026-09-09 at 04:11 +08
+(2026-09-08 at 20:11 UTC), the owner superseded the initial combined-PR plan:
+each lane must submit its own PR and merge after its delivery gates pass.
+The orchestrator owns final gate verification and merge execution. This does
+not authorize publishing an engine or application release, deploying,
+updating/restarting the running local Avibe, mutating user configuration, or
+advancing the primary checkout.
 
 Implementation starts from default-branch commit
 `e4924db41bcbf37581cda08cf1376a899e70906c`. Independent lanes share this committed
-contract before they branch. Avibe changes integrate into one task branch and
-one normally reviewed PR; no lane stacks a PR on an unmerged peer.
+contract before they branch. Each lane now delivers one independent Avibe PR
+against the current default branch; no lane stacks a PR on an unmerged peer.
+The combined task branch is retained only as integration-test evidence.
 
 ## Evidence and goal
 
@@ -96,13 +101,16 @@ authentication and exact Source/model binding must remain unchanged.
 - **Engine lane:** owns exact-pinned-source diagnosis and a reproducible
   hermetic wire/build proposal first; policy edits, publication, and a manifest
   change are separate decisions.
-- **Orchestrator:** owns this plan, integration branch, final review, combined
-  validation, PR submission, durable PR/CI observation, and close-out.
+- **Orchestrator:** owns this plan, cross-lane validation, independent PR/CI
+  observation, final review, guarded merge execution, and user-facing close-out.
 
-Lane commits remain local until integrated. Lanes must not push, open PRs,
-merge, create release tags/assets, deploy, or edit a peer's worktree. Each lane
-returns a stable Session/Run ID, commit SHA, tests actually run, known gaps, and
-any contract decision required. A callback is evidence to inspect, not approval.
+Each lane may push its assigned branch, open its own non-draft PR, and follow
+review/CI with one durable combined Watch. It must immediately return the PR,
+exact head, Watch/state, review inventory, tests, and known gaps to the
+orchestrator, who arms a separate gate Watch and independently inspects evidence.
+Lanes must not merge, create release tags/assets, deploy, or edit peers. The
+orchestrator executes the owner's gated merge authorization after all checks
+hold together. A callback is evidence to inspect, not proof of readiness.
 
 ## Acceptance
 
@@ -124,13 +132,41 @@ any contract decision required. A callback is evidence to inspect, not approval.
   TypeScript and build. Use only isolated fixtures/local regression targets.
 - Require current-head Codex pass, all expected CI jobs, and zero unresolved
   paginated threads. Record findings-bearing heads/root causes before edits;
-  enforce the review circuit breaker. No automatic merge authorization exists.
+  enforce the review circuit breaker. Before merging, the orchestrator must
+  also verify an open non-draft PR, CLEAN merge state, no running/queued lane
+  edits, and every merge gate in one fail-closed conditional, using the exact
+  validated head. Authorization does not permit skipping a gate.
 
 ## Decisions and status
 
 - Initial decision: implement the 128 MiB compatibility boundary, not unlimited
   buffering; investigate the identifier and engine seams before choosing edits.
 - Initial findings-bearing review heads: zero. No PR has been submitted yet.
+
+### Independent delivery allocation
+
+The four PRs own disjoint product concerns: A owns the gateway and request-budget
+scenario registration; B owns capability/limit projection and its CLI scenario
+registration; C owns identifier admission/discovery/UI plus the integration
+guard correction and qualified usage scenario descriptions; D owns the inactive
+exact-base engine patch, recipe, and consuming evidence. Each carries the same
+orchestrator-owned shared contract. Lane-specific assessments must describe
+independent delivery rather than the superseded combined-PR plan.
+
+Merge landed default-branch changes normally into each task branch before
+submission. Do not cherry-pick another lane's product changes or count the
+combined branch's tests as exact-head PR evidence. Recheck shared scenario IDs
+and catalog entries after each earlier PR lands. Subsequent gate evaluations
+remain exact-head and must inspect all paginated reviews/threads and every lint
+run, including old unresolved findings. Repeated root-cause classes are escalated
+to this same orchestrator before another edit/push; they do not automatically
+require another owner decision.
+
+Keep separate original durable lane and orchestrator gate Watch states across
+all rounds. Do not merge or remove a lane Watch merely because a callback reports
+green tests. After GitHub confirms a guarded merge, report that PR's result to
+the owner before removing its observation. Completed historical PR authority
+and Watches are not reused.
 
 ### Capability and launch-limit decision (2026-09-09)
 
