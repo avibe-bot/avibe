@@ -381,11 +381,18 @@ turn ends because you armed a watch and are waiting, say exactly that.
 
 ## 5a. User-facing next-action buttons
 
-In the orchestrator's final user-facing response, offer the next choice as a
-real quick-reply button. Use Avibe's existing trailing `---` and `[label]`
-syntax from `core/prompts/quick-replies.md`, at the very end of the message and
-outside code fences. Never append this block to GitHub comments or internal
-lane reports. Name the repository, target PR, and reviewed head in the report.
+In the orchestrator's final user-facing response, offer the next choice using
+the destination's actual delivery capability and reply-enhancement settings.
+When quick replies are supported and enabled, use Avibe's existing trailing
+`---` and `[label]` syntax from `core/prompts/quick-replies.md`, at the very end
+of the message and outside code fences. If support is absent, disabled, or
+unknown, provide the same choices as ordinary visible prose, including the PR
+URL in each suggested reply. Do not use a trailing bracket row or separator in
+that fallback: the parser can remove a button block even when the destination
+cannot render it. Apply this capability check to every action below, using
+the existing delivery configuration rather than a list of platform names.
+Never append these action offers to GitHub comments or internal lane reports.
+Name the repository, target PR, and reviewed head in the user-facing report.
 
 Use the user's conversation language, defaulting to English when unknown, and
 honor explicitly requested labels. These are the exact Chinese labels; English
@@ -441,10 +448,16 @@ or change the requested labels to work around this transport limitation.
   binding the click and rechecking `MERGED`, follow `docs/regression/README.md`:
   fetch `origin`, fast-forward the **primary default-branch checkout** with
   `--ff-only`, and verify it is on `master` at the fetched `origin/master` SHA.
-  Its tracked and untracked source files must be clean before deployment. Never
-  discard, stash, or commit unrelated user edits to achieve this; report the
-  blocker instead. Fetching alone does not update a task worktree, and the
-  runner synchronizes its invoking checkout, including dirty source files.
+  Before any environment mutation, verify that the actual deployable input of
+  `sync_source()` matches that selected Git tree under the runner's sender
+  exclusions. This includes ignored deployable files: Git ignore rules do not
+  govern rsync. Inspect the real input set, not just tracked/untracked status;
+  a clean `git status` or a receipt with `dirty=false` is not proof. Only paths
+  actually excluded by the runner are outside this source check. If the input
+  differs or the match cannot be established, stop and report the blocker.
+  Never discard, stash, or commit unrelated user edits to make it pass.
+  Fetching alone does not update a task worktree, and the runner synchronizes
+  its invoking checkout, including local source overrides.
 
   Run `python3 scripts/incus_regression.py up --target master --reset-mode none`
   with the working directory set to that verified primary checkout, targeting
