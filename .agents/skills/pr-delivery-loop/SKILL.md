@@ -456,17 +456,37 @@ or change the requested labels to work around this transport limitation.
   actually excluded by the runner are outside this source check. If the input
   differs or the match cannot be established, stop and report the blocker.
   Never discard, stash, or commit unrelated user edits to make it pass.
+  Keep that verified input unchanged throughout the update.
   Fetching alone does not update a task worktree, and the runner synchronizes
   its invoking checkout, including local source overrides.
 
-  Run `python3 scripts/incus_regression.py up --target master --reset-mode none`
-  with the working directory set to that verified primary checkout, targeting
-  the persistent **local** master environment (`avr-master` / `avibe-master`
-  by default), not a temporary worktree environment. Use the documented local
-  Lima route on macOS. Preserve the environment's product state, credentials,
-  pairing, and sessions; neither button authorizes a state reset. Verify the
-  deployment receipt and served source commit match the intended master SHA
-  before reporting success or starting the second choice's end-to-end checks.
+  Confirm the persistent **local** master environment (`avr-master` /
+  `avibe-master` by default), its product config, and its runtime environment
+  file already exist. Missing or unreadable state is a blocker, not permission
+  to provision or re-seed it. From the verified primary checkout, use:
+
+  ```bash
+  python3 scripts/incus_regression.py up --target master --reset-mode none --clean --env-file /dev/null
+  ```
+
+  Use the documented local Lima route on macOS. Preserve the existing local
+  bind/port settings explicitly when they differ from the runner defaults.
+  For this existing-target path, `--env-file /dev/null` suppresses automatic
+  `.env.regression` discovery and leaves `/etc/avibe-regression.env` untouched.
+  `--reset-mode none` alone does not prevent that file from being rewritten;
+  an empty regular env file still triggers a rewrite and is not a substitute.
+  If the checked-out runner cannot preserve the runtime environment this way,
+  stop before mutation. Neither button authorizes credential changes or a
+  product-state reset. Preserve pairing, agent homes, and persistent sessions.
+
+  `--clean` replaces the disposable synced source and generated build tree,
+  not product state or the runtime environment. It forces receiver content
+  reconciliation even when stale bytes have the same size and mtime; a normal
+  rsync quick check plus a commit receipt cannot establish that property.
+  Let the runner rebuild its assets, then verify the deployment receipt and
+  served source commit match the intended master SHA, and that the runtime
+  environment is unchanged without exposing its values, before reporting
+  success or starting the second choice's end-to-end checks.
   Report the environment, deployed commit, and actual verification results;
   a healthy service alone is not an end-to-end pass.
 
