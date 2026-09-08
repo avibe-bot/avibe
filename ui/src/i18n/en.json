@@ -437,10 +437,6 @@
           "label": "Node.js",
           "detail": "Shared prerequisite for the runtimes above."
         },
-        "memory-package": {
-          "label": "Memory Python package",
-          "detail": "Optional Memory implementation matched to this Avibe release."
-        },
         "memory-runtime": {
           "label": "Memory runtime",
           "detail": "Runs local memory distillation and search on your machine."
@@ -4617,7 +4613,7 @@
     },
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
-      "runtimeRequiredHint": "Install or repair the Memory runtime from Dependencies. You can still disable Memory or delete stored data below."
+      "runtimeRequiredHint": "Install the Memory runtime from Dependencies, then return here to configure and use Memory."
     },
     "tabs": {
       "processingRecord": "Processing Record",

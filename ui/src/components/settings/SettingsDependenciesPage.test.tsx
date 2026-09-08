@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   getMemoryStatus: vi.fn(),
   installDependency: vi.fn(),
   listDependencies: vi.fn(),
+  wakeMemory: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
 
@@ -53,7 +54,9 @@ const stubDependencies = (response: DependenciesResult) => {
     ...response,
     deps: (ids ?? response.deps.map((dep) => dep.id)).map((id) => (
       response.deps.find((dep) => dep.id === id)
-      ?? { id, kind: 'runtime', required: null, installed: null, version: null, status: 'unknown', action_class: 'none' }
+      ?? (id === 'memory-package' && response.deps.some((dep) => dep.id === 'memory-runtime')
+        ? dependency({ id, action_class: 'none' })
+        : { id, kind: 'runtime', required: null, installed: null, version: null, status: 'unknown', action_class: 'none' })
     )),
   }));
 };
@@ -74,6 +77,7 @@ beforeEach(() => {
     health: null,
   });
   api.installDependency.mockResolvedValue({ ok: true });
+  api.wakeMemory.mockResolvedValue({ ok: true, state: 'running' });
 });
 
 afterEach(() => {
@@ -214,6 +218,20 @@ describe('SettingsDependenciesPage independent checks', () => {
 });
 
 describe('SettingsDependenciesPage Memory runtime', () => {
+  it('presents both installed components as one Memory runtime entry', async () => {
+    stubDependencies({ ok: true, deps: [
+      dependency({ id: 'memory-package', version: '3.0.15', action_class: 'none' }),
+      dependency({ version: '1.2.3', action_class: 'none' }),
+    ] });
+    renderPage();
+
+    expect(await screen.findByText('settings.dependencies.statusReady · v1.2.3')).toBeTruthy();
+    expect(screen.getAllByText('settings.dependencies.items.memory-runtime.label')).toHaveLength(1);
+    expect(screen.queryByText('settings.dependencies.items.memory-package.label')).toBeNull();
+    expect(screen.queryByText(/v3\.0\.15/)).toBeNull();
+    expect(screen.getByRole('link', { name: /common.configure/ }).getAttribute('href')).toBe('/settings/memory');
+  });
+
   it('does not let an older sidecar read override the current repair guard', async () => {
     let finish!: (value: MemoryStatusResult) => void;
     api.getMemoryStatus.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
@@ -285,7 +303,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     });
     renderPage();
 
-    expect(await screen.findByText('settings.dependencies.statusSourceManaged')).toBeTruthy();
+    await screen.findByText('settings.dependencies.memoryPackageSourceManaged');
     expect(screen.getByText('settings.dependencies.statusError').className).toContain('destructive');
     expect(screen.getByRole('alert').textContent).toBe(`errors.${reason}`);
     expect(api.installDependency).not.toHaveBeenCalled();
@@ -315,7 +333,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     expect(api.installDependency).not.toHaveBeenCalled();
   });
 
-  it('routes repairable Python package bootstrap through its own dependency action', async () => {
+  it('routes the single Memory entry to package bootstrap before runtime installation', async () => {
     stubDependencies({
       ok: true,
       deps: [dependency({
@@ -332,6 +350,9 @@ describe('SettingsDependenciesPage Memory runtime', () => {
 
     await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('memory-package'));
     expect(api.installDependency).not.toHaveBeenCalledWith('memory-runtime');
+    expect(screen.getAllByText('settings.dependencies.items.memory-runtime.label')).toHaveLength(1);
+    expect(screen.queryByText('settings.dependencies.items.memory-package.label')).toBeNull();
+    expect(screen.queryByRole('link', { name: /common.configure/ })).toBeNull();
   });
 
   it('hides package bootstrap while Memory is not required', async () => {
@@ -363,7 +384,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     });
     renderPage();
 
-    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.reinstall' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.repair' }));
 
     await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('memory-package'));
   });
@@ -402,8 +423,24 @@ describe('SettingsDependenciesPage Memory runtime', () => {
       'getMemoryStatus',
       'installDependency',
       'listDependencies',
+      'wakeMemory',
     ]);
   });
+
+  it.each(['starting', 'running', 'degraded'] as const)(
+    'keeps missing-runtime recovery reachable from Dependencies while Memory is %s',
+    async (state) => {
+      stubDependencies({ ok: true, deps: [dependency({ installed: false, status: 'missing', action_class: 'repairable' })] });
+      api.getMemoryStatus.mockResolvedValue({ status: 'ok', state });
+      renderPage();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.retryButton' }));
+
+      await waitFor(() => expect(api.wakeMemory).toHaveBeenCalledOnce());
+      expect(api.installDependency).not.toHaveBeenCalled();
+      expect(screen.queryByText('settings.dependencies.memoryRuntimeDisableBeforeRepair')).toBeNull();
+    },
+  );
 
   it('renders a persisted preparation reason on initial page load', async () => {
     stubDependencies({

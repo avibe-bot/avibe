@@ -20,6 +20,21 @@ export const memoryPackageIsSourceManaged = (
   && dependency.reason === 'memory_package_source_build'
 );
 
+/** One Memory entry surfaces the prerequisite that currently needs attention. */
+export const memoryDependencyForDisplay = (
+  memoryPackage: DependencyItem | null,
+  memoryRuntime: DependencyItem | null,
+): DependencyItem | null => {
+  if (memoryPackage && !memoryPackageIsSourceManaged(memoryPackage)
+    && !['ready', 'not_required'].includes(memoryPackage.status)) {
+    return memoryPackage;
+  }
+  if (memoryRuntime && !['not_required', 'unknown'].includes(memoryRuntime.status)) {
+    return memoryRuntime;
+  }
+  return memoryPackage ?? memoryRuntime;
+};
+
 export const dependencyHasInstallAction = (
   dependency: Pick<DependencyItem, 'id' | 'status' | 'action_class'>,
 ): boolean => {

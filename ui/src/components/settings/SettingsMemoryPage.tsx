@@ -51,6 +51,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [repairing, setRepairing] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
+  const [dependencyLoaded, setDependencyLoaded] = useState(false);
   const [repairError, setRepairError] = useState<string | null>(null);
   const [deleteResult, setDeleteResult] = useState<MemoryDataOperationResult | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
@@ -107,6 +108,8 @@ export const SettingsMemoryPage: React.FC = () => {
       }
     } catch {
       setRuntimeInstalled(true);
+    } finally {
+      setDependencyLoaded(true);
     }
   }, [api]);
 
@@ -200,7 +203,7 @@ export const SettingsMemoryPage: React.FC = () => {
     ...(canAdminister ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }] : []),
   ], [canAdminister, t]);
   const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'processingRecord';
-  const runtimeAction = !remoteUnavailable && canAdminister && settings?.enabled === true
+  const runtimeAction = dependencyLoaded && runtimeInstalled !== false && !remoteUnavailable && canAdminister && settings?.enabled === true
     ? runtimeState === 'degraded' ? (
         <Button variant="secondary" size="xs" onClick={() => void runMemoryRuntimeAction()} disabled={mutationBusy}>
           {waking ? <Loader2 className="animate-spin" /> : <RotateCw />}
@@ -281,7 +284,21 @@ export const SettingsMemoryPage: React.FC = () => {
           <span className="text-[14px] font-semibold text-foreground">{t('memory.remoteUnavailable.title')}</span>
           <span className="max-w-md text-[12.5px] text-muted">{t('memory.remoteUnavailable.description')}</span>
         </div>
-      ) : !settings ? (
+      ) : dependencyLoaded && runtimeInstalled === false ? (
+        <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
+          <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+            <Brain className="size-4 text-violet-ink" />
+            {t('memory.setup.runtimeRequired')}
+          </div>
+          <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
+          <Button asChild variant="secondary" size="sm">
+            <Link to="/settings/dependencies">
+              {t('memory.settings.goToDependencies')}
+              <ArrowUpRight className="size-3.5" />
+            </Link>
+          </Button>
+        </div>
+      ) : !dependencyLoaded || !settings ? (
         settingsRead.error ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{settingsRead.error}</div>
         ) : (
@@ -292,21 +309,6 @@ export const SettingsMemoryPage: React.FC = () => {
         )
       ) : (
         <>
-          {runtimeInstalled === false ? (
-            <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
-              <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-                <Brain className="size-4 text-violet-ink" />
-                {t('memory.setup.runtimeRequired')}
-              </div>
-              <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
-              <Button asChild variant="secondary" size="sm">
-                <Link to="/settings/dependencies">
-                  {t('memory.settings.goToDependencies')}
-                  <ArrowUpRight className="size-3.5" />
-                </Link>
-              </Button>
-            </div>
-          ) : null}
           <div data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1">
             <div className="min-w-max">
               <SegmentedRadio value={activeTab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
