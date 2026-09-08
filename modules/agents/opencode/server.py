@@ -2625,6 +2625,12 @@ class OpenCodeServerManager:
             return {}
         return agent_config
 
+    def get_explicit_subagent_model(self, agent_name: str) -> Optional[str]:
+        """Read only the selected subagent's own model, never a native default."""
+        config = self._load_opencode_user_config() or {}
+        model = self._get_agent_config(config, agent_name).get("model")
+        return (model.strip() or None) if isinstance(model, str) else None
+
     def get_agent_reasoning_effort_from_config(self, agent_name: Optional[str]) -> Optional[str]:
         """Read agent's reasoningEffort from user's opencode.json config file."""
 
@@ -2664,6 +2670,5 @@ class OpenCodeServerManager:
 
         # OpenCode doesn't have an explicit "default agent" config field.
         # Users can override via channel settings.
-        # Default to "build" agent which uses the agent's configured model,
-        # avoiding fallback to global model which may use restricted credentials.
+        # Default to the native "build" agent; Avibe supplies its model explicitly.
         return "build"

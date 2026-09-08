@@ -617,8 +617,19 @@ class AgentAuthService:
         if callable(get_overrides):
             _, override_model, _ = get_overrides(context)
 
+        if not override_model:
+            resolve_agent = getattr(self.controller, "resolve_vibe_agent_for_context", None)
+            if callable(resolve_agent):
+                agent = resolve_agent(context, required=False)
+                if agent is not None and agent.backend == "opencode":
+                    override_model = agent.model
+
         if isinstance(override_model, str) and "/" in override_model:
             return override_model.split("/", 1)[0]
+
+        configured_provider = getattr(self._resolve_backend_config("opencode"), "default_provider", None)
+        if isinstance(configured_provider, str) and configured_provider.strip():
+            return configured_provider.strip()
 
         agent_service = getattr(self.controller, "agent_service", None)
         opencode_agent = getattr(agent_service, "agents", {}).get("opencode") if agent_service else None
