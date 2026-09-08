@@ -8,6 +8,8 @@ for (const lang of ['en', 'zh'] as const) {
     await page.goto('/e2e/model-provider/fixture.html?lang=' + lang);
     await expect(page.getByText('Example relay', { exact: true })).toBeVisible();
     await expect(page.getByText('high', { exact: true })).toHaveCount(0);
+    await expect(page.locator('[data-tier-provenance]')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Advanced settings|高级设置/ })).toHaveCount(0);
     await page.getByRole('button', { name: 'Add provider fixture' }).click();
     await page.getByRole('textbox', { name: 'Base URL', exact: true }).fill('https://relay.example/v1');
     await page.getByLabel(text('addKey.field.apiKey'), { exact: true }).fill('fixture-placeholder');
@@ -25,10 +27,12 @@ for (const lang of ['en', 'zh'] as const) {
     await page.getByRole('button', { name: lang === 'en' ? 'Close' : '关闭', exact: true }).first().click();
     await page.getByRole('button', { name: text('sourceDetail.action.addModel'), exact: true }).click();
     await page.getByPlaceholder(text('sourceDetail.col.id'), { exact: true }).fill('manual-model');
+    await expect(page.locator('[data-manual-model-draft]').getByRole('textbox')).toHaveCount(1);
+    await page.locator('.model-hub-source-detail').screenshot({ path: info.outputPath('manual-model.png') });
     await page.getByRole('button', { name: text('sourceDetail.action.addModel'), exact: true }).last().click();
     await expect(page.getByText('manual-model', { exact: true })).toBeVisible();
     expect(await page.getByTestId('calls').textContent()).not.toContain('refetch');
-    await page.screenshot({ path: info.outputPath('inventory.png') });
+    await page.locator('.model-hub-source-detail').screenshot({ path: info.outputPath('inventory.png') });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 

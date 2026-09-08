@@ -1004,10 +1004,10 @@ def test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown(
             )
 
 
-def test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop(
+def test_d10_reasoning_intent_survives_exact_provider_fallback(
     tmp_path,
 ) -> None:
-    """D10: the per-turn gateway records the exact hop whose effort it strips."""
+    """D10: provider fallback preserves intent without inventing strip telemetry."""
 
     async def exercise() -> None:
         first = source(
@@ -1044,7 +1044,7 @@ def test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop(
         )
         service = service_for(tmp_path, MemoryModelHubStore(config), adapter)
         gateway = ModelHubTurnGateway(service)
-        turn_id = "turn_d10_strip"
+        turn_id = "turn_d10_intent"
         base_url, token = await gateway.endpoint(
             "codex",
             process_scope="/repo",
@@ -1074,7 +1074,10 @@ def test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop(
             "effort": "high",
             "summary": "auto",
         }
-        assert adapter.requests[1]["reasoning"] == {"summary": "auto"}
+        assert adapter.requests[1]["reasoning"] == {
+            "effort": "high",
+            "summary": "auto",
+        }
         gateway.correlation.settle(
             turn_id,
             settled_by=SETTLED_BY_TERMINAL_RESULT,
@@ -1087,8 +1090,6 @@ def test_d10_strip_is_forwarded_and_persisted_for_the_exact_fallback_hop(
             "source_id": second.id,
             "configured_model_id": "relay-model",
             "channel": "hub",
-            "stripped_reasoning_efforts": ["high"],
-            "declared_reasoning_efforts": [],
         }
 
     asyncio.run(exercise())

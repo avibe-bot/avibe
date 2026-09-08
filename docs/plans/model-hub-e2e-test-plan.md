@@ -52,7 +52,7 @@ Out of scope (documented, not dropped silently):
 | B7 | sole owned default source + exact one-hop manual route, verified by reads → delete source → guard 409 → echo plan → force | actual inherited supply gap; impact report lists interrupted agents; malformed echo rejected; canonical route and exact captured default order restored independently (only the owned deleted ID may be omitted) | assert |
 | B8 | force transport asymmetry (`?force=` vs body) | document current split (B6 issue); decide normalization | baseline |
 | B9 | refetch after upstream inventory change | added/removed diff; **`discovered_at` preserved for pre-existing models** (currently overwritten — fix-first, see B-list) | fix-first |
-| B10 | open Advanced settings, inspect catalog-managed tiers; edit user/null tiers; reload a v6 row and refresh | default inventory hides capability details; advanced catalog edits return 409 `source_model_tiers_managed` with exact provenance; user tiers remain editable; refresh restores catalog truth and emits one redacted override event | assert |
+| B10 | inspect provider inventory and add/remove a manual model | no reasoning column, provenance badge, tier editor or empty advanced toggle; manual creation needs only a model ID. Compatibility API tests retain existing metadata ownership coverage | assert |
 | B11 | trigger each of: `mapping_target_unavailable`, `runtime_in_use`, `source_nonce_conflict`, `reauth_confirmation_required`, `turn_not_found` | UI renders human copy, never the raw `modelHub.errors.*` string (B1 — fix-first; baseline expected-fail) | fix-first |
 
 ### C. OAuth lifecycle (C30–C40, partial by §1)
@@ -75,7 +75,7 @@ Out of scope (documented, not dropped silently):
 | D7 | stream interrupt after first output | terminal frame injected per protocol; **no replay/failover**; source still settles; next turn resolves hop1 (takeover pill visible) | assert |
 | D8 | cooldown `retry_at` elapses | next resolve recovers source, chain returns to hop0, `recover` event | assert |
 | D9 | all hops failing | 503 `mapping_target_unavailable` + waiting copy with retry_at | assert |
-| D10 | chat selects effort `high`; fallback hop declares tiers `[]` | upstream capture strips effort only for that hop; the exact served attempt records the stripped value and declared tiers in turn provenance | assert |
+| D10 | chat selects effort `high`; fallback hop declares tiers `[]` | each exact adapter attempt retains the requested effort; turn provenance identifies the serving hop without inventing stripping. This fixture covers the Avibe gateway/adapter boundary, not the proxy engine translator | assert |
 | D11 | `POST /{backend}/v1/messages/count_tokens` | currently 404 `not_found_error` (D-2 decision: fix or document impact on Claude Code auto-compact) | baseline |
 | D12 | env/catalog injection for claude/codex/opencode | `ANTHROPIC_BASE_URL/TOKEN` only for claude; codex catalog neutralized 4 keys; opencode overlay model projection shape | assert |
 | D13 | member role matrix | member can PUT chains/PATCH mode; cannot create/delete source, start runtime, read usage (B15) — assert the dead-ends are at least *visible* errors, not silent UI | assert |

@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, X } from 'lucide-react';
+import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -47,15 +47,7 @@ import {
 import { handOffProviderTab } from './providerTab';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
-import { tierEditRefusedAsManaged } from './serverCopy';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
-import {
-  managedTierSource,
-  tierMutationPayload,
-  type ManagedTierSource,
-  type TierMutationIntent,
-} from './tierMutation';
-import { TIER_SUGGESTIONS } from './tierSuggestions';
 import { useDeadlineClock } from './useDeadlineClock';
 import { SourceTestDialog } from './SourceTestDialog';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
@@ -64,7 +56,6 @@ import type {
   RouteHopRef,
   Source,
   SourcePatch,
-  SourceProtocol,
   SuppliedModel,
   SupplyGap,
 } from './types';
@@ -154,277 +145,6 @@ type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
 
-/** The badge that says which rung declared a locked model's tiers. */
-const TIER_PROVENANCE_LABEL_KEY: Readonly<Record<ManagedTierSource, string>> = {
-  upstream: 'settings.models.sourceDetail.tiers.managed.upstream',
-  catalog: 'settings.models.sourceDetail.tiers.managed.catalog',
-};
-
-/**
- * A tier write that did not land, and whether anything is left to try.
- *
- * `retryable` carries the intent because "Try again" has to replay the exact
- * write the rollback undid. `managed` carries none on purpose: the server owns
- * that model's declaration, so there is no version of this write that succeeds,
- * and offering a button that re-asks a settled question would be the one wrong
- * affordance to put in front of this user.
- */
-type TierFailure =
-  | { kind: 'retryable'; intent: TierMutationIntent }
-  | { kind: 'managed' };
-
-const TierEditor: React.FC<{
-  model: SuppliedModel;
-  protocol: SourceProtocol;
-  editing: boolean;
-  onEdit: () => void;
-  onClose: () => void;
-  onMutating: () => void;
-  trackMutation: TrackSourceMutation;
-}> = ({ model, protocol, editing, onEdit, onClose, onMutating, trackMutation }) => {
-  const { t } = useTranslation();
-  const managed = managedTierSource(model.reasoning_efforts_source);
-  const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
-  const [draft, setDraft] = React.useState('');
-  const [saving, setSaving] = React.useState(false);
-  const [failed, setFailed] = React.useState<TierFailure | null>(null);
-  const [returnFocus, setReturnFocus] = React.useState(false);
-  const inputRef = React.useRef<HTMLInputElement>(null);
-  const cellRef = React.useRef<HTMLButtonElement>(null);
-  React.useEffect(() => setTiers(model.reasoning_efforts ?? []), [model.reasoning_efforts]);
-  // Which row is open belongs to the table, not to the row — that is what makes
-  // "one editor at a time" structural rather than a convention every collapse
-  // path has to remember. What the row drops on the way out is the uncommitted
-  // draft, and only that: a rolled-back write is not a draft, so it stays with
-  // the row that produced it (below) rather than with whoever holds the editor.
-  React.useEffect(() => { if (!editing) setDraft(''); }, [editing]);
-  // Escape is the one collapse the keyboard asks for, so it is the one that owes
-  // a place to land; a click elsewhere already chose one.
-  React.useEffect(() => {
-    if (editing || !returnFocus) return;
-    cellRef.current?.focus();
-    setReturnFocus(false);
-  }, [editing, returnFocus]);
-
-  const commit = async (intent: TierMutationIntent): Promise<boolean> => {
-    if (saving) return false;
-    setSaving(true);
-    // Every in-editor control is transient — a suggestion becomes a chip, a chip
-    // disappears — so acting on one has to hand focus back to the field that
-    // outlives them all, before the element holding it unmounts onto the body.
-    (inputRef.current ?? cellRef.current)?.focus();
-    try {
-      return await trackMutation(async (latest, settlement) => {
-        const payload = tierMutationPayload(latest, model.id, intent);
-        if (!payload) {
-          settlement.release();
-          return false;
-        }
-        const { previous, next } = payload;
-        onMutating();
-        setFailed(null);
-        setTiers(next);
-        if (previous.length === next.length && previous.every((tier, index) => tier === next[index])) {
-          settlement.release();
-          return true;
-        }
-        try {
-          const echoed = await modelsApi.updateModelReasoningEfforts(latest.id, model.id, next);
-          await settlement.source(echoed);
-          return true;
-        } catch (error) {
-          setTiers(previous);
-          const refusal = apiFailure(error);
-          setFailed(tierEditRefusedAsManaged(refusal) ? { kind: 'managed' } : { kind: 'retryable', intent });
-          if (refusal?.code === 'source_not_found') await settlement.gone(latest.id);
-          // A managed refusal re-reads for the same reason every other failed
-          // write does, and one more: this client believed the row was editable
-          // and the server says otherwise, so the read is what replaces the
-          // stale editor with the provenance the server actually holds.
-          else await settlement.unread();
-          return false;
-        }
-      });
-    } finally {
-      setSaving(false);
-    }
-  };
-  const add = async () => {
-    const value = draft.trim();
-    if (!value || tiers.includes(value)) return;
-    if (await commit({ kind: 'add', tier: value })) setDraft('');
-  };
-  const retry = async () => {
-    if (failed?.kind !== 'retryable') return;
-    const { intent } = failed;
-    if (await commit(intent) && intent.kind === 'add' && draft.trim() === intent.tier) setDraft('');
-  };
-  // A rolled-back write is the row's own unfinished business: the tier list is
-  // already back to what the server holds, and "Try again" is the only way forward
-  // from there. So the notice renders in whichever state the row is in and leaves
-  // only through a write that lands — never because the editor closed or moved on.
-  //
-  // A refusal is the exception, and the one that outlives the editor: the re-read
-  // it triggers turns the row into the locked one below, so its notice has to be
-  // rendered by that branch too, or the only explanation the user gets would
-  // disappear at the moment the row changes under them.
-  //
-  // Provenance can also reach that branch after an ordinary failure — the re-read
-  // the rollback triggers, or a refresh from anywhere else, comes back with the
-  // server owning the list — and it answers the retry the same way the refusal
-  // did: `tierMutationPayload` declines a managed model, so the button would
-  // replay a write that can no longer land. Which notice to show is therefore read
-  // from the row's current provenance rather than frozen when the write failed;
-  // that also lets the retry come back untouched if the server hands the list back.
-  const failure = failed && (managed || failed.kind === 'managed' ? (
-    <span data-tier-failure="managed" className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
-      {t('settings.models.sourceDetail.fail.tierManaged')}
-    </span>
-  ) : (
-    <span data-tier-failure="retryable" className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
-      {t('settings.models.sourceDetail.fail.tier')}
-      <button type="button" disabled={saving} onClick={() => void retry()} className="font-semibold underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceDetail.retry')}</button>
-    </span>
-  ));
-  // Rung 1 and 2 of the provenance ladder are the server's declaration, re-applied
-  // on every refresh: there is nothing for the user to add and nothing to delete,
-  // so the cell stops being a way in rather than becoming a disabled one. It says
-  // which rung instead — a row that simply refused to open would leave "why" as
-  // the user's problem.
-  if (managed) {
-    return (
-      <div className="flex min-w-0 flex-col gap-1.5">
-        <div data-tier-provenance={managed} className="model-hub-source-tier-cell flex min-w-0 flex-wrap items-center gap-1.5">
-          {tiers.length > 0 ? tiers.map((tier) => (
-            <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border font-mono text-foreground">{tier}</span>
-          )) : <span className="model-hub-source-tier-empty">{t('settings.models.sourceDetail.tiers.empty')}</span>}
-          <span
-            title={t('settings.models.sourceDetail.tiers.managedHint') as string}
-            className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border font-semibold"
-          >
-            {t(TIER_PROVENANCE_LABEL_KEY[managed])}
-          </span>
-        </div>
-        {failure}
-      </div>
-    );
-  }
-  if (!editing) {
-    // The whole cell is the edit entry, which is what lets the add affordance be
-    // drawn only under a pointer: 20 rows each carrying a permanent 「+ 添加档位」
-    // pill turn an inventory table into a wall of buttons. It stays in the box it
-    // reserves rather than being removed from it, so revealing it moves nothing.
-    return (
-      <div className="flex min-w-0 flex-col gap-1.5">
-        <button
-          ref={cellRef}
-          type="button"
-          className="model-hub-source-tier-cell flex min-w-0 flex-wrap items-center gap-1.5 text-left"
-          onClick={onEdit}
-        >
-          {tiers.length > 0 ? tiers.map((tier) => (
-            <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border font-mono text-foreground">{tier}</span>
-          )) : <span className="model-hub-source-tier-empty">{t('settings.models.sourceDetail.tiers.empty')}</span>}
-          <span className="model-hub-source-tier model-hub-source-tier-add model-hub-source-tier-reveal inline-flex rounded-full border font-semibold">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
-        </button>
-        {failure}
-      </div>
-    );
-  }
-  const suggestions = TIER_SUGGESTIONS[protocol].filter((tier) => !tiers.includes(tier));
-  // The editor collapses when focus leaves the editor, not when the input alone
-  // does. Keyed to the input, every control inside had to defend itself against
-  // its own focus — which a pointer can fake by refusing it and a keyboard
-  // cannot, so Tab closed the row before it could reach a suggestion at all.
-  // Containment is that same rule stated once, at the boundary it is about.
-  return (
-    <div
-      data-source-dialog-local-escape
-      className="flex min-w-0 flex-col gap-1.5"
-      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) onClose(); }}
-      onKeyDown={(event) => {
-        if (event.key !== 'Escape') return;
-        event.preventDefault();
-        setDraft('');
-        setReturnFocus(true);
-        onClose();
-      }}
-    >
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        {tiers.map((tier) => (
-          <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border font-mono text-foreground">
-            {tier}
-            <button type="button" disabled={saving} onClick={() => void commit({ kind: 'remove', tier })} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
-              <X className="size-2.5" />
-            </button>
-          </span>
-        ))}
-        <Input
-          ref={inputRef}
-          autoFocus
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void add(); } }}
-          disabled={saving}
-          placeholder={t('settings.models.sourceDetail.tiers.inputHint') as string}
-          className="model-hub-source-tier h-7 w-28 rounded-full border-mint/40 px-2.5"
-        />
-        {/* A suggestion adds through the same path typing it would take. */}
-        {suggestions.map((tier) => (
-          <button
-            key={tier}
-            type="button"
-            disabled={saving}
-            onClick={() => void commit({ kind: 'add', tier })}
-            aria-label={t('settings.models.sourceDetail.tiers.suggest', { tier }) as string}
-            className="model-hub-source-tier model-hub-source-tier-suggest inline-flex rounded-full border font-mono disabled:opacity-50"
-          >
-            {tier}
-          </button>
-        ))}
-        {failure}
-      </div>
-      {/* The two questions a free-text field cannot answer by itself: whether
-          anything validates what is typed, and what an empty row costs. */}
-      <p className="model-hub-source-tier-note">{t('settings.models.sourceDetail.tiers.note')}</p>
-    </div>
-  );
-};
-
-const DraftTiers: React.FC<{
-  tiers: string[];
-  onChange: (tiers: string[]) => void;
-}> = ({ tiers, onChange }) => {
-  const { t } = useTranslation();
-  const [draft, setDraft] = React.useState('');
-  const add = () => {
-    const value = draft.trim();
-    if (!value || tiers.includes(value)) return;
-    onChange([...tiers, value]);
-    setDraft('');
-  };
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-      {tiers.map((tier) => (
-        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border font-mono text-foreground">
-          {tier}
-          <button type="button" onClick={() => onChange(tiers.filter((item) => item !== tier))} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground"><X className="size-2.5" /></button>
-        </span>
-      ))}
-      <Input
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') { event.preventDefault(); add(); }
-          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setDraft(''); event.currentTarget.blur(); }
-        }}
-        placeholder={t('settings.models.sourceDetail.tiers.inputHint') as string}
-        className="model-hub-source-tier h-7 w-36 rounded-full border-mint/40 px-2.5"
-      />
-    </div>
-  );
-};
-
 export const SourceDetailPanel: React.FC<{
   source: Source;
   trackMutation: TrackSourceMutation;
@@ -455,12 +175,10 @@ export const SourceDetailPanel: React.FC<{
   const busy = pendingAction !== null;
   const refetching = pendingAction === 'refetch';
   const [testing, setTesting] = React.useState(false);
-  const [advanced, setAdvanced] = React.useState(false);
   const [confirmingReauth, setConfirmingReauth] = React.useState(false);
   const [replacingKey, setReplacingKey] = React.useState(false);
   const [manageStage, dispatchManageStage] = React.useReducer(transitionManageStage, { kind: 'idle' });
-  const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean; retryRead: boolean } | null>(null);
-  const [editingTiers, setEditingTiers] = React.useState<string | null>(null);
+  const [manualDraft, setManualDraft] = React.useState<{ modelId: string; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
   const [refetchFailed, setRefetchFailed] = React.useState(false);
@@ -581,7 +299,7 @@ export const SourceDetailPanel: React.FC<{
         const echoed = await modelsApi.addCustomModel(latest.id, {
           model_id: modelId,
           display_name: null,
-          reasoning_efforts: draft.tiers,
+          reasoning_efforts: [],
         });
         setManualDraft(null);
         setResult(null);
@@ -935,7 +653,7 @@ export const SourceDetailPanel: React.FC<{
     : t('settings.models.gateway.modelCount', { count: source.models.length });
 
   return (
-    <div className="model-hub-source-detail" data-advanced={advanced}>
+    <div className="model-hub-source-detail">
       <section className="model-hub-source-bar flex shrink-0 items-center border-b border-border bg-surface">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
         <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
@@ -970,35 +688,19 @@ export const SourceDetailPanel: React.FC<{
           {repairDestination === 'replace_key_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
           {source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {source.kind === 'api_key' && source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" disabled={busy} onClick={() => setTesting(true)}><FlaskConical />{t('settings.models.sourceTest.open')}</Button>}
-          <Button variant="ghost" size="xs" className="model-hub-source-action" aria-expanded={advanced}
-            disabled={busy} onClick={() => { setAdvanced((value) => !value); setEditingTiers(null); }}>
-            <Settings2 />{t('settings.models.sourceDetail.advanced')}
-          </Button>
-          {source.kind === 'api_key' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+          {source.kind === 'api_key' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
       <section className="model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
-          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span>{advanced && <span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span>}<span />
+          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span />
         </div>
         <div className="model-hub-source-table-scroll min-h-0 flex-1 overflow-y-auto">
         {filteredModels.length === 0 && !manualDraft && <p className="px-5 py-12 text-center text-[12px] text-muted">{t(normalizedQuery ? 'settings.models.sourceDetail.searchEmpty' : source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p>}
         {models.map((model) => (
           <div key={model.id} hidden={!visibleModelIds.has(model.id)} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            {advanced && <TierEditor
-              model={model}
-              protocol={source.protocol}
-              editing={editingTiers === model.id}
-              onEdit={() => setEditingTiers(model.id)}
-              // Guarded against the row it is closing: the outgoing editor's blur
-              // lands after the incoming row's click, so an unguarded close would
-              // collapse the editor the user just opened.
-              onClose={() => setEditingTiers((current) => (current === model.id ? null : current))}
-              onMutating={() => { setResult(null); setRefetchFailed(false); }}
-              trackMutation={trackMutation}
-            />}
             <div className="model-hub-source-row-actions flex items-center justify-end gap-1">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);
@@ -1008,11 +710,7 @@ export const SourceDetailPanel: React.FC<{
                     .finally(() => setPendingAction(null));
                 }
               }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
-              {/* The pencil is a second door into the same tier editor, so a locked
-                  row has to close it too — a manual entry whose id matches a
-                  catalog model is locked exactly like a discovered one. Removing
-                  the model itself is a different question and stays offered. */}
-              {model.origin === 'manual' && <>{advanced && !managedTierSource(model.reasoning_efforts_source) && <button type="button" disabled={busy} aria-label={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} title={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} className="model-hub-source-row-action grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground" onClick={() => setEditingTiers(model.id)}><Pencil className="size-3.5" /></button>}<ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} /></>}
+              {model.origin === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}
             </div>
           </div>
         ))}
@@ -1034,7 +732,6 @@ export const SourceDetailPanel: React.FC<{
                 placeholder={t('settings.models.sourceDetail.col.id') as string}
                 className="model-hub-source-manual-id model-hub-source-model h-8 min-w-0 font-mono"
               /><span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span></span>
-            {advanced && <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false, retryRead: false } : current)} />}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
               <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{pendingAction === 'add_model' && <Loader2 className="animate-spin" />}{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>

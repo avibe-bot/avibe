@@ -543,7 +543,7 @@ for hop in C, in effective-plan order:
         continue
 
     attempted = true
-    result = invoke_exact(hop.source_id, hop.model_id, exact_reasoning_effort(hop))
+    result = invoke_exact(hop.source_id, hop.model_id, original_request)
     if result == served: return SERVED(hop)
     if result == canceled: return CANCELED
     if result is terminal_request_error: return FAILED_TERMINAL(result)
@@ -568,9 +568,14 @@ repairs or rewrites configuration.
 
 `invoke_exact` preserves chain order. A `native_cli` hop uses the sanctioned backend's
 singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
-system never prepends native supply or chooses a model. If the requested reasoning
-effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
-value; otherwise omit the effort field, with no approximation or downgrade.
+system never prepends native supply or chooses a model. Owner amendment (2026-09-08):
+the shared resolver passes the original reasoning intent to the adapter on every
+attempt, including credential retries and provider fallback. Source inventory
+capability metadata is not a forwarding allowlist: an absent declaration does not
+establish unsupported reasoning. The resolver neither removes nor approximates the
+requested value. Protocol translation remains the managed adapter's responsibility;
+the separate engine boundary and remaining compatibility limitations are recorded in
+[Reasoning intent](model-hub-reasoning-intent.md).
 
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
