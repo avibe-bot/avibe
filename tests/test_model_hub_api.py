@@ -4,12 +4,14 @@ import ast
 import asyncio
 import copy
 import inspect
+import io
 import json
 import re
 import textwrap
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
@@ -43,7 +45,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
+from core.handlers.model_hub.identifiers import canonical_model_id, usage_ledger_key
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import (
     NativeOAuthSourceStatus,
@@ -2313,7 +2315,7 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
             display_name="Saved label",
         )
     )
-    legacy_overlong_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    legacy_overlong_id = "x" * (256 + 1)
     agent.models.append(
         ModelHubBackendModelConfig(
             id=legacy_overlong_id,
@@ -2506,7 +2508,7 @@ def test_candidate_protocol_projection_is_total_only_for_opencode(tmp_path):
 def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     invalid_claude_id = "not-a-claude-family"
-    too_long = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    unencodable = "claude-invalid\ud800"
     source = ModelHubSourceConfig(
         id="src_invalid001",
         kind="api_key",
@@ -2518,7 +2520,7 @@ def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_
         state=ModelHubSourceStateConfig(status="standby"),
         models=[
             ModelHubModelConfig(id=invalid_claude_id, provenance="manual"),
-            ModelHubModelConfig(id=too_long, provenance="discovered"),
+            ModelHubModelConfig(id=unencodable, provenance="discovered"),
         ],
         credential_ref="cred_invalid001",
     )
@@ -2532,7 +2534,7 @@ def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_
                 "generation": "invalid-candidate-snapshot",
                 "models": [
                     {"id": invalid_claude_id},
-                    {"id": too_long},
+                    {"id": unencodable},
                 ],
             }
         },
@@ -2542,7 +2544,7 @@ def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_
 
     ids = {item["id"] for group in candidates.values() for item in group}
     assert invalid_claude_id not in ids
-    assert too_long not in ids
+    assert unencodable not in ids
 
 
 def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
@@ -2742,7 +2744,7 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
         },
         {"id": "gpt-omega"},
         {"id": "gpt-hidden"},
-        {"id": "x" * (MODEL_ID_MAX_LENGTH + 1)},
+        {"id": "invalid\ud800"},
     ]
     unchanged = {model.id: model.to_payload() for model in agent.models}
     monkeypatch.setattr(
@@ -2770,7 +2772,7 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     assert "gpt-new" not in agent.routes
     assert service.agent_chain("codex", "gpt-new")["current"] == {"source_id": source.id, "model_id": "gpt-new"}
     assert "gpt-hidden" not in {model.id for model in agent.models}
-    assert "x" * (MODEL_ID_MAX_LENGTH + 1) not in {model.id for model in agent.models}
+    assert "invalid\ud800" not in {model.id for model in agent.models}
     assert {model.id: model.to_payload() for model in agent.models if model.id in unchanged} == unchanged
     assert refreshed == ["codex"]
 
@@ -2820,7 +2822,8 @@ def test_model_producers_emit_admissible_backend_payloads(
     tmp_path,
     producer,
 ):
-    rejected_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
+    rejected_id = "gpt-metadata-invalid\ud800"
+    admitted_id = "gpt-metadata-" + "模型🧪" * 1800
     long_display_name = "Model " + "x" * 80
     if producer == "candidates_read":
         producer_backend = "codex"
@@ -2836,7 +2839,7 @@ def test_model_producers_emit_admissible_backend_payloads(
             state=ModelHubSourceStateConfig(status="standby"),
             models=[
                 ModelHubModelConfig(
-                    id="gpt-metadata-candidate",
+                    id=admitted_id,
                     provenance="manual",
                     display_name=long_display_name,
                     reasoning_efforts=[" high "],
@@ -2863,7 +2866,7 @@ def test_model_producers_emit_admissible_backend_payloads(
         candidate = next(
             candidate
             for candidate in candidates
-            if candidate["id"] == "gpt-metadata-candidate"
+            if candidate["id"] == admitted_id
         )
         payload = {
             "id": candidate["id"],
@@ -2882,7 +2885,7 @@ def test_model_producers_emit_admissible_backend_payloads(
                     "complete": True,
                     "models": [
                         {
-                            "id": "gpt-metadata-reconcile",
+                            "id": admitted_id,
                             "display_name": long_display_name,
                             "reasoning_efforts": [" high "],
                         },
@@ -2895,7 +2898,7 @@ def test_model_producers_emit_admissible_backend_payloads(
         payload = next(
             model.to_payload()
             for model in store.config.agents["codex"].models
-            if model.id == "gpt-metadata-reconcile"
+            if model.id == admitted_id
         )
         assert rejected_id not in {
             model.id for model in store.config.agents["codex"].models
@@ -2911,7 +2914,7 @@ def test_model_producers_emit_admissible_backend_payloads(
                 "openai": {
                     "name": "OpenAI",
                     "models": {
-                        "gpt-metadata-typeahead": {
+                        admitted_id: {
                             "name": long_display_name,
                             "reasoning_options": [
                                 {"type": "effort", "values": [" high "]}
@@ -2922,12 +2925,20 @@ def test_model_producers_emit_admissible_backend_payloads(
                 }
             },
         )
-        matches = models_dev_catalog.search_models_dev("metadata")
+        matches = ModelHubService.models_dev_matches(admitted_id)
+        service, _store, _adapter = _service(tmp_path)
+        monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+        response = app.test_client().get(
+            f"/api/models/catalog/models-dev?query={quote(admitted_id, safe='')}",
+            base_url="http://127.0.0.1:15131",
+        )
+        assert response.status_code == 200
+        assert response.get_json()["matches"] == matches
         assert rejected_id not in {match["model_id"] for match in matches}
         match = next(
             match
             for match in matches
-            if match["model_id"] == "gpt-metadata-typeahead"
+            if match["model_id"] == admitted_id
         )
         payload = {
             "id": match["model_id"],
@@ -2944,6 +2955,7 @@ def test_model_producers_emit_admissible_backend_payloads(
         }
 
     parsed = ModelHubBackendModelConfig.from_payload(payload)
+    assert parsed.id == admitted_id
     assert parsed.display_name == long_display_name
     assert (
         admissible_backend_model(
@@ -3330,25 +3342,33 @@ def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(
     ]
 
 
-def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path):
+@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path, backend):
     service, store, _adapter = _service(tmp_path)
-    legacy_id = "x" * (MODEL_ID_MAX_LENGTH + 1)
-    agent = store.config.agents["codex"]
-    agent.models.append(ModelHubBackendModelConfig(id=legacy_id, origin="manual"))
+    legacy_id = "legacy-" + "模型🧪/e\u0301" * 3000
+    agent = store.config.agents[backend]
+    agent.models.append(ModelHubBackendModelConfig(
+        id=legacy_id, origin="manual",
+        native_protocol="anthropic" if backend == "opencode" else None,
+    ))
     agent.routes[legacy_id] = ModelHubRouteConfig()
+    if agent.menu is not None:
+        agent.menu.checked.append(legacy_id)
+    store.config = ModelHubConfig.from_payload(store.config.to_payload())
     baseline = next(
-        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "codex"
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == backend
     )
     desired = copy.deepcopy(baseline)
     next(model for model in desired if model["id"] == legacy_id)["display_name"] = "Persisted legacy model"
 
-    response = asyncio.run(service.set_agent_models("codex", baseline, desired))
+    response = asyncio.run(service.set_agent_models(backend, baseline, desired))
 
     assert (
         next(model for model in response["agent"]["catalog_models"] if model["id"] == legacy_id)["display_name"]
         == "Persisted legacy model"
     )
     _assert_valid("agent-supply.schema.json", response["agent"])
+    assert ModelHubConfig.from_payload(store.config.to_payload()).to_payload() == store.config.to_payload()
 
 
 def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
@@ -3371,34 +3391,44 @@ def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
     assert response["agent"]["catalog_models"][1]["display_name"] == "Unrelated edit"
 
 
-def test_backend_catalog_rejects_a_new_id_past_the_admission_bound(tmp_path):
+@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+def test_backend_catalog_rejects_a_new_unencodable_id(tmp_path, backend):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
+    baseline = service.backend_catalog_models(backend)
     added = {
-        **baseline[0],
-        "id": "x" * (MODEL_ID_MAX_LENGTH + 1),
+        "id": "claude-" + "x" * 17000 + "\ud800",
         "origin": "manual",
+        **({"native_protocol": "anthropic"} if backend == "opencode" else {}),
     }
 
     with pytest.raises(ModelHubError) as raised:
-        asyncio.run(service.set_agent_models("codex", baseline, [*baseline, added]))
+        asyncio.run(service.set_agent_models(backend, baseline, [*baseline, added]))
 
     assert raised.value.code == "backend_model_id_invalid"
 
 
-def test_backend_catalog_accepts_a_new_id_at_the_contract_bound(tmp_path):
+@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+@pytest.mark.parametrize(
+    "identifier", ["x" * 257, "模型🧪/e\u0301" * 3000, "x" * 17000],
+    ids=("past-former-bound", "long-unicode", "past-lexical-budget"),
+)
+def test_backend_catalog_accepts_complete_long_ids_and_reloads(tmp_path, backend, identifier):
     service, _store, _adapter = _service(tmp_path)
-    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")
-    model_id = "x" * MODEL_ID_MAX_LENGTH
+    baseline = service.backend_catalog_models(backend)
+    model_id = "claude-" + identifier
     added = {
-        **baseline[0],
         "id": model_id,
         "origin": "manual",
+        **({"native_protocol": "anthropic"} if backend == "opencode" else {}),
     }
 
-    response = asyncio.run(service.set_agent_models("codex", baseline, [*baseline, added]))
+    response = asyncio.run(service.set_agent_models(backend, baseline, [*baseline, added]))
 
     assert response["agent"]["catalog_models"][-1]["id"] == model_id
+    _assert_valid("agent-supply.schema.json", response["agent"])
+    loaded = ModelHubConfig.from_payload(_store.config.to_payload())
+    assert loaded.agents[backend].models[-1].id == model_id
+    assert loaded.to_payload() == _store.config.to_payload()
 
 
 def test_backend_catalog_merges_an_unrelated_concurrent_edit(tmp_path):
@@ -8740,14 +8770,155 @@ def test_admitted_model_ids_are_stored_in_their_canonical_form(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("length", (200, 201, 256, 257, 264, 265, 266, 4097, 16384, 16385))
+def test_new_identity_admission_has_no_length_boundary(length):
+    identity = "m" * length
+    assert canonical_model_id("  " + identity + "  ") == identity
+
+
+def test_long_identity_source_lifecycle_preserves_api_binding_and_reload(monkeypatch, tmp_path):
+    service, store, adapter = _service(tmp_path)
+    head = "模型🧪/e\u0301" * 3000
+    discovered = [head + "-one", head + "-two", "é", "e\u0301"]
+
+    async def models(*_args):
+        return tuple(DiscoveredModel(id="  " + identity + "  ") for identity in discovered)
+
+    adapter.discover_models = models
+    source = asyncio.run(_create_source(service, {
+        "kind": "api_key", "vendor": "custom", "display_name": "Long identities",
+        "base_url": "https://relay.example/v1", "key": "sk-test-transient-only",
+        "models": [{"id": head + "-inline", "origin": "manual", "reasoning_efforts": []}],
+    }))
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    manual = head + "-manual"
+    # Exercise encoded path semantics within the HTTP client's generic URL
+    # budget. The full inventory/body IDs above deliberately exceed that budget.
+    path_identity = "模型🧪/e\u0301" * 600
+    folded_literal = usage_ledger_key(discovered[0])
+    for identity in (manual, path_identity, folded_literal, " " + manual + " "):
+        response = client.post(
+            f"/api/models/sources/{source['id']}/models",
+            json={"model_id": identity, "reasoning_efforts": []},
+            headers=headers, base_url=base_url,
+        )
+        assert response.status_code == 201
+    expected = {*discovered, head + "-inline", manual, path_identity, folded_literal}
+    config_ids = [model.id for model in store.config.sources[0].models]
+    assert len(config_ids) == len(expected)
+    assert set(config_ids) == expected
+
+    response = client.patch(
+        f"/api/models/sources/{source['id']}/models/{quote(path_identity, safe='')}",
+        json={"reasoning_efforts": ["low"]}, headers=headers, base_url=base_url,
+    )
+    assert response.status_code == 200
+    assert next(model for model in response.get_json()["source"]["models"] if model["id"] == path_identity)[
+        "reasoning_efforts"
+    ] == ["low"]
+    asyncio.run(service.update_model_reasoning_efforts(source["id"], manual, {"reasoning_efforts": ["low"]}))
+    asyncio.run(service.refresh_source(source["id"]))
+    snapshot = store.config.to_payload()
+    asyncio.run(service.refresh_source(source["id"]))
+    assert store.config.to_payload() == snapshot
+    reloaded = ModelHubConfig.from_payload(json.loads(json.dumps(snapshot, ensure_ascii=False)))
+    assert {model.id for model in reloaded.sources[0].models} == expected
+    binding = next(binding for binding in adapter.synced[-1] if binding.source_id == source["id"])
+    assert set(binding.model_ids) == expected
+    assert reloaded.to_payload() == snapshot
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (None, 7, "", " " * 17000, "模型" * 9000 + "\ud800",
+     "m" * 17000 + " sk-fabricated-never-persist-this"),
+    ids=("none", "number", "empty", "blank", "surrogate-tail", "credential-tail"),
+)
+def test_new_manual_identity_refusal_is_atomic(tmp_path, invalid):
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(_create_source(service, {
+        "kind": "api_key", "vendor": "anthropic", "display_name": "Safe source",
+        "key": "sk-test-transient-only",
+    }))
+    previous = store.config.to_payload()
+    syncs = len(adapter.synced)
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.add_custom_model(source["id"], {"model_id": invalid, "reasoning_efforts": []}))
+    assert error.value.code == "mapping_target_unavailable"
+    assert store.config.to_payload() == previous
+    assert len(adapter.synced) == syncs
+
+
+@pytest.mark.parametrize("field", ("id", "supported_parameters"))
+@pytest.mark.parametrize("tail", ("sk-fabricated-never-persist-this", "\ud800"))
+def test_unsaved_inventory_refuses_invalid_material_beyond_old_string_budget(monkeypatch, tmp_path, field, tail):
+    from vibe.model_hub_runtime.client import _project_model_inventory
+
+    service, store, adapter = _service(tmp_path)
+    invalid = "模型🧪" * 6000 + " " + tail
+    model = {"id": "safe-model", "supported_parameters": ["reasoning"]}
+    model[field] = invalid if field == "id" else ["reasoning", invalid]
+    projected = _project_model_inventory(io.BytesIO(json.dumps({"data": [model]}).encode()))
+    assert projected is not None
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.OBSERVED, reachable=True, authenticated=True,
+        protocol="anthropic", discovery=ObservationDiscovery.SUCCEEDED, models=tuple(projected[2]),
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/observe",
+        json={"vendor": "anthropic", "key": "sk-test-transient-only"},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+    assert response.status_code == 502
+    assert response.get_json()["error"] == "discovery_failed"
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_test001"]
+    assert tail not in json.dumps(response.get_json(), ensure_ascii=False)
+    assert invalid not in json.dumps(store.config.to_payload(), ensure_ascii=False)
+
+
+def test_unsaved_inventory_publishes_full_id_and_parameter_facts(monkeypatch, tmp_path):
+    from vibe.model_hub_runtime.client import _project_model_inventory
+
+    identity, parameter = "模型🧪/e\u0301" * 3000, "unknown-" + "x" * 17000
+    projected = _project_model_inventory(io.BytesIO(json.dumps({
+        "data": [{"id": identity, "supported_parameters": ["reasoning", parameter]}],
+    }).encode()))
+    assert projected is not None
+    service, store, adapter = _service(tmp_path)
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.OBSERVED, reachable=True, authenticated=True,
+        protocol="anthropic", discovery=ObservationDiscovery.SUCCEEDED, models=tuple(projected[2]),
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/observe",
+        json={"vendor": "anthropic", "key": "sk-test-transient-only"},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+    assert response.status_code == 200
+    observation = response.get_json()["observation"]
+    assert observation["models"] == [identity]
+    assert observation["model_metadata"] == [{"id": identity, "supported_parameters": ["reasoning", parameter]}]
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_test001"]
+
+
 def test_models_declared_inline_at_source_creation_are_admitted_the_same_way(tmp_path):
     """Review 4960570946: the third admission path obeyed neither half.
 
     A source may be created with its models inline, so this is the other way a
     client-declared identifier enters config. Spelling is now settled by the
-    config validator, which every path goes through; the length bound stays with
-    the admission surfaces, because that same validator also loads files older
-    releases wrote and rejecting one of those would fail config load.
+    config validator, which every path goes through. New-admission checks stay
+    with the request rather than the validator that loads historical files.
     """
 
     service, store, _ = _service(tmp_path)
@@ -8780,7 +8951,7 @@ def test_models_declared_inline_at_source_creation_are_admitted_the_same_way(tmp
                 creation(
                     [
                         {
-                            "id": "m" * (MODEL_ID_MAX_LENGTH + 1),
+                            "id": "m" * 17000 + "\ud800",
                             "origin": "manual",
                             "reasoning_efforts": [],
                         }
@@ -8794,25 +8965,26 @@ def test_models_declared_inline_at_source_creation_are_admitted_the_same_way(tmp
 
 
 def test_a_persisted_model_id_past_the_bound_still_loads(tmp_path):
-    """The bound is an admission rule, not a load rule.
+    """An older admission limit was never a persisted Source load rule.
 
-    Nothing stops a file written before the bound existed from holding a longer
+    Nothing stops a file written before that limit existed from holding a longer
     identifier, and per the persisted-shape rule that file must still load. It
     keeps its length and gains only the canonical spelling.
     """
 
     model = ModelHubModelConfig.from_payload(
         {
-            "id": "  " + "m" * (MODEL_ID_MAX_LENGTH + 1) + "  ",
+            "id": "  " + "m" * (256 + 1) + "  ",
             "origin": "manual",
             "reasoning_efforts": [],
         }
     )
 
-    assert model.id == "m" * (MODEL_ID_MAX_LENGTH + 1)
+    assert model.id == "m" * (256 + 1)
 
 
-def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path):
+@pytest.mark.parametrize("identity", ("relay-model", "模型🧪/e\u0301" * 3000), ids=("ordinary", "long-unicode"))
+def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path, identity):
     """Two spellings of one identity are a failed listing, not two models."""
 
     service, store, adapter = _service(tmp_path)
@@ -8831,8 +9003,8 @@ def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path)
 
     async def duplicate_spellings(vendor, protocol, base_url, credential_ref):
         return (
-            DiscoveredModel(id="relay-model"),
-            DiscoveredModel(id=" relay-model"),
+            DiscoveredModel(id=identity),
+            DiscoveredModel(id=" " + identity),
         )
 
     adapter.discover_models = duplicate_spellings

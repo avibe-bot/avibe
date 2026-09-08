@@ -8,7 +8,6 @@ import pytest
 
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES, classify_outcome
-from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from core.handlers.model_hub.service import ModelHubError
@@ -179,9 +178,9 @@ def test_model_history_validates_backend_and_canonical_catalog_id(tmp_path, back
         service.get_model_provenance(backend, model)
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 def test_latest_history_reads_exact_persisted_legacy_catalog_identity(tmp_path, backend):
-    legacy = "legacy-" + "x" * MODEL_ID_MAX_LENGTH
+    legacy = "legacy-" + "模型🧪" * 3000
     service, store, adapter = _service(tmp_path, _loaded_catalog_config(backend, legacy))
     before = store.config.to_payload()
     assert service.get_model_provenance(backend, legacy) is None
@@ -191,7 +190,7 @@ def test_latest_history_reads_exact_persisted_legacy_catalog_identity(tmp_path, 
     with pytest.raises(ModelHubError):
         service.get_model_provenance(backend, f" {legacy} ")
     with pytest.raises(ModelHubError):
-        service.get_model_provenance(backend, "new-" + "x" * MODEL_ID_MAX_LENGTH)
+        service.get_model_provenance(backend, "new-" + "x" * 256)
     assert store.config.to_payload() == before
     assert adapter.synced == []
 

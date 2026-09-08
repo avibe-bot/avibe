@@ -374,19 +374,22 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_runtime.py::test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
   - id: MH-USAGE-006
-    name: Every model identifier a persisted config still loads is one the ledger can key
+    # Malformed historical whitespace/surrogate exceptions remain documented in
+    # docs/plans/model-hub-identifier-boundary-assessment.md; these rows do not
+    # claim that every arbitrary loadable legacy string is correctly attributed.
+    name: Supported persisted model identities remain meterable across reload
     status: covered
     kind: compatibility
     layer: unit
     test: tests/test_model_hub_usage.py::test_metering_can_key_exactly_the_identities_a_config_can_hold
   - id: MH-USAGE-007
-    name: Two model identifiers a config holds are never metered onto one ledger row
+    name: Distinct nonblank UTF-8 model identities and folded literals retain separate usage rows
     status: covered
     kind: persistence
     layer: unit
     test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
   - id: MH-USAGE-008
-    name: Every metered row is labelled under the identity it was metered for, however it was keyed
+    name: Configured nonblank UTF-8 identities label their verbatim and folded ledger rows
     status: covered
     kind: compatibility
     layer: unit

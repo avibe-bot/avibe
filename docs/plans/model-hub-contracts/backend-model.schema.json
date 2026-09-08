@@ -29,7 +29,7 @@
     "id": {
       "type": "string",
       "minLength": 1,
-      "description": "The exact canonical identifier shown to and emitted by the backend Agent. OpenCode stores this bare id without an overlay provider prefix. Mutation admission limits newly added identifiers to 256 characters."
+      "description": "The exact canonical identifier shown to and emitted by the backend Agent. OpenCode stores this bare id without an overlay provider prefix. New identifiers must be nonblank, credential-free Unicode representable as UTF-8; no model-ID length ceiling applies."
     },
     "display_name": {
       "type": ["string", "null"],
