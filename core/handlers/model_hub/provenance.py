@@ -35,7 +35,7 @@ from .events import (
     SOURCE_DETAIL_EVENT_REASONS,
     event_reason_label,
 )
-from .resolver import ModelHubTurnResolution, source_eligible_for_backend
+from .resolver import ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
 from .state_file import write_state_document
 
 
@@ -446,6 +446,7 @@ def turn_supply_facts(
         source=", ".join(source.display_name for source in cooling),
         retry_at=min(
             (source.state.retry_at or "" for source in cooling),
+            key=parse_model_hub_timestamp,
             default="",
         ),
         blockers=tuple(blockers),
@@ -1484,12 +1485,11 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is None or trace.outcome_frozen:
                 return
-            if trace.model_supply_state is not None:
-                # Admission supersedes an earlier retryable no-candidate result.
-                trace.model_supply_state = None
-                trace.blockers = []
-                if trace.terminal_outcome is not None and trace.terminal_outcome.outcome == "no_candidate":
-                    trace.terminal_outcome = None
+            # Admission supersedes earlier supply failures, not their attempt history.
+            trace.model_supply_state = None
+            trace.blockers = []
+            if trace.terminal_outcome is not None and trace.terminal_outcome.outcome in {"no_candidate", "exhausted"}:
+                trace.terminal_outcome = None
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,

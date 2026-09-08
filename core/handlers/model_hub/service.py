@@ -124,6 +124,7 @@ from .resolver import (
     effective_model_route,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
+    parse_model_hub_timestamp,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -547,21 +548,6 @@ def load_opencode_public_models(
 
 def _source_id() -> str:
     return f"src_{uuid.uuid4().hex[:12]}"
-
-
-def _parse_datetime(value: str) -> datetime:
-    """Parse a timestamp into something comparable with this service's clock.
-
-    Every parsed value is compared against ``self.now()``, which is UTC-aware.
-    A provider or an older persisted record may still carry a naive ISO string,
-    and comparing the two raises ``TypeError`` rather than answering the
-    question — so read a naive timestamp as the UTC it was written as.
-    """
-
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 def _mask_credential(value: str) -> str:
@@ -1725,7 +1711,7 @@ class ModelHubService:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
             return
         try:
-            expired = _parse_datetime(flow.expires_at_iso) <= self.now()
+            expired = parse_model_hub_timestamp(flow.expires_at_iso) <= self.now()
         except ValueError:
             return
         if expired:
@@ -5285,6 +5271,7 @@ class ModelHubService:
                     for item in chain_payload["chain"]
                     if item["retry_at"]
                 ),
+                key=parse_model_hub_timestamp,
                 default=None,
             )
             raise ModelHubError(
@@ -6095,7 +6082,7 @@ class ModelHubService:
         if (
             source.state.status == "cooldown"
             and source.state.retry_at is not None
-            and _parse_datetime(source.state.retry_at) >= retry_at
+            and parse_model_hub_timestamp(source.state.retry_at) >= retry_at
         ):
             return False
         previous = self._clone_config(config)

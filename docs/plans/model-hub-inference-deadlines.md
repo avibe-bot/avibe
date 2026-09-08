@@ -155,3 +155,58 @@ the task-specific `avr-wt-model-hub-inference-deadlines` environment was used.
 The first lint run's migration-fixture failure is supplied by merged dependency
 #1933 (`a58644528deb8365876915904d11fb89df48db11`); integrate it normally before
 requesting the next exact-head review and CI.
+
+### Second-head circuit breaker and orchestrator decision
+
+The full paginated inventory contains five findings across two reviewed heads:
+`2d0700c64c849ba97e71ec7b4cbc7f9cf9522492` (review `5136689855`) and
+`bb0ba11f056084884231c89814084b23c07594ad` (review `5136913971`). The first
+head's three findings are listed above. The second head repeats two classes:
+
+First-head threads: `PRRT_kwDOPbFPYs6gEzJI` (timestamp),
+`PRRT_kwDOPbFPYs6gEzJM` (cancellation), and `PRRT_kwDOPbFPYs6gEzJN` (provenance).
+
+| Root-cause class | Second-head finding | Full-chain diagnosis |
+| --- | --- | --- |
+| Timestamp semantics | Thread `PRRT_kwDOPbFPYs6gFJW0`: string ordering selects the wrong cooldown deadline | Validation preserves offsets. Parsing at the gateway alone does not fix selection in `turn_supply_facts`; the probe API has the same string minimum. Resolver readiness, service comparisons, and gateway delay must share timestamp semantics |
+| Retry provenance | Thread `PRRT_kwDOPbFPYs6gFJW2`: an earlier exhausted projection overrides Stop after readmission | Admission clears only no-candidate projections and only when a supply marker exists. Exhaustion has no such marker. All supply-level retry projections need the same admission boundary, independently of that marker |
+
+Both repeated classes reached the two-head threshold. The orchestrator paused
+editing, inspected all five threads and their consuming paths/tests, and chose
+the following smallest complete correction before resuming:
+
+- Move the existing service timestamp parser to the existing resolver module.
+  Reuse it for readiness, source/OAuth time comparisons, both earliest-deadline
+  selections, and gateway delay. Compare aware instants, preserving the selected
+  original string for rendering and compatibility. Keep Python 3.10 `Z` support
+  and the existing interpretation of old naive timestamps as UTC.
+- On actual attempt admission, retire both `no_candidate` and `exhausted`
+  projections independently of supply-marker presence. Preserve failed-attempt
+  history, request-specific identities, committed served/nonretryable facts,
+  and the Stop/frozen-outcome boundary. No persistent schema or lifecycle rewrite.
+- Enumerate every supply-level outcome/variant from the production authority in
+  the retry regression, followed by success, exhaustion, terminal failure, or
+  Stop. Exercise exhaustion, delayed recovery, readmission, and Stop through real
+  gateway HTTP as well. Exercise mixed offsets, fractional timestamps, and route
+  permutations through resolution, probe, and gateway admission.
+- Keep the resolver-consuming retry test in the existing L3 ownership scope.
+  Current-head lint run `34182012889` failed only because its prior placement in
+  `test_model_hub_provenance.py` added an unregistered resolver importer (O1).
+  Move the test to L3; do not weaken the authority guard or expand lane ownership.
+
+The first lint run `34179699562` belongs to the old head and its dependency
+failure is resolved by the already-integrated #1933. The current head has 15
+successful checks and the O1 failure plus its failing unit-test aggregate.
+Cancellation ownership did not recur on the second reviewed head. The durable
+watch and cursor remain unchanged. Production, merge, and deployment stay out
+of scope; fresh exact-head review, complete lint, and task-local Incus validation
+are still required after this correction.
+
+Before the correction, the added consuming tests reproduced 12 failures across
+chronological selection, old naive timestamps, and exhaustion followed by Stop
+(including Codex and Claude HTTP requests). Afterward all 75 focused cases pass.
+The combined local regression passes 1,492 tests and 30 subtests with one existing
+xfail, including the previously failing config/authority closure test. The
+authority checker reports no findings; changed Python files pass Ruff and
+whitespace checks. The orchestrator inspected the parser/minimum diff and its
+probe-to-gateway consumer, and the admission diff and its HTTP Stop consumer.
