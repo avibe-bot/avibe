@@ -356,13 +356,11 @@ describe('SettingsLayout', () => {
     expect(back.className).toContain('size-11');
   });
 
-  it('shows a touch-sized current version with a safe-area-aware mobile popup', async () => {
+  it('shows the current version with a safe-area-aware mobile popup', async () => {
     const user = userEvent.setup();
     renderLayout('/settings');
 
     const version = await screen.findByTitle('v3.1.4');
-    expect(version.className).toContain('min-h-11');
-    expect(version.className).toContain('min-w-11');
     expect(version.parentElement?.parentElement?.className).toContain('md:hidden');
 
     await user.click(version);

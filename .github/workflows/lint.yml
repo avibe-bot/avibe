@@ -59,6 +59,7 @@ jobs:
           npm run test:model-provider
           npm run test:project-order
           npm run test:inbox-return
+          npm run test:badge-triggers
 
   build-linux-artifacts:
     runs-on: ubuntu-latest
