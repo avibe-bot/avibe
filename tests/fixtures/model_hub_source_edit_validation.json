@@ -116,19 +116,19 @@
       "id": "anthropic_openai_responses",
       "vendor": "anthropic",
       "protocol": "openai_responses",
-      "server_valid": false
+      "server_valid": true
     },
     {
       "id": "anthropic_openai_chat",
       "vendor": "anthropic",
       "protocol": "openai_chat",
-      "server_valid": false
+      "server_valid": true
     },
     {
       "id": "openai_anthropic",
       "vendor": "openai",
       "protocol": "anthropic",
-      "server_valid": false
+      "server_valid": true
     },
     {
       "id": "openai_openai_responses",
@@ -146,7 +146,7 @@
       "id": "codex_anthropic",
       "vendor": "codex",
       "protocol": "anthropic",
-      "server_valid": false
+      "server_valid": true
     },
     {
       "id": "codex_openai_responses",
@@ -158,7 +158,25 @@
       "id": "codex_openai_chat",
       "vendor": "codex",
       "protocol": "openai_chat",
-      "server_valid": false
+      "server_valid": true
+    },
+    {
+      "id": "xai_anthropic",
+      "vendor": "xai",
+      "protocol": "anthropic",
+      "server_valid": true
+    },
+    {
+      "id": "xai_openai_responses",
+      "vendor": "xai",
+      "protocol": "openai_responses",
+      "server_valid": true
+    },
+    {
+      "id": "xai_openai_chat",
+      "vendor": "xai",
+      "protocol": "openai_chat",
+      "server_valid": true
     },
     {
       "id": "custom_anthropic",

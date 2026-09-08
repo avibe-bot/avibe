@@ -49,6 +49,17 @@ contract_version bump). Dialog badges are local form state. After save,
 `Source.vendor` is the catalog id (`deepseek`, not `custom`), which is
 enough for source-detail identity.
 
+**The ladder is the only owner (amended 2026-09-08).** A rung's verdict is
+reached once, when the Source is saved, and nothing re-derives it afterwards.
+The engine projection used to re-check a stored Source's `protocol` against its
+vendor's current catalog pin, which contradicted the ladder twice: rung 2 can
+legitimately prove a protocol the pin does not name, and a pin is mutable
+product data, so repinning a vendor between releases retroactively invalidated
+the Sources that vendor's own earlier pin had admitted. `_validate_source_target`
+now asks only what the renderer downstream of it asks — can this Source's
+upstream be resolved — so a pin is read where a protocol is *decided* and never
+where one is replayed.
+
 ## First-wave catalog
 
 Authoritative table, shipped as `vibe/data/api_key_vendors.json`. Vendor
@@ -68,7 +79,7 @@ prefix map in `vibe/data/model_vendors.json` is a different document
 | `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openai_chat` |
 | `groq` | Groq | `https://api.groq.com/openai/v1` | `openai_chat` |
 | `mistral` | Mistral | `https://api.mistral.ai/v1` | `openai_chat` |
-| `xai` | xAI | `https://api.x.ai/v1` | `openai_chat` |
+| `xai` | xAI | `https://api.x.ai/v1` | `openai_responses` |
 | `together` | Together | `https://api.together.xyz/v1` | `openai_chat` |
 | `fireworks` | Fireworks | `https://api.fireworks.ai/inference/v1` | `openai_chat` |
 

@@ -1781,6 +1781,55 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+def test_a_persisted_key_source_survives_a_repin_of_its_vendor(tmp_path: Path) -> None:
+    """A stored api-key Source is judged by its upstream, not by today's pin.
+
+    A released Avibe persisted api-key Sources whose Base URL the user left empty:
+    their upstream is the official URL their vendor's catalog row holds, which is
+    why the runtime keeps a fallback for it. A row's ``protocol`` is product data
+    that moves between releases — `xai` moved from `openai_chat` to
+    `openai_responses` — and moving it must not retroactively invalidate the
+    Sources the earlier value admitted. The projection is atomic, so a Source that
+    stopped being admissible would take every other Source down with it rather
+    than fail alone.
+
+    Seeded from the catalog on the one protocol each row does *not* pin, so the
+    property covers every vendor rather than the row that happened to move, and a
+    vendor added or repinned later is covered without editing this test.
+    """
+
+    store = EngineStateStore(tmp_path / "state")
+    store.prepare_instance("install-repin")
+    bindings = []
+    for index, entry in enumerate(api_key_vendor_catalog()):
+        off_pin_protocol = next(
+            protocol for protocol in SOURCE_PROTOCOLS if protocol != entry.protocol
+        )
+        credential_ref = store.store_api_key(
+            "secret",
+            vendor=entry.id,
+            protocol=off_pin_protocol,
+            base_url=None,
+        )
+        bindings.append(
+            SourceBinding(
+                source_id=f"src_repin{index:08d}",
+                vendor=entry.id,
+                protocol=off_pin_protocol,
+                base_url=None,
+                credential_ref=credential_ref,
+                allowed_origins=("main",),
+                model_ids=(f"{entry.id}-model",),
+            )
+        )
+
+    projected = store.sync_sources(bindings)
+
+    assert [(record.vendor, record.protocol, record.base_url) for record in projected] == [
+        (binding.vendor, binding.protocol, None) for binding in bindings
+    ]
+
+
 def test_source_record_requires_valid_reasoning_state() -> None:
     payload = {
         "source_id": "src_fixture123",

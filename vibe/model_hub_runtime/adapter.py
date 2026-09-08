@@ -109,12 +109,13 @@ _OAUTH_ENDPOINTS = {
 #           the executor sends to `/responses`
 #           (`internal/runtime/executor/xai_executor_execute.go:45`).
 #
-# All three land on `openai_chat`, which is also what the api-key catalog pins
-# for the same three vendor ids — one vendor, one protocol, whichever channel
-# holds the credential. That agreement is what lets `_validate_source_target`
-# admit these Sources without a base URL, so keep the two tables consistent: a
-# subscription pinned to a protocol its api-key sibling contradicts would need
-# that validator taught about a second pin.
+# All three land on `openai_chat`. This table is not required to agree with
+# `vibe/data/api_key_vendors.json`, and for `xai` it no longer does: that catalog
+# pins the protocol Avibe speaks to a vendor's *public* API with a key it holds,
+# while this one names the surface the engine serves a credential it holds
+# itself. The engine reaches xAI's Responses API from either, so the api-key
+# channel is pinned to the surface OpenAI is steering the ecosystem toward and
+# this one keeps the surface the shipped grant path was verified on.
 _HUB_SUBSCRIPTION_PROTOCOLS = {
     "gemini": "openai_chat",
     "kimi": "openai_chat",
