@@ -1032,12 +1032,15 @@ def check_proposals(
         for match in sql_matches(pattern, expression):
             parts[match.start():match.end()] = " " * (match.end() - match.start())
     expression = "".join(parts)
-    literals = [match.group()[1:-1].replace("''", "'") for match in SQL_OPAQUE.finditer(expression) if match.group().startswith("'")]
+    if not any(match.group().startswith("'") for match in SQL_OPAQUE.finditer(expression)):
+        return []
     mentioned = sql_identifiers(expression)
     named = [column for column in columns if identifier_key(column) in mentioned]
     names = {identifier_key(column): column for column in named}
+    context_columns = tuple(context_columns)
+    terms = list(conjunctive_terms(expression, (*columns, *context_columns)))
     preferred = []
-    for term in conjunctive_terms(expression, (*columns, *context_columns)):
+    for term in terms:
         for reverse in (False, True):
             operands = (SQL_STRING, SQL_IDENTIFIER) if reverse else (SQL_IDENTIFIER, SQL_STRING)
             match = re.fullmatch(rf'\s*({operands[0]}){EQUALITY}({operands[1]})\s*', term, SQL_FLAGS)
@@ -1046,8 +1049,16 @@ def check_proposals(
                 column = names.get(identifier_key(unquote_identifier(token)))
                 if column is not None:
                     preferred.append((column, literal[1:-1].replace("''", "'")))
-    # An explicit binding should not first be broadcast into unrelated columns.
-    return list(dict.fromkeys([*preferred, *((column, literal) for column in named for literal in literals)]))
+    # Reuse the semantic owners' connectivity: a literal may help a functional
+    # dependent, but cannot repair a disconnected term's column.
+    recipients = semantic_recipients(expression, named, context_columns=context_columns)
+    scoped = []
+    for term in terms:
+        keys = sql_identifiers(term)
+        targets = set().union(*(recipients[name] for name in named if identifier_key(name) in keys))
+        literals = [match.group()[1:-1].replace("''", "'") for match in SQL_OPAQUE.finditer(term) if match.group().startswith("'")]
+        scoped.extend((name, literal) for name in named if name in targets for literal in literals)
+    return list(dict.fromkeys([*preferred, *scoped]))
 
 
 SeedAssignment = tuple[tuple[str, object], ...]
@@ -1293,6 +1304,7 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
         between = False
         outer_start = outer_end = None
         commas = []
+        cast_as = None
         for token in re.finditer(rf'\(|\)|,|{SQL_IDENTIFIER}', active, SQL_FLAGS):
             kind = token.group().lower()
             if kind == '(':
@@ -1310,6 +1322,8 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
             elif kind == ',':
                 if depth == 1 and case_depth == 0:
                     commas.append(token.start())
+            elif kind == 'as' and depth == 1 and case_depth == 0:
+                cast_as = (token.start(), token.end())
             elif kind in {"and", "or", "between"} and depth == 0 and case_depth == 0:
                 if kind == 'or':
                     cuts = []
@@ -1338,7 +1352,7 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
                 boolean_suffix = re.fullmatch(
                     rf'(?:{is_true}{not_false})', suffix, SQL_FLAGS,
                 )
-                whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood"}
+                whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood", "cast"}
                 if whole_operand and negations % 2 == 0 and (not suffix or (
                     not negations and ("-" not in unary.group() or boolean_suffix)
                 )):
@@ -1355,6 +1369,17 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
                     probability = sql_projection(term[commas[0] + 1:outer_end - 1]).strip(SQL_WHITESPACE)
                     if re.fullmatch(r'(?:0(?:\.\d*)?|1(?:\.0*)?|\.\d+)', probability, SQL_FLAGS):
                         inner = term[outer_start + 1:commas[0]]
+                elif cast_as is not None and (
+                    (prefix.lower() == "cast" and (not suffix or re.fullmatch(
+                        rf'(?:{EQUALITY}{truth}{not_false})', suffix, SQL_FLAGS
+                    )))
+                    or (not suffix and re.fullmatch(rf'{truth}{EQUALITY}cast', prefix, SQL_FLAGS))
+                ):
+                    target = sql_projection(term[cast_as[1]:outer_end - 1], literals=True, identifiers=True)
+                    if sqlite_affinity(target.strip(SQL_WHITESPACE)) in {"INTEGER", "REAL", "NUMERIC"}:
+                        # A whole numeric truth CAST exposes required predicates,
+                        # not a converted operand of an arbitrary comparison.
+                        inner = term[outer_start + 1:cast_as[0]]
             if inner is None:
                 yield term
             else:
@@ -2029,20 +2054,25 @@ def insert_seed_row(
                      *json_proposals(connection, expression, names, text_constraints=text_constraints, context_columns=context_columns),
                      *((pair,) for pair in related_proposals)],
                 ]
-                # Derived repairs precede guesses. Both guess sources remain live
-                # throughout the INSERT budget, with JSON after generic literals.
-                for offset in range(len(sources)):
-                    source = (next_source + offset) % len(sources)
-                    options = sources[source]
-                    for step in range(len(options)):
-                        index = (source_positions[source] + step) % len(options)
-                        if unseen(options[index]):
-                            untried = [options[index]]
-                            source_positions[source] = (index + 1) % len(options)
+                # Finish each source's forward pass before either wraps. Otherwise
+                # a short numeric list restarts with every new text value and
+                # consumes turns owed to the longer source's unvisited tail.
+                # A later pass still permits whole-row repairs in changed context.
+                for _ in range(2):
+                    for offset in range(len(sources)):
+                        source = (next_source + offset) % len(sources)
+                        options = sources[source]
+                        for index in range(source_positions[source], len(options)):
+                            source_positions[source] = index + 1
+                            if unseen(options[index]):
+                                untried = [options[index]]
+                                break
+                        if untried:
+                            source_progress[expression] = ((source + 1) % len(sources), source_positions)
                             break
                     if untried:
-                        source_progress[expression] = ((source + 1) % len(sources), source_positions)
                         break
+                    source_positions[:] = [0] * len(sources)
             if not untried:
                 return objection, True
             values.update(untried[0])
