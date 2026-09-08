@@ -5,7 +5,8 @@
 Implemented locally after the recorded decision from orchestrator Session
 `sesvmgbdub2gp` at integration commit
 `d5adacdba42783f49dc0c40745fa25d5af8fcf7e`. The decision was read directly from
-the integration worktree; the shared plan was not edited or cherry-picked.
+the integration worktree. The later independent-delivery decision authorized
+importing the six root-owned shared-document commits without editing them.
 The boundary inventory below records the diagnosed base; the implementation
 record at the end describes the completed repair and its remaining gates.
 
@@ -308,8 +309,10 @@ After implementation, run the corresponding focused tests and changed-Python
 Ruff first, then relevant Model Hub/authority/scenario checks. UI changes require
 the relevant Vitest cases, test type checking, and `npm run build`. The
 orchestrator owns integrated validation, exact-current-commit Codex review, CI,
-thread inventory, and the single PR. No push, PR, Watch, merge, release, deploy,
-or local service restart is authorized for this lane.
+thread inventory, and final merge. The later independent-delivery authorization
+allows this lane to push its task branch, open its own PR, and retain one durable
+combined PR/CI Watch. It does not authorize lane-executed merge, release, deploy,
+or local service restart.
 
 ## Implementation record
 
@@ -338,13 +341,14 @@ dependency, schema revision, runtime setting, or ledger migration:
 
 ### Consuming evidence
 
-Final focused verification used the lane-local locked Python environment,
+The pre-split implementation verification at
+`6ee16bcd79e0182ac8d85b57dccf9ac58f811f0c` used the lane-local locked Python environment,
 `python -B -m pytest -q -p no:cacheprovider`, and repository HOME/XDG/backend
 store isolation. Runtime transport tests used a test-owned loopback HTTP
 server, not an installed or pinned engine. Native-import tests used fabricated
 credentials and verified the test-owned native tree's byte digest was unchanged.
 
-| Final verification | Result |
+| Pre-split lane verification | Result |
 | --- | --- |
 | Complete JSON-wire, usage, routing-modes, provenance, and migration-scenario files | 384 passed. |
 | API selection covering identity, catalog, producers, canonical/inline admission, observation/inventory, typeahead, and duplicate spelling | 108 passed; 351 deselected. |
@@ -371,10 +375,11 @@ evidence, not proof of a real engine's interpretation.
 keying generations), 75 recorded calls, repeated writer/read reloads, and exact
 full labels. `MH-USAGE-008` also covers 28 Source/model label-join pairs
 including long Unicode and folded-looking model literals after reload.
-Existing scenario IDs/names remain stable; no registry entry was allocated.
-The historical blanket wording of the registry must not be read as a proof
-over malformed legacy text; the test documentation and this assessment
-explicitly retain that exception.
+Existing scenario IDs remain stable; no registry entry was allocated.
+The root-owned integration repair subsequently qualified the names of
+`MH-USAGE-006/007/008` to the tested valid population. The registry, test
+documentation, and this assessment explicitly retain the malformed legacy
+exceptions.
 
 ### Remaining boundaries and integration handoff
 
@@ -392,10 +397,52 @@ explicitly retain that exception.
   already merged.
 - Shared-file edits stay in the approved admission/load/observation/typeahead
   seams. No gateway envelope, `project_opencode_public_model`, launch
-  capability policy, engine config-generation policy, engine pin, or shared
-  scenario registry was changed. Integration must preserve peers' disjoint
-  hunks in service/config/API-test/runtime-test files.
+  capability policy, engine config-generation policy, or engine pin was
+  changed. The additional authorized config test and three usage scenario
+  descriptions are described below. Integration must preserve peers' disjoint
+  hunks in service/config/API-test/runtime-test/catalog files.
 - The orchestrator owns broad integrated validation, real pinned-engine
-  evidence, exact-head Codex review, CI, and the single PR. This lane only
-  commits locally; no push, PR, Watch, release, deploy, or running-local change
-  was performed.
+  evidence, independent gate verification, and merge execution. This lane
+  delivers its own PR, exact-head review/CI inventory, and durable Watch.
+  No release, deploy, or running-local change is authorized.
+
+## Independent PR delivery
+
+The owner changed delivery authority at 2026-09-09 04:11 +08
+(2026-09-08 20:11 UTC), recorded by root commit
+`752c1def8f6c2978bf1a810c4dd48a8522afaa8c`. Lane C retains Session
+`sesm79v4dhm25` and branch `fix/model-hub-identifier-boundary`; root Session
+`sesvmgbdub2gp` independently verifies all gates and performs the merge.
+The six shared-document commits were imported in their authorized order.
+Landed `origin/master` at `4a504f375b73f9e23b058d914398ec76abf8c1a6`
+was merged normally into this task branch; no peer's unmerged product code
+was copied, rebased, or force-pushed.
+
+Root repair `c263f7f5db7856136f87003acdab0b451c5aeac2` was imported
+as `407c52fd1`. It changes only `tests/test_model_hub_config.py` and the three
+usage scenario descriptions. The structural normalization guard now records
+comparison-only spelling checks separately from producing normalization
+owners, with exact owner sets for both and unchanged collapse-owner assertions.
+Twelve consuming OpenCode cases cover ordinary, long, Unicode, legacy-surrogate,
+padded, and blank identities under both repairing modes; no production or
+duplicate-repair policy changed.
+
+The pre-split counts above are historical lane evidence, not a claim about a
+later PR head. Fresh branch-local tests, Ruff, authority/catalog checks, UI test
+types, and production build are recorded with the submitted head in the PR and
+the lane review inventory. Root's combined-tree and browser counts are not
+attributed to this branch.
+
+The lane owns `/tmp/avibe-model-boundaries.9OVz1v/lane-c-review.md` and
+`/tmp/avibe-model-boundaries.9OVz1v/lane-c-pr-watch.json`; root uses its own
+independent Watch state. Initial findings-bearing reviewed heads are zero.
+The same lane Watch/cursor stays live throughout review rounds, with both
+timeouts disabled. A repeated root-cause class on two reviewed heads, or three
+findings-bearing heads following a model rewrite, pauses edits/pushes for
+the same orchestrator's recorded decision.
+
+Readiness requires an exact-current-head Codex pass, no unresolved paginated
+threads, every expected lint job present and successful in every matching run,
+and a CLEAN open non-draft PR. Once ready, the lane stops editing/pushing,
+durably reports readiness, and leaves the original Watch live until root
+reports the verified merge and explicitly authorizes Watch removal.
