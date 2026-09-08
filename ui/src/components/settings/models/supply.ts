@@ -4,10 +4,10 @@
 // deserve unit tests, and this repo's vitest setup has no DOM, so they are plain
 // functions over the contract types and nothing else.
 import { processAvailabilityOf } from './eligibility';
+import { catalogModelIds } from './backendCatalog';
 import type {
   AgentSupply,
   ModelSupply,
-  NamedAgentSupply,
   Source,
   SourceState,
   SupplyStatus,
@@ -69,20 +69,19 @@ export const needsAttention = (state: SourceState): boolean =>
 export const healthyButUnrunnable = (agent: Pick<AgentSupply, 'sources'>, source: Source): boolean =>
   !isUnhealthy(source.state) && !processAvailabilityOf(agent, source.id).runnable;
 
-export type AgentGroupStatus = SupplyStatus | 'unconfigured' | 'unused';
+export type GatewayRouteStatus = 'empty' | 'unknown' | 'unconfigured' | 'available' | 'partial' | 'unavailable';
 
-/** Summarize the enabled Agents using one backend without inventing a backend selection. */
-export const agentGroupStatus = (agents: NamedAgentSupply[]): AgentGroupStatus => {
-  if (agents.length === 0) return 'unused';
-  if (agents.every((agent) =>
-    agent.effective_model_id === null || agent.route_reason === 'route_unconfigured'
-  )) return 'unconfigured';
-
-  const statuses = agents.map((agent) => agent.supply_status);
-  if (statuses.every((status) => status === 'ok')) return 'ok';
-  if (statuses.some((status) => status === 'ok' || status === 'degraded')) return 'degraded';
-  if (statuses.some((status) => status === 'waiting')) return 'waiting';
-  return 'interrupted';
+/** Gateway coverage is about the catalog, independent of any Agent's selection. */
+export const gatewayRouteStatus = (agent: AgentSupply): GatewayRouteStatus => {
+  const models = catalogModelIds(agent);
+  if (models.length === 0) return 'empty';
+  const byId = new Map((agent.model_supply ?? []).map((row) => [row.model_id, row]));
+  const supply = models.map((id) => byId.get(id));
+  if (supply.some((row) => !row)) return 'unknown';
+  if (supply.every((row) => row?.chain_length === 0)) return 'unconfigured';
+  const available = supply.filter((row) => row && row.chain_length > 0 && row.has_runnable_hop).length;
+  if (available === models.length) return 'available';
+  return available > 0 ? 'partial' : 'unavailable';
 };
 
 // ── AC-9: who a supply problem is about ─────────────────────────────────

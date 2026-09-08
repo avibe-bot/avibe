@@ -417,7 +417,7 @@ export type AgentSupply = {
   routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
    *  and whenever `selected_model_id` is null. This is not a backend-wide
-   *  rollup; group summaries derive from `named_agents`. */
+   *  rollup; gateway coverage derives from the catalog's `model_supply`. */
   supply_status?: SupplyStatus | null;
   /** Supply depth per selectable model. null when mode=direct. */
   model_supply?: ModelSupply[] | null;
