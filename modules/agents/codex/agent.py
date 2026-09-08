@@ -461,12 +461,18 @@ class CodexAgent(BaseAgent):
 
             self._turn_registry.remember_request(request)
             developer_instructions: Optional[str] = None
+            prompt_rendered = False
             try:
                 # Get or create thread (with resume support)
                 thread_id = self._session_mgr.get_thread_id(request.base_session_id)
 
                 if not thread_id:
-                    thread_id = await self._start_or_resume_thread(transport, request)
+                    self.ensure_agent_session_id(request)
+                    developer_instructions = await self._build_thread_developer_instructions(request)
+                    prompt_rendered = True
+                    thread_id = await self._start_or_resume_thread(
+                        transport, request, developer_instructions=developer_instructions
+                    )
 
                 # If a turn is active, interrupt it first
                 active_turn = self._turn_registry.get_active_turn(request.base_session_id)
@@ -499,7 +505,9 @@ class CodexAgent(BaseAgent):
                 # payload byte-stable, this avoids repeating Memory admission
                 # side effects while the same request refreshes and starts.
                 self.ensure_agent_session_id(request)
-                developer_instructions = await self._build_thread_developer_instructions(request)
+                if not prompt_rendered:
+                    developer_instructions = await self._build_thread_developer_instructions(request)
+                    prompt_rendered = True
                 await self._refresh_thread_developer_instructions_if_needed(
                     transport,
                     request,
@@ -530,9 +538,13 @@ class CodexAgent(BaseAgent):
                         else:
                             transport = await self._get_or_create_transport(request.working_path, launch)
                         self._touch_transport_activity(request.working_path)
-                        thread_id = await self._start_or_resume_thread(transport, request)
-                        if developer_instructions is None:
+                        if not prompt_rendered:
+                            self.ensure_agent_session_id(request)
                             developer_instructions = await self._build_thread_developer_instructions(request)
+                            prompt_rendered = True
+                        thread_id = await self._start_or_resume_thread(
+                            transport, request, developer_instructions=developer_instructions
+                        )
                         self._bind_runtime_agent_session_id(request)
                         await self._start_turn(
                             transport,
@@ -1956,6 +1968,8 @@ class CodexAgent(BaseAgent):
         self,
         transport: CodexTransport,
         request: AgentRequest,
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Create a new Codex thread and return its threadId."""
         params: Dict[str, Any] = {
@@ -1964,6 +1978,10 @@ class CodexAgent(BaseAgent):
             "sandbox": "danger-full-access",
         }
         self.ensure_agent_session_id(request)
+        if developer_instructions:
+            params["developerInstructions"] = await self._native_thread_prompt(
+                transport, request, developer_instructions
+            )
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
 
         resp = await transport.send_request("thread/start", params)
@@ -1979,6 +1997,34 @@ class CodexAgent(BaseAgent):
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         # Also persist for resume support
         self.bind_agent_session_id(request, thread_id)
+        if developer_instructions:
+            from core.skill_observability import accept_catalog
+
+            accept_catalog(
+                self.controller,
+                request.context,
+                getattr(request, "skill_catalog_observation", None),
+                backend="codex",
+            )
+            # Only a genuinely new thread can establish its first model-visible
+            # prompt from native configuration alone. Resume/fork still carry
+            # history, so they must not advance this delivery fingerprint.
+            self._remember_thread_developer_instructions(
+                request.base_session_id, thread_id, developer_instructions
+            )
+            self._remember_thread_prompt_strategy(
+                request.base_session_id, thread_id, "injected_pending_persist"
+            )
+            if not hasattr(self, "_thread_unpersisted_prompts"):
+                self._thread_unpersisted_prompts = {}
+            self._thread_unpersisted_prompts[request.base_session_id] = (
+                thread_id,
+                developer_instructions,
+                "fallback",
+            )
+            self._repair_unpersisted_prompt_strategy(
+                request, thread_id, agent_session_id=self._prompt_state_agent_session_id(request)
+            )
         self._remember_thread_model_settings_from_response(
             request.base_session_id,
             thread_id,
@@ -2002,6 +2048,8 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         request: AgentRequest,
         fork: dict[str, Any],
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Fork an existing Codex thread and bind the new thread id."""
         target_agent_session_id = self.ensure_agent_session_id(request)
@@ -2048,7 +2096,11 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
-        if source_prompt_strategy is None and callable(
+        if developer_instructions:
+            params["developerInstructions"] = await self._native_thread_prompt(
+                transport, request, developer_instructions
+            )
+        elif source_prompt_strategy is None and callable(
             getattr(
                 getattr(self, "sessions", None),
                 "get_agent_session_runtime_marker",
@@ -2302,6 +2354,8 @@ class CodexAgent(BaseAgent):
         self,
         transport: CodexTransport,
         request: AgentRequest,
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Try to resume a persisted thread, fall back to creating a new one."""
         # Resume the native thread bound to the RESERVED workbench row (by PK): the
@@ -2326,6 +2380,10 @@ class CodexAgent(BaseAgent):
                 resume_params: Dict[str, Any] = {
                     "threadId": persisted,
                 }
+                if developer_instructions:
+                    resume_params["developerInstructions"] = await self._native_thread_prompt(
+                        transport, request, developer_instructions
+                    )
                 marker_getter = getattr(
                     getattr(self, "sessions", None),
                     "get_agent_session_runtime_marker",
@@ -2336,7 +2394,7 @@ class CodexAgent(BaseAgent):
                         persisted,
                         agent_session_id=self._prompt_state_agent_session_id(request),
                     )
-                    if marker is None:
+                    if marker is None and not developer_instructions:
                         # Older Avibe releases persisted their prompt as thread
                         # configuration. Clear it before the first Turn selects
                         # one of the new prompt-delivery strategies.
@@ -2408,10 +2466,42 @@ class CodexAgent(BaseAgent):
 
         fork = pending_native_fork(request.context, self.name)
         if fork:
-            return await self._fork_thread(transport, request, fork)
+            return await self._fork_thread(
+                transport, request, fork, developer_instructions=developer_instructions
+            )
 
         # No associated thread yet (genuinely first turn) — start fresh.
-        return await self._start_thread(transport, request)
+        return await self._start_thread(
+            transport, request, developer_instructions=developer_instructions
+        )
+
+    async def _native_thread_prompt(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        developer_instructions: str,
+    ) -> str:
+        """Keep user-configured native instructions before Avibe's baseline.
+
+        Native configuration is reconstructed after compaction, whereas injected
+        items are budgeted history. Never claim that an overlay updates this
+        configuration, or advance the history fingerprint on resume/fork.
+        """
+        params: Dict[str, Any] = {"includeLayers": False}
+        if getattr(request, "working_path", None):
+            params["cwd"] = request.working_path
+        response = await transport.send_request("config/read", params)
+        config = response.get("config") if isinstance(response, dict) else None
+        if not isinstance(config, dict):
+            raise CodexPromptRefreshUnavailableError(
+                "Could not read configured Codex instructions before setting the native baseline"
+            )
+        configured = config.get("developer_instructions")
+        if configured is not None and not isinstance(configured, str):
+            raise CodexPromptRefreshUnavailableError(
+                "Configured Codex developer instructions must be text"
+            )
+        return f"{configured}\n\n{developer_instructions}" if configured else developer_instructions
 
     async def _resolve_resume_model_provider_override(
         self,

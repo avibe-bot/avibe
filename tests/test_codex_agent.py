@@ -1684,7 +1684,9 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
             {"threadId": "thread-old", "turnId": "turn-1"},
         )
         agent._event_handler.clear_pending.assert_not_called()
-        agent._start_or_resume_thread.assert_awaited_once_with(fresh_transport, request)
+        agent._start_or_resume_thread.assert_awaited_once_with(
+            fresh_transport, request, developer_instructions="stable prompt"
+        )
         agent._start_thread.assert_not_awaited()
         agent.controller.emit_agent_message.assert_not_awaited()
 
