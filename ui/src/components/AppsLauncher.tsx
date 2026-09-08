@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronUp, LayoutGrid, Pin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -27,11 +28,46 @@ export const AppsLauncher: React.FC = () => {
   // Cursor-positioned right-click menu, on the shared ContextMenu primitive.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const closeTimer = useRef<number | null>(null);
+  const slotRef = useRef<HTMLDivElement | null>(null);
+  const launcherRef = useRef<HTMLDivElement | null>(null);
+  const [placement, setPlacement] = useState({ left: 0, bottom: 0, width: 0, height: 0 });
   // Set on unpin so the lingering hover doesn't immediately re-open the panel;
   // cleared once the cursor actually leaves the trigger+panel.
   const suppressHover = useRef(false);
 
   const visible = pinned || hovering || (showPageDrag.active && dragHovering);
+
+  useLayoutEffect(() => {
+    const slot = slotRef.current;
+    const launcher = launcherRef.current;
+    if (!slot || !launcher) return;
+    const measure = () => {
+      const rect = slot.getBoundingClientRect();
+      const next = {
+        left: rect.left,
+        bottom: window.innerHeight - rect.bottom,
+        width: rect.width,
+        height: launcher.getBoundingClientRect().height,
+      };
+      setPlacement((current) =>
+        current.left === next.left && current.bottom === next.bottom
+          && current.width === next.width && current.height === next.height ? current : next,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(slot);
+    observer.observe(launcher);
+    // The optional hostname/version rows can move the slot without resizing it.
+    if (slot.parentElement?.parentElement) observer.observe(slot.parentElement.parentElement);
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+    };
+  }, []);
 
   useEffect(() => {
     const resetDragHover = () => setDragHovering(false);
@@ -77,12 +113,11 @@ export const AppsLauncher: React.FC = () => {
     setMenu(null);
   };
 
-  return (
-    // The sidebar aside owns the stacking context (z-10, below the window layer z-20), so the Apps
-    // button is covered by a maximized window like the rest of the sidebar. `relative` is just the
-    // positioning context for the Dock popover below; the popover's z-50 is scoped to the sidebar.
+  const launcher = (
     <div
-      className="relative flex-1"
+      ref={launcherRef}
+      className="fixed z-30 hidden md:block"
+      style={{ left: placement.left, bottom: placement.bottom, width: placement.width }}
       data-show-page-dock-drop-target
       onMouseEnter={openHover}
       onMouseLeave={queueClose}
@@ -166,5 +201,14 @@ export const AppsLauncher: React.FC = () => {
         </ContextMenu>
       )}
     </div>
+  );
+
+  return (
+    <>
+      {/* Keep the sidebar's layout slot, but let this single launcher and its Dock escape the
+          sidebar stacking context. z-30 is above all app windows (z-20), below dialogs (z-50). */}
+      <div ref={slotRef} className="flex-1" style={{ height: placement.height }} />
+      {createPortal(launcher, document.body)}
+    </>
   );
 };
