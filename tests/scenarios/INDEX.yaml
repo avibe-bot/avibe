@@ -150,6 +150,7 @@ capabilities:
       - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
       - tests/test_model_hub_inference_wait.py
+      - tests/test_model_hub_request_body_budget.py
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_usage.py
       - tests/test_local_deps.py
