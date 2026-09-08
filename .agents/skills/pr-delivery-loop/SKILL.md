@@ -1,525 +1,255 @@
 ---
 name: pr-delivery-loop
-description: The implementation-lane standard for delivering a PR across the Avibe repositories (avibe, avibe-backend, avibe-docs, avault, and vault-sandbox) — branch/scope rules, contracts, Codex-bot review-loop discipline, and close-out criteria. Use this skill for every implementation task in these repos, regardless of agent backend.
+description: Deliver implementation PRs across Avibe, avibe-backend, avibe-docs, avault, and vault-sandbox. Required for branch and scope discipline, Codex review, CI, circuit breaking, and user-facing close-out, regardless of agent backend.
 ---
 
-# PR Delivery Loop — implementation-lane standard
+# PR Delivery Loop
 
-## Distribution
+This file contains the operating rules. [Rationale and examples](references/rationale.md)
+are optional reading for understanding a failure or the reasons behind a rule;
+do not load them routinely. They introduce no additional delivery gates.
 
-- The canonical maintained copy lives in the Avibe repository at
-  `.agents/skills/pr-delivery-loop/SKILL.md`.
-- Every other applicable repository carries a byte-for-byte copy of this skill
-  file at the same repo-relative path. Do not copy watcher implementations or
-  their tests into this skill.
-- In the multi-repo workspace, the project-level skill entry is a symlink to
-  the Avibe copy. Update the canonical copy first, then sync every repository
-  copy only after the canonical Avibe change passes review.
+## Ownership and distribution
 
-## Dependency boundary
+- The current user-started session is the **orchestrator**. A delegated lane's
+  orchestrator is its dispatching session/callback target. Authority is
+  **user > orchestrator > this standard**. Never delegate final review,
+  orchestration, or merge approval to a newly spawned agent.
+- The orchestrator decides clear, reversible, contract-preserving scope changes.
+  Ask the user only for a major trade-off, irreversible risk, or genuinely
+  ambiguous direction. A lane reports cross-scope gaps instead of editing peers.
+- Avibe's `.agents/skills/pr-delivery-loop/` is canonical; the project-level
+  entry links to it. After canonical review passes, sync the **whole maintained
+  package**, including references, byte-for-byte to each repository mirror.
+  Inspect companion guidance and preserve unrelated files and edits.
+- `background-watch-hook` owns managed waits, waiter scripts, cursor mechanics,
+  retry/settle/filter behavior, and delivery acknowledgement. Load that skill
+  before a managed wait. If unavailable, report the environment blocker; do not
+  vendor or reimplement it in a repository. This skill owns delivery policy.
 
-- Use the `background-watch-hook` skill for every managed wait. It owns the
-  reusable `vibe watch` workflow and the GitHub PR, issue, and Actions waiter
-  implementations.
-- This skill owns Avibe-specific delivery policy: branch and scope rules,
-  review and CI gates, thread resolution, circuit breaking, authority, and
-  close-out criteria.
-- Refer to the dependency by skill name. Do not hard-code an installation path,
-  vendor its scripts here, or hand-roll a replacement waiter. It is a
-  workspace-level dependency, not a repository payload: companion repositories
-  must not copy it just to satisfy this policy. The active agent environment
-  must expose it by skill name before a managed wait starts; if it does not,
-  report that environment blocker rather than changing repository scope.
+## 1. Scope, contracts, and implementation
 
-## Roles & authority
+- Continue an assigned branch/worktree after checking its head and authorship;
+  unexplained new commits may belong to a live peer. Otherwise fetch origin and
+  branch from GitHub's current default branch in a separate task worktree
+  (`.worktrees/avibe/<branch>` in the multi-repo workspace). Preserve dirty work.
+- Stay within assigned scope. No stacked PRs: declare dependencies on unmerged
+  PRs and use default-branch contracts until those dependencies land.
+- Before parallel lanes fork, commit shared interface and behavior contracts to
+  the base branch. Specify exact fields and their producer, consumer, signer,
+  and supplier as applicable, including what each signature covers. Audit the
+  complete boundary flow before dispatch
+  and after integration failures; isolated peer-mocked tests are not end-to-end
+  evidence. Include real data and non-ASCII boundary cases.
+- Contract deviations need orchestrator approval. At final rebase, refresh any
+  externally owned spec from its authoritative current source, not an old copy.
+  Do not leave a required contract as an untracked draft in the primary checkout.
+- Treat allocated IDs as shared contracts. Before final integration, compare
+  new migration revisions/chains and other allocated namespaces against the
+  latest default branch; reconcile collisions even if Git reports no conflict.
+- Cancellation is asynchronous. Before rerouting a lane, confirm the original
+  stopped or explicitly notify both sessions of the handover. Do not create
+  competing owners by treating a cancel request as completed termination.
+- State acceptance criteria as invariants. Test all existing relevant shapes,
+  including unchanged state; migrations need upgrade and downgrade checks.
+  When a failure class is identifiable, cover the class, not only the example.
+- Run focused tests and changed-file lint, plus required repository gates
+  (`npm run build` for UI work). Self-review `git diff origin/<default>...HEAD`
+  for scope drift, missing contracts, secrets, and temporary artifacts.
+- Claims about another lane's code name the SHA actually read from its current
+  remote branch. Findings belong to their reviewed head; reconcile them against
+  the current head before making another edit.
 
-- Your **orchestrator** is the agent session responsible for integration and
-  scope decisions. For a delegated lane, it is the dispatching session (your
-  run's callback target). In a user-started working session, the current agent
-  is the orchestrator; the user remains the owner and highest authority, not
-  the default decision engine.
-- Authority order: **user > orchestrator > this standard.** An explicit
-  instruction from the user or your orchestrator overrides any rule below —
-  verify the mechanical gates, then carry it out yourself.
-- Never spawn another agent to act as orchestrator, final reviewer, or
-  merge-approver. Review authority cannot be conjured by a delegated lane:
-  report decisions to its assigned orchestrator. When the current session is
-  the orchestrator, decide independently; ask the owner only for a major
-  trade-off, irreversible risk, or genuinely ambiguous direction.
+## 2. Open the PR and establish observation
 
-## 0. Scope & branch
+- Open a non-draft PR with a `type(scope): summary` title and explicit
+  `--base <GitHub-default-branch>`. Read back the title, body, and base.
+  Use `--body-file` for multiline Markdown, not shell-interpolated backticks.
+- Include capability/scope, applicable scenario IDs, validation layers, residual
+  manual/E2E checks, dependencies, and a **Known-by-design ledger** for intentional
+  non-changes. Reply to repeated intentional findings with that ledger entry.
+- Use one durable combined PR + CI Watch per owner/concern through
+  `background-watch-hook`: `wait_pr.py`, `--forever`, required `--workflow`
+  names, optional `--branch`, and no fixed `--sha` during a normal delivery loop.
+  Set `--timeout 0` on both supervisor and waiter; do not impose a lifetime cap.
+- Seed one complete owner-specific baseline and arm the Watch before the first
+  watched push or review trigger. For a new PR, create it first, then immediately
+  seed/arm before any subsequent push or explicit trigger. Never reseed, rotate,
+  or replace the cursor between rounds. Recovery from an actual Watch failure
+  is separate from routine delivery; retain evidence and follow the dependency.
+- Keep that Watch live while pushing, replying, and resolving. At each round's
+  end, use management commands to verify exactly one live Watch for this owner,
+  PR, and concern, not merely a remembered ID. An independent orchestrator gate
+  Watch is required for delegated work and has its own state; it is not a
+  duplicate lane Watch. Verify the lane's observation is live too.
+- Match every distinct Actions run ID for each required workflow at the current
+  head and branch. Another matching run still pending or failed blocks CI, even
+  if one run succeeded. Verify workflow names against actual runs. `DIRTY` plus
+  absent CI calls for conflict diagnosis, not queue waiting.
 
-- If the owner or orchestrator gives you an existing branch or worktree, treat
-  it as the assigned task context and continue there after verifying its head;
-  do not create a fresh default-branch lane that abandons or duplicates it.
-- Otherwise branch from the **latest** origin default branch (`git fetch
-  origin` first). In avibe, use a task worktree under the workspace's
-  `.worktrees/avibe/<branch>` directory, or the equivalent sibling worktree
-  directory in a standalone clone.
-- Stay inside your assigned file scope. A cross-lane interface gap is a
-  **report to the orchestrator**, never an edit to the other lane's files.
-- No stacked PRs. If you depend on an unmerged PR, build against its documented
-  shapes from the default branch and declare the dependency in your PR body.
-- **A unique identifier you allocate is a cross-lane contract, even though git
-  treats it as a private file.** Two lanes each add
-  `storage/alembic/versions/<date>_00NN_*.py` picking the same next number; the
-  filenames differ, so git merges both silently into a duplicate revision and a
-  forked head, and the one textual conflict — the shared `HEAD_REVISION` line in
-  `tests/test_sqlite_state_migration.py` — resolves mechanically ("same string,
-  keep it") and erases the evidence. Before final rebase, re-diff your
-  `revision` / `down_revision` against the default branch's newest revision;
-  renumber and re-chain rather than keeping siblings.
-  Same shape for any allocated-id namespace: route paths, feature-flag keys,
-  fixture ids. `git merge-tree --write-tree` will not find it.
-- **`DIRTY` + zero CI checks is one symptom, not two.** A conflicted PR cannot
-  produce the `refs/pull/N/merge` ref that `pull_request` workflows run
-  against, so no workflow starts at all. Before waiting on a slow queue, check
-  `gh pr view --json mergeStateStatus`.
-- **A cancel-and-reroute is not a handover.** `vibe runs cancel` is
-  asynchronous and can lose the race, so a brief rerouted to a fresh agent can
-  leave two agents live on one branch. The run table shows nothing wrong; the
-  symptom is commits the current agent did not author and a PR head ahead of its
-  own record. Whoever reroutes owes one of two things: confirmation that the
-  original is dead before the fork starts, or an explicit statement to each side
-  — the fork is told which session it replaces, the original is told it has been
-  superseded. Whoever inherits a branch reads `git log` for authors other than
-  itself before editing, and treats an unexplained commit as a live peer rather
-  than as its own forgotten work.
+## 3. Review, findings, and circuit breaking
 
-## 1. Contracts before code (multi-lane work)
+### Bind review evidence to the current head
 
-- Interface shapes live in files both lanes can read (types, example payloads,
-  endpoint lists, or a spec section explicitly named as the contract) — never
-  only in prose. Field names are exact (case included). **Commit them to the
-  base branch before the lanes fork**: a contract that lands after the fork is
-  not a shared reference, it is two divergent copies.
-- **An untracked contract draft in the main checkout is a defect with a delayed
-  cost.** No lane can read it from `origin/<base>`, and it blocks the
-  post-merge fast-forward of that checkout — which matters because regression
-  deploys the local commit, so the checkout that cannot fast-forward is exactly
-  the one that ships stale code. Commit the contract, or keep it out of the
-  checkout entirely.
-- **Freeze behavior contracts, not just field shapes.** For every
-  cross-boundary flow, the contract states per field: who produces it, who
-  consumes it, what a signature covers, and — for any handshake/attestation —
-  which side must supply what. A shape-only contract passes both sides' unit
-  tests while the behavior silently disagrees.
-- Orchestrator duty: before dispatching multi-lane work, walk each end-to-end
-  flow across all boundaries and enumerate every field's
-  produce/consume/sign/supply, surfacing every misalignment at once. On any
-  live integration failure, audit the whole remaining chain in one pass — each
-  fix can mask the next layer.
-- Require a real end-to-end test that pierces every boundary with real data
-  (including non-ASCII) — two isolated unit suites with the peer mocked prove
-  nothing about the boundary.
-- Deviating from the contract requires orchestrator sign-off first.
-- Orchestrator-owned spec/contract files you were given by absolute path live
-  OUTSIDE your branch (often uncommitted). If your PR needs them in-repo, sync
-  the AUTHORITATIVE current content at final rebase (confirm the path with the
-  orchestrator) — never commit the possibly-stale copy you read at kickoff:
-  amendments accumulate while you work.
+- After each push, confirm current-head review pickup within a few minutes;
+  otherwise post `@codex review`. While awaiting review, never pause without a
+  pending review or a new trigger. Do not push another head during a pending
+  review. Use wait time for acceptance, integration, and final-report preparation.
+- Save the trigger comment ID returned by your own write and read it back.
+  Check that exact comment for the Codex bot's `eyes` reaction within about two
+  minutes. Never select the last comment or search bodies for the trigger text.
+  The reaction disappears after completion; its later absence is not failed
+  pickup. PR-body `eyes` or a current-head verdict also provides live evidence.
+- Accept only Codex-authored evidence (`chatgpt-codex-connector`, often rendered
+  with `[bot]`). A comment-shaped pass must say
+  `Codex Review: Didn't find any major issues` and name the current reviewed SHA.
+  `Reviewed commit` alone is not a pass; findings reviews use it too.
+- A Codex `+1` **on the PR body** is a pass only when the original durable Watch
+  captured it as new after the current head epoch began, the prior-head review
+  was already terminal, and the head is unchanged. Never manufacture this
+  boundary by reseeding. If the timeline cannot bind it, trigger review on the
+  unchanged head and require a SHA-bearing verdict. A summary marked completed,
+  another author's reaction, or an empty owner-authored review is not a pass.
 
-## 1a. State criteria and tests as invariants, never as enumerations
+### Handle the full inventory before editing
 
-- Every acceptance criterion and every test states the property that must hold,
-  never the list of cases that must not happen. A list reads as complete and
-  never is: the case nobody thought of is, by construction, absent from it.
-- The mechanical form: seed one row of every shape that already exists, run the
-  change, and assert the rows are unchanged — never list which shapes are
-  skipped. A test naming the skipped ones passes forever while the one shape it
-  never named is silently rewritten; seeding is complete by construction, so a
-  shape added later is covered without editing the test. For a migration, assert
-  after upgrade **and** after downgrade.
-- Same rule for spec criteria: name the property and let the tests enumerate. An
-  enumeration written into a spec becomes the definition of done, so whatever is
-  missing from it falls out of scope by accident rather than by decision.
+- Fetch the current head, all paginated review threads/comments and verdicts,
+  and all exact-head CI runs. Count distinct findings-bearing reviewed heads;
+  classify by root cause, not by comment count. Include outdated threads.
+- The orchestrator independently verifies that inventory and spot-checks a
+  claimed root-cause fix in the diff and a consuming test each round. A lane's
+  report or green tests cannot substitute for this check.
+- **Stop before another edit/push** if a class appears on two reviewed heads.
+  After an architecture/data-model rewrite, three findings-bearing heads
+  without a clean pass also stop the loop, even for unrelated findings.
+- A lane delivers the full inventory and waits for its orchestrator's decision.
+  The orchestrator diagnoses the whole class, records the scope decision, and
+  continues when the smallest complete fix is clear, reversible, and preserves
+  contracts. Escalate to the user only under the ownership criteria above.
+  The breaker stops blind patching; it neither proves a design rewrite necessary
+  nor transfers the decision automatically to the user.
+- Fix actionable findings, reply, then resolve each addressed thread. If another
+  person's pending review prevents a reply, never delete/dismiss it: preserve
+  their drafts, report the blocker, keep observation live, and continue safe
+  work. Retry the reply after they submit/discard it; do not hide the open thread.
+- Internal round reports identify PR/head, findings addressed, and remaining
+  gates in one or two lines. Do not add redundant round-summary PR comments.
 
-## 2. Pre-PR checks
+## 4. Deliver, then close out
 
-- Run the smallest relevant local validation: focused tests for what you
-  touched, lint on changed files, the build gate (`npm run build` for UI work),
-  and any repository-specific required checks. Self-review your own diff once
-  (`git diff origin/<default>...HEAD`) for scope strays and leftovers.
-- The GitHub Codex bot review (§4) is the review gate.
+All close-out gates must hold together:
 
-## 3. Opening the PR
+1. A valid current-head Codex pass with no real findings.
+2. Unless the repository explicitly defines no CI, the full expected check set
+   is present and successful, and every matching required-workflow run succeeded.
+   Missing, pending, failed, cancelled, timed-out, action-required, or unreadable
+   evidence blocks the gate.
+3. Zero unresolved threads across the entire PR, including older/outdated heads.
+4. A delivered final report naming repository, PR URL, reviewed head, changes,
+   validation layers, and residual manual/E2E work.
 
-- Non-draft (drafts don't trigger review). Title `type(scope): summary`.
-- Pass the repository's default branch explicitly with `gh pr create
-  --base <default-branch>`; derive it from GitHub rather than trusting a local
-  `branch.<name>.gh-merge-base` setting. After creation, read the PR back and
-  verify `baseRefName` is that default branch before treating the PR as open.
-- Body must include: the changed capability; affected scenario IDs when a
-  catalog exists; evidence layers (unit / contract / scenario / residual manual
-  checks); explicit dependencies ("requires #NNN merged first"); and a
-  **Known-by-design ledger** (§4) when applicable.
+Delegated run finals are callback reports with a stable PR/head or Run ID, not
+scratch text. A watch-triggered lane must explicitly deliver its report or
+escalation to the orchestrator using `vibe agent run --session-id <orchestrator>
+--message-file <report> --no-callback` and verify the send. The orchestrator also
+sends circuit-breaker decisions back explicitly; a GitHub Watch cannot observe
+Session decisions. In a user-started orchestrator session, deliver to the user.
 
-## 3a. Turn-final text = a delivered status line
+Keep the Watch until the report is delivered, then remove it. This order also
+applies when the gates were already green when the turn started. If delivery
+fails, observation remains available for recovery.
 
-When you run as an async lane (`vibe agent run`), the FINAL TEXT of every turn
-you end is delivered to your orchestrator's conversation as an at-least-once
-callback. It is a report surface, not scratch space: include a stable PR/head
-or Run identifier so duplicate callback delivery can be deduplicated, and end
-every turn with a short, meaningful status line — e.g. `PR #921 head 41c088c5:
-review triggered (👀 confirmed); watch armed` — never a step narration ("Push
-branch, confirm repo"), a thinking fragment, or a bare next-action note. If a
-turn ends because you armed a watch and are waiting, say exactly that.
+**Do not merge without explicit user/orchestrator authorization.** Such an
+instruction is final review authority, not permission to skip mechanical gates
+or spawn another approver. Recheck all gates in one guarded shell conditional:
+valid head-bound bot pass, zero unresolved threads, complete successful CI, and
+an open non-draft PR with `mergeStateStatus == CLEAN`. Errors, empty responses,
+and missing checks fail closed. Re-scan scope, confirm delegated lanes have no
+running/queued work, and merge dependencies in order. Execute:
 
-## 4. Review-loop discipline
+```bash
+gh pr merge <validated-pr-url> --squash --match-head-commit <validated-head-sha>
+```
 
-- The Codex bot usually auto-reviews new pushes, but not reliably. After every
-  push, confirm a review of the new head is in flight within a few minutes; if
-  none appears, comment `@codex review`. An auto-review that finds something
-  submits a review with inline threads, exactly like a triggered one — act on
-  it. Only the passing case is asymmetric: it announces through the PR-body
-  reaction alone, never the sha-bearing pass comment, which is produced by an
-  explicit trigger and by nothing else. Triggering is therefore the only route
-  to comment-shaped head-bound pass evidence.
-- A trigger only counts once the bot reacts 👀 (`eyes`) to that comment. The
-  trigger is the comment ID your own `gh pr comment <pr> --body '@codex review'`
-  call returned — identify it by that ID. Never use `issues/<pr>/comments --jq
-  '.[-1]'`, and never find one by matching `@codex review` in comment bodies:
-  the bot quotes that phrase in the boilerplate appended to its own verdicts, so
-  the pattern selects its output as readily as your input. Query
-  `repos/<o>/<r>/issues/comments/<comment-id>/reactions` within ~2 minutes and
-  require `content == "eyes"` from the Codex bot (`chatgpt-codex-connector` in
-  the API, often displayed as `chatgpt-codex-connector[bot]`); aggregate counts
-  or other users' reactions do not prove pickup. **The bot withdraws the
-  reaction when the review completes**, so 👀 is evidence only inside that
-  window — afterwards every trigger reads 0, including the reviewed ones. Never
-  infer "it never started" from a reaction count after the fact; look for a
-  current-head verdict instead.
-- Liveness invariant: at every pause there is either a pending bot review of
-  the current head, or one you just triggered. Never wait on nothing.
-- Use `background-watch-hook` to create one durable `--forever` combined PR watch
-  for the whole delivery loop. Prefer the bundled `wait_pr.py` with each required
-  `--workflow` and optional `--branch`, but omit `--sha`: every cycle resolves the
-  PR's current head and observes Actions at that exact SHA. A push is a head-change
-  event, not a reason to replace the Watch. Add `--sha` only for an intentionally
-  fixed-head one-shot wait. Use `wait_pr.py` without CI arguments for PR-only
-  monitoring, and reserve `wait_action.py` for Actions targets that are not attached
-  to a PR.
-- Set the durable PR Watch's per-cycle `--timeout 0`. The Harness default is
-  21600 seconds, so leaving it implicit turns six quiet hours into a terminal
-  timeout; an idle PR is expected state, not a failed cycle.
-- The CI waiter matches every distinct Actions run ID for each requested
-  workflow name at the exact SHA and branch. A workflow name is not a unique
-  run identity; do not declare CI complete while a second matching run is
-  pending or failed.
-- The one-watch invariant is scoped by owner and concern: one live lane/fix
-  watch per PR, plus one independent orchestrator gate watch when work is
-  delegated. Review activity and the PR's exact-head CI are one lane concern
-  and should use the combined `wait_pr.py` watch rather than two sibling
-  waiters. Each genuinely independent concern needs its own state; never share
-  cursor state between concurrent watches or count unrelated global monitors as
-  the lane watch.
-- Follow `background-watch-hook` for waiter commands, state, baseline seeding,
-  catch-up, filtering, settling, retries, and delivery acknowledgement. Those
-  mechanics belong to the reusable skill; this policy only constrains when and
-  why the watch is armed.
-- Before the first push or review trigger, use `background-watch-hook` to seed one
-  complete owner-specific state file, then arm the forever Watch with that same
-  file. This is the only routine baseline creation in the loop. Never reseed,
-  rotate, or replace it between rounds: review or CI activity can land while the
-  current follow-up runs, and making the already-arrived event a fresh baseline
-  silently drops it. Catch-up is for deliberately replaying historical activity
-  before the loop starts, and a replacement Watch is recovery from a real
-  failure — neither is normal per-round operation.
-- Keep the Watch alive while pushing, replying, and resolving threads. Those own
-  actions may produce one extra batched callback, but they cannot consume the Watch
-  or leave the real next review unobserved. End every round by using the
-  `background-watch-hook` management commands to verify exactly one live Watch for
-  this owner, concern, repository, and PR. Do not rely on a remembered Watch ID or
-  one bookkeeping field as proof that its waiter is live.
-- For whoever gates the PR: a lane run that ended `succeeded` proves nothing
-  about the loop. A watch-triggered run can finish clean having pushed nothing
-  and armed nothing, leaving the PR with new findings and no watcher on either
-  side. When your gate watch fires on a findings review, verify the lane still
-  has a live PR watch before concluding it has the round handled.
-- The bot has three verdict shapes. Findings arrive as a review with inline
-  threads. A PASS is either (a) a plain issue comment by the Codex bot whose
-  body says "Codex Review: Didn't find any major issues" and names
-  `Reviewed commit: <sha>` equal to the current head, or (b) a `+1` reaction
-  from that bot on the PR body. Nothing else is one: not a contributor comment
-  quoting the pass text, not a reaction by another author, not a reaction on any
-  other comment.
-- That PR-body reaction is one state slot, not an append-only log: 👀 while a
-  review runs, `+1` once one completes with no comments, each write withdrawing
-  the last. So 👀 there means a review is running right now — a more durable
-  liveness probe than the 👀 on your trigger comment. The `+1` names no sha, but
-  its `created_at` is not stale either: it is when the most recent completed
-  review passed, and the only open question is which head that review ran
-  against. So do not push another head while a review is pending, and accept the
-  reaction when the durable Watch reports it as new after the current head epoch
-  began, the prior-head review was already terminal, and the PR head is
-  unchanged. Never reseed to manufacture that boundary. When the timeline cannot
-  settle it — an intervening head that was never reviewed, say — force the
-  binding rather than infer it: comment `@codex review` on the unchanged head
-  and take whatever verdict returns, a pass comment naming the sha or a findings
-  review naming it. Waiting for that comment instead of triggering waits
-  forever. The slot's 👀 → `+1` transition cannot stand in for it either: the
-  mandated waiter queries PR-body reactions with `?content=+1`, so it never sees
-  the 👀 half.
-- Do not treat `Reviewed commit:` alone as a pass signal. A findings verdict is
-  a `COMMENTED` review whose body also opens
-  `### 💡 Codex Review … **Reviewed commit:** <sha>`, so a gate that merely
-  greps for the sha merges over live findings. Match the bot author, pass
-  phrase, and exact head together for a comment-shaped pass; require the
-  head-bound waiter evidence above for a reaction-shaped one. Neither is enough
-  alone: the bot double-passes commits, so close-out also gates on zero
-  unresolved threads across the entire PR, including threads opened on earlier
-  or outdated heads — never on a quiet latest review.
-- A review attributed to the repo owner with an **empty body** is a phantom, not
-  a review: replying to a review thread creates a `COMMENTED` review under your
-  own account, stamped with the current head's `commit_id`. Any check that
-  selects reviews by head sha will count it as "the bot has started". Filter it
-  out by author and empty body.
-- Resolve every thread you address (reply, then resolve). For intentional
-  non-changes the bot keeps re-flagging: keep a **Known-by-design ledger** in
-  the PR body and answer re-flags by linking the entry.
-- If GitHub refuses your thread reply because another user (often the repo
-  owner) has a **PENDING review** on the PR, never delete or dismiss that
-  pending review to unblock yourself — it may hold unsubmitted draft comments,
-  and deletion destroys them unverifiably. Stop, report the block to the
-  orchestrator/owner, and continue the round without the reply (push, re-arm
-  the watch, note the unreplied threads in your report); reply only after the
-  owner submits or discards the draft themselves.
-- Same-theme findings = stop patching. The trigger is not a round count, it is
-  whether you can **name the class**: the moment you can enumerate the members
-  the reviewer has not reached yet ("it flagged the projected definition name,
-  and the projection also carries session title, session label, and the
-  callback session"), close the class now — one shared declaration plus a test
-  that asserts the enumeration, so a member added later fails a test instead of
-  costing a review round. Waiting for a third round is paying for a review you
-  have already predicted. Can't name the class? A delegated lane escalates the
-  inventory to its orchestrator; the orchestrator diagnoses whether the closure
-  belongs in a local path, chokepoint, contract, or data model.
-- The circuit breaker is mechanical, not discretionary. Before editing any
-  findings review, fetch every paginated thread and record the reviewed head,
-  number of findings, and root-cause classes in the status delivered to the
-  orchestrator. If a class appears on a second reviewed head, stop before the
-  next edit or push. After an architecture or data-model rewrite, the third
-  findings-bearing head also stops the lane even when no class has repeated.
-  A delegated lane delivers the complete inventory and waits for its
-  orchestrator. The orchestrator diagnoses the full inventory, records the
-  scope decision, and continues independently when the smallest complete action
-  is clear, reversible, and contract-preserving; it asks the owner only for a
-  major trade-off, irreversible risk, or genuinely ambiguous direction. Local
-  tests, CI, and resolved old threads cannot waive the diagnosis.
-- Searchable-list invariant, learned the expensive way on #1023 (three rounds):
-  **every string a row displays must remain a substring of a column the search
-  predicate covers.** A projected field the predicate forgot breaks it; so does
-  a display-side transform that produces a string no column contains
-  (whitespace collapsing, ellipsizing, reformatting). Deleting the transform is
-  not always available: HTML collapses runs of whitespace when it renders, so a
-  row can differ from its column even with no JS touching it. When the rendering
-  layer itself normalizes, make the **matcher** tolerant at the single
-  chokepoint that builds the pattern — never mirror the transform field by
-  field, which puts every future display tweak on a treadmill. Assert the
-  invariant over the enumerated title/label cases, not one example.
-- **Every claim about code you did not write names the sha it was read at.**
-  Read another lane's file from `origin/<their-branch>`, never at your own
-  merge-base: a merge-base snapshot ages the moment they push, and reading one
-  is how a lane escalates a defect the sibling fixed minutes earlier. Name the
-  sha in the escalation so the reader can tell a live read from a stale one.
-- A review finding — and any ruling derived from it — is pinned to the head the
-  review ran on, so name that head when you act on it. If the branch has moved
-  since, reconcile the finding against the current head rather than re-doing the
-  fix; the work may already be there.
-- **Delivery rule.** An escalation — and the §5 final report — only counts once
-  it is delivered to the orchestrator: a watch-triggered run must send it to the
-  orchestrator's session with `vibe agent run --session-id <orchestrator>
-  --no-callback`, then verify the send succeeded. Merely finishing the run
-  leaves the result in the lane session and notifies nobody. `--no-callback`
-  matters: without it the orchestrator's next user-facing reply is auto-queued
-  back into YOUR session as a stray instruction. While blocked, the PR waiter
-  observes GitHub activity only, never Session decisions, so the orchestrator
-  must deliver the circuit-breaker decision explicitly to the lane session (for
-  example `vibe agent run --session-id <lane-session> --message-file <decision>
-  --no-callback`). Keep the GitHub watch armed and state exactly which decision
-  the lane needs.
+Read back `MERGED` and the merge commit. Report a failed gate precisely. Clean
+up only this merged task's clean worktree/branches, preserving unrelated work;
+fast-forward the primary default checkout before any separately authorized
+deployment. Neither merge nor close-out authorizes deployment or a restart.
 
-## 5. Close-out — all conditions, then stop
+## 5. User-facing next actions
 
-1. Bot review of the current head with no real findings;
-2. CI fully green: the repository's expected check set is present (unless the
-   repository explicitly defines no CI), every applicable check is terminal,
-   and none is failing, cancelled, timed out, action-required, or pending;
-3. Zero unresolved review threads across the entire PR, regardless of the head
-   on which each thread was opened;
-4. Post the final report: PR URL, what shipped, evidence layers, residual
-   manual checks (state what end-to-end verification is deferred to the
-   orchestrator's integration pass). Only the orchestrator's final user-facing
-   response includes the applicable next-action buttons from §5a; internal
-   lane reports never include a button block. Deliver it by §4's delivery rule,
-   or finish the run the orchestrator dispatched with it as the result; ending a
-   watch-triggered round without that send means the orchestrator never learns
-   you finished.
-   **Tripwire:** the round where the clean pass finally lands is exactly the
-   round where lanes forget this and stop after tidying watches. When you notice
-   conditions 1–3 are already true at the start of a watch-triggered round, SEND
-   THE FINAL REPORT FIRST, then do cleanup;
-5. Remove your watches only after report delivery is verified (nothing
-   dangles, and a failed delivery still has recovery liveness);
-6. **Do not merge on your own initiative** — hand back; the orchestrator does
-   the final review and merge. If the user or your orchestrator explicitly
-   tells you to merge, that instruction IS the final review: check the
-   mechanical gate yourself in one guarded shell conditional that evaluates
-   every condition together — either a bot-authored pass-phrase issue comment
-   naming the current head or a head-bound Codex `+1` captured by the current
-   phase's waiter, zero unresolved threads across the entire PR, the expected
-   CI check set is present and fully successful, and
-   `gh pr view --json mergeStateStatus` == `CLEAN` — so that a check which
-   errors, returns empty, or omits an expected check reads as *do not merge*.
-   Then merge the validated PR explicitly with
-   `gh pr merge <validated-pr-number-or-url> --squash
-   --match-head-commit <validated-head-sha>` — no re-review, no spawning
-   anyone. The explicit PR target and `--squash` keep the command
-   noninteractive even when the orchestrator is running outside the PR's
-   worktree. If the gate is not CLEAN, report exactly what's missing instead
-   of refusing by role.
+Only the orchestrator's final **user-facing** report offers action buttons,
+never an internal lane report or GitHub comment. Name one repository/PR and its
+reviewed head. Use actual destination capability and reply-enhancement settings:
+when supported and enabled, append the trailing `---` and `[label]` syntax from
+Avibe's `core/prompts/quick-replies.md`, outside code fences. Otherwise, including
+unknown capability/settings, use ordinary visible prose with the PR URL in each
+suggested reply, without a trailing separator/bracket row that could be stripped.
 
-## 5a. User-facing next-action buttons
-
-In the orchestrator's final user-facing response, offer the next choice using
-the destination's actual delivery capability and reply-enhancement settings.
-When quick replies are supported and enabled, use Avibe's existing trailing
-`---` and `[label]` syntax from `core/prompts/quick-replies.md`, at the very end
-of the message and outside code fences. If support is absent, disabled, or
-unknown, provide the same choices as ordinary visible prose, including the PR
-URL in each suggested reply. Do not use a trailing bracket row or separator in
-that fallback: the parser can remove a button block even when the destination
-cannot render it. Apply this capability check to every action below, using
-the existing delivery configuration rather than a list of platform names.
-Never append these action offers to GitHub comments or internal lane reports.
-Name the repository, target PR, and reviewed head in the user-facing report.
-
-Use the user's conversation language, defaulting to English when unknown, and
-honor explicitly requested labels. These are the exact Chinese labels; English
-labels remain within the same 20-character button limit:
+Use the conversation language, English when unknown, and honor explicit labels:
 
 | Action | Chinese | English |
 | --- | --- | --- |
-| Merge the reported PR | 合并PR | Merge PR |
+| Merge | 合并PR | Merge PR |
 | Update local master regression | 更新master到回归环境 | Update master |
 | Update and verify end to end | 更新回归环境并进行端到端验证 | Update + E2E |
 
-**Bind the target before acting, for every button below.** The current format
-submits the label, not a target payload; Markdown links cannot add a hidden
-payload. Adjacent prose does not bind a click to that report. Resolve the source
-report from source-message metadata only when it is actually available to the
-agent. If it is unavailable or the report does not identify one repository/PR,
-ask the user for the PR URL before any merge or regression mutation. Never pick
-the latest-mentioned PR, the current worktree, or the only PR still open: an
-older button may refer to a different or already-closed PR. A label-only reply
-expresses action intent, not authority over an inferred target. An explicit
-target supplied by the user resolves this ambiguity; explicit merge requests
-then follow §5.6 without an extra confirmation. Do not invent payload syntax
-or change the requested labels to work around this transport limitation.
+**Bind every action to its target before mutation.** The callback submits only
+the label; adjacent prose and Markdown links add no hidden payload. Recover the
+source report from actual source-message metadata when available. If unavailable
+or not uniquely bound to a repository/PR, ask for the PR URL. Never select the
+latest mention, current worktree, or only open PR. An explicit user target
+resolves ambiguity without extra confirmation; do not change requested labels
+or invent a payload format.
 
-- **Ready, awaiting merge authorization:** only after verifying §5.1–§5.3 on
-  the current head and `mergeStateStatus == CLEAN` for an open, non-draft PR,
-  append the merge button from the language table. Do not show it while
-  review/CI is pending, findings remain unresolved, or the PR is conflicted,
-  closed, or already merged.
-  Offering the button is not merge authorization. After binding a click to its
-  report, re-fetch the PR/head and all merge gates. If the head differs from the
-  offered head or readiness was lost, report the change and refresh the offer
-  instead of executing a stale approval. Chinese example:
-
-  ```text
-  ---
-  [合并PR]
-  ```
-
-- **Merged, next local regression action:** for Avibe, after GitHub confirms
-  the named PR is `MERGED`, replace the merge offer with both regression choices
-  from the language table. The first updates local master regression from
-  `master`; the second performs that same update and then the relevant end-to-end
-  verification. Name the local target in the report. Do not present a
-  closed-but-unmerged PR as merged. Chinese example:
+- Offer **Merge** only when the review, CI, and thread gates pass and the PR is
+  open, non-draft, and `CLEAN`. Offering it is not authorization. After binding a
+  click, re-fetch the head and gates; if the offered head changed or readiness
+  was lost, report that change and refresh the offer instead of using stale approval.
+- After GitHub confirms the named PR is **MERGED**, replace Merge with both
+  regression choices and name the local target. Closed/unmerged is not merged.
+  Update + E2E performs the same update, then relevant end-to-end verification.
+  Both are separate opt-ins, not implied by merge. For Chinese reports:
 
   ```text
   ---
   [更新master到回归环境] | [更新回归环境并进行端到端验证]
   ```
 
-  These are separate opt-in actions, not implied by a merge request. After
-  binding the click and rechecking `MERGED`, follow `docs/regression/README.md`:
-  fetch `origin`, fast-forward the **primary default-branch checkout** with
-  `--ff-only`, and verify it is on `master` at the fetched `origin/master` SHA.
-  Before any environment mutation, verify that the actual deployable input of
-  `sync_source()` matches that selected Git tree under the runner's sender
-  exclusions. This includes ignored deployable files: Git ignore rules do not
-  govern rsync. Inspect the real input set, not just tracked/untracked status;
-  a clean `git status` or a receipt with `dirty=false` is not proof. Only paths
-  actually excluded by the runner are outside this source check. If the input
-  differs or the match cannot be established, stop and report the blocker.
-  Never discard, stash, or commit unrelated user edits to make it pass.
-  Keep that verified input unchanged throughout the update.
-  Fetching alone does not update a task worktree, and the runner synchronizes
-  its invoking checkout, including local source overrides.
+### Authorized local regression updates
 
-  Confirm the persistent **local** master environment (`avr-master` /
-  `avibe-master` by default), its product config, and its runtime environment
-  file already exist. Missing or unreadable state is a blocker, not permission
-  to provision or re-seed it. From the verified primary checkout, use:
+For Avibe, bind the action and recheck `MERGED`, then follow
+`docs/regression/README.md`. Other repos offer these choices only when their own
+documented local workflow applies; never invent a target.
 
-  ```bash
-  python3 scripts/incus_regression.py up --target master --reset-mode none --clean --env-file /dev/null
-  ```
+1. Fetch origin and fast-forward the **primary** checkout with `--ff-only`;
+   verify `master` equals the fetched `origin/master` SHA. Establish that the
+   actual `sync_source()` input, including ignored deployable files, matches that
+   Git tree under the runner's sender exclusions, and keep it unchanged through
+   the update. Git status or `dirty=false` alone is not proof. A mismatch or an
+   unprovable match blocks mutation; never stash, discard, or commit user edits
+   to bypass it. Invoke the runner from this verified checkout, not a task tree.
+2. Confirm the persistent **local** master environment (`avr-master` /
+   `avibe-master` by default), product config, and runtime environment file exist
+   and are readable. Missing state is a blocker, not provisioning/re-seeding
+   authority. Use the documented local Lima route on macOS; preserve existing
+   bind/port settings explicitly when different from defaults.
+3. For the existing target, run from the verified checkout:
 
-  Use the documented local Lima route on macOS. Preserve the existing local
-  bind/port settings explicitly when they differ from the runner defaults.
-  For this existing-target path, `--env-file /dev/null` suppresses automatic
-  `.env.regression` discovery and leaves `/etc/avibe-regression.env` untouched.
-  `--reset-mode none` alone does not prevent that file from being rewritten;
-  an empty regular env file still triggers a rewrite and is not a substitute.
-  If the checked-out runner cannot preserve the runtime environment this way,
-  stop before mutation. Neither button authorizes credential changes or a
-  product-state reset. Preserve pairing, agent homes, and persistent sessions.
+   ```bash
+   python3 scripts/incus_regression.py up --target master --reset-mode none --clean --env-file /dev/null
+   ```
 
-  `--clean` replaces the disposable synced source and generated build tree,
-  not product state or the runtime environment. It forces receiver content
-  reconciliation even when stale bytes have the same size and mtime; a normal
-  rsync quick check plus a commit receipt cannot establish that property.
-  Let the runner rebuild its assets, then verify the deployment receipt and
-  served source commit match the intended master SHA, and that the runtime
-  environment is unchanged without exposing its values, before reporting
-  success or starting the second choice's end-to-end checks.
-  Report the environment, deployed commit, and actual verification results;
-  a healthy service alone is not an end-to-end pass.
+   `--env-file /dev/null` suppresses automatic env discovery and leaves
+   `/etc/avibe-regression.env` untouched; an empty regular file does not.
+   Stop before mutation if the checked-out runner cannot preserve this behavior.
+   `--clean` reconciles disposable source/build output, including same-size,
+   same-mtime stale bytes. Preserve credentials, runtime environment, product
+   state, pairing, agent homes, and sessions; neither choice authorizes a reset.
+4. Let the runner rebuild assets. Verify the receipt and served source commit
+   match the intended SHA and the runtime environment is unchanged without
+   exposing values, before success or E2E checks. Report environment, deployed
+   commit, and actual test results; health alone is not an end-to-end pass.
 
-  Never reinterpret either choice as permission to update production, a remote
-  tenant, or the running local Avibe. Other repositories offer regression
-  actions only when their own documented local workflow applies; do not invent
-  a deployment target to make a button work.
-
-## 6. While waiting, don't idle
-
-Bot rounds take 5–20 minutes. Use the gaps to prepare integration assets: the
-user-facing acceptance checklist, regression/deploy prep notes, contract notes
-for dependent lanes, and your final-report draft.
-
-## 7. Orchestrator counterpart (for dispatchers, not lanes)
-
-- Do not rely on lane terminal reports alone: arm your OWN durable `--forever`
-  gate Watch per PR through `background-watch-hook`, with independent state, the
-  follow-up in your session, and merge-gate instructions in the message. Lanes go
-  silent at exactly the moment that matters (§5.5 failure mode); your gate Watch is
-  the insurance.
-- One waiter per concern still holds: the lane's watch drives its fix loop;
-  your watch drives the merge gate. Two watches on one PR, two concerns — fine.
-- Every time a findings review lands, independently paginate the threads and
-  update the head/class counts before allowing another fix push. On each round,
-  inspect at least one claimed root-cause fix in the diff and one consuming test;
-  do not accept "all tests green" or the lane's classification as a substitute.
-  Enforce the circuit breaker above: a repeated class on the second reviewed
-  head, or a third findings-bearing head after a model rewrite, pauses the lane
-  and requires the orchestrator to make and record a whole-model decision before
-  work resumes.
-- At gate: verify pass-on-current-head + all expected CI green + zero unresolved
-  across the entire PR + CLEAN yourself from GitHub, re-scan the final diff
-  against the granted file scope (plus any ratified extensions), confirm the
-  lane session is quiesced (no running or queued runs), then merge in dependency
-  order and ff your local default branch before any deploy.
+Neither choice authorizes production, a remote tenant, or the running local Avibe
+to be updated or restarted.
