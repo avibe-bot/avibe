@@ -224,3 +224,79 @@ Historical merged counters cannot identify their original owner, so this PR
 must not rekey or split them speculatively. Preserve the diagnostic evidence
 and record that attribution-policy follow-up separately; do not claim a proof
 over every malformed legacy string.
+
+### Native consumer follow-up
+
+The orchestrator inspected Codex 0.153.2's
+`models-manager/src/model_info.rs::with_config_overrides` and lane B's actual
+app-server consumer test. Codex takes the minimum of explicit
+`model_context_window` and catalog `max_context_window`; Avibe currently
+synthesizes both catalog fields from one BackendModel planning value.
+
+Approve removing `max_context_window` only when applying an explicit saved
+BackendModel `context_window` override. Retain `context_window` as the planning
+fallback and remove its obsolete catalog compaction threshold as before.
+Native rows without that override and native-CLI launches remain unchanged.
+The consumer test must prove both the fallback and an explicit larger context,
+alongside the native compaction setting. No Codex output cap is introduced.
+
+Claude's bundled CLI consumer honors explicit output limits, but its normal
+context planner does not necessarily consume `CLAUDE_CODE_MAX_CONTEXT_TOKENS`;
+the diagnosed context branch checks it only with compaction disabled. Retain
+the approved environment/settings preservation, prove actual output and
+Avibe-to-SDK context delivery, and document this native planner limitation.
+Do not disable compaction or claim end-to-end context control from environment
+injection alone.
+
+### Engine source-only decision
+
+Lane D's complete assessment is at
+`2a756b4b19a1478d06e1cc2a382aad0a9268acb5`. The orchestrator independently
+verified the clean exact upstream SHA, read the shared thinking entry point,
+validation and configured-model consuming tests, inspected the HTTP fixture,
+and verified the baseline artifact digest and all 380 result records. The
+recorded native disable-to-positive outcomes agree with the inspected
+capability clamp. These are baseline defects, not patched acceptance results.
+
+Approve a maintained, inactive candidate source/test patch series under
+`patches/cliproxyapi/`, against upstream
+`2a6b87aca083a5bf498ac1f68a1b636c500d7aaa`, with a small apply/test recipe
+and frozen input receipt. This is a local source-maintenance decision only,
+not authorization for a public fork, upstream contribution, release assets,
+manifest changes, installation, or runtime replacement.
+
+Source scope:
+
+- Distinguish identical reasoning wire representations from broad provider
+  families at the shared thinking entry point. Without an explicit suffix,
+  preserve the already prepared native target payload instead of performing
+  catalog-driven strip/map/validate/reapply. Recognize verified Responses
+  aliases; do not conflate Chat/Responses or Kimi's different dialect.
+- Extract explicit disable before capability gating, retain suffix priority,
+  reuse native disable writers before their support guards, and never turn
+  disable into a positive level or reactivate it through summary handling.
+- For genuine conversion with missing thinking metadata, use the existing
+  capability-free conversion responsibility, supplying original source
+  payload/format instead of extracting source fields from translated data.
+  Preserve positive conversion with known metadata and real protocol
+  constraints, normalizer/payload-rule ownership, and forced tool choice.
+- Preserve all registration metadata, including the existing Chat conversion
+  hint, exact selected credential snapshot, aliases/prefixes, routing, OAuth,
+  replacement, and refresh lifetimes. No fabricated UserDefined/capability
+  claim, broad validator deletion, new user setting, or runtime config change.
+
+Acceptance must include the maintained policy tests, patched HTTP matrix
+through real registration/execution, source/auth identity and replacement,
+stream/cancellation, and fake-auth subscription HTTP/WebSocket/dialect tests
+with external egress rejected. Keep source execution isolated and concurrency
+bounded. Use the committed engine catalogs, locked Go modules and exact
+toolchain; no catalog refresh from a moving branch.
+
+Release/packaging is deliberately separate. The existing manifest guard only
+accepts a truthful upstream identity and verified available four-platform
+assets. Do not weaken it or label locally patched bytes as upstream. Local
+diagnostic builds are not four-platform production reproducibility evidence.
+An upstream acceptance/release or a separately authorized Avibe source/
+provenance release contract is required before shipping this engine change.
+The Avibe PR may carry the reviewed inactive patch, but must explicitly state
+that its current engine pin and installed behavior remain unchanged.
