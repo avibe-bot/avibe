@@ -1421,6 +1421,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
             base_session_id="ses-target",
             composite_session_id="ses-target:/tmp/work",
             session_key="avibe::ses-target",
+            vibe_agent_model="fixture-provider/fixture-model",
         )
         await agent._process_message(request)
 
@@ -1599,6 +1600,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
         base_session_id="base",
         composite_session_id="base:/tmp/work",
         session_key="slack::c",
+        vibe_agent_model="fixture-provider/fixture-model",
     )
 
     asyncio.run(agent._process_message(request))

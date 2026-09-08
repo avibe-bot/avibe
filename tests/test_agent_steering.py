@@ -233,6 +233,7 @@ def _primary_request(*, session_id: str = "avibe-session", backend: str) -> Agen
         base_session_id=session_id,
         composite_session_id="runtime-key",
         session_key="scope-key",
+        vibe_agent_model="fixture-provider/fixture-model" if backend == "opencode" else f"{backend}-fixture",
     )
 
 
