@@ -935,11 +935,11 @@
         "retry": "Retry",
         "routeStatus": {
           "empty": "No models",
-          "unknown": "Routes unknown",
+          "unknown": "Unknown",
           "unconfigured": "No routes",
-          "available": "Routes ready",
-          "partial": "Partial routes",
-          "unavailable": "Routes down"
+          "available": "Ready",
+          "partial": "Partial",
+          "unavailable": "Unavailable"
         },
         "agentIssues": {
           "summary_one": "{{count}} Agent needs attention",

@@ -1,12 +1,13 @@
 import { expect, test } from '@playwright/test';
+import { hub } from '../support/copy';
 
-for (const lang of ['en', 'zh']) {
+for (const lang of ['en', 'zh'] as const) {
   for (const long of [false, true]) {
-    test(`gateway status and Agent details remain separate without overflow (${lang}, long=${long})`, async ({ page }) => {
+    test(`MH-GATEWAY-STATUS-001: gateway status and Agent details remain separate without overflow (${lang}, long=${long})`, async ({ page }) => {
       await page.goto(`/e2e/model-catalog/fixture.html?view=gateway&backend=opencode&lang=${lang}${long ? '&long=1' : ''}`);
       const card = page.locator('[data-agent-backend="opencode"]');
       const head = card.locator('[data-agent-group-head]');
-      await expect(head).toContainText(lang === 'zh' ? '网关 · 路由可用' : 'Gateway · Routes ready');
+      await expect(head).toContainText(lang === 'zh' ? '网关 · 路由可用' : 'Gateway · Ready');
       await expect(head).not.toContainText('grok');
       await expect(card.locator('[data-route-model]')).toHaveCount(5);
       const issues = card.locator('[data-agent-supply-issues]');
@@ -34,4 +35,23 @@ for (const lang of ['en', 'zh']) {
       await expect(issues.locator('ul')).toBeHidden();
     });
   }
+
+  test(`MH-GATEWAY-STATUS-001: every route status fits the compact mode trigger (${lang})`, async ({ page }) => {
+    for (const status of ['empty', 'unknown', 'unconfigured', 'available', 'partial', 'unavailable']) {
+      await test.step(status, async () => {
+        await page.goto(`/e2e/model-catalog/fixture.html?view=gateway&backend=opencode&lang=${lang}&status=${status}`);
+        const trigger = page.locator('.model-hub-agent-mode-trigger');
+        await expect(trigger).toContainText(hub(`gateway.routeStatus.${status}`, {}, lang));
+        // Platform fallback fonts have different widths; reserve room for a wider fallback too.
+        for (const font of ['inherit', 'monospace']) {
+          await trigger.evaluate((element, family) => { element.style.fontFamily = family; }, font);
+          const label = trigger.locator('span').last();
+          const size = await label.evaluate((element) => ({ available: element.clientWidth, text: element.scrollWidth }));
+          expect(size.text, `${status}/${font}`).toBeLessThanOrEqual(size.available + 1);
+          expect((await trigger.boundingBox())!.width).toBeLessThanOrEqual(190);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        }
+      });
+    }
+  });
 }

@@ -6,7 +6,9 @@ import { freshRuntimeProjection } from '../../src/components/settings/models/run
 import type { AgentChain, AgentSupply, Source } from '../../src/components/settings/models/types';
 
 export function GatewayFixture() {
-  const long = new URLSearchParams(location.search).has('long');
+  const params = new URLSearchParams(location.search);
+  const long = params.has('long');
+  const status = params.get('status') ?? 'available';
   const ids = ['claude-fable-5', 'claude-opus-4-8', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5'];
   const source: Source = {
     id: 'src_fixture', display_name: 'Primary', kind: 'api_key', vendor: 'anthropic',
@@ -16,9 +18,12 @@ export function GatewayFixture() {
   };
   const agent: AgentSupply = {
     backend: 'opencode', cli_present: true, mode: 'hub', menu_kind: 'open',
-    catalog_models: ids.map((id) => ({ ...blankBackendModel(), id })),
+    catalog_models: status === 'empty' ? [] : ids.map((id) => ({ ...blankBackendModel(), id })),
     sources: { order: [source.id], eligibility: [{ source_id: source.id, eligible: true }] },
-    model_supply: ids.map((model_id) => ({ model_id, route_origin: 'automatic', chain_length: 1, has_runnable_hop: true })),
+    model_supply: status === 'unknown' ? [] : ids.map((model_id, index) => ({
+      model_id, route_origin: 'automatic', chain_length: status === 'unconfigured' ? 0 : 1,
+      has_runnable_hop: status === 'available' || (status === 'partial' && index === 0),
+    })),
     named_agents: [{
       name: long ? `opencode-${'long-agent-name-'.repeat(16)}` : 'opencode',
       effective_model_id: long ? `grok/${'long-model-id-'.repeat(20)}grok-4.6` : 'grok/grok-4.6',

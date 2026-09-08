@@ -292,7 +292,7 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Routes down'],
+    ['en', 'Gateway · Unavailable'],
     ['zh', '网关 · 路由不可用'],
   ] as const)('summarizes unavailable model routes in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, model_supply: hubAgent.model_supply!.map((row) => ({ ...row, has_runnable_hop: false })), named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
@@ -301,7 +301,7 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Routes ready'],
+    ['en', 'Gateway · Ready'],
     ['zh', '网关 · 路由可用'],
   ] as const)('summarizes catalog routes without requiring a selected Agent model in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{
@@ -316,7 +316,7 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Routes ready'],
+    ['en', 'Gateway · Ready'],
     ['zh', '网关 · 路由可用'],
   ] as const)('keeps available routes independent of Agent usage in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
@@ -324,7 +324,7 @@ describe('AgentCard', () => {
     expect(screen.getByText(copy)).toBeTruthy();
   });
 
-  it.each(['en', 'zh'] as const)('keeps Agent issues in an expandable footer, outside the mode trigger in %s', async (lng) => {
+  it.each(['en', 'zh'] as const)('MH-GATEWAY-STATUS-001: keeps Agent issues in an expandable footer, outside the mode trigger in %s', async (lng) => {
     const instance = localeInstance(lng);
     const agent = {
       ...openCodeAgent,

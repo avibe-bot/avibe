@@ -1,5 +1,7 @@
 # Gateway Route Status and Agent Attribution
 
+Scenario: `MH-GATEWAY-STATUS-001` in the Model Hub scenario catalog.
+
 The Model Hub backend header summarizes the routes of the displayed model
 catalog, not the configured model of an enabled named Agent. Changing an Agent
 selection or enabling/disabling an Agent must not change this route summary.
@@ -17,5 +19,6 @@ selection or enabling/disabling an Agent must not change this route summary.
 
 Verification covers route-summary invariance, absent/incomplete supply,
 localized disclosure behavior, keyboard/touch interaction, and actual
-desktop/mobile layout with long identifiers. The existing Model Hub surface
+desktop/mobile layout with long identifiers and all localized route statuses
+under platform and wider fallback fonts. The existing Model Hub surface
 tokens and typography remain unchanged.
