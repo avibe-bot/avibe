@@ -795,7 +795,7 @@ def describe_schema_gap(db_path: Path) -> str:
 # SQLite names the one constraint an insert tripped, which is what makes the repair below
 # a guided search rather than a guess: the database says what it objected to, and the
 # objection itself carries the values it would have accepted.
-CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
+CHECK_FAILURE = re.compile(r"CHECK constraint failed: (.+)", re.DOTALL)
 
 # Enough attempts to satisfy every constraint a row trips one at a time, and few enough
 # that a table whose constraints cannot be satisfied this way is given up on rather than
@@ -816,13 +816,15 @@ JSON_VARIED_MEMBER = "__seed_step__"
 # `json_type(col,'$.p') = 'array'` both name the column, the path, and what belongs at it,
 # which is the same three things the plain literal form carries -- so both are read the
 # same way rather than treated as unseedable.
-SUBSTRING_TERM = r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
+SQL_QUOTED_IDENTIFIER = r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]'
+SQL_IDENTIFIER = rf'(?:{SQL_QUOTED_IDENTIFIER}|(?<![\w$])[^\W\d][\w$]*)'
+SUBSTRING_TERM = rf'\bsubstr\s*\(\s*({SQL_IDENTIFIER})\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
 EQUALITY = r'\s*(?:==|=(?!=)|\bis\b(?!\s+not\b))\s*'
 SQL_STRING = r"'(?:[^']|'')*'"
-JSON_TERM = r"\bjson_(extract|type)\s*\(\s*\"?(\w+)\"?\s*,\s*'((?:[^']|'')*)'\s*\)"
+JSON_TERM = rf"\bjson_(extract|type)\s*\(\s*({SQL_IDENTIFIER})\s*,\s*'((?:[^']|'')*)'\s*\)"
 JSON_REQUIREMENT = re.compile(JSON_TERM + EQUALITY + rf"({SQL_STRING}|-?[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
 SQL_OPAQUE = re.compile(
-    SQL_STRING + r'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\n]*|/\*[\s\S]*?(?:\*/|$)'
+    SQL_STRING + '|' + SQL_QUOTED_IDENTIFIER + r'|--[^\n]*|/\*[\s\S]*?(?:\*/|$)'
 )
 
 # Every name SQLite's `json_type` can return, against the emptiest document member of that
@@ -869,39 +871,67 @@ def sqlite_affinity(declared_type: str, *, strict: bool = False) -> str:
 
 
 def is_strict_table(connection: sqlite3.Connection, table: str) -> bool:
-    quoted = table.replace('"', '""')
-    return any(row[5] for row in connection.execute(f'pragma main.table_list("{quoted}")'))
+    return any(row[5] for row in connection.execute(f'pragma main.table_list({quote_identifier(table)})'))
 
 
-def sql_projection(expression: str, *, literals: bool = False) -> str:
+def sql_projection(expression: str, *, literals: bool = False, identifiers: bool = False) -> str:
     """An offset-preserving code view for the seeder's bounded expression grammar."""
     def project(match: re.Match) -> str:
         token = match.group()
         if token.startswith("'") and literals:
             return token
-        if token[0] in '\"`[':
-            identifier = token[1:-1]
-            if re.fullmatch(r"\w+", identifier):
-                return identifier.ljust(len(token))
+        if identifiers and token[0] in '\"`[':
+            return token
         return " " * len(token)
     return SQL_OPAQUE.sub(project, expression)
 
 
 def sql_matches(pattern: str | re.Pattern, expression: str) -> Iterable[re.Match]:
     """Allow literal operands without interpreting their contents as expressions."""
-    active = sql_projection(expression)
-    for match in re.finditer(pattern, sql_projection(expression, literals=True), 0 if isinstance(pattern, re.Pattern) else re.IGNORECASE):
-        if active[match.start():match.start() + 1].strip():
+    active = sql_projection(expression, identifiers=True)
+    opaque = [(token.start(), token.end()) for token in SQL_OPAQUE.finditer(expression)]
+    searchable = sql_projection(expression, literals=True, identifiers=True)
+    compiled = re.compile(pattern, 0 if isinstance(pattern, re.Pattern) else re.IGNORECASE)
+    position = 0
+    while match := compiled.search(searchable, position):
+        enclosing = next(((start, end) for start, end in opaque if start <= match.start() < end), None)
+        if enclosing and (match.start() > enclosing[0] or not active[match.start()].strip()):
+            # An invalid cross-token match must not consume the following real operand.
+            position = enclosing[1]
+            continue
+        # An identifier can be an operand, but no match can start/end inside its payload.
+        if any(start < match.end() < end for start, end in opaque):
+            position = match.start() + 1
+        else:
             yield match
+            position = max(match.end(), match.start() + 1)
+
+
+def unquote_identifier(token: str) -> str:
+    if token.startswith('['):
+        return token[1:-1]
+    if token.startswith(('"', '`')):
+        return token[1:-1].replace(token[0] * 2, token[0])
+    return token
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def sql_identifiers(expression: str) -> set[str]:
+    return {identifier_key(unquote_identifier(match.group())) for match in sql_matches(SQL_IDENTIFIER, expression)}
 
 
 def substring_requirements(expression: str) -> Iterable[tuple[str, str, str, str]]:
     """Normalize either operand order into (target, start, width, source)."""
-    identifier = r'"?(\w+)"?'
-    expression = sql_projection(expression)
-    yield from re.findall(SUBSTRING_TERM + EQUALITY + identifier, expression, re.IGNORECASE)
-    for source, target, start, width in re.findall(identifier + EQUALITY + SUBSTRING_TERM, expression, re.IGNORECASE):
-        yield target, start, width, source
+    identifier = f'({SQL_IDENTIFIER})'
+    for match in sql_matches(SUBSTRING_TERM + EQUALITY + identifier, expression):
+        target, start, width, source = match.groups()
+        yield unquote_identifier(target), start, width, unquote_identifier(source)
+    for match in sql_matches(identifier + EQUALITY + SUBSTRING_TERM, expression):
+        source, target, start, width = match.groups()
+        yield unquote_identifier(target), start, width, unquote_identifier(source)
 
 
 def representative_value(column: str, declared_type: str, *, strict: bool = False) -> object:
@@ -914,10 +944,12 @@ def representative_value(column: str, declared_type: str, *, strict: bool = Fals
     migration that parses a timestamp, an address, or a JSON document gets something
     parseable rather than ``'x'``.
     """
-    kind = sqlite_affinity(declared_type, strict=strict)
-    if kind in {"INTEGER", "REAL", "NUMERIC"}:
+    # Affinity governs storage/evaluation, not the established representative family:
+    # flexible DATE/DECIMAL/ANY declarations still admit semantic text seeds.
+    kind = declared_type.upper()
+    if any(marker in kind for marker in ("INT", "REAL", "NUM", "DOUB", "FLOA", "BOOL")):
         return 0
-    if kind == "BLOB" and declared_type and not (strict and declared_type.upper() == "ANY"):
+    if "BLOB" in kind:
         return b""
     if column.endswith(("_at", "_time")):
         return "1970-01-01T00:00:00+00:00"
@@ -933,7 +965,8 @@ def check_expression(ddl: str, name: str) -> str:
     # SQLite stores the DDL as it was written, so the keywords are whatever case the
     # migration that created the table happened to use.
     active = sql_projection(ddl)
-    marker = re.search(rf'CONSTRAINT\s+"?{re.escape(name)}"?\s+CHECK\s*\(', active, re.IGNORECASE)
+    marker = next((match for match in sql_matches(rf'\bCONSTRAINT\s+({SQL_IDENTIFIER})\s+CHECK\s*\(', ddl)
+                   if identifier_key(unquote_identifier(match.group(1))) == identifier_key(name)), None)
     if marker is None:
         return ""
     depth = 1
@@ -976,14 +1009,14 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     """
     # Paths and member values already belong to semantic JSON proposals; offering
     # them to ordinary columns can overwrite an otherwise successful repair.
-    parts = list(sql_projection(expression, literals=True))
+    parts = list(sql_projection(expression, literals=True, identifiers=True))
     for pattern in (JSON_REQUIREMENT, JSON_TERM):
         for match in sql_matches(pattern, expression):
             parts[match.start():match.end()] = " " * (match.end() - match.start())
     expression = "".join(parts)
-    literals = [match.group()[1:-1].replace("''", "'") for match in re.finditer(SQL_STRING, expression)]
-    folded = identifier_key(sql_projection(expression))
-    named = [column for column in columns if re.search(rf"\b{re.escape(identifier_key(column))}\b", folded)]
+    literals = [match.group()[1:-1].replace("''", "'") for match in SQL_OPAQUE.finditer(expression) if match.group().startswith("'")]
+    mentioned = sql_identifiers(expression)
+    named = [column for column in columns if identifier_key(column) in mentioned]
     return [(column, literal) for column in named for literal in literals]
 
 
@@ -1002,7 +1035,7 @@ def json_proposals(
     for match in sql_matches(JSON_REQUIREMENT, expression):
         function, column, path, literal = match.groups()
         path = path.replace("''", "'")
-        column = wanted.get(identifier_key(column))
+        column = wanted.get(identifier_key(unquote_identifier(column)))
         if column is None:
             continue
         if function.lower() == "type":
@@ -1027,13 +1060,13 @@ def json_proposals(
             parameters.extend([path, value])
         proposals.append((column, str(connection.execute(f"select {document}", parameters).fetchone()[0])))
     documents = dict(proposals)
-    identifier = r'"?(\w+)"?\b'
+    identifier = f'({SQL_IDENTIFIER})'
     dependencies = [match.groups() for match in sql_matches(JSON_TERM + EQUALITY + identifier, expression)]
     dependencies.extend((function, source, path, target) for target, function, source, path in (
         match.groups() for match in sql_matches(identifier + EQUALITY + JSON_TERM, expression)
     ))
     for function, source, path, target in dependencies:
-        source, target = wanted.get(identifier_key(source)), wanted.get(identifier_key(target))
+        source, target = wanted.get(identifier_key(unquote_identifier(source))), wanted.get(identifier_key(unquote_identifier(target)))
         if source in documents and target is not None:
             value = connection.execute(f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))).fetchone()[0]
             proposals.append((target, value))
@@ -1172,22 +1205,23 @@ def shape_proposals(
     text = {name: value for name, value in values.items() if name in text_eligible and isinstance(value, str)}
     widths = {}
     shapes = text_constraints if text_constraints is not None else expression
-    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', sql_projection(shapes), re.IGNORECASE):
-        name = names.get(identifier_key(name), name)
+    for match in sql_matches(rf'\blength\s*\(\s*({SQL_IDENTIFIER})\s*\)\s*=\s*(\d+)', shapes):
+        name, width = match.groups()
+        name = names.get(identifier_key(unquote_identifier(name)), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
         if name in text_eligible and size is not None:
             text.setdefault(name, "x")
             widths[name] = size
             text[name] = text[name][:size].ljust(size, "0")
     globs = (match.groups() for match in sql_matches(
-        r"\b\"?(\w+)\"?\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
+        rf"({SQL_IDENTIFIER})\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
         shapes,
     ))
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
     alphabets: dict[str, str] = defaultdict(lambda: string.printable)
     for name, negated, quoted in globs:
-        name = names.get(identifier_key(name), name)
+        name = names.get(identifier_key(unquote_identifier(name)), name)
         if name in text_eligible:
             text.setdefault(name, "x")
             pattern = quoted.replace("''", "'")
@@ -1215,6 +1249,7 @@ def shape_proposals(
                 text[name] = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
     proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
     active = sql_projection(expression)
+    mentioned = sql_identifiers(expression)
     numeric_text = active + " " + " ".join(
         match.group()[1:-1] for match in re.finditer(SQL_STRING, sql_projection(expression, literals=True))
         if re.fullmatch(r"-?[0-9]+", match.group()[1:-1])
@@ -1228,7 +1263,7 @@ def shape_proposals(
         name for name, declared in required
         if (sqlite_affinity(declared, strict=strict) in {"INTEGER", "REAL", "NUMERIC"}
             or (strict and declared.upper() == "ANY"))
-        and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(active))
+        and identifier_key(name) in mentioned
     ]
     candidates = list(dict.fromkeys(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
@@ -1240,7 +1275,7 @@ def shape_proposals(
     omitted, unavailable = tuple(omitted), tuple(unavailable)
     declared_names = {identifier_key(name) for name, _ in required} | {identifier_key(name) for name, _, _ in omitted} | {identifier_key(name) for name in unavailable}
     implicit = {"rowid", "_rowid_", "oid"} - declared_names
-    if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(active)) for name in (*unavailable, *implicit)):
+    if any(identifier_key(name) in mentioned for name in (*unavailable, *implicit)):
         return ShapeProposals(proposals, fallback)
     if not numeric or not candidates:
         return ShapeProposals(proposals, [])
@@ -1250,18 +1285,15 @@ def shape_proposals(
     # the fixture connection's changes()/last_insert_rowid()/total_changes().
     evaluation = sqlite3.connect(":memory:")
     table = '"seed_candidate"'
-    def quote(name: str) -> str:
-        return '"' + name.replace('"', '""') + '"'
-
     def declaration(name: str, declared: str) -> str:
-        return quote(name) + (f' {quote(declared)}' if declared else '')
+        return quote_identifier(name) + (f' {quote_identifier(declared)}' if declared else '')
 
     declarations = [declaration(name, declared) for name, declared in required]
     declarations.extend(
         declaration(name, declared) + (f' default ({default})' if default is not None else '')
         for name, declared, default in omitted
     )
-    columns = ', '.join(quote(name) for name, _ in required)
+    columns = ', '.join(quote_identifier(name) for name, _ in required)
     placeholders = ', '.join('?' for _ in required)
     try:
         contextual = {
@@ -1350,7 +1382,7 @@ def numeric_domains(
     expression: str, numeric: list[str], values: dict[str, object], candidates: list[int]
 ) -> list[list[object]]:
     """Rank finite domains by local predicates; the complete CHECK still decides."""
-    identifier = r'"?(\w+)"?'
+    identifier = f'({SQL_IDENTIFIER})'
     literal = r"(-?[0-9]+)(?![\w.])"
     operator = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
     predicates: dict[str, list[tuple[str, int]]] = defaultdict(list)
@@ -1361,7 +1393,7 @@ def numeric_domains(
     ))
     for name, op, token in clauses:
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None:
-            predicates[identifier_key(name)].append((op, bound))
+            predicates[identifier_key(unquote_identifier(name))].append((op, bound))
 
     def score(name: str, value: object) -> int:
         if not isinstance(value, (int, float)):
@@ -1426,7 +1458,7 @@ def resolve_references(connection: sqlite3.Connection, table: str) -> None:
     ``seeded_rows_prove_repetition`` reads back.
     """
     groups: dict[int, list[tuple[str, str, str | None]]] = {}
-    for row in connection.execute(f'pragma foreign_key_list("{table}")'):
+    for row in connection.execute(f'pragma foreign_key_list({quote_identifier(table)})'):
         groups.setdefault(int(row[0]), []).append((str(row[2]), str(row[3]), row[4] and str(row[4])))
     for members in groups.values():
         parent = members[0][0]
@@ -1436,33 +1468,33 @@ def resolve_references(connection: sqlite3.Connection, table: str) -> None:
             keys = [
                 str(column[1])
                 for column in sorted(
-                    (row for row in connection.execute(f'pragma table_info("{parent}")') if row[5]),
+                    (row for row in connection.execute(f'pragma table_info({quote_identifier(parent)})') if row[5]),
                     key=lambda row: row[5],
                 )
             ]
-        selected = ", ".join('"{}"'.format(key) for key in keys)
-        held = connection.execute(f'select distinct {selected} from "{parent}"').fetchall()
+        selected = ", ".join(quote_identifier(key) for key in keys)
+        held = connection.execute(f'select distinct {selected} from {quote_identifier(parent)}').fetchall()
         if not held:
             continue
-        assignments = ", ".join(f'"{name}" = ?' for _, name, _ in members)
+        assignments = ", ".join(f'{quote_identifier(name)} = ?' for _, name, _ in members)
         try:
-            connection.execute(f'update "{table}" set {assignments}', list(held[0]))
+            connection.execute(f'update {quote_identifier(table)} set {assignments}', list(held[0]))
             continue
         except sqlite3.Error:
             pass
         nullable = {
             str(row[1]): not (row[3] or row[5])
-            for row in connection.execute(f'pragma table_info("{table}")')
+            for row in connection.execute(f'pragma table_info({quote_identifier(table)})')
         }
-        blanked = ", ".join(f'"{name}" = null' for _, name, _ in members)
-        rows = [row[0] for row in connection.execute(f'select rowid from "{table}"')]
+        blanked = ", ".join(f'{quote_identifier(name)} = null' for _, name, _ in members)
+        rows = [row[0] for row in connection.execute(f'select rowid from {quote_identifier(table)}')]
         for index, rowid in enumerate(rows):
             # Offsets so two rows start from different parents; the whole rotation because a
             # row already holding a later parent's value is in the way of the earlier one.
             for offset in range(len(held)):
                 try:
                     connection.execute(
-                        f'update "{table}" set {assignments} where rowid = ?',
+                        f'update {quote_identifier(table)} set {assignments} where rowid = ?',
                         [*held[(index + offset) % len(held)], rowid],
                     )
                     break
@@ -1476,11 +1508,11 @@ def resolve_references(connection: sqlite3.Connection, table: str) -> None:
                 remove = not all(nullable[name] for _, name, _ in members)
                 if not remove:
                     try:
-                        connection.execute(f'update "{table}" set {blanked} where rowid = ?', [rowid])
+                        connection.execute(f'update {quote_identifier(table)} set {blanked} where rowid = ?', [rowid])
                     except sqlite3.Error:
                         remove = True
                 if remove:
-                    connection.execute(f'delete from "{table}" where rowid = ?', [rowid])
+                    connection.execute(f'delete from {quote_identifier(table)} where rowid = ?', [rowid])
 
 
 def dangling_references(connection: sqlite3.Connection) -> str:
@@ -1517,8 +1549,8 @@ def seeded_rows_prove_repetition(
     """
     for column in repeated:
         shared = connection.execute(
-            f'select count(*) from (select "{column}" from "{table}" '
-            f'where "{column}" is not null group by "{column}" having count(*) > 1)'
+            f'select count(*) from (select {quote_identifier(column)} from {quote_identifier(table)} '
+            f'where {quote_identifier(column)} is not null group by {quote_identifier(column)} having count(*) > 1)'
         ).fetchone()[0]
         if not shared:
             return f"no two rows share a {column}, though a row repeating it was accepted"
@@ -1598,8 +1630,8 @@ def restore_repeat(
     granted in isolation.
     """
     names = [name for name, _ in offered]
-    selected = ", ".join(f'"{name}"' for name in names)
-    survivor = connection.execute(f'select {selected} from "{table}" limit 1').fetchone()
+    selected = ", ".join(quote_identifier(name) for name in names)
+    survivor = connection.execute(f'select {selected} from {quote_identifier(table)} limit 1').fetchone()
     if survivor is None:
         return "no row is left to copy a reference from", True
     row = {
@@ -1611,7 +1643,7 @@ def restore_repeat(
         return objection, settled
     optional = {
         str(info[1])
-        for info in connection.execute(f'pragma table_info("{table}")')
+        for info in connection.execute(f'pragma table_info({quote_identifier(table)})')
         if not (info[3] or info[5]) and str(info[1]) in references
     }
     emptied = {name: None if name in optional else value for name, value in row.items()}
@@ -1642,25 +1674,25 @@ def insert_seed_row(
     """
     if not required:
         try:
-            connection.execute(f'insert into "{table}" default values')
+            connection.execute(f'insert into {quote_identifier(table)} default values')
         except sqlite3.Error as exc:
             return str(exc), True
         return "", True
 
-    columns = ", ".join(f'"{column}"' for column, _ in required)
+    columns = ", ".join(quote_identifier(column) for column, _ in required)
     placeholders = ", ".join("?" for _ in required)
-    statement = f'insert into "{table}" ({columns}) values ({placeholders})'
+    statement = f'insert into {quote_identifier(table)} ({columns}) values ({placeholders})'
     names = [column for column, _ in required]
     # Related columns may be constrained by a later CHECK. Derive their text shapes
     # together so declaration order does not decide whether a prefix can be offered.
     constraints = [
-        check_expression(ddl, name)
-        for name in re.findall(r'\bconstraint\s+"?(\w+)"?\s+check\s*\(', sql_projection(ddl), re.IGNORECASE)
+        check_expression(ddl, unquote_identifier(match.group(1)))
+        for match in sql_matches(rf'\bconstraint\s+({SQL_IDENTIFIER})\s+check\s*\(', ddl)
     ]
     text_constraints = "\n".join(constraints)
     omitted = []
     unavailable = []
-    for info in connection.execute(f'pragma table_xinfo("{table}")'):
+    for info in connection.execute(f'pragma table_xinfo({quote_identifier(table)})'):
         if str(info[1]) in values:
             continue
         if info[6] or (info[5] and str(info[2]).upper() == "INTEGER" and info[4] is None):
@@ -1809,7 +1841,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
         for table, ddl in schema:
             info = [
                 (str(row[1]), str(row[2]), bool(row[3] or row[5]))
-                for row in connection.execute(f'pragma table_info("{table}")')
+                for row in connection.execute(f'pragma table_info({quote_identifier(table)})')
             ]
             every = [(column, declared) for column, declared, _ in info]
             mandatory = [(column, declared) for column, declared, required in info if required]
@@ -1884,7 +1916,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             # columns together with a third, so sharing both at once is refused while sharing
             # either alone is fine. What the fixture claims for a reference is that it resolves,
             # and ``dangling_references`` is where that claim is read back.
-            references = {str(row[3]) for row in connection.execute(f'pragma foreign_key_list("{table}")')}
+            references = {str(row[3]) for row in connection.execute(f'pragma foreign_key_list({quote_identifier(table)})')}
             claimed = []
             for column in [name for name in repeated if name not in references]:
                 if not seeded_rows_prove_repetition(connection, table, [column]):
@@ -1903,7 +1935,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
                 else:
                     claimed.append(column)
             repeated = claimed
-            rows = connection.execute(f'select count(*) from "{table}"').fetchone()[0]
+            rows = connection.execute(f'select count(*) from {quote_identifier(table)}').fetchone()[0]
             if rows < SEED_ROWS:
                 short[table] = f"{rows} of {SEED_ROWS} rows; {objection or 'the schema accepted no more'}"
                 continue

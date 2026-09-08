@@ -1424,9 +1424,9 @@ def test_sparse_candidates_keep_turns_at_every_column_position(declared, changed
         assert guard.shape_proposals(connection, expression, required, values).derived == [(f"n{changed}", 1)]
 
 
-@pytest.mark.parametrize("declared", ["", "TEXT"])
+@pytest.mark.parametrize("declared", ["", "TEXT", "DATE", "DECIMAL", "ANY", "JSON", "UUID"])
 @pytest.mark.parametrize("name,check", [
-    ("payload_json", "json_valid(payload_json)"),
+    ("payload_json", "json_valid(payload_json) and json_type(payload_json)='object'"),
     ("created_at", "datetime(created_at) is not null"),
     ("elapsed_time", "datetime(elapsed_time) is not null"),
     ("email_address", "email_address like '%@%'"),
@@ -1444,10 +1444,96 @@ def test_open_storage_columns_retain_semantic_seeds(tmp_path, declared, name, ch
         assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
-@pytest.mark.parametrize("declared,expected", [("BLOB", b""), ("INTEGER", 0), ("REAL", 0), ("NUMERIC", 0), ("ANY", 0)])
+@pytest.mark.parametrize("declared,expected", [("BLOB", b""), ("INTEGER", 0), ("REAL", 0), ("NUMERIC", 0), ("BOOLEAN", 0)])
 def test_explicit_storage_defaults_still_take_precedence(declared, expected):
     for name in ["payload_json", "created_at", "elapsed_time", "email_address", "label"]:
         assert guard.representative_value(name, declared) == expected
+
+
+@pytest.mark.parametrize("quote", ['"', '`', '['])
+@pytest.mark.parametrize("name", ["has space", "has-dash", "123", "n=999", "length(x)=2", "has\"quote", "has`quote", "has'apostrophe", "中文", "a/*comment*/b"])
+@pytest.mark.parametrize("kind", ["literal", "shape", "numeric", "json", "substring"])
+def test_quoted_column_identity_survives_all_candidate_owners(tmp_path, quote, name, kind):
+    def quoted(value):
+        return '[' + value + ']' if quote == '[' else quote + value.replace(quote, quote * 2) + quote
+
+    column, source = quoted(name), quoted("source " + name)
+    declared = "INTEGER" if kind == "numeric" else "TEXT"
+    expressions = {
+        "literal": f"{column}='ready'",
+        "shape": f"length({column})=4 and {column} glob 'A*' and {column} glob '*Z'",
+        "numeric": f"{column}>0 and {column}=2",
+        "json": f"json_valid({source}) and json_extract({source},'$.x')='ready' and {column}=json_extract({source},'$.x')",
+        "substring": f"{source}='ready' and length({column})=8 and substr({column},1,5)={source}",
+    }
+    expression = expressions[kind]
+    db_path = tmp_path / "quoted.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({column} {declared} not null,{source} TEXT not null,constraint ck check({expression}))")
+
+    short, _ = guard.seed_representative_rows(db_path)
+
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"select count(*) from shaped where {expression}").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("quote", ['"', '`', '['])
+def test_quoted_identifiers_are_tokens_not_literal_or_code_sources(quote):
+    name = "json_extract(other,'$.x')='bad'; n=999"
+    column = '[' + name + ']' if quote == '[' else quote + name.replace(quote, quote * 2) + quote
+    expression = column + "='ready'"
+    assert guard.check_proposals(expression, [name, "other", "n"]) == [(name, "ready")]
+    with sqlite3.connect(":memory:") as connection:
+        shaped = guard.shape_proposals(connection, expression, [(name, "TEXT"), ("other", "TEXT"), ("n", "INTEGER")], {name: "x", "other": "held", "n": 0})
+        assert shaped.derived == []
+        assert shaped.numeric_fallback == []
+        assert guard.json_proposals(connection, expression, [name, "other", "n"]) == []
+
+
+@pytest.mark.parametrize("payload", ['"', '`', '[', "'", '"n=999', '`n=999', '[n=999'])
+@pytest.mark.parametrize("kind", ["literal", "json", "substring", "numeric"])
+def test_opaque_delimiters_cannot_consume_later_identifiers(tmp_path, payload, kind):
+    prefix = "length('" + payload.replace("'", "''") + "')>0 AND "
+    column, source = '"has space"', '"source space"'
+    expressions = {
+        "literal": f"{column}='ready'",
+        "json": f"json_valid({source}) and json_extract({source},'$.x')='ready' and {column}=json_extract({source},'$.x')",
+        "substring": f"{source}='ready' and length({column})=8 and substr({column},1,5)={source}",
+        "numeric": f"{column}=2",
+    }
+    declared = "INTEGER" if kind == "numeric" else "TEXT"
+    expression = prefix + expressions[kind]
+    db_path = tmp_path / "delimiters.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({column} {declared} not null,{source} text not null,constraint ck check({expression}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(f"select count(*) from shaped where {expression}").fetchone()[0] >= guard.SEED_ROWS
+
+
+@pytest.mark.parametrize("name", ["has space", 'has"quote', "has`quote", "/* not a comment */", "(has parentheses)", "", "has\nnewline"])
+def test_identifier_round_trip_in_constraints_references_and_repetitions(tmp_path, name):
+    def quoted(value):
+        return '"' + value.replace('"', '""') + '"'
+
+    parent, child = quoted("parent " + name), quoted("child " + name)
+    key, foreign = quoted("key " + name), quoted("foreign " + name)
+    column, constraint = quoted(name), quoted("check " + name)
+    db_path = tmp_path / "references.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table {parent}({key} text primary key,{column} text not null,constraint {constraint} check({column}='ready'))")
+        connection.execute(f"create table {child}({foreign} text not null references {parent}({key}),{column} text not null,constraint {constraint} check({column}='ready'))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("pragma foreign_key_check").fetchall() == []
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+        for table in (parent, child):
+            assert connection.execute(f"select count(*) from {table} where {column}='ready'").fetchone()[0] >= guard.SEED_ROWS
+        assert guard.seeded_rows_prove_repetition(connection, "child " + name, [name]) == ""
 
 
 @pytest.mark.parametrize("name,quoted", [
