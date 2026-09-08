@@ -817,15 +817,24 @@ JSON_VARIED_MEMBER = "__seed_step__"
 # which is the same three things the plain literal form carries -- so both are read the
 # same way rather than treated as unseedable.
 SQL_QUOTED_IDENTIFIER = r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]'
-SQL_IDENTIFIER = rf'(?:{SQL_QUOTED_IDENTIFIER}|(?<![\w$])[^\W\d][\w$]*)'
-SUBSTRING_TERM = rf'\bsubstr\s*\(\s*({SQL_IDENTIFIER})\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
-EQUALITY = r'\s*(?:==|=(?!=)|\bis\b(?!\s+not\b))\s*'
+# SQLite treats non-ASCII characters as identifier characters, not Python's
+# Unicode word/digit/space classes. A BOM is special only at the token's start.
+SQL_IDENTIFIER_CHARS = r'A-Za-z_0-9$\x80-\U0010ffff'
+SQL_FLAGS = re.IGNORECASE | re.ASCII
+SQL_WHITESPACE = " \t\n\r\f"
+SQL_IDENTIFIER = rf'(?:{SQL_QUOTED_IDENTIFIER}|(?<![{SQL_IDENTIFIER_CHARS}])(?!\ufeff)[A-Za-z_\x80-\U0010ffff][{SQL_IDENTIFIER_CHARS}]*)'
+# These scalar-function results have no column affinity for unary '+' to erase.
+SQL_UNARY_PLUS = r'(?:\+\s*)*'
+SUBSTRING_TERM = rf'(?<![{SQL_IDENTIFIER_CHARS}]){SQL_UNARY_PLUS}substr\s*\(\s*({SQL_IDENTIFIER})\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
+EQUALITY = rf'\s*(?:==|=(?!=)|(?<![{SQL_IDENTIFIER_CHARS}])is(?![{SQL_IDENTIFIER_CHARS}])(?!\s+not(?![{SQL_IDENTIFIER_CHARS}])))\s*'
 SQL_STRING = r"'(?:[^']|'')*'"
-JSON_TERM = rf"\bjson_(extract|type)\s*\(\s*({SQL_IDENTIFIER})\s*,\s*'((?:[^']|'')*)'\s*\)"
-JSON_REQUIREMENT = re.compile(JSON_TERM + EQUALITY + rf"({SQL_STRING}|-?[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+SQL_INTEGER = rf"(?<![{SQL_IDENTIFIER_CHARS}.])-?[0-9]+(?![{SQL_IDENTIFIER_CHARS}.])"
+JSON_TERM = rf"(?<![{SQL_IDENTIFIER_CHARS}]){SQL_UNARY_PLUS}json_(extract|type)\s*\(\s*({SQL_IDENTIFIER})\s*,\s*'((?:[^']|'')*)'\s*\)"
+JSON_REQUIREMENT = re.compile(JSON_TERM + EQUALITY + rf"({SQL_STRING}|-?[0-9]+(?:\.[0-9]+)?)", SQL_FLAGS)
 GLOB_REQUIREMENT = rf"({SQL_IDENTIFIER})\s+(not\s+)?glob\s*'((?:[^']|'')*)'"
 SQL_OPAQUE = re.compile(
     SQL_STRING + '|' + SQL_QUOTED_IDENTIFIER + r'|--[^\n]*|/\*[\s\S]*?(?:\*/|$)'
+    + rf'|(?<![{SQL_IDENTIFIER_CHARS}])\ufeff+'
 )
 
 # Every name SQLite's `json_type` can return, against the emptiest document member of that
@@ -892,11 +901,11 @@ def sql_matches(pattern: str | re.Pattern, expression: str) -> Iterable[re.Match
     active = sql_projection(expression, identifiers=True)
     opaque = [(token.start(), token.end()) for token in SQL_OPAQUE.finditer(expression)]
     searchable = sql_projection(expression, literals=True, identifiers=True)
-    compiled = re.compile(pattern, 0 if isinstance(pattern, re.Pattern) else re.IGNORECASE)
+    compiled = re.compile(pattern, 0 if isinstance(pattern, re.Pattern) else SQL_FLAGS)
     position = 0
     while match := compiled.search(searchable, position):
         enclosing = next(((start, end) for start, end in opaque if start <= match.start() < end), None)
-        if enclosing and (match.start() > enclosing[0] or not active[match.start()].strip()):
+        if enclosing and (match.start() > enclosing[0] or not active[match.start()].strip(SQL_WHITESPACE)):
             # An invalid cross-token match must not consume the following real operand.
             position = enclosing[1]
             continue
@@ -931,7 +940,7 @@ def substring_requirements(expression: str, columns: Iterable[str] = ()) -> Iter
         active = sql_projection(term, identifiers=True)
         for reverse in (False, True):
             operands = (identifier, SUBSTRING_TERM) if reverse else (SUBSTRING_TERM, identifier)
-            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', active, re.IGNORECASE)
+            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', active, SQL_FLAGS)
             if match is not None:
                 if reverse:
                     source, target, start, width = match.groups()
@@ -971,7 +980,7 @@ def check_expression(ddl: str, name: str) -> str:
     # SQLite stores the DDL as it was written, so the keywords are whatever case the
     # migration that created the table happened to use.
     active = sql_projection(ddl)
-    marker = next((match for match in sql_matches(rf'\bCONSTRAINT\s+({SQL_IDENTIFIER})\s+CHECK\s*\(', ddl)
+    marker = next((match for match in sql_matches(rf'(?<![{SQL_IDENTIFIER_CHARS}])CONSTRAINT\s+({SQL_IDENTIFIER})\s+CHECK\s*\(', ddl)
                    if identifier_key(unquote_identifier(match.group(1))) == identifier_key(name)), None)
     if marker is None:
         return ""
@@ -1031,7 +1040,7 @@ def check_proposals(
     for term in conjunctive_terms(expression, (*columns, *context_columns)):
         for reverse in (False, True):
             operands = (SQL_STRING, SQL_IDENTIFIER) if reverse else (SQL_IDENTIFIER, SQL_STRING)
-            match = re.fullmatch(rf'\s*({operands[0]}){EQUALITY}({operands[1]})\s*', term, re.IGNORECASE)
+            match = re.fullmatch(rf'\s*({operands[0]}){EQUALITY}({operands[1]})\s*', term, SQL_FLAGS)
             if match is not None:
                 token, literal = reversed(match.groups()) if reverse else match.groups()
                 column = names.get(identifier_key(unquote_identifier(token)))
@@ -1059,7 +1068,7 @@ def json_proposals(
     wanted = {identifier_key(column): column for column in columns}
     shapes = text_constraints if text_constraints is not None else expression
     context_columns = tuple(context_columns)
-    terms = [sql_projection(term, literals=True, identifiers=True).strip()
+    terms = [sql_projection(term, literals=True, identifiers=True).strip(SQL_WHITESPACE)
              for term in conjunctive_terms(shapes, (*wanted.values(), *context_columns))]
     scopes = [
         tuple(match.groups() for term in terms if (match := JSON_REQUIREMENT.fullmatch(term))),
@@ -1120,7 +1129,7 @@ def json_member_assignments(
     for term in terms:
         for reverse in (False, True):
             operands = (identifier, JSON_TERM) if reverse else (JSON_TERM, identifier)
-            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', term, re.IGNORECASE)
+            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', term, SQL_FLAGS)
             if match is None:
                 continue
             if reverse:
@@ -1273,17 +1282,18 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
     """Descend through required conjunctions and transparent truth wrappers."""
     names = {identifier_key(name) for name in columns}
     truth = r'(?:1|true)' if "true" not in names else '1'
+    is_true = r'is\s+true' if "true" not in names else r'(?!)'
     not_false = r'|is\s+not\s+false' if "false" not in names else ''
     pending = [expression]
     while pending:
-        term = pending.pop().strip()
+        term = pending.pop().strip(SQL_WHITESPACE)
         active = sql_projection(term)
         depth = case_depth = 0
         cuts = []
         between = False
         outer_start = outer_end = None
         commas = []
-        for token in re.finditer(rf'\(|\)|,|{SQL_IDENTIFIER}', active, re.IGNORECASE):
+        for token in re.finditer(rf'\(|\)|,|{SQL_IDENTIFIER}', active, SQL_FLAGS):
             kind = token.group().lower()
             if kind == '(':
                 if depth == 0 and outer_start is None:
@@ -1317,22 +1327,33 @@ def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[
         else:
             inner = None
             if outer_start is not None and outer_end is not None:
-                prefix = sql_projection(term[:outer_start], identifiers=True).strip()
-                suffix = sql_projection(term[outer_end:], literals=True, identifiers=True).strip()
+                prefix = sql_projection(term[:outer_start], identifiers=True).strip(SQL_WHITESPACE)
+                suffix = sql_projection(term[outer_end:], literals=True, identifiers=True).strip(SQL_WHITESPACE)
                 body = term[outer_start + 1:outer_end - 1]
+                # These operators wrap the whole parenthesized operand (or hint).
+                # Never strip '+' from an operand of an equality: it removes affinity.
+                unary = re.match(rf'(?:(?:[+-]|not(?![{SQL_IDENTIFIER_CHARS}]))\s*)*', prefix, SQL_FLAGS)
+                negations = len(re.findall('not', unary.group(), SQL_FLAGS))
+                operand = prefix[unary.end():]
+                boolean_suffix = re.fullmatch(
+                    rf'(?:{is_true}{not_false})', suffix, SQL_FLAGS,
+                )
+                whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood"}
+                if whole_operand and negations % 2 == 0 and (not suffix or (
+                    not negations and ("-" not in unary.group() or boolean_suffix)
+                )):
+                    prefix = operand
                 if not prefix and (not suffix or re.fullmatch(
-                    rf'(?:{EQUALITY}{truth}{not_false})', suffix, re.IGNORECASE
+                    rf'(?:{EQUALITY}{truth}{not_false})', suffix, SQL_FLAGS
                 )):
                     inner = body
-                elif not suffix and re.fullmatch(rf'{truth}{EQUALITY}', prefix, re.IGNORECASE):
-                    inner = body
-                elif not suffix and re.fullmatch(r'not\s+not', prefix, re.IGNORECASE):
+                elif not suffix and re.fullmatch(rf'{truth}{EQUALITY}', prefix, SQL_FLAGS):
                     inner = body
                 elif not suffix and identifier_key(unquote_identifier(prefix)) in {"likely", "unlikely"} and not commas:
                     inner = body
                 elif not suffix and identifier_key(unquote_identifier(prefix)) == "likelihood" and len(commas) == 1:
-                    probability = sql_projection(term[commas[0] + 1:outer_end - 1]).strip()
-                    if re.fullmatch(r'(?:0(?:\.\d*)?|1(?:\.0*)?|\.\d+)', probability):
+                    probability = sql_projection(term[commas[0] + 1:outer_end - 1]).strip(SQL_WHITESPACE)
+                    if re.fullmatch(r'(?:0(?:\.\d*)?|1(?:\.0*)?|\.\d+)', probability, SQL_FLAGS):
                         inner = term[outer_start + 1:commas[0]]
             if inner is None:
                 yield term
@@ -1348,7 +1369,7 @@ def column_equality_groups(
     groups = {name: [name] for name in names.values()}
     pattern = rf'\s*({SQL_IDENTIFIER}){EQUALITY}({SQL_IDENTIFIER})\s*'
     for term in conjunctive_terms(expression, (*names.values(), *context_columns)):
-        match = re.fullmatch(pattern, sql_projection(term, identifiers=True), re.IGNORECASE)
+        match = re.fullmatch(pattern, sql_projection(term, identifiers=True), SQL_FLAGS)
         if match is None:
             continue
         left, right = (names.get(identifier_key(unquote_identifier(token))) for token in match.groups())
@@ -1402,7 +1423,7 @@ def shape_proposals(
     # Occurrences inside optional/negative branches are not required shapes.
     shape_terms = [sql_projection(term, literals=True, identifiers=True) for term in conjunctive_terms(shapes, context_columns)]
     for term in shape_terms:
-        match = re.fullmatch(rf'\s*length\s*\(\s*({SQL_IDENTIFIER})\s*\)\s*=\s*(\d+)\s*', term, re.IGNORECASE)
+        match = re.fullmatch(rf'\s*{SQL_UNARY_PLUS}length\s*\(\s*({SQL_IDENTIFIER})\s*\)\s*=\s*(\d+)\s*', term, SQL_FLAGS)
         if match is None:
             continue
         name, width = match.groups()
@@ -1414,7 +1435,7 @@ def shape_proposals(
                 text.setdefault(name, "x")
                 text[name] = text[name][:size].ljust(size, "0")
     globs = (match.groups() for term in shape_terms
-             if (match := re.fullmatch(rf'\s*{GLOB_REQUIREMENT}\s*', term, re.IGNORECASE)) is not None)
+             if (match := re.fullmatch(rf'\s*{GLOB_REQUIREMENT}\s*', term, SQL_FLAGS)) is not None)
     positive: dict[str, list[str]] = defaultdict(list)
     negative: dict[str, list[str]] = defaultdict(list)
     for name, negated, quoted in globs:
@@ -1510,7 +1531,7 @@ def shape_proposals(
     )
     bounds = {
         bound
-        for token in re.findall(r"(?<![\w.])-?[0-9]+(?![\w.])", numeric_text)
+        for token in re.findall(SQL_INTEGER, numeric_text)
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None
     }
     numeric = [
@@ -1640,7 +1661,7 @@ def numeric_domains(
 ) -> list[list[object]]:
     """Rank finite domains by local predicates; the complete CHECK still decides."""
     identifier = f'({SQL_IDENTIFIER})'
-    literal = r"(-?[0-9]+)(?![\w.])"
+    literal = f"({SQL_INTEGER})"
     operator = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
     predicates: dict[str, list[tuple[str, int]]] = defaultdict(list)
     clauses = [match.groups() for match in sql_matches(identifier + operator + literal, expression)]
@@ -1944,7 +1965,7 @@ def insert_seed_row(
     # together so declaration order does not decide whether a prefix can be offered.
     constraints = [
         check_expression(ddl, unquote_identifier(match.group(1)))
-        for match in sql_matches(rf'\bconstraint\s+({SQL_IDENTIFIER})\s+check\s*\(', ddl)
+        for match in sql_matches(rf'(?<![{SQL_IDENTIFIER_CHARS}])constraint\s+({SQL_IDENTIFIER})\s+check\s*\(', ddl)
     ]
     text_constraints = " AND ".join(f"({constraint}\n)" for constraint in constraints)
     omitted = []
