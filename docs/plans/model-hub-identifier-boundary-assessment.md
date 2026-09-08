@@ -2,16 +2,21 @@
 
 ## Status and recommendation
 
-Diagnosis only; no product or test code has changed. Implementation requires a
-recorded decision from orchestrator Session `sesvmgbdub2gp`.
+Implemented locally after the recorded decision from orchestrator Session
+`sesvmgbdub2gp` at integration commit
+`d5adacdba42783f49dc0c40745fa25d5af8fcf7e`. The decision was read directly from
+the integration worktree; the shared plan was not edited or cherry-picked.
+The boundary inventory below records the diagnosed base; the implementation
+record at the end describes the completed repair and its remaining gates.
 
 - Inspected product SHA: `76e269c9a9dfd3a6286ce0da81b77316ca4be38a`.
 - Lane: C; Session `sesm79v4dhm25`; Run `ddca032db570`.
 - Assigned branch: `fix/model-hub-identifier-boundary`.
 - Authority: `model-hub-permissive-boundaries.md`, shared invariant 4.
-- Evidence: 128 existing focused tests passed, plus synthetic reproductions
-  described below. No live services, credentials, upstreams, or user state were
-  exercised.
+- Diagnosis evidence: 128 existing focused tests passed, plus synthetic
+  reproductions described below. Implementation evidence: 524 focused Python
+  tests and 64 UI tests passed. No live services, credentials, upstreams, or
+  user state were exercised.
 
 Remove the model-ID admission length ceiling, its UI/schema mirrors, and the
 typeahead query ceiling. Preserve the existing whitespace spelling rule,
@@ -276,12 +281,13 @@ that removing an application field cap removes generic transport/resource
 limits. Add hermetic HTTP/engine consumer evidence at integration where those
 claims are needed; never infer it from a fake-only test.
 
-## Validation actually run
+## Diagnosis validation
 
 All runs used the existing Python environment read-only, `python -B`, pytest
 with its cache provider disabled, and the repository's per-test HOME/XDG/
 Avibe/backend-store isolation. Synthetic ledger files lived in
-`TemporaryDirectory` and were removed automatically. No product files changed.
+`TemporaryDirectory` and were removed automatically. No product files had
+changed during those diagnosis runs.
 
 | Suite selection | Result |
 | --- | --- |
@@ -304,3 +310,92 @@ the relevant Vitest cases, test type checking, and `npm run build`. The
 orchestrator owns integrated validation, exact-current-commit Codex review, CI,
 thread inventory, and the single PR. No push, PR, Watch, merge, release, deploy,
 or local service restart is authorized for this lane.
+
+## Implementation record
+
+The implementation follows the approved ownership table without adding a
+dependency, schema revision, runtime setting, or ledger migration:
+
+- Removed the new-ID length cap, editor/type/schema mirrors, unused localized
+  length error, and models.dev query cap. New identity admission requires
+  nonblank UTF-8-representable canonical text; credential checks remain with
+  the existing admission owners.
+- OpenCode aggregate load and whole-list parsing no longer reuse new-ID
+  admission. Native-protocol, spelling, route membership, Source eligibility,
+  subscription inventory, and retirement rules remain in place.
+- Added default-empty selected-path lossless string retention to the existing
+  parser. Only inventory IDs and supported-parameter values opt in. Tests
+  prove object keys, other selected strings, unselected strings, ignored
+  trees, malformed JSON, duplicate scopes, and the discovery deadline retain
+  their established behavior.
+- Unsaved observations refuse unencodable IDs and parameters before response
+  encoding, while scanning full credential-bearing values. Native manual
+  imports reuse new-ID admission, including when inventory discovery fails.
+- Compared the computational source of both ledger functions with
+  `76e269c9a9dfd3a6286ce0da81b77316ca4be38a`: byte-for-byte unchanged.
+  The entire `core/handlers/model_hub/usage.py` is unchanged. Only misleading
+  identifier-module comments/docstrings were corrected.
+
+### Consuming evidence
+
+Final focused verification used the lane-local locked Python environment,
+`python -B -m pytest -q -p no:cacheprovider`, and repository HOME/XDG/backend
+store isolation. Runtime transport tests used a test-owned loopback HTTP
+server, not an installed or pinned engine. Native-import tests used fabricated
+credentials and verified the test-owned native tree's byte digest was unchanged.
+
+| Final verification | Result |
+| --- | --- |
+| Complete JSON-wire, usage, routing-modes, provenance, and migration-scenario files | 384 passed. |
+| API selection covering identity, catalog, producers, canonical/inline admission, observation/inventory, typeahead, and duplicate spelling | 108 passed; 351 deselected. |
+| Runtime inventory/discovery, provisioning probe, and long-ID HTTP consumers | 32 passed; 270 deselected. |
+| Editor, catalog dialog, and Source-create UI contract tests | 64 passed. |
+| UI test type checking and production build | Passed; build reported dependency annotation/browser-crypto and chunk-size warnings. |
+| Pinned Ruff 0.4.9 on all 13 changed Python files; whitespace diff check | Passed. |
+
+The complete Source lifecycle preserves two long shared-head Unicode IDs,
+composed/decomposed accents, inline and manual IDs, and an admitted
+folded-looking literal through refresh, upsert, API output, runtime binding,
+and reload. All three backend catalogs accept full long IDs; their legacy
+catalogs remain editable/loadable, and malformed legacy surrogate identities
+still load without being newly admitted.
+
+The runtime consumer tests discover escaped long IDs over HTTP, reload
+`SourceRecord`, serialize exact model names/aliases, and invoke every identity
+plus an unlisted route-only identity through each of the three protocol
+endpoints. Captured request bodies carry the exact prefixed IDs, and successful
+outcomes retain the full Source/model pair. This is Avibe-to-mock-engine wire
+evidence, not proof of a real engine's interpretation.
+
+`MH-USAGE-007` now exercises 25 distinct valid identities (11 seeds plus two
+keying generations), 75 recorded calls, repeated writer/read reloads, and exact
+full labels. `MH-USAGE-008` also covers 28 Source/model label-join pairs
+including long Unicode and folded-looking model literals after reload.
+Existing scenario IDs/names remain stable; no registry entry was allocated.
+The historical blanket wording of the registry must not be read as a proof
+over malformed legacy text; the test documentation and this assessment
+explicitly retain that exception.
+
+### Remaining boundaries and integration handoff
+
+- A percent-encoded 18,000-code-point Unicode path exceeded the test client's
+  generic 65,536-character URL budget before reaching Avibe. The full ID
+  succeeds through JSON body submission, service mutation, runtime HTTP bodies,
+  and reload. Encoded path mutation is separately proven with 3,600 Unicode
+  code points, and the real query route with 5,413 code points. No URI budget was
+  raised or endpoint redesigned. Browser/proxy limits are still outside this
+  field-admission repair.
+- Long all-whitespace historical attribution and already persisted unpaired
+  surrogates remain the documented pre-existing exceptions. No historical
+  counter is rekeyed, split, dropped, or assigned a guessed owner by a migration.
+  A future attribution policy must retain ambiguity where counters were
+  already merged.
+- Shared-file edits stay in the approved admission/load/observation/typeahead
+  seams. No gateway envelope, `project_opencode_public_model`, launch
+  capability policy, engine config-generation policy, engine pin, or shared
+  scenario registry was changed. Integration must preserve peers' disjoint
+  hunks in service/config/API-test/runtime-test files.
+- The orchestrator owns broad integrated validation, real pinned-engine
+  evidence, exact-head Codex review, CI, and the single PR. This lane only
+  commits locally; no push, PR, Watch, release, deploy, or running-local change
+  was performed.

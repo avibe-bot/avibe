@@ -1371,6 +1371,14 @@ class ModelHubService:
             validated = validate_source_observation(observation)
         except (TypeError, ValueError):
             raise ModelHubError("discovery_failed", status=502)
+        if any(canonical_model_id(model.id) is None for model in validated.models):
+            raise ModelHubError("discovery_failed", status=502)
+        try:
+            for model in validated.models:
+                for parameter in model.supported_parameters or ():
+                    parameter.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ModelHubError("discovery_failed", status=502) from None
         if contains_credential_material(
             [
                 {
@@ -2738,10 +2746,8 @@ class ModelHubService:
                 model.provenance != "manual"
                 or model.reasoning_efforts_source not in {None, "user"}
                 # The same admission rule the manual-add surface applies. A source
-                # may be created with its models inline, so this is the other way a
-                # client-declared identifier enters config — and a client can still
-                # be told no, which is the one moment an unbounded identifier is
-                # refusable rather than something every later surface must carry.
+                # may be created with its models inline, so these newly supplied
+                # identities must be representable before any credential work.
                 or canonical_model_id(model.id) is None
                 or contains_credential_material(model.id)
                 or contains_credential_material(model.display_name or "")
@@ -3702,7 +3708,7 @@ class ModelHubService:
             if source is None or not self._eligible_for_agent(source, backend):
                 raise ModelHubError("mapping_target_unavailable", status=409)
             # Existing exact targets keep their load-time identity; only a new
-            # source/target identity is subject to the current admission bound.
+            # source/target identity is subject to new-ID admission.
             persisted_target = (hop.source_id, hop.model_id) in old_pairs or any(
                 model.id == hop.model_id for model in source.models
             )
@@ -4206,11 +4212,6 @@ class ModelHubService:
                 raise ModelHubError("backend_model_catalog_invalid")
             if backend != "opencode" and model.native_protocol is not None:
                 raise ModelHubError("backend_model_catalog_invalid")
-            if backend == "opencode" and cls._backend_model_admission_error(
-                "opencode",
-                model.id,
-            ):
-                raise ModelHubError("backend_model_id_invalid")
             rows.append(model)
         if len({model.id for model in rows}) != len(rows):
             raise ModelHubError("backend_model_duplicate")
@@ -4712,7 +4713,7 @@ class ModelHubService:
 
     @staticmethod
     def models_dev_matches(query: object) -> list[dict]:
-        if not isinstance(query, str) or not query.strip() or len(query) > 256:
+        if not isinstance(query, str) or not query.strip():
             raise ModelHubError("mapping_target_unavailable")
         from vibe.models_dev_catalog import search_models_dev
 
@@ -5121,7 +5122,7 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         model_id = payload["model"]
         # This selects an existing inventory identity, not a newly admitted ID.
-        # Legacy persisted IDs remain testable even beyond today's input bound.
+        # Legacy persisted IDs retain their load-time spelling.
         if not isinstance(model_id, str) or not model_id.strip():
             raise ModelHubError("discovery_failed")
         model_id = normalized_model_id(model_id)

@@ -17,7 +17,6 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind, SourceBinding
-from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.resolver import effective_model_route, resolve_model_hub_turn
 from core.handlers.model_hub.service import ModelHubError
 from scripts.check_model_hub_authorities import AuthorityInput, _typescript_string_union
@@ -521,7 +520,7 @@ def test_normalization_preserves_nonempty_intent_and_other_config_through_refres
     agent = config.agents[backend]
     shapes = {
         "exact": [(api.id, MODEL)],
-        "unknown-long": [(api.id, "legacy-" + "x" * MODEL_ID_MAX_LENGTH)],
+        "unknown-long": [(api.id, "legacy-" + "x" * 256)],
         "retired": [(retired.id, "retired")],
         "subscription-stale": [(subscription.id, "stale")],
         "ordered": [(subscription.id, "known"), (api.id, "mapped")],
@@ -671,11 +670,11 @@ def test_refresh_preserves_guard_for_disappearing_inventory_matches(tmp_path, ba
     assert result["interrupted"] == []
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("state", ["automatic", "manual", "empty"])
 @pytest.mark.parametrize("operation", ["put", "preview", "restore_preview", "restore_save"])
 def test_persisted_legacy_catalog_identity_survives_route_consumers(tmp_path, backend, state, operation):
-    requested = "legacy-" + "x" * MODEL_ID_MAX_LENGTH
+    requested = "legacy-" + "模型🧪/" * 3000
     source = _source("src_legacy001", (requested,))
     config = _loaded_catalog_config(backend, requested, source)
     route = {"hops": [] if state == "empty" else [{"source_id": source.id, "model_id": "mapped-target"}]}
@@ -729,16 +728,19 @@ def test_persisted_legacy_catalog_identity_survives_route_consumers(tmp_path, ba
         assert adapter.synced == []
 
 
-def test_opencode_existing_loader_still_rejects_overlength_catalog_identity():
-    with pytest.raises(ValueError, match="models.id"):
-        _loaded_catalog_config("opencode", "x" * (MODEL_ID_MAX_LENGTH + 1))
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_persisted_unencodable_catalog_identity_still_loads(backend):
+    identifier = "legacy\ud800"
+    loaded = _loaded_catalog_config(backend, identifier)
+    assert loaded.agents[backend].models[0].id == identifier
+    assert ModelHubConfig.from_payload(loaded.to_payload()).to_payload() == loaded.to_payload()
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("kind", ["api_key", "subscription"])
 @pytest.mark.parametrize("evidence", ["override", "inventory"])
 def test_existing_long_target_identity_can_be_saved_and_reordered(tmp_path, backend, kind, evidence):
-    target = "legacy-target-" + "x" * MODEL_ID_MAX_LENGTH
+    target = "legacy-target-" + "x" * 256
     source = _source("src_legacy001", (target,) if evidence == "inventory" else (), kind=kind)
     other = _source("src_legacy002", ("other",), kind=kind)
     config = _loaded_catalog_config(backend, MODEL, source, other)
@@ -759,11 +761,12 @@ def test_existing_long_target_identity_can_be_saved_and_reordered(tmp_path, back
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-@pytest.mark.parametrize("target_kind", ["new_long", "padded_known", "padded_long", "other_source_long"])
-def test_new_target_admission_cannot_reuse_legacy_identity_exceptions(tmp_path, backend, target_kind):
-    legacy = "legacy-" + "x" * MODEL_ID_MAX_LENGTH
-    source = _source("src_legacy001", ("known", legacy))
-    other = _source("src_legacy002", ())
+@pytest.mark.parametrize("kind", ["api_key", "subscription"])
+@pytest.mark.parametrize("target_kind", ["new_long", "padded_known", "padded_long", "other_source_long", "unencodable"])
+def test_new_target_admission_keeps_spelling_and_source_policy(tmp_path, backend, kind, target_kind):
+    legacy = "legacy-" + "x" * 256
+    source = _source("src_legacy001", ("known", legacy), kind=kind)
+    other = _source("src_legacy002", (), kind=kind)
     config = _loaded_catalog_config(backend, MODEL, source, other)
     config.agents[backend].routes[MODEL] = ModelHubRouteConfig.from_payload(
         {
@@ -772,13 +775,19 @@ def test_new_target_admission_cannot_reuse_legacy_identity_exceptions(tmp_path, 
     )
     service, store, adapter = _service(tmp_path, ModelHubConfig.from_payload(config.to_payload()))
     target = {
-        "new_long": "new-" + "x" * MODEL_ID_MAX_LENGTH,
+        "new_long": "new-" + "x" * 256,
         "padded_known": " known ",
         "padded_long": f" {legacy} ",
         "other_source_long": legacy,
+        "unencodable": "new-" + "x" * 17000 + "\ud800",
     }[target_kind]
     route = {"hops": [{"source_id": other.id if target_kind == "other_source_long" else source.id, "model_id": target}]}
     before = store.config.to_payload()
+    if kind == "api_key" and target_kind in {"new_long", "other_source_long"}:
+        assert service.preview_agent_chain(backend, MODEL, {"manual_override": route})["manual_override"] == route
+        assert asyncio.run(service.set_agent_chain(backend, MODEL, route))["chain"]["manual_override"] == route
+        assert ModelHubConfig.from_payload(store.config.to_payload()).to_payload() == store.config.to_payload()
+        return
     with pytest.raises(ModelHubError):
         service.preview_agent_chain(backend, MODEL, {"manual_override": route})
     with pytest.raises(ModelHubError):
@@ -798,7 +807,7 @@ def test_new_target_admission_cannot_reuse_legacy_identity_exceptions(tmp_path, 
     ],
 )
 def test_legacy_target_retirement_keeps_existing_source_policy(tmp_path, backend, kind, existing, allowed):
-    target = "retired-" + "x" * MODEL_ID_MAX_LENGTH
+    target = "retired-" + "x" * 256
     source = _source("src_legacy001", (target,), kind=kind)
     source.models[0].retired = True
     config = _loaded_catalog_config(backend, MODEL, source)

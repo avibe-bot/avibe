@@ -2636,9 +2636,8 @@ class ModelHubModelConfig:
             )
         # Spelling is settled here, at the one place a payload becomes a model
         # config, so no admission path can invent a second spelling for one
-        # model and split its usage across two ledger rows. The length bound
-        # stays with the admission surfaces: this constructor also reads files
-        # older releases wrote, and rejecting one of those would fail config load.
+        # model and split its usage across two ledger rows. New-admission checks
+        # stay with callers: this constructor also reads older persisted files.
         from core.handlers.model_hub.identifiers import normalized_model_id
 
         return cls(
@@ -3398,10 +3397,10 @@ class ModelHubAgentSupplyConfig:
         if any(_contains_model_hub_credential_material(model_id) for model_id in routes):
             raise ValueError("Config 'model_hub.agents.routes' contains an invalid model id")
         if backend == "opencode":
-            from core.handlers.model_hub.identifiers import canonical_model_id
+            from core.handlers.model_hub.identifiers import normalized_model_id
 
             for identifier in (*routes, *(model.id for model in models)):
-                if canonical_model_id(identifier) != identifier:
+                if not identifier.strip() or normalized_model_id(identifier) != identifier:
                     raise ValueError("Config 'model_hub.agents.models.id' is invalid")
             if any(model.native_protocol is None for model in models):
                 raise ValueError(

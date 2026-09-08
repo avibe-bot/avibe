@@ -645,6 +645,50 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
         assert secret not in serialized
 
 
+@pytest.mark.parametrize("discovery", (ObservationDiscovery.SUCCEEDED, ObservationDiscovery.FAILED))
+def test_mh_mig_001_long_manual_inventory_is_copy_only_even_when_discovery_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery: ObservationDiscovery,
+) -> None:
+    """MH-MIG-001: new manual imports share admission without rewriting native files."""
+    native_home = tmp_path / "native-home"
+    _isolate_native_home(monkeypatch, native_home)
+    identity = "模型🧪/e\u0301" * 3000
+    invalid = (" " * 17000, "m" * 17000 + "\ud800", "m" * 17000 + " sk-fabricated-never-persist-this")
+    _write(
+        native_home / ".config" / "opencode" / "opencode.json",
+        json.dumps({"provider": {"openrouter": {
+            "options": {"apiKey": "sk-openrouter-123456", "baseURL": "https://openrouter.example/v1"},
+            "models": {
+                "  " + identity + "  ": {"name": "Long manual"},
+                **{model_id: {} for model_id in invalid},
+            },
+        }}}),
+    )
+    before = _tree_digest(native_home)
+    service, store, adapter = _service(tmp_path)
+    _assert_sources_validated_before_commit(monkeypatch, service)
+
+    async def observe(*_args):
+        return SourceObservation(
+            outcome=ObservationOutcome.OBSERVED, reachable=True, authenticated=True,
+            protocol="openai_chat", discovery=discovery,
+            models=(DiscoveredModel(id=identity + "-discovered"),) if discovery is ObservationDiscovery.SUCCEEDED else (),
+        )
+
+    adapter.observe_source = observe
+    [item] = service.migration_scan()["items"]
+    result = asyncio.run(service.migration_apply([item["id"]]))
+    assert result["applied"] == 1
+    [source] = _assert_canonical_round_trip(store.config).sources
+    manual = [model for model in source.models if model.provenance == "manual"]
+    assert [(model.id, model.display_name) for model in manual] == [(identity, "Long manual")]
+    assert all(model.id not in invalid for model in source.models)
+    assert source.state.status == ("error" if discovery is ObservationDiscovery.FAILED else "standby")
+    assert _tree_digest(native_home) == before
+    assert adapter.transient_revoked == adapter.transient_refs
+    assert "sk-fabricated-never-persist-this" not in json.dumps(result)
+
+
 def test_mh_mig_002_oauth_defaults_to_native_sources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

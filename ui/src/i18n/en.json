@@ -1039,7 +1039,6 @@
             "label": "Model",
             "placeholder": "Search models.dev or enter a model ID",
             "required": "Enter a backend model ID.",
-            "tooLong": "A model ID may be at most 256 characters.",
             "duplicate": "This list already has a model with this ID."
           },
           "displayName": {

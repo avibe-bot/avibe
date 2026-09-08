@@ -26,7 +26,6 @@ import { apiFailure, modelsApi } from './modelsApi';
 import { modelsDevFillFailureKey } from './serverCopy';
 import {
   BACKEND_MODEL_EFFORT_MAX_LENGTH,
-  BACKEND_MODEL_ID_MAX_LENGTH,
   BACKEND_MODEL_INPUT_MODALITIES,
   BACKEND_MODEL_OUTPUT_MODALITIES,
   NATIVE_PROTOCOLS,
@@ -250,20 +249,14 @@ export const BackendModelEditorDialog: React.FC<{
    * resolving it again would rename a saved row whose id predates the rule.
    */
   const resolved = creating ? draftWithId(draft, trimmedId, backend) : draft;
-  // Every id rule is a rule about what the user may type, and only add mode lets
-  // them type it — an edit shows the id read-only. Judging a value the dialog
-  // itself locks is what made a persisted row whose id predates the length
-  // ceiling uneditable: its metadata is the part the backend still accepts, yet
-  // Save refused it and pointed at the one field nobody could shorten.
+  // Existing IDs are read-only; only a newly entered identity needs these checks.
   const idError = !creating
     ? null
     : trimmedId === ''
       ? 'required'
-      : resolved.id.length > BACKEND_MODEL_ID_MAX_LENGTH
-        ? 'tooLong'
-        : takenIds.has(resolved.id)
-          ? 'duplicate'
-          : null;
+      : takenIds.has(resolved.id)
+        ? 'duplicate'
+        : null;
   const valid = idError === null && context.ok && output.ok;
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
@@ -447,9 +440,6 @@ export const BackendModelEditorDialog: React.FC<{
                     aria-autocomplete="list"
                     aria-activedescendant={lookupOpen ? `${listId}-${activeRow}` : undefined}
                     aria-invalid={Boolean(idHint)}
-                    // The ceiling belongs to the field that can still be typed
-                    // into; a read-only legacy id is shown in full, not clipped.
-                    maxLength={creating ? BACKEND_MODEL_ID_MAX_LENGTH : undefined}
                     spellCheck={false}
                     autoComplete="off"
                     onChange={(event) => changeId(event.target.value)}
