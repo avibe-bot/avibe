@@ -338,3 +338,36 @@ This narrowly supersedes the earlier blanket preservation of normalizers
 only for the identified catalog deletion. All changes stay in the inactive
 exact-base source/test patch. Avibe runtime/config/manifest, release guards,
 publication authority, and the installed engine remain unchanged.
+
+### Kimi native representation clarification
+
+The orchestrator inspected the pinned Kimi executor's original/prepared payload
+flow, the original Kimi applier and extraction precedence, the current shared
+native-format gate, and the failing actual OAuth executor test. An OpenAI Chat
+transport can already carry Kimi's native `thinking` object. Treating every
+`openai` to `kimi` pair as conversion rejects a native future effort using
+catalog levels, although extraction already gives the native object priority.
+This is the same representation-identity defect, not evidence to remove
+genuine cross-protocol validation.
+
+Approve this bounded source-only clarification:
+
+- With no model suffix, recognize `openai` to `kimi` as native only when the
+  original source contains `thinking.type` or `thinking.effort`. A `keep`-only
+  object and a legacy `reasoning_effort` input do not establish native intent.
+- Preserve the prepared target payload and its native object without restoring
+  source fields or interpreting unknown effort/type values. Remove only the
+  legacy `reasoning_effort` alias, consistent with the existing Kimi wire writer.
+  Native disabled input must not be re-enabled or replaced by the legacy alias.
+- Preserve suffix priority and the existing conversion owner for legacy-only,
+  keep-only, and genuine cross-protocol inputs. No new interface, metadata,
+  configuration, registration, routing, or authentication policy is needed.
+- Verify native enabled/future/disabled/type-only input, conflicting legacy
+  input, keep-only conversion, suffix priority, and prepared-target authority
+  through policy tests and actual streaming/non-streaming executor captures.
+
+The expected result is exact prepared native intent reaching the loopback
+upstream, with the legacy alias absent; it is not a claim that a real upstream
+supports an arbitrary future value. Any target normalization or another
+protocol constraint that makes this preservation unsafe requires evidence and
+a new scope decision. The patch remains inactive and the engine pin unchanged.
