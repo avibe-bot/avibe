@@ -1998,7 +1998,6 @@ class TelegramBot(BaseIMClient):
             build_reasoning_effort_options,
             resolve_model_reasoning_options,
             resolve_opencode_allowed_providers,
-            resolve_opencode_default_model,
             resolve_opencode_provider_preferences,
         )
 
@@ -2019,11 +2018,6 @@ class TelegramBot(BaseIMClient):
             target_model = state.opencode_model
             preferred = resolve_opencode_provider_preferences(state.opencode_default_config, target_model)
             allowed = resolve_opencode_allowed_providers(state.opencode_default_config, state.opencode_models)
-            default_model = resolve_opencode_default_model(
-                state.opencode_default_config,
-                state.opencode_agents,
-                state.opencode_agent,
-            )
             entries = build_opencode_model_option_items(
                 state.opencode_models,
                 max_total=24,
@@ -2031,8 +2025,6 @@ class TelegramBot(BaseIMClient):
                 allowed_providers=allowed,
             )
             options = [(self._t("common.default"), None)]
-            if default_model:
-                options[0] = (f"{self._t('common.default')} - {default_model}", None)
             options.extend((str(entry.get("label")), str(entry.get("value"))) for entry in entries if entry.get("value"))
             return options
         if field == "opencode_reasoning_effort":

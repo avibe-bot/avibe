@@ -12,7 +12,6 @@ const baseProvider: OpencodeProvider = {
   oauth_available: true,
   local: false,
   models: [],
-  default_model: null,
 };
 
 describe('providerOauthSignedIn', () => {

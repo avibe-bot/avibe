@@ -3427,39 +3427,6 @@ class SlackBot(BaseIMClient):
         except SlackApiError as e:
             logger.debug(f"Failed to update resume modal: {e}")
 
-    def _get_default_opencode_agent_name(self, opencode_agents: list) -> Optional[str]:
-        """Resolve the default OpenCode agent name."""
-        for agent in opencode_agents:
-            name = agent.get("name")
-            if name == "build":
-                return name
-        for agent in opencode_agents:
-            name = agent.get("name")
-            if name:
-                return name
-        return None
-
-    def _resolve_opencode_default_model(
-        self,
-        opencode_default_config: dict,
-        opencode_agents: list,
-        selected_agent: Optional[str],
-    ) -> Optional[str]:
-        """Resolve the default model for a selected OpenCode agent."""
-        agent_name = selected_agent or self._get_default_opencode_agent_name(opencode_agents)
-        if isinstance(opencode_default_config, dict):
-            agents_config = opencode_default_config.get("agent", {})
-            if isinstance(agents_config, dict) and agent_name:
-                agent_config = agents_config.get(agent_name, {})
-                if isinstance(agent_config, dict):
-                    model = agent_config.get("model")
-                    if isinstance(model, str) and model:
-                        return model
-            model = opencode_default_config.get("model")
-            if isinstance(model, str) and model:
-                return model
-        return None
-
     def _build_routing_modal_view(
         self,
         channel_id: str,
@@ -3581,11 +3548,6 @@ class SlackBot(BaseIMClient):
             else:
                 current_oc_reasoning = selected_opencode_reasoning
 
-            # Determine default agent/model from OpenCode config
-            default_model_str = self._resolve_opencode_default_model(
-                opencode_default_config, opencode_agents, current_oc_agent
-            )
-
             # Build agent options
             agent_options = [
                 {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
@@ -3618,14 +3580,12 @@ class SlackBot(BaseIMClient):
 
             # Build model options
             default_label = self._t("common.default")
-            if default_model_str:
-                default_label = f"{self._t('common.default')} - {default_model_str}"
             model_options = [{"text": {"type": "plain_text", "text": default_label}, "value": "__default__"}]
 
             # Add models from providers (sorted, filtered, truncated)
             preferred_providers = resolve_opencode_provider_preferences(
                 opencode_default_config,
-                current_oc_model or default_model_str,
+                current_oc_model,
             )
             allowed_providers = resolve_opencode_allowed_providers(
                 opencode_default_config,
@@ -3666,7 +3626,7 @@ class SlackBot(BaseIMClient):
             }
 
             # Build reasoning effort options dynamically based on model variants
-            target_model = current_oc_model or default_model_str
+            target_model = current_oc_model
 
             reasoning_model_key = target_model or "__default__"
             reasoning_action_id = (

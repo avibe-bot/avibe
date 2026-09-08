@@ -1432,8 +1432,9 @@ moment; it never infers a removal or tombstone. Each snapshot change adds, but n
 removes, missing built-ins not in the set, in snapshot order among built-ins already present
 (or at the menu tail when none remain), seeds snapshot label and reasoning efforts, and
 leaves each new row automatic without seeding route keys. Remote-catalog payload, validators, success, failure,
-and backoff state are keyed by the configured catalog source. Claude's locked `default` row
-is excluded.
+and backoff state are keyed by the configured catalog source. Model catalogs contain
+explicit models only; backend-native default selections are not projected. See
+`avibe-owned-model-selection.md` for the model-selection contract.
 
 A write validates every newly introduced or changed exact pair before commit. An exact
 pair already present in the persisted array may be retained or reordered even when a

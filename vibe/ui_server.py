@@ -8120,7 +8120,7 @@ async def backend_opencode_providers():
 
     Fans out to the live OpenCode daemon's ``/provider``, ``/provider/auth``,
     and ``/config/providers`` endpoints and merges them into a list of
-    ``{id, name, configured, oauth_available, local, models, default_model}``.
+    ``{id, name, configured, oauth_available, local, models}``.
     """
     from vibe import api
 

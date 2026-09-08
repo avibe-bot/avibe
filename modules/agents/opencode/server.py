@@ -2625,31 +2625,6 @@ class OpenCodeServerManager:
             return {}
         return agent_config
 
-    def get_agent_model_from_config(self, agent_name: Optional[str]) -> Optional[str]:
-        """Read agent's default model from user's opencode.json config file.
-
-        This is a workaround for OpenCode server not using agent-specific models
-        when only the agent parameter is passed to the message API.
-        """
-
-        config = self._load_opencode_user_config()
-        if not config:
-            return None
-
-        # Try agent-specific model first
-        agent_config = self._get_agent_config(config, agent_name)
-        model = agent_config.get("model")
-        if isinstance(model, str) and model:
-            logger.debug(f"Found model '{model}' for agent '{agent_name}' in opencode.json")
-            return model
-
-        # Fall back to global default model
-        model = config.get("model")
-        if isinstance(model, str) and model:
-            logger.debug(f"Using global default model '{model}' from opencode.json")
-            return model
-        return None
-
     def get_agent_reasoning_effort_from_config(self, agent_name: Optional[str]) -> Optional[str]:
         """Read agent's reasoningEffort from user's opencode.json config file."""
 

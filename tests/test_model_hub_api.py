@@ -2115,23 +2115,10 @@ def test_agents_project_one_shared_backend_catalog_contract(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     claude_models = agents["claude"]["catalog_models"]
-    assert claude_models[0] == {
-        "id": "default",
-        "display_name": None,
-        "origin": "builtin",
-        "models_dev_id": None,
-        "context_window": None,
-        "max_output_tokens": None,
-        "input_modalities": [],
-        "output_modalities": [],
-        "supports_tools": None,
-        "supports_reasoning": None,
-        "reasoning_efforts": [],
-        "locked": True,
-        "routeable": False,
-    }
-    assert all(model["locked"] is False for model in claude_models[1:])
-    assert all(model["routeable"] is True for model in claude_models[1:])
+    assert claude_models
+    assert all(model["id"] != "default" for model in claude_models)
+    assert all(model["locked"] is False for model in claude_models)
+    assert all(model["routeable"] is True for model in claude_models)
     assert agents["codex"]["catalog_models"]
     assert agents["opencode"]["catalog_models"] == []
 
@@ -3623,37 +3610,25 @@ def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline
     assert raised.value.code == "backend_model_id_prefix"
 
 
-def test_backend_catalog_requires_claude_locked_default_echo(tmp_path):
+def test_backend_catalog_saves_claude_models_without_native_default(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(service.set_agent_models("claude", baseline, baseline[1:]))
-
-    assert raised.value.code == "backend_model_locked"
-    assert raised.value.status == 409
+    result = asyncio.run(service.set_agent_models("claude", baseline, baseline))
+    assert result["agent"]["catalog_models"] == baseline
+    assert all(model["id"] != "default" for model in baseline)
 
 
-@pytest.mark.parametrize("mutation", ["edit", "duplicate", "reorder"])
-def test_backend_catalog_rejects_any_claude_locked_default_mutation(
-    tmp_path,
-    mutation,
-):
+def test_backend_catalog_rejects_claude_native_default_selection(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     desired = copy.deepcopy(baseline)
-    if mutation == "edit":
-        desired[0]["display_name"] = "Not the server sentinel"
-    elif mutation == "duplicate":
-        desired.insert(1, copy.deepcopy(desired[0]))
-    else:
-        desired[0], desired[1] = desired[1], desired[0]
+    desired.append({**desired[0], "id": "default"})
 
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("claude", baseline, desired))
 
-    assert raised.value.code == "backend_model_locked"
-    assert raised.value.status == 409
+    assert raised.value.code == "backend_model_id_invalid"
 
 
 def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):

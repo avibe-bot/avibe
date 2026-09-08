@@ -3816,33 +3816,12 @@ class ModelHubService:
             "routeable": True,
         }
 
-    @staticmethod
-    def _claude_default_catalog_payload() -> dict:
-        return {
-            "id": "default",
-            "display_name": None,
-            "origin": "builtin",
-            "models_dev_id": None,
-            "context_window": None,
-            "max_output_tokens": None,
-            "input_modalities": [],
-            "output_modalities": [],
-            "supports_tools": None,
-            "supports_reasoning": None,
-            "reasoning_efforts": [],
-            "locked": True,
-            "routeable": False,
-        }
-
     @classmethod
     def _catalog_models_payload(
         cls,
         agent: ModelHubAgentSupplyConfig,
     ) -> list[dict]:
-        models = [cls._catalog_model_payload(model) for model in agent.models]
-        if agent.backend == "claude":
-            models.insert(0, cls._claude_default_catalog_payload())
-        return models
+        return [cls._catalog_model_payload(model) for model in agent.models]
 
     def backend_catalog_models(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -4242,25 +4221,10 @@ class ModelHubService:
             raise ModelHubError("mapping_target_unavailable")
         if not isinstance(payload, list):
             raise ModelHubError("backend_model_catalog_invalid")
-        default_indices = [
-            index
-            for index, item in enumerate(payload)
-            if isinstance(item, dict) and item.get("id") == "default"
-        ]
-        if backend == "claude":
-            if (
-                default_indices != [0]
-                or payload[0] != cls._claude_default_catalog_payload()
-            ):
-                raise ModelHubError("backend_model_locked", status=409)
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
-            if (
-                backend == "claude"
-                and isinstance(item, dict)
-                and item.get("id") == "default"
-            ):
-                continue
+            if backend == "claude" and isinstance(item, dict) and item.get("id") == "default":
+                raise ModelHubError("backend_model_id_invalid")
             try:
                 model = ModelHubBackendModelConfig.from_payload(item)
             except (TypeError, ValueError) as exc:

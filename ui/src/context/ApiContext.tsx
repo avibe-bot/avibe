@@ -2452,7 +2452,6 @@ export type OpencodeProvider = {
     user_managed: boolean;
     reasoning_efforts?: string[];
   }[];
-  default_model: string | null;
   // Optional ``baseURL`` override persisted in opencode.json. Surfaced so
   // the Settings page can pre-populate the Base URL input with the last
   // saved value instead of starting empty on every reload.
