@@ -1,5 +1,34 @@
 # Model Hub — UI & Interaction Spec (gateway frames)
 
+## Direct route editing — 2026-09-08
+
+The owner-approved direct-edit revision removes the inherited read-only entry state.
+Every ready route uses the existing editable hop rows, picker, keyboard/pointer
+reordering and visual tokens. Opening, focusing, selecting without applying, or
+applying an unchanged pair does not create manual intent. A real local edit creates
+a manual draft; Pin current route explicitly stages the same effective pairs as
+manual. Neither action writes. Pending manual copy says that saving stops following
+defaults. Save is disabled for unchanged normalized intent.
+
+Cancel changes discards a reversible draft, keeps the same dialog mounted and reads
+the latest saved chain/intent; it never writes or reinstalls a stale snapshot. A
+failed read stays unread with Retry. The clean footer uses Close. Title-close,
+Escape and outside press remain dismissal, respecting nested selector/grab/guard
+precedence. Saving, unknown-attempt abandonment, rejection, committed impact and
+reconciliation keep their existing distinct lifecycle rules. Cancel changes is
+not a rollback action for an unknown or committed write.
+
+Restore/final-hop removal retains both prior pairs and intent for Undo, previews
+inheritance without writing, and saves only when normalized intent changes.
+Ready preview rows are editable; editing them replaces the local restore proposal.
+Keyboard grab cancellation restores its prior pairs, intent and restore/Undo
+state. Late reads cannot replace a newer edit or a canceled draft.
+The route header's existing height token is a minimum: long exact model identities
+wrap and grow the header rather than overlapping the editable body. The footer
+remains within the dialog and viewport; the existing body owns scrolling.
+This supersedes the earlier Edit route entry, ordinary Cancel-as-close and
+read-only preview row instructions below, not the persistence or error contracts.
+
 ## Save-first provider revision — 2026-09-08
 
 The owner-approved `model-hub-save-first-testing.md` supersedes the automatic
@@ -57,11 +86,12 @@ opening the row editor. Escape/outside dismiss it; avoid nested buttons. Retain 
 helper text and complete EN/ZH pairs in design/locales. Recorded model-not-found keeps
 Passthrough and uses the retained-turn detail surface below without marking the Source failed.
 
-Inherited dialogs open with Edit route. Manual editing retains add/edit/remove/reorder
+Dialogs open directly editable without changing saved intent. Editing retains add/edit/remove/reorder
 and accepts exact API-key upstream ids absent from inventory; subscription targets retain
 known-model admission. Restore automatic in the footer, or removing the final manual hop,
 changes the draft to null and calls preview; its result may be Passthrough or Unconfigured.
-Undo restore reinstates the prior manual draft. Cancel/close never writes. Save sends
+Undo restore reinstates the prior draft and intent. Cancel changes stays in the
+dialog and rereads saved state; Close dismisses. Neither writes. Save sends
 DELETE for inherited intent or PUT for nonempty manual hops, consuming the complete canonical
 mutation result and exact-plan guards. Failed saves retain draft intent; stale preview
 responses cannot replace newer edits; duplicate submissions are disabled.
@@ -2014,7 +2044,7 @@ what order?*
 **Sparse manual intent replaces the historical stored-chain-only model.** The
 server's effective projection owns Automatic, Manual, Passthrough or Unconfigured;
 there is no `follow` / `custom` discriminator or client-side recommendation engine.
-Inherited routes enter editing through Edit route. Manual arrays execute as saved;
+Inherited routes are immediately editable without being pinned. Manual arrays execute as saved;
 Restore automatic stages null, previews the effective plan, and removes the saved
 override only on Save. The routing revision above owns the approved current frames.
 
@@ -2043,8 +2073,8 @@ while `route.sourceMissing` means the chain annotation and never the local join 
 **One held identity, one origin and one wire projection** `[contract]` `[derived]`.
 Opening 02 holds `(backend, menu_model)` and reads
 `GET /api/models/agents/<backend>/chain?model=<id>`. Hold `manual_override` separately
-from the effective `chain`. Edit route initializes a manual draft from effective exact
-pairs; Restore automatic stages null. Live `channel`, `health`, `runnable`, `reason`,
+from the effective `chain`. Actual edits or explicit Pin current route initialize
+manual intent from effective exact pairs; Restore automatic stages null. Live `channel`, `health`, `runnable`, `reason`,
 `retry_at`, `current` and `supply_state` remain read annotations and are never echoed
 into a write. The reversible origin includes saved intent as well as pairs, so equal
 arrays cannot settle a lost response with different manual intent. Local edits operate
@@ -2471,6 +2501,7 @@ generation is ignored and cannot install authority, feedback or focus.
 | ET-7e — cancel keyboard grab | Grabbed row + pre-grab order | Restore the exact snapshot; send/read nothing | Clear `aria-grabbed` and snapshot | Prior Ready, Dirty or Invalid class | `route.reorder.cancelled` plus registered prior invalid lines | Same row's restored grip | None |
 | ET-7f — Tab from grabbed row | Grabbed row + current draft | Settle current order and re-run V5 before focus movement | Clear `aria-grabbed` and snapshot, then perform ordinary Tab/Shift+Tab | Ready, Dirty or Invalid by settled V5 result | `route.reorder.dropped` plus registered invalid lines | Ordinary next/previous enabled modal control | None |
 | ET-8a — ordinary / terminal-rejected reversible exit | Loading route, Route unread, Ready, Dirty, Invalid after refresh or Route save rejected + latest installed authoritative page projection | Send no mutation; disown the current RL opening generation before close. A terminal rejection owns no D-36 generation | Close selector; restore/cancel any grab; discard local/submitted draft and terminal rejection evidence; ignore every late result from disowned opening reads | Reveal the latest installed page authority | Exact latest projection; retain its existing unresolved marker if any. No recovery read or false commit report follows | Preserve an FF-1-valid active page target, otherwise PF-1 after the modal target unmounts | None; an already-unresolved row retains D-35 |
+| ET-8c — Cancel changes | Ready or terminal-rejected + reversible local draft/restore proposal | Disown local preview and prior opening generations; acquire a fresh exact-chain GET without mutation | Drop selector, grab, local intent and rejected submission evidence; keep the dialog mounted | Loading then Ready from saved authority, or Route unread | Existing loading/read-failure copy; unchanged intent disables Save | Stable footer Close, then Retry on failed read | Dialog-owned chain GET; never a recovery PUT/DELETE |
 | ET-8b — explicit unknown-attempt abandonment | Attempt settlement is `unknown`, owner is mounted editor, legality is Hub-observable or Direct-suspended, and the latest successful members are already installed | Send no mutation/read; explicitly abandon this old workflow and disown every mounted AR-D/RO generation before close | Close selector; restore/cancel any grab; discard submitted pairs/stage and all old-workflow rights. Ignore every later result from disowned generations | Reveal the latest installed authority, including an AgentSupply, Source or matching/nonmatching AgentChain installed before this edge | Exact latest projection with no old-attempt Retry. A later row open starts from current authority as a new workflow; it never resumes or replays this attempt | Preserve an FF-1-valid page target, otherwise PF-1 after modal close | None |
 | ET-9a — first Route save | V5-valid nonempty manual draft or ready inherited preview | Freeze normalized intent and send nonempty PUT or inherited DELETE without `force` or plan echoes | Close selector; settle any grab | Saving | `route.saving` | Programmatically focusable progress status | One owned Route PUT or DELETE matching the immutable intent |
 | ET-10 — R6 success with impact | Saving + exact R6 envelope with either array nonempty | Consume every R6 member, establish CF-R, mount its report and start AR-M with Agents acquired and Source/Route applicability deferred | Release mutation/refusal ownership; retain the entire envelope and held self-satisfying chain | Route impact reported with AR-M pending | Impact title/detail and each nonempty block | `route.impact.done` | Agents landing read; mode then acquires Sources under Direct or after CF-H under Hub and activates/drops the held Route evidence |

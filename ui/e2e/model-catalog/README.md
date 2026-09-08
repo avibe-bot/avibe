@@ -30,3 +30,10 @@ collapsible Agent footer remain separate, and long identifiers wrap inside the
 footer. Every localized route status fits the existing compact control, including
 a wider fallback-font check. These are browser layout contracts, not live routing
 or backend acceptance.
+
+`route-direct-edit.spec.ts` consumes `MH-ROUTING-007` through the production
+route dialog. All backends and origins open directly editable without writing;
+Cancel changes rereads saved intent in place, nested picker dismissal preserves
+the parent, and only Save persists the exact ordered pairs. Desktop/mobile EN/ZH
+screenshots also cover explicit pinning, long identities and light/dark footer
+geometry. Its in-memory route API is installed only for the route fixture view.

@@ -381,8 +381,8 @@ export const pickerRowId = async (row: Locator): Promise<string> => {
  * icon-only close carrying the same accessible name.
  *
  * Every Model Hub surface with a footer does this: the header X takes the
- * footer action's own label as its `aria-label` — `Cancel` on the route dialog
- * and the priority drawer, `Done` on the mutation report. That is right for a
+ * dismissal action's label as its `aria-label` — `Close` on the route dialog,
+ * `Cancel` on the priority drawer, `Done` on the mutation report. That is right for a
  * screen reader, since the X genuinely does perform that action, and it means a
  * name alone matches two elements, which Playwright refuses in strict mode. The
  * visible one is the one whose own text is the label; the X has none.
