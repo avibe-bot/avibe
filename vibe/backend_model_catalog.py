@@ -105,6 +105,11 @@ _CODEX_CUSTOM_SCAFFOLD_KEYS = (
     "tool_mode",
     "prefer_websockets",
 )
+_CODEX_CUSTOM_REQUIRED_DEFAULTS: dict[str, Any] = {
+    "support_verbosity": False,
+    "experimental_supported_tools": [],
+    "supports_parallel_tool_calls": False,
+}
 
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
@@ -177,9 +182,9 @@ def _codex_hub_catalog_bytes(
                     if key in template
                 }
                 # Required in some Codex catalog versions, with no matching
-                # user-authored BackendModel field.
-                row["support_verbosity"] = False
-                row["experimental_supported_tools"] = []
+                # user-authored BackendModel field. Codex 0.146.0 also requires
+                # supports_parallel_tool_calls.
+                row.update(_CODEX_CUSTOM_REQUIRED_DEFAULTS)
             row["slug"] = model_id
             display_name = configured.get("display_name")
             row["display_name"] = (
