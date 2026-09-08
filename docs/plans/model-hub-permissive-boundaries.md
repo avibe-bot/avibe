@@ -300,3 +300,41 @@ An upstream acceptance/release or a separately authorized Avibe source/
 provenance release contract is required before shipping this engine change.
 The Avibe PR may carry the reviewed inactive patch, but must explicitly state
 that its current engine pin and installed behavior remain unchanged.
+
+### xAI post-translation capability gate
+
+The orchestrator independently inspected the exact pinned source's
+`prepareResponsesRequestTo` chain, `sanitizeXAIResponsesBody`,
+`xaiSupportsReasoningEffort`, both existing catalog-strip tests, and the new
+fake-OAuth executor consumer and failing wire record. A whole-source search
+found one production caller of the capability helper: the sanitizer removes
+`reasoning.effort` after shared thinking and payload rules when registry
+thinking levels are absent. This is another catalog policy owner, not a
+Responses representation constraint. Shared passthrough alone cannot satisfy
+the accepted intent contract.
+
+Approve this additional source-only scope:
+
+- Remove only the catalog-conditioned reasoning deletion from
+  `sanitizeXAIResponsesBody`. Keep its `stop` removal and every other xAI
+  schema, tool-choice, replay, image, normalizer, and payload-rule constraint.
+  Preserve the current prepared target fields; do not restore the whole
+  original request or override configured payload rules.
+- Remove the now-unconsumed private `xaiSupportsReasoningEffort` helper,
+  its obsolete assertion-only test, unused imports, and the sanitizer's
+  now-unused model argument. No registry or registration policy change.
+- Replace catalog-strip assertions with actual executor evidence for unknown,
+  known-nil, empty/narrow, and supported metadata populations; native future
+  effort and explicit disable remain present, missing native intent remains
+  absent, and `stop` still does not reach Responses. Cover cross-protocol
+  conversion and stream/non-stream paths without claiming upstream support.
+- Reconcile the complete manager/credential-replacement and Kimi fixture
+  failures from the same test run independently of this xAI defect. A passing
+  xAI case alone is not source acceptance. Check the final egress preparation
+  of the other supported executor paths for an equivalent downstream
+  catalog-only gate; report another boundary before expanding changes.
+
+This narrowly supersedes the earlier blanket preservation of normalizers
+only for the identified catalog deletion. All changes stay in the inactive
+exact-base source/test patch. Avibe runtime/config/manifest, release guards,
+publication authority, and the installed engine remain unchanged.
