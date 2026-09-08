@@ -1095,6 +1095,114 @@ def test_joint_numeric_search_preserves_single_column_repairs(changed):
         assert guard.shape_proposals(connection, expression, required, values) == [(f"n{changed}", 1)]
 
 
+@pytest.mark.parametrize("count", [2, 5, 16])
+@pytest.mark.parametrize("dense,reverse", itertools.product([False, True], repeat=2))
+def test_numeric_search_preserves_sparse_and_dense_consumers(tmp_path, count, dense, reverse):
+    names = [f"n{index}" for index in range(count)]
+    terms = [f"({name}>0)" for name in names]
+    if reverse:
+        names.reverse()
+    positive = count - 1 if dense else 1
+    db_path = tmp_path / "sparse.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        columns = ','.join(f'{name} integer not null' for name in names)
+        connection.execute(f"create table shaped({columns},constraint ck check({'+'.join(terms)}={positive}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("declared", ["", "TEXT"])
+@pytest.mark.parametrize("changed", range(16))
+def test_sparse_candidates_keep_turns_at_every_column_position(declared, changed):
+    # Extra TEXT context cannot change the numeric scheduling order.
+    required = [(f"n{index}", "INTEGER") for index in range(16)] + [("label", declared)]
+    values = {name: 0 for name, _ in required}
+    values["label"] = "held"
+    expression = '+'.join(f'(n{index}>0)' for index in range(16)) + f'=1 and abs(n{changed})>0'
+    with sqlite3.connect(":memory:") as connection:
+        assert guard.shape_proposals(connection, expression, required, values) == [(f"n{changed}", 1)]
+
+
+@pytest.mark.parametrize("declared", ["", "TEXT"])
+@pytest.mark.parametrize("name,check", [
+    ("payload_json", "json_valid(payload_json)"),
+    ("created_at", "datetime(created_at) is not null"),
+    ("elapsed_time", "datetime(elapsed_time) is not null"),
+    ("email_address", "email_address like '%@%'"),
+    ("label", "typeof(label)='text'"),
+])
+def test_open_storage_columns_retain_semantic_seeds(tmp_path, declared, name, check):
+    assert guard.representative_value(name, declared) == guard.representative_value(name, "TEXT")
+    db_path = tmp_path / "semantic.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({name} {declared} not null,constraint ck check({check}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("declared,expected", [("BLOB", b""), ("INTEGER", 0), ("REAL", 0), ("NUMERIC", 0)])
+def test_explicit_storage_defaults_still_take_precedence(declared, expected):
+    for name in ["payload_json", "created_at", "elapsed_time", "email_address", "label"]:
+        assert guard.representative_value(name, declared) == expected
+
+
+@pytest.mark.parametrize("name,quoted", [
+    (name, quoted)
+    for name in ["random", "changes", "total_changes", "last_insert_rowid", "current_timestamp"]
+    for quoted in ([True] if name == "current_timestamp" else [False, True])
+])
+def test_function_named_columns_are_not_function_invocations(tmp_path, name, quoted):
+    column = f'"{name}"' if quoted else name
+    db_path = tmp_path / "names.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({column} integer not null,a integer not null,constraint ck check({column}=1 and a=2))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("extra", [
+    " and 'random changes current_timestamp' != ''",
+    " /* random() changes() current_timestamp */",
+    " -- random() changes() current_timestamp\n",
+])
+def test_context_screen_ignores_literal_and_comment_contents(extra):
+    with sqlite3.connect(":memory:") as connection:
+        proposals = guard.shape_proposals(connection, "a=1 and b=2" + extra, [("a", "INTEGER"), ("b", "INTEGER")], {"a": 0, "b": 0})
+        assert proposals == [("a", 1), ("b", 2)]
+
+
+@pytest.mark.parametrize("function", ["changes()", '"changes"()', "changes /* note */ ()", "current_timestamp", "CURRENT_DATE", "current_time"])
+@pytest.mark.parametrize("in_default", [False, True])
+def test_compiled_context_functions_defer_without_evaluating(monkeypatch, function, in_default):
+    connect = sqlite3.connect
+    statements = []
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+    with connect(":memory:") as connection:
+        monkeypatch.setattr(guard.sqlite3, "connect", traced_connect)
+        expression = "n>0" if in_default else f"n>0 and ({function}) is not null"
+        omitted = [("tag", "TEXT", function)] if in_default else []
+        assert guard.shape_proposals(connection, expression, [("n", "INTEGER")], {"n": 0}, omitted=omitted, allow_unvalidated_numeric=False) == []
+    assert not any(statement.startswith("select coalesce(cast(") for statement in statements)
+
+
+@pytest.mark.parametrize("default", ["'random'", "'current_timestamp'", "1 /* changes() */", "1 -- random()\n"])
+def test_default_literals_and_comments_do_not_disable_joint_evaluation(default):
+    with sqlite3.connect(":memory:") as connection:
+        assert guard.shape_proposals(connection, "a=1 and b=2", [("a", "INTEGER"), ("b", "INTEGER")], {"a": 0, "b": 0}, omitted=[("tag", "TEXT", default)]) == [("a", 1), ("b", 2)]
+
+
 @pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
 @pytest.mark.parametrize("separate", [False, True])
 @pytest.mark.parametrize("patterns", [("A*", "*Z"), ("[A-C]*", "*[Y-Z]"), ("*A*", "*Z*"), ("\u00e9*", "*]")])

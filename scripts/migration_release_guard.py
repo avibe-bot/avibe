@@ -886,7 +886,7 @@ def representative_value(column: str, declared_type: str) -> object:
     kind = sqlite_affinity(declared_type)
     if kind in {"INTEGER", "REAL", "NUMERIC"}:
         return 0
-    if kind == "BLOB":
+    if kind == "BLOB" and declared_type:
         return b""
     if column.endswith(("_at", "_time")):
         return "1970-01-01T00:00:00+00:00"
@@ -1179,12 +1179,7 @@ def shape_proposals(
     if not numeric or not candidates:
         return proposals
     domains = numeric_domains(expression, numeric, values, candidates)
-    products = itertools.product(*domains)
-    assignments = itertools.chain(
-        itertools.islice(products, 1),
-        (tuple(candidate for _ in numeric) for candidate in candidates),
-        products,
-    )
+    assignments = numeric_assignments(domains, tuple(values[name] for name in numeric), candidates)
     # Native typed insertion models affinity, but scratch DML must never change
     # the fixture connection's changes()/last_insert_rowid()/total_changes().
     evaluation = sqlite3.connect(":memory:")
@@ -1204,13 +1199,21 @@ def shape_proposals(
     columns = ', '.join(quote(name) for name, _ in required)
     placeholders = ', '.join('?' for _ in required)
     try:
-        context = identifier_key(expression + "\n" + "\n".join(default or "" for _, _, default in omitted))
         contextual = {
             str(row[0]) for row in evaluation.execute("pragma function_list")
             if not int(row[5]) & 0x800  # SQLITE_DETERMINISTIC
         }
-        if any(re.search(rf"\b{re.escape(name)}\b", context) for name in contextual):
-            return [*proposals, *fallback]
+        def authorize(action, _first, function, _database, _source):
+            if action == sqlite3.SQLITE_FUNCTION and function in contextual:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        evaluation.set_authorizer(authorize)
+        # INSERT compilation does not authorize DEFAULT functions. Compile them
+        # separately without execution, including SQLite's keyword-style functions.
+        for _, _, default in omitted:
+            if default is not None:
+                evaluation.execute(f"explain select ({default})").fetchall()
         evaluation.execute(f"create table {table} ({', '.join(declarations)})")
         for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
             changes = dict(zip(numeric, assignment))
@@ -1229,6 +1232,41 @@ def shape_proposals(
     finally:
         evaluation.close()
     return proposals
+
+
+def numeric_assignments(
+    domains: list[list[object]], current: tuple[object, ...], candidates: list[int]
+) -> Iterable[tuple[object, ...]]:
+    """Give local repairs and joint guesses turns in the same bounded search."""
+    ranked = tuple(domain[0] for domain in domains)
+
+    def sparse(base: tuple[object, ...]) -> Iterable[tuple[object, ...]]:
+        alternatives = [
+            [value for value in dict.fromkeys([current[index], *domain]) if value != base[index]]
+            for index, domain in enumerate(domains)
+        ]
+        for rank in range(max(map(len, alternatives), default=0)):
+            for index, options in enumerate(alternatives):
+                if rank < len(options):
+                    yield (*base[:index], options[rank], *base[index + 1:])
+
+    seen = {ranked}
+    yield ranked
+    uniform = [tuple(candidate for _ in domains) for candidate in candidates]
+
+    def interleave(*families):
+        for batch in itertools.zip_longest(*families):
+            yield from (assignment for assignment in batch if assignment is not None)
+
+    anchors = dict.fromkeys([ranked, *uniform])
+    neighborhoods = interleave(*(sparse(base) for base in anchors if base != current))
+    joint = interleave(neighborhoods, iter(uniform), itertools.product(*domains))
+    # Current-row single changes keep their own turns regardless of how many
+    # joint anchors the CHECK's literals introduced.
+    for assignment in interleave(sparse(current), joint):
+        if assignment not in seen:
+            seen.add(assignment)
+            yield assignment
 
 
 def numeric_domains(
