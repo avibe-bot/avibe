@@ -851,9 +851,11 @@ SEED_ROWS = 2
 RESTORE_STEP = SEED_ATTEMPTS
 
 
-def sqlite_affinity(declared_type: str) -> str:
+def sqlite_affinity(declared_type: str, *, strict: bool = False) -> str:
     """SQLite's ordered declared-type rules, shared by seed and repair candidates."""
     kind = declared_type.upper()
+    if strict and kind == "ANY":
+        return "BLOB"
     if "INT" in kind:
         return "INTEGER"
     if any(marker in kind for marker in ("CHAR", "CLOB", "TEXT")):
@@ -865,6 +867,11 @@ def sqlite_affinity(declared_type: str) -> str:
     return "NUMERIC"
 
 
+def is_strict_table(connection: sqlite3.Connection, table: str) -> bool:
+    quoted = table.replace('"', '""')
+    return any(row[5] for row in connection.execute(f'pragma main.table_list("{quoted}")'))
+
+
 def substring_requirements(expression: str) -> Iterable[tuple[str, str, str, str]]:
     """Normalize either operand order into (target, start, width, source)."""
     identifier = r'"?(\w+)"?'
@@ -873,7 +880,7 @@ def substring_requirements(expression: str) -> Iterable[tuple[str, str, str, str
         yield target, start, width, source
 
 
-def representative_value(column: str, declared_type: str) -> object:
+def representative_value(column: str, declared_type: str, *, strict: bool = False) -> object:
     """A value of ``declared_type`` that SQLite will store in ``column``.
 
     Typed off the declaration rather than off the column's meaning, because meaning is
@@ -883,10 +890,10 @@ def representative_value(column: str, declared_type: str) -> object:
     migration that parses a timestamp, an address, or a JSON document gets something
     parseable rather than ``'x'``.
     """
-    kind = sqlite_affinity(declared_type)
+    kind = sqlite_affinity(declared_type, strict=strict)
     if kind in {"INTEGER", "REAL", "NUMERIC"}:
         return 0
-    if kind == "BLOB" and declared_type:
+    if kind == "BLOB" and declared_type and not (strict and declared_type.upper() == "ANY"):
         return b""
     if column.endswith(("_at", "_time")):
         return "1970-01-01T00:00:00+00:00"
@@ -942,6 +949,9 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     whether the resulting row is admissible, so a bad proposal costs an attempt rather
     than producing a row the schema would have refused.
     """
+    # Paths and member values already belong to semantic JSON proposals; offering
+    # them to ordinary columns can overwrite an otherwise successful repair.
+    expression = JSON_REQUIREMENT.sub("", expression)
     literals = re.findall(r"'([^']*)'", expression)
     folded = identifier_key(expression)
     named = [column for column in columns if re.search(rf"\b{re.escape(identifier_key(column))}\b", folded)]
@@ -1094,6 +1104,12 @@ def glob_witness(
     return None
 
 
+@dataclass
+class ShapeProposals:
+    derived: list[tuple[str, object]]
+    numeric_fallback: list[tuple[str, object]]
+
+
 def shape_proposals(
     connection: sqlite3.Connection,
     expression: str,
@@ -1103,8 +1119,8 @@ def shape_proposals(
     text_constraints: str | None = None,
     omitted: Iterable[tuple[str, str, str | None]] = (),
     unavailable: Iterable[str] = (),
-    allow_unvalidated_numeric: bool = True,
-) -> list[tuple[str, object]]:
+    strict: bool = False,
+) -> ShapeProposals:
     """Derive bounded text-shape and numeric candidates from the rejected CHECK.
 
     This extends the literal/JSON proposals, not the seeder's coverage claim. Unsupported
@@ -1164,7 +1180,8 @@ def shape_proposals(
     }
     numeric = [
         name for name, declared in required
-        if sqlite_affinity(declared) in {"INTEGER", "REAL", "NUMERIC"}
+        if (sqlite_affinity(declared, strict=strict) in {"INTEGER", "REAL", "NUMERIC"}
+            or (strict and declared.upper() == "ANY"))
         and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
     ]
     candidates = list(dict.fromkeys(
@@ -1173,11 +1190,11 @@ def shape_proposals(
     ))
     fallback = [
         (name, candidate) for candidate in candidates for name in numeric if candidate != values[name]
-    ] if allow_unvalidated_numeric else []
+    ]
     if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)) for name in unavailable):
-        return [*proposals, *fallback]
+        return ShapeProposals(proposals, fallback)
     if not numeric or not candidates:
-        return proposals
+        return ShapeProposals(proposals, [])
     domains = numeric_domains(expression, numeric, values, candidates)
     assignments = numeric_assignments(domains, tuple(values[name] for name in numeric), candidates)
     # Native typed insertion models affinity, but scratch DML must never change
@@ -1214,12 +1231,16 @@ def shape_proposals(
         for _, _, default in omitted:
             if default is not None:
                 evaluation.execute(f"explain select ({default})").fetchall()
-        evaluation.execute(f"create table {table} ({', '.join(declarations)})")
+        evaluation.execute(f"create table {table} ({', '.join(declarations)})" + (" STRICT" if strict else ""))
         for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
             changes = dict(zip(numeric, assignment))
             parameters = [changes.get(column, values[column]) for column, _ in required]
             evaluation.execute(f"delete from {table}")
-            evaluation.execute(f"insert into {table} ({columns}) values ({placeholders})", parameters)
+            try:
+                evaluation.execute(f"insert into {table} ({columns}) values ({placeholders})", parameters)
+            except sqlite3.IntegrityError:
+                # STRICT storage can reject a candidate before its CHECK is evaluated.
+                continue
             accepted = evaluation.execute(
                 f"select coalesce(cast(({expression}) as numeric), 1) != 0 from {table}"
             ).fetchone()[0]
@@ -1228,10 +1249,10 @@ def shape_proposals(
                 break
     except sqlite3.OperationalError:
         # Unrepresentable context cannot reject a candidate; actual INSERT decides.
-        proposals.extend(fallback)
+        return ShapeProposals(proposals, fallback)
     finally:
         evaluation.close()
-    return proposals
+    return ShapeProposals(proposals, [])
 
 
 def numeric_assignments(
@@ -1260,10 +1281,11 @@ def numeric_assignments(
 
     anchors = dict.fromkeys([ranked, *uniform])
     neighborhoods = interleave(*(sparse(base) for base in anchors if base != current))
-    joint = interleave(neighborhoods, iter(uniform), itertools.product(*domains))
-    # Current-row single changes keep their own turns regardless of how many
-    # joint anchors the CHECK's literals introduced.
-    for assignment in interleave(sparse(current), joint):
+    anchors = interleave(neighborhoods, iter(uniform))
+    products = itertools.product(*domains)
+    # Cartesian search gets two direct turns; local and anchor repairs get one
+    # each. Nesting Cartesian behind anchors would dilute its finite budget.
+    for assignment in interleave(sparse(current), products, products, anchors):
         if assignment not in seen:
             seen.add(assignment)
             yield assignment
@@ -1591,9 +1613,11 @@ def insert_seed_row(
         else:
             omitted.append((str(info[1]), str(info[2]), info[4]))
     prefix_sources = {identifier_key(other) for _, _, _, other in substring_requirements(text_constraints)}
+    strict = is_strict_table(connection, table)
     proposed: set[tuple[str, object]] = set()
+    next_source = 0
     objection = ""
-    for attempt in range(SEED_ATTEMPTS):
+    for _ in range(SEED_ATTEMPTS):
         try:
             connection.execute(statement, [values[column] for column in names])
         except sqlite3.Error as exc:
@@ -1605,19 +1629,25 @@ def insert_seed_row(
             if failure is None:
                 return objection, True
             expression = check_expression(ddl, failure.group(1))
-            untried = [
-                pair
-                for pair in [
-                    *shape_proposals(
-                        connection, expression, required, values,
-                        text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
-                        allow_unvalidated_numeric=attempt < SEED_ATTEMPTS // 2,
-                    ),
-                    *json_proposals(connection, expression, names),
-                    *check_proposals(expression, names),
+            shaped = shape_proposals(
+                connection, expression, required, values,
+                text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
+                strict=strict,
+            )
+            untried = [pair for pair in shaped.derived if pair not in proposed and values[pair[0]] != pair[1]]
+            if not untried:
+                sources = [
+                    shaped.numeric_fallback,
+                    [*check_proposals(expression, names), *json_proposals(connection, expression, names)],
                 ]
-                if pair not in proposed and values[pair[0]] != pair[1]
-            ]
+                # Derived repairs precede guesses. Both guess sources remain live
+                # throughout the INSERT budget, with JSON after generic literals.
+                for offset in range(len(sources)):
+                    source = (next_source + offset) % len(sources)
+                    untried = [pair for pair in sources[source] if pair not in proposed and values[pair[0]] != pair[1]]
+                    if untried:
+                        next_source = (source + 1) % len(sources)
+                        break
             if not untried:
                 # Follow only prefix-source dependencies into other CHECKs. Unrelated
                 # literals must not overwrite columns that already satisfy their checks.
@@ -1731,7 +1761,8 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             # column first and fall back to what the table demands, because a table whose
             # CHECKs make some columns mutually exclusive refuses the maximal row by
             # construction and still has to be seeded.
-            base = {column: representative_value(column, declared) for column, declared in every}
+            strict = is_strict_table(connection, table)
+            base = {column: representative_value(column, declared, strict=strict) for column, declared in every}
             objection, settled = insert_seed_row(connection, table, ddl, every, dict(base))
             offered = every
             if objection:

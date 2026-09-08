@@ -1019,9 +1019,31 @@ def test_shape_repairs_follow_constraints_not_column_names(tmp_path, minimum, or
 
 def test_numeric_candidates_use_the_column_affinity():
     with sqlite3.connect(":memory:") as connection:
-        proposals = guard.shape_proposals(connection, "n > '0'", [("n", "INTEGER")], {"n": 0})
+        proposals = guard.shape_proposals(connection, "n > '0'", [("n", "INTEGER")], {"n": 0}).derived
         assert ("n", 1) in proposals
         assert ("n", -1) not in proposals
+
+
+@pytest.mark.parametrize("unavailable", [(), ("generated",)])
+def test_shape_candidates_keep_derived_repairs_separate_from_numeric_guesses(unavailable):
+    expression = "length(code)=4 and n>0" + (" and generated=0" if unavailable else "")
+    with sqlite3.connect(":memory:") as connection:
+        proposals = guard.shape_proposals(
+            connection, expression, [("code", "TEXT"), ("n", "INTEGER")],
+            {"code": "x000", "n": 0}, unavailable=unavailable,
+        )
+        if unavailable:
+            assert proposals.derived == []
+            assert ("n", 1) in proposals.numeric_fallback
+        else:
+            assert proposals.derived == [("n", 1)]
+            assert proposals.numeric_fallback == []
+        shaped = guard.shape_proposals(
+            connection, expression, [("code", "TEXT"), ("n", "INTEGER")],
+            {"code": "x", "n": 0}, unavailable=unavailable,
+        )
+        assert ("code", "x000") in shaped.derived
+        assert not any(name == "code" for name, _ in shaped.numeric_fallback)
 
 
 @pytest.mark.parametrize("pattern,width", [("[A-Z]*", 4), ("*[A-Z]", 4), ("[A-Z]*[A-Z]", 4), ("*[A-Z]*", 4), ("[A-Z]???", 4), ("[A-Z][A-Z][A-Z][A-Z]", 4), ("*", 0), ("*", guard.SEED_TEXT_LIMIT)])
@@ -1081,7 +1103,9 @@ def test_joint_numeric_evaluation_has_a_finite_budget(monkeypatch):
             candidate.set_trace_callback(statements.append)
             return candidate
         monkeypatch.setattr(guard.sqlite3, "connect", traced_connect)
-        assert guard.shape_proposals(connection, expression, required, values) == []
+        proposals = guard.shape_proposals(connection, expression, required, values)
+        assert proposals.derived == []
+        assert proposals.numeric_fallback == []
     evaluations = [statement for statement in statements if statement.startswith("select coalesce(cast(")]
     assert len(evaluations) == guard.SEED_ATTEMPTS
 
@@ -1092,7 +1116,138 @@ def test_joint_numeric_search_preserves_single_column_repairs(changed):
     values = {name: 0 for name, _ in required}
     expression = " and ".join(f"{name} >= 0" for name in values) + f" and n{changed} > 0"
     with sqlite3.connect(":memory:") as connection:
-        assert guard.shape_proposals(connection, expression, required, values) == [(f"n{changed}", 1)]
+        assert guard.shape_proposals(connection, expression, required, values).derived == [(f"n{changed}", 1)]
+
+
+@pytest.mark.parametrize("clauses", list(itertools.permutations(["n0 in (0)", "n1 in (2)", "n2 in (4)"])))
+def test_cartesian_repairs_keep_budget_for_unranked_predicates(tmp_path, clauses):
+    db_path = tmp_path / "cartesian.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped(n0 integer not null,n1 integer not null,n2 integer not null,constraint ck check({' and '.join(clauses)}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where n0=0 and n1=2 and n2=4").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("count", [16, 25])
+@pytest.mark.parametrize("reverse_columns,reverse_clauses", itertools.product([False, True], repeat=2))
+def test_numeric_only_fallback_remains_available_until_insert_budget(tmp_path, count, reverse_columns, reverse_clauses):
+    columns = [f'n{index} integer not null' for index in range(count)]
+    clauses = ['g=0', *(f'n{index}>=0' for index in range(count-1)), f'n{count-1}=1']
+    if reverse_columns:
+        columns.reverse()
+    if reverse_clauses:
+        clauses.reverse()
+    db_path = tmp_path / "fallback.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({','.join(columns)},g integer generated always as(0),constraint ck check({' and '.join(clauses)}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("reverse_columns,not_null", itertools.product([False, True], repeat=2))
+@pytest.mark.parametrize("order", list(itertools.permutations(range(2))))
+@pytest.mark.parametrize("case_guard", [False, True])
+def test_json_and_generic_literals_preserve_each_others_repairs(tmp_path, reverse_columns, not_null, order, case_guard):
+    names = ['doc', 'state']
+    if reverse_columns:
+        names.reverse()
+    json_check = "json_extract(doc,'$.x')=1"
+    if case_guard:
+        json_check = f"case when json_valid(doc) then {json_check} else 0 end"
+    clauses = [json_check, "state='ready'"]
+    columns = ','.join(f'{name} text' + (' not null' if not_null else '') for name in names)
+    expression = ' and '.join(clauses[index] for index in order)
+    if not case_guard:
+        expression = f'json_valid(doc) and ({expression})'
+    ddl = f"create table shaped({columns},constraint ck check({expression}))"
+    db_path = tmp_path / "json.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(ddl)
+        assert guard.insert_seed_row(connection, 'shaped', ddl, [(name,'TEXT') for name in names], dict.fromkeys(names, 'x')) == ('', True)
+        assert connection.execute("select json_extract(doc,'$.x'),state from shaped").fetchall() == [(1,'ready')]
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped where doc is not null and state is not null").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("strict,name,check", [
+    (True, "value", "lower(value)=value"),
+    (True, "payload_json", "json_valid(payload_json)"),
+    (True, "value", "typeof(value)='integer' and value>0"),
+    (False, "value", "typeof(value)='integer' and value>0"),
+])
+def test_strict_any_supports_semantic_and_integer_seeds(tmp_path, strict, name, check):
+    db_path = tmp_path / "strict.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"create table shaped({name} ANY not null,constraint ck check({check}))" + (' STRICT' if strict else ''))
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short == {}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("select count(*) from shaped").fetchone()[0] >= guard.SEED_ROWS
+        assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("strict,omitted", itertools.product([False, True], repeat=2))
+@pytest.mark.parametrize("literal", ["'000123'", "'1.25'", "1", "1.25", "x'313233'", "NULL"])
+def test_any_candidate_context_matches_native_table_mode(strict, omitted, literal):
+    with sqlite3.connect(":memory:") as connection:
+        suffix = ' STRICT' if strict else ''
+        connection.execute('create table oracle(value ANY)' + suffix)
+        connection.execute(f'insert into oracle values({literal})')
+        storage, quoted = connection.execute('select typeof(value),quote(value) from oracle').fetchone()
+        expected_quote = quoted.replace("'", "''")
+        ddl = f"create table shaped(n integer not null,value ANY default ({literal}),constraint ck check(n>0 and typeof(value)='{storage}' and quote(value)='{expected_quote}')){suffix}"
+        connection.execute(ddl)
+        required,values = [('n','INTEGER')],{'n':0}
+        if not omitted:
+            required.append(('value','ANY'))
+            values['value'] = connection.execute(f'select {literal}').fetchone()[0]
+        assert guard.insert_seed_row(connection,'shaped',ddl,required,values) == ('',True)
+        assert connection.execute('select typeof(value),quote(value) from shaped').fetchone() == (storage,quoted)
+
+
+def test_numeric_fallback_exhaustion_stays_visible(tmp_path):
+    db_path = tmp_path / "exhausted.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        columns = ','.join(f'n{index} integer not null' for index in range(30))
+        clauses = ' and '.join(['g=0', *(f'n{index}>=0' for index in range(29)), 'n29=1'])
+        connection.execute(f"create table shaped({columns},g integer generated always as(0),constraint ck check({clauses}))")
+    short, _ = guard.seed_representative_rows(db_path)
+    assert short
+    assert all('60 attempts did not produce a row' in reason for reason in short.values())
+
+
+@pytest.mark.parametrize("member_type", list(guard.JSON_TYPE_MEMBERS))
+def test_json_member_literals_stay_in_the_semantic_source(member_type):
+    expression = f"json_valid(doc) and json_type(doc,'$.member')='{member_type}' and state='ready'"
+    proposals = guard.check_proposals(expression, ['doc', 'state'])
+    assert proposals
+    assert {value for _, value in proposals} == {'ready'}
+
+
+def test_strict_mode_comes_from_table_metadata():
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("create table ordinary(value ANY default('STRICT'))")
+        connection.execute("create table typed(value ANY) STRICT")
+        assert not guard.is_strict_table(connection, 'ordinary')
+        assert guard.is_strict_table(connection, 'typed')
+        assert guard.sqlite_affinity('ANY') == 'NUMERIC'
+        assert guard.sqlite_affinity('ANY', strict=True) == 'BLOB'
+
+
+def test_strict_datatype_rejection_does_not_escape_candidate_evaluation():
+    with sqlite3.connect(":memory:") as connection:
+        proposals = guard.shape_proposals(connection, 'n>0', [('n','INTEGER'),('other','INTEGER')], {'n':0,'other':'not an integer'}, strict=True)
+        assert proposals.derived == []
+        assert proposals.numeric_fallback == []
 
 
 @pytest.mark.parametrize("count", [2, 5, 16])
@@ -1123,7 +1278,7 @@ def test_sparse_candidates_keep_turns_at_every_column_position(declared, changed
     values["label"] = "held"
     expression = '+'.join(f'(n{index}>0)' for index in range(16)) + f'=1 and abs(n{changed})>0'
     with sqlite3.connect(":memory:") as connection:
-        assert guard.shape_proposals(connection, expression, required, values) == [(f"n{changed}", 1)]
+        assert guard.shape_proposals(connection, expression, required, values).derived == [(f"n{changed}", 1)]
 
 
 @pytest.mark.parametrize("declared", ["", "TEXT"])
@@ -1146,7 +1301,7 @@ def test_open_storage_columns_retain_semantic_seeds(tmp_path, declared, name, ch
         assert connection.execute("pragma integrity_check").fetchall() == [("ok",)]
 
 
-@pytest.mark.parametrize("declared,expected", [("BLOB", b""), ("INTEGER", 0), ("REAL", 0), ("NUMERIC", 0)])
+@pytest.mark.parametrize("declared,expected", [("BLOB", b""), ("INTEGER", 0), ("REAL", 0), ("NUMERIC", 0), ("ANY", 0)])
 def test_explicit_storage_defaults_still_take_precedence(declared, expected):
     for name in ["payload_json", "created_at", "elapsed_time", "email_address", "label"]:
         assert guard.representative_value(name, declared) == expected
@@ -1176,7 +1331,7 @@ def test_function_named_columns_are_not_function_invocations(tmp_path, name, quo
 ])
 def test_context_screen_ignores_literal_and_comment_contents(extra):
     with sqlite3.connect(":memory:") as connection:
-        proposals = guard.shape_proposals(connection, "a=1 and b=2" + extra, [("a", "INTEGER"), ("b", "INTEGER")], {"a": 0, "b": 0})
+        proposals = guard.shape_proposals(connection, "a=1 and b=2" + extra, [("a", "INTEGER"), ("b", "INTEGER")], {"a": 0, "b": 0}).derived
         assert proposals == [("a", 1), ("b", 2)]
 
 
@@ -1193,14 +1348,16 @@ def test_compiled_context_functions_defer_without_evaluating(monkeypatch, functi
         monkeypatch.setattr(guard.sqlite3, "connect", traced_connect)
         expression = "n>0" if in_default else f"n>0 and ({function}) is not null"
         omitted = [("tag", "TEXT", function)] if in_default else []
-        assert guard.shape_proposals(connection, expression, [("n", "INTEGER")], {"n": 0}, omitted=omitted, allow_unvalidated_numeric=False) == []
+        proposals = guard.shape_proposals(connection, expression, [("n", "INTEGER")], {"n": 0}, omitted=omitted)
+        assert proposals.derived == []
+        assert ("n", 1) in proposals.numeric_fallback
     assert not any(statement.startswith("select coalesce(cast(") for statement in statements)
 
 
 @pytest.mark.parametrize("default", ["'random'", "'current_timestamp'", "1 /* changes() */", "1 -- random()\n"])
 def test_default_literals_and_comments_do_not_disable_joint_evaluation(default):
     with sqlite3.connect(":memory:") as connection:
-        assert guard.shape_proposals(connection, "a=1 and b=2", [("a", "INTEGER"), ("b", "INTEGER")], {"a": 0, "b": 0}, omitted=[("tag", "TEXT", default)]) == [("a", 1), ("b", 2)]
+        assert guard.shape_proposals(connection, "a=1 and b=2", [("a", "INTEGER"), ("b", "INTEGER")], {"a": 0, "b": 0}, omitted=[("tag", "TEXT", default)]).derived == [("a", 1), ("b", 2)]
 
 
 @pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
@@ -1355,7 +1512,7 @@ def test_numeric_context_matches_real_supplied_storage(declared, offered):
         connection.execute("insert into sample values (?)", (offered,))
         value_sql, type_sql = connection.execute("select quote(tag), quote(typeof(tag)) from sample").fetchone()
         expression = f"n > 0 and tag is {value_sql} and typeof(tag) = {type_sql}"
-        proposals = guard.shape_proposals(connection, expression, [("n", "INTEGER"), ("tag", declared)], {"n": 0, "tag": offered})
+        proposals = guard.shape_proposals(connection, expression, [("n", "INTEGER"), ("tag", declared)], {"n": 0, "tag": offered}).derived
         assert ("n", 1) in proposals
         assert not any(name == "tag" for name, _ in proposals)
         assert connection.execute("select name from sqlite_temp_master").fetchall() == []
@@ -1618,7 +1775,7 @@ def test_bounded_numeric_tokens_ignore_leading_zeroes():
     assert guard.bounded_integer("0" * 5000 + "12", 0, 4096) == 12
     assert guard.bounded_integer("-" + "0" * 5000 + "12", -4096, 0) == -12
     with sqlite3.connect(":memory:") as connection:
-        assert guard.shape_proposals(connection, "substr(a, " + "9" * 5000 + ", 1) = b", [("a", "TEXT"), ("b", "TEXT")], {"a": "x", "b": "y"}) == []
+        assert guard.shape_proposals(connection, "substr(a, " + "9" * 5000 + ", 1) = b", [("a", "TEXT"), ("b", "TEXT")], {"a": "x", "b": "y"}).derived == []
 
 
 @pytest.mark.parametrize("literal", ["9223372036854775808", "0001", "1.0", "-0001.5"])
