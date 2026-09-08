@@ -1961,7 +1961,9 @@ def test_every_normalized_identifier_collection_collapses_through_one_owner():
     # without its collapse fails here instead of arriving as a finding.
     source = Path("config/v2_config.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     normalizing = set()
+    validating = set()
     collapsing = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
@@ -1970,12 +1972,49 @@ def test_every_normalized_identifier_collection_collapses_through_one_owner():
             if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
                 continue
             if call.func.id == "normalized_model_id":
-                normalizing.add(node.name)
+                # A comparison rejects an unsettled spelling; it does not
+                # produce a normalized identity or require a collapse owner.
+                owner_set = validating if isinstance(parents[call], ast.Compare) else normalizing
+                owner_set.add(node.name)
             elif call.func.id == "_collapse_settled_duplicates":
                 collapsing.add(node.name)
     assert normalizing == {"ModelHubModelConfig", "ModelHubRouteHopConfig"}
+    assert validating == {"ModelHubAgentSupplyConfig"}
     assert collapsing == {"ModelHubSourceConfig", "ModelHubRouteConfig"}
     assert len(collapsing) == len(normalizing)
+
+
+@pytest.mark.parametrize("repairing", (False, True))
+@pytest.mark.parametrize(
+    "identifier,valid",
+    [
+        ("model", True),
+        ("m" * 257, True),
+        ("模型🧪/e\u0301" * 3000, True),
+        ("legacy\ud800", True),
+        (" model ", False),
+        (" " * 257, False),
+    ],
+    ids=("ordinary", "long", "unicode", "legacy-surrogate", "padded-route", "blank-route"),
+)
+def test_opencode_aggregate_checks_spelling_without_rewriting_identity(identifier, valid, repairing):
+    payload = ModelHubAgentSupplyConfig.default("opencode", mode="hub").to_payload()
+    payload["models"] = [{"id": identifier, "origin": "manual", "native_protocol": "anthropic"}]
+    payload["routes"] = {
+        identifier: {"hops": [{"source_id": "src_test0001", "model_id": "upstream"}]},
+    }
+    before = copy.deepcopy(payload)
+
+    if not valid:
+        with pytest.raises(ValueError, match="models.id"):
+            ModelHubAgentSupplyConfig.from_payload(payload, repairing=repairing)
+    else:
+        loaded = ModelHubAgentSupplyConfig.from_payload(payload, repairing=repairing)
+        assert list(loaded.routes) == [identifier]
+        assert [model.id for model in loaded.models] == [identifier]
+        assert loaded.menu.checked == [identifier]
+        assert ModelHubAgentSupplyConfig.from_payload(loaded.to_payload()).to_payload() == loaded.to_payload()
+    assert payload == before
 
 
 def test_collapsing_a_settled_duplicate_is_a_repair_no_caller_gets_by_default():
