@@ -242,7 +242,6 @@ def test_codex_hub_catalog_projects_custom_backend_models_from_native_shape():
             "visibility": "list",
             "supported_in_api": True,
             "context_window": 1_048_576,
-            "max_context_window": 1_048_576,
             "input_modalities": ["text"],
             "supports_image_detail_original": False,
             "default_reasoning_level": "low",
@@ -313,8 +312,10 @@ def test_codex_hub_catalog_does_not_inherit_native_model_metadata_for_custom_row
     assert custom["model_messages"] == {"instructions_template": "preserved"}
     assert custom["shell_type"] == "unified_exec"
     assert custom["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
-    assert custom["input_modalities"] == ["text"]
-    assert custom["supported_reasoning_levels"] == [{"effort": "none", "description": "None"}]
+    assert "input_modalities" not in custom
+    assert custom["supports_image_detail_original"] is False
+    assert custom["supported_reasoning_levels"] == []
+    assert "default_reasoning_level" not in custom
     assert custom["support_verbosity"] is False
     assert custom["experimental_supported_tools"] == []
     assert custom["supports_parallel_tool_calls"] is False
@@ -367,6 +368,8 @@ def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
 
     assert payload["models"][0]["input_modalities"] == ["text", "image"]
     assert payload["models"][0]["supports_image_detail_original"] is True
+    assert payload["models"][0]["context_window"] == 200_000
+    assert payload["models"][0]["max_context_window"] == 200_000
     assert payload["models"][0]["auto_compact_token_limit"] == 180_000
 
 
@@ -447,18 +450,19 @@ def test_codex_hub_catalog_retires_native_compaction_limit_after_context_overrid
     projected = payload["models"][0]
 
     assert projected["context_window"] == 400_000
-    assert projected["max_context_window"] == 400_000
+    assert "max_context_window" not in projected
     assert projected["effective_context_window_percent"] == 90
     assert "auto_compact_token_limit" not in projected
 
 
-def test_codex_hub_catalog_does_not_give_custom_models_template_modalities():
+@pytest.mark.parametrize("template_modalities", [["text"], ["text", "image"]])
+def test_codex_hub_catalog_leaves_unknown_custom_modalities_to_the_consumer(template_modalities):
     raw = json.dumps(
         {
             "models": [
                 {
                     "slug": "gpt-native",
-                    "input_modalities": ["text", "image"],
+                    "input_modalities": template_modalities,
                     "supports_image_detail_original": True,
                 }
             ]
@@ -472,8 +476,36 @@ def test_codex_hub_catalog_does_not_give_custom_models_template_modalities():
         )
     )
 
-    assert payload["models"][0]["input_modalities"] == ["text"]
+    assert "input_modalities" not in payload["models"][0]
     assert payload["models"][0]["supports_image_detail_original"] is False
+
+
+@pytest.mark.parametrize("supports_reasoning", [None, True, False])
+@pytest.mark.parametrize("efforts", [[], ["low", "high"]])
+@pytest.mark.parametrize("modalities", [[], ["text"], ["text", "image"], ["audio"]])
+def test_codex_custom_catalog_preserves_explicit_capability_choices(supports_reasoning, efforts, modalities):
+    from config.v2_config import ModelHubBackendModelConfig
+
+    raw = b'{"models":[{"slug":"unrelated","default_reasoning_level":"xhigh","context_window":999999}]}'
+    configured = ModelHubBackendModelConfig.from_payload({
+        "id": "custom",
+        "supports_reasoning": supports_reasoning,
+        "reasoning_efforts": efforts,
+        "input_modalities": modalities,
+    }).to_payload()
+    row = json.loads(backend_model_catalog._codex_hub_catalog_bytes(raw, [configured]))["models"][0]
+
+    if modalities:
+        assert row["input_modalities"] == ([item for item in modalities if item in {"text", "image"}] or ["text"])
+    else:
+        assert "input_modalities" not in row
+    settled = ["none"] if supports_reasoning is False else efforts
+    assert [item["effort"] for item in row["supported_reasoning_levels"]] == settled
+    if settled:
+        assert row["default_reasoning_level"] == settled[0]
+    else:
+        assert "default_reasoning_level" not in row
+    assert "context_window" not in row
 
 
 def test_codex_hub_catalog_can_disable_reasoning_and_preserve_native_default():
