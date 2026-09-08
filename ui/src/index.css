@@ -892,12 +892,14 @@ pre,
 
 /* The project header remains a scroll/tap target until a touch hold activates. */
 .project-drag-header {
+  cursor: pointer;
   touch-action: manipulation;
   -webkit-touch-callout: none;
   user-select: none;
 }
-.project-drag-header[aria-describedby] { cursor: grab; }
-.project-drag-header[aria-pressed="true"] { cursor: grabbing; }
+.project-drag-header[aria-describedby] .project-drag-icon { cursor: grab; }
+.project-drag-header[aria-pressed="true"],
+.project-drag-header[aria-pressed="true"] .project-drag-icon { cursor: grabbing; }
 .project-drag-preview { animation: project-pickup 140ms ease-out; }
 @keyframes project-pickup {
   from { opacity: 0.75; transform: scale(0.98); }

@@ -170,7 +170,7 @@ const MobileProjectRow: React.FC<{
           onClick={onToggle}
           className="project-drag-header flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
         >
-          {open ? <FolderOpen className="size-4 shrink-0 text-cyan-ink" /> : <Folder className="size-4 shrink-0 text-muted" />}
+          {open ? <FolderOpen className="project-drag-icon size-4 shrink-0 text-cyan-ink" /> : <Folder className="project-drag-icon size-4 shrink-0 text-muted" />}
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{project.display_name}</span>
           {state.sessions !== null && !state.error && (
             <Badge variant="secondary" className="font-mono text-[10px]">
@@ -178,7 +178,7 @@ const MobileProjectRow: React.FC<{
               {state.cursor ? '+' : ''}
             </Badge>
           )}
-          {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
+          {open ? <ChevronDown className="project-drag-icon size-4 shrink-0 text-muted" /> : <ChevronRight className="project-drag-icon size-4 shrink-0 text-muted" />}
         </button>
         {(canChat || canManageProjects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
