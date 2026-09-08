@@ -54,10 +54,11 @@ jobs:
       - name: Test browser interactions
         working-directory: ui
         run: |
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium webkit
           npm run test:model-catalog
           npm run test:model-provider
           npm run test:project-order
+          npm run test:inbox-return
 
   build-linux-artifacts:
     runs-on: ubuntu-latest

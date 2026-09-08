@@ -1,9 +1,11 @@
 # Inbox Return Regression
 
-Run `npm run test:inbox-return` from `ui/`.
+Install the browser engines with `npx playwright install --with-deps chromium webkit`,
+then run `npm run test:inbox-return` from `ui/`.
 
-This backend-free suite renders the production `InboxPage` with an in-memory
-Inbox provider and a routed Chat placeholder. Its shell mirrors the production
+This backend-free suite renders the production `InboxPage` and `SearchPage` with
+an in-memory Inbox provider and a routed Chat placeholder. Like production, a
+data router hosts descendant declarative routes. Its shell mirrors the production
 mobile internal scroll owner and desktop document scrolling. Browser history
 and the Chat Back button both return to the original Inbox entry.
 
@@ -21,6 +23,12 @@ renders, all visible rows disappearing, every supported input cancellation,
 expiration, and Strict Mode lifecycle replay. Consumption and cancellation both
 prevent the shared snapshot from leaking into a later Inbox remount, while the
 current visit retains its local copy for delayed layout corrections.
+
+Search-entry taps must mount and focus the search input before the click finishes
+bubbling, so focus stays inside the user gesture required by mobile keyboards.
+Chromium and mobile WebKit checks cover this timing, typing without another tap,
+clearing, repeat visits, and query restoration from a direct URL. Browser automation
+does not prove that the native iOS soft keyboard appears; that remains a device check.
 
 All API requests are blocked. No Avibe instance, credentials, or persisted
 messages are used. Screenshots and failure traces are written under

@@ -20,7 +20,7 @@ import {
   type InboxFilter as FilterMode,
 } from '../../lib/inboxFilterMemory';
 
-export const InboxPage: React.FC = () => {
+export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
@@ -163,7 +163,7 @@ export const InboxPage: React.FC = () => {
       <Button
         type="button"
         variant="ghost"
-        onClick={() => navigate('/search')}
+        onClick={onOpenSearch}
         className="h-auto w-full justify-start gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3.5 py-2.5 text-left font-normal transition hover:bg-foreground/[0.06] md:hidden"
       >
         <Search className="size-4 shrink-0 text-muted" />

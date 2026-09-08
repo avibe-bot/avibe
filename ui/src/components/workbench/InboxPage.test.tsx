@@ -54,9 +54,13 @@ function Chat() {
 
 function mount() {
   const key = `inbox-${++entry}`;
+  function InboxRoute() {
+    const navigate = useNavigate();
+    return <InboxPage onOpenSearch={() => navigate('/search')} />;
+  }
   const app = () => <StrictMode><MemoryRouter initialEntries={[{ pathname: '/inbox', key }]}>
     <Routes>
-      <Route path="/inbox" element={<InboxPage />} />
+      <Route path="/inbox" element={<InboxRoute />} />
       <Route path="/chat/:sessionId" element={<Chat />} />
       <Route path="/search" element={<Chat />} />
     </Routes>

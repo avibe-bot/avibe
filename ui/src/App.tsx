@@ -706,8 +706,12 @@ const settingsRoute = () => (
   </Route>
 );
 
-const WorkbenchRouteSurface = () => (
-  <SettingsOverlayRouteSurface
+const WorkbenchRouteSurface = () => {
+  const navigate = useNavigate();
+  // Keep mounting/focusing Search inside the tap so mobile keyboards can open.
+  // This must use the data-route navigate: descendant <Routes> drop flushSync.
+  const openSearch = () => { void navigate('/search', { flushSync: true }); };
+  return <SettingsOverlayRouteSurface
     fallbackElement={<Navigate to="/" replace />}
   >
     <Route path="/setup" element={<Wizard />} />
@@ -715,7 +719,7 @@ const WorkbenchRouteSurface = () => (
     {/* Workbench mode — `/` is the canvas root, the five capability
         entries (Inbox + Agents/Skills/Harness/Vaults) live alongside it. */}
     <Route path="/" element={<Workbench />} />
-    <Route path="/inbox" element={<InboxPage />} />
+    <Route path="/inbox" element={<InboxPage onOpenSearch={openSearch} />} />
     <Route path="/search" element={<SearchPage />} />
     <Route path="/agents" element={<AgentsPage />} />
     <Route path="/skills" element={<SkillsPage />} />
@@ -765,8 +769,8 @@ const WorkbenchRouteSurface = () => (
     {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
       <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
     ))}
-  </SettingsOverlayRouteSurface>
-);
+  </SettingsOverlayRouteSurface>;
+};
 
 function RouterRoot() {
   return (
