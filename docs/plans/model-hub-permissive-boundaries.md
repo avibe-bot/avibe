@@ -170,3 +170,57 @@ capabilities and conflicting settings. Hermetic consumer evidence must confirm
 the representation and precedence before integration; a schema requirement or
 unexpected consumer override calls for another bounded decision, not a fallback
 to silent filtering.
+
+### Identifier decision (2026-09-09, local +08)
+
+Lane C's diagnosis is committed as
+`e3f3628230333b141449684ba2f9af90ad0e3d1a`. The orchestrator independently
+inspected live and persisted ledger key owners, their consuming closure test,
+the selective parser and inventory projection, new-ID admission, OpenCode
+aggregate loading, and the typeahead refusal. A separate read-only synthetic
+run confirmed 12 valid long/Unicode/folded-literal identities remain distinct
+with stable read-back keys. It also reproduced the pre-existing whitespace
+normalization exception and admission of unencodable surrogate text.
+
+Approved smallest complete scope:
+
+- Remove the 256-character admission ceiling and its editor, schema, locale,
+  and typeahead-query mirrors. Keep canonical outer-whitespace spelling,
+  nonblank text, complete credential scanning, exact Source/model pairing, and
+  backend/source eligibility policy.
+- Require newly admitted IDs and unsaved observation IDs to be representable
+  as UTF-8, without replacement, truncation, Unicode normalization, or case
+  folding. This is a transport/storage validity check, not a new length cap.
+  Do not apply new admission rules to legacy persisted identities.
+- Separate OpenCode aggregate loading and whole-list editing from new-ID
+  admission while retaining existing spelling, nonblank, native-protocol,
+  menu, and route-membership invariants.
+- Extend the existing selective parser with a default-empty lossless-string
+  path option. Opt only inventory string-row IDs, object-row IDs, and
+  supported-parameter string values into it. Decide at value-token start;
+  object keys and unrelated values keep the existing bounded behavior.
+  Preserve malformed-JSON rejection, duplicate-member/scope semantics,
+  document completion, spooling, and the discovery deadline.
+- Keep the 200-character ledger head, digest calculation, persisted key
+  reader, stored rows, label joins, and retention unchanged. New admission can
+  safely include folded-looking literals because live derivation folds those
+  literals again; persisted key recognition is intentionally a different owner.
+- Limit shared service/config changes to the diagnosed admission, discovery,
+  typeahead, and load seams. Lane B's projection and lane A's gateway remain
+  independently owned. No new schema revision, dependency, ledger namespace,
+  engine setting, or arbitrary replacement size is approved.
+
+Selected identity/parameter facts necessarily occupy memory proportional to
+their full values. This decision does not remove generic HTTP/resource limits
+or promise arbitrary URI-size support. Consuming tests must cover lexical
+JSON expansion, long credential-shaped tails, exact runtime IDs, key-literal
+closure, reload, and the UI's whole-ID submission.
+
+Known-by-design legacy exceptions: an already loadable long all-whitespace
+identity can be misattributed by the existing persisted-key normalization;
+unencodable historical identities can also fail later encoding. Neither is
+introduced by removing the limit, and blank/unencodable new IDs are refused.
+Historical merged counters cannot identify their original owner, so this PR
+must not rekey or split them speculatively. Preserve the diagnostic evidence
+and record that attribution-policy follow-up separately; do not claim a proof
+over every malformed legacy string.
