@@ -11,6 +11,7 @@ capability:
     - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
+    - tests/test_model_hub_retry_lifecycle.py
     - tests/test_model_hub_recovery_evidence.py
     - tests/test_model_hub_progress.py
     - tests/test_model_hub_failure_presentation.py
@@ -108,6 +109,36 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_opencode_model_hub_retry.py::test_hub_terminal_skips_automatic_continue_and_emits_one_failure
+  - id: MH-RETRY-OWNERSHIP-001
+    name: A production adapter returning without admission releases its provisional half-open claim
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_unavailable_production_client_releases_unadmitted_half_open_claim
+  - id: MH-RETRY-NATIVE-002
+    name: Native CLI settlements retain fixed cooldowns without entering HTTP recovery streaks
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_native_failure_never_enters_http_recovery_streak
+  - id: MH-RETRY-PERSISTENCE-001
+    name: Verified recovery survives failed persistence and fresh reads of the retired cooldown
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_verified_response_survives_failed_recovery_persistence_and_fresh_reads
+  - id: MH-RETRY-EXPIRY-001
+    name: An expired waiter retains its closed terminal when live supply changes
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_expiry_remains_a_closed_terminal_when_live_supply_changes
+  - id: MH-RETRY-EXPIRY-002
+    name: Window expiry does not relabel an observed hard failure as temporary recovery exhaustion
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal
   - id: MH-RETRY-ADVICE-001
     name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
     status: covered

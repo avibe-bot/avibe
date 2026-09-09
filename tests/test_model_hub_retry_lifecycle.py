@@ -109,7 +109,7 @@ async def loopback_engine(tmp_path, service, respond):
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_unavailable_production_client_releases_unadmitted_half_open_claim(tmp_path, stream):
-    """3965010535: a completed engine-down handle never fires on_admitted."""
+    """MH-RETRY-OWNERSHIP-001: completed engine-down never fires on_admitted."""
     async def run():
         service, clock, models = configured_service(tmp_path)
         source = service.store.load().sources[0]
@@ -156,7 +156,7 @@ def test_unavailable_production_client_releases_unadmitted_half_open_claim(tmp_p
     ("503 server error", 30), ("429 rate limit", 60), ("quota exhausted", 300), ("connection failed", 0),
 ])
 def test_native_failure_never_enters_http_recovery_streak(tmp_path, backend, diagnostic, delay):
-    """3965010540: native success has no Hub handle and cannot clear a Hub streak."""
+    """MH-RETRY-NATIVE-002: native success has no Hub handle to clear a streak."""
     async def run():
         source = _source(
             "src_native001", "Native", channel="native_cli", status="active",
@@ -192,7 +192,7 @@ def test_native_failure_never_enters_http_recovery_streak(tmp_path, backend, dia
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("write_failure", ["io", "recovery_warning"])
 def test_verified_response_survives_failed_recovery_persistence_and_fresh_reads(tmp_path, backend, stream, write_failure):
-    """3965010544: persisted cooldown cannot resurrect over observed recovery."""
+    """MH-RETRY-PERSISTENCE-001: stored cooldown cannot resurrect after recovery."""
     async def run():
         service, clock, models = configured_service(tmp_path)
         metadata, output, terminal, buffered = WIRE[BACKENDS[backend][1]]
@@ -429,7 +429,7 @@ def test_persisted_cooldown_without_failure_evidence_does_not_invent_server_erro
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("wake", ["owner_success", "runnable_edit", "blocked_edit"])
 def test_expiry_remains_a_closed_terminal_when_live_supply_changes(tmp_path, backend, wake):
-    """3965010548: a waiter exhausting its window is not a fresh route failure."""
+    """MH-RETRY-EXPIRY-001: an exhausted waiter is not a fresh route failure."""
     async def run():
         service, clock, models = configured_service(tmp_path)
         source = service.store.load().sources[0]
@@ -581,6 +581,7 @@ def test_admitted_terminal_classification_is_not_replaced_by_elapsed_window(tmp_
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal(tmp_path, backend):
+    """MH-RETRY-EXPIRY-002: elapsed time cannot erase an admitted hard failure."""
     async def run():
         first, second = _source("src_primary01", "Primary"), _source("src_backup001", "Backup")
         service, clock, models = configured_service(tmp_path, sources=[first, second], outcomes=[
