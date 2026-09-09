@@ -103,7 +103,10 @@ vi.mock('./workbench/search/SearchPalette', () => ({
 }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    // Renders the key, plus any interpolated address, so a test can tell which
+    // copy was chosen AND what value reached it.
+    t: (key: string, options?: { url?: string }) =>
+      (options?.url === undefined ? key : `${key} ${options.url}`),
     i18n,
   }),
 }));
@@ -146,6 +149,47 @@ describe('AppShell setup recovery', () => {
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/settings/service');
     expect(screen.queryByTestId('wizard')).toBeNull();
+  });
+
+  it('shows the local address the backend resolved, composing no part of it', async () => {
+    // An IPv6-only host: the address the card must show is one only the backend
+    // can work out, and one the old client-side composition could never produce.
+    api.getConfig.mockResolvedValue({
+      platforms: { enabled: [] },
+      ui: { setup_host: '::', setup_port: 5123 },
+      local_ui_origin: 'http://[::1]:5123',
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/setup']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/setup" element={<div data-testid="wizard">wizard</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('setup.remoteOwner.hint http://[::1]:5123')).toBeTruthy();
+    expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull();
+  });
+
+  it('names no address when the backend did not resolve one', async () => {
+    // Deliberate degradation, not composition: an older backend or a port the
+    // authority could not read leaves the field absent, and the card says only
+    // that setup runs on the Avibe machine.
+    render(
+      <MemoryRouter initialEntries={['/setup']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/setup" element={<div data-testid="wizard">wizard</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('setup.remoteOwner.hintNoAddress')).toBeTruthy();
+    expect(screen.queryByText(/setup\.remoteOwner\.hint /)).toBeNull();
   });
 });
 

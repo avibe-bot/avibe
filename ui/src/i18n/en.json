@@ -2674,7 +2674,8 @@
     "remoteOwner": {
       "title": "Setup runs on the machine itself",
       "body": "You're connected through remote access, so Avibe skips the first-run wizard here.",
-      "hint": "Platforms, backends, and models are all in Settings. To run the wizard itself, open http://127.0.0.1:{{port}} on the machine running Avibe.",
+      "hint": "Platforms, backends, and models are all in Settings. To run the wizard itself, open {{url}} on the machine running Avibe.",
+      "hintNoAddress": "Platforms, backends, and models are all in Settings. The wizard itself only runs on the machine running Avibe.",
       "action": "Open Settings"
     }
   },

@@ -282,12 +282,19 @@ export const AppShell: React.FC = () => {
             <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* The port the wizard actually listens on, not the default: an owner
-                who moved it would otherwise be sent to an address nothing answers.
-                Only the port interpolates — the host is deliberately loopback,
-                since `ui.setup_host` is a bind address and may be `0.0.0.0`. */}
+            {/* The backend is the single writer of this address, and we render
+                what it sent verbatim. It alone can resolve the loopback family
+                the bind host implies (`localhost` needs a DNS answer on a
+                dual-stack box, and `0.0.0.0` / `::` are bind addresses nobody
+                can open) and the port actually in effect, which `VIBE_UI_PORT`
+                may override. Composing any of that here from `ui.setup_host` /
+                `ui.setup_port` produced two wrong addresses already. When the
+                field is absent — an older backend, or a port it could not read —
+                the copy names no address rather than guessing one. */}
             <p className="text-sm leading-relaxed text-muted">
-              {t('setup.remoteOwner.hint', { port: config?.ui?.setup_port || 5123 })}
+              {config?.local_ui_origin
+                ? t('setup.remoteOwner.hint', { url: config.local_ui_origin })
+                : t('setup.remoteOwner.hintNoAddress')}
             </p>
             <Button asChild>
               <Link to="/settings/service">

@@ -1153,9 +1153,19 @@ def save_config(
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
-    # This read-only projection is returned by GET /api/config so the browser
-    # can explain a recovered load; it must never become persisted config data.
-    payload = {key: value for key, value in payload.items() if key != "config_recovery"}
+    # These read-only projections are returned by GET /api/config so the browser
+    # can explain a recovered load and name the address that reaches this UI;
+    # neither is config data. A settings page POSTs back what it fetched, and
+    # ``from_payload`` drops a key that matches no config field — so what this
+    # guards is the projection whose name DOES collide with one, which would
+    # otherwise merge a computed answer over stored configuration. Deriving the
+    # set from the same declaration the response side uses means a projection
+    # added later is covered without anyone remembering this line exists.
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in _DERIVED_CONFIG_RESPONSE_KEYS
+    }
     payload = {key: value for key, value in payload.items() if key != "memory"}
     # Model Hub mutations must pass through ModelHubService so runtime source
     # bindings and credential lifecycle stay in sync with the persisted config.
@@ -1523,6 +1533,13 @@ def config_to_payload(
     return payload
 
 
+# What GET /api/config answers with beyond the stored config: state the browser
+# cannot compute for itself, and that is not config data either. ``save_config``
+# strips every key named here, so a settings page that POSTs back what it
+# fetched cannot turn one of these answers into persisted configuration.
+_DERIVED_CONFIG_RESPONSE_KEYS = ("config_recovery", "local_ui_origin")
+
+
 def client_config_payload(config: V2Config) -> dict:
     """Project config for an HTTP response rather than for a save.
 
@@ -1539,6 +1556,8 @@ def client_config_payload(config: V2Config) -> dict:
     ``payload.pop("memory", None)`` and eventually forgetting.
     """
 
+    from vibe import remote_access
+
     payload = config_to_payload(config)
     payload.pop("memory", None)
     recovery_notice = config_recovery_notice(config)
@@ -1547,6 +1566,19 @@ def client_config_payload(config: V2Config) -> dict:
         "required": bool(config.load_warnings),
         "warnings": recovery_warnings,
     }
+    # The one authority on which local address reaches this UI. It resolves the
+    # loopback family the bind host implies — ``localhost`` needs a DNS answer on
+    # a dual-stack box, and a wildcard bind is not an address you can open — and
+    # the port actually in effect, ``VIBE_UI_PORT`` override included. A browser
+    # can answer none of those, so it renders this string and composes no part of
+    # it from ``ui.setup_host`` / ``ui.setup_port``.
+    try:
+        payload["local_ui_origin"] = remote_access.origin_service_for_pairing(config)
+    except (TypeError, ValueError):
+        # A port this authority cannot read is an unusable optional answer, not a
+        # reason to fail the request every settings page bootstraps from. The key
+        # stays absent and the UI falls back to copy that names no address.
+        pass
     return payload
 
 
