@@ -282,19 +282,20 @@ export const AppShell: React.FC = () => {
             <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* The backend is the single writer of this address, and we render
-                what it sent verbatim. It alone can resolve the loopback family
-                the bind host implies (`localhost` needs a DNS answer on a
-                dual-stack box, and `0.0.0.0` / `::` are bind addresses nobody
-                can open) and the port actually in effect, which `VIBE_UI_PORT`
-                may override. Composing any of that here from `ui.setup_host` /
-                `ui.setup_port` produced two wrong addresses already. When the
-                field is absent — an older backend, or a port it could not read —
-                the copy names no address rather than guessing one. */}
+            {/* This copy deliberately names no address. Composing one here from
+                `ui.setup_host` / `ui.setup_port` was wrong twice (port, then
+                address family), and delegating to
+                `remote_access.origin_service_for_pairing` was wrong too: that
+                function answers which origin `cloudflared` should dial, which
+                only equals "which address opens this UI" while the cloud tunnel
+                is enabled, because that is the only case where the bind is
+                widened to a wildcard. This card renders before setup is
+                finished — usually with the tunnel off — where the projected
+                `127.0.0.1` is unreachable for every non-loopback `setup_host`.
+                No address means none to get wrong. See issue #1965 for the
+                pre-existing pairing bug that analysis uncovered. */}
             <p className="text-sm leading-relaxed text-muted">
-              {config?.local_ui_origin
-                ? t('setup.remoteOwner.hint', { url: config.local_ui_origin })
-                : t('setup.remoteOwner.hintNoAddress')}
+              {t('setup.remoteOwner.hint')}
             </p>
             <Button asChild>
               <Link to="/settings/service">

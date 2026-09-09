@@ -23,7 +23,7 @@ from config.v2_config import (
     VibeCloudRemoteAccessConfig,
 )
 from core.audio_asr import AudioAsrService
-from vibe import api, remote_access, runtime
+from vibe import api, remote_access
 
 
 def _full_config_payload() -> dict:
@@ -1972,102 +1972,3 @@ def test_list_ops_reject_malformed_operands(monkeypatch, tmp_path, operations, s
 
     with pytest.raises(ValueError, match="Config list operation"):
         api.save_config({"__avibe_list_ops": {"platforms.enabled": operations}})
-
-
-@pytest.mark.parametrize(
-    ("setup_host", "localhost_family", "port_env", "expected"),
-    [
-        # A bind host nobody can open, so the answer is the loopback that reaches it.
-        ("192.168.2.3", None, None, "http://127.0.0.1:15130"),
-        ("0.0.0.0", None, None, "http://127.0.0.1:15130"),
-        # Address family: an IPv6 host needs the bracketed v6 loopback, not 127.0.0.1.
-        ("::1", None, None, "http://[::1]:15130"),
-        ("[::1]", None, None, "http://[::1]:15130"),
-        ("::", None, None, "http://[::1]:15130"),
-        # ``localhost`` is ambiguous on a dual-stack box: only a DNS answer settles
-        # which family it names, which is why no browser can compose this.
-        ("localhost", "inet", None, "http://127.0.0.1:15130"),
-        ("localhost", "inet6", None, "http://[::1]:15130"),
-        # The port in effect can come from the environment of the serving process.
-        ("127.0.0.1", None, "15999", "http://127.0.0.1:15999"),
-    ],
-)
-def test_client_config_payload_delegates_the_local_ui_origin(
-    monkeypatch, tmp_path, sqlite_schema_db_factory, setup_host, localhost_family, port_env, expected
-):
-    """The config response names the local address by delegation, never by composing it.
-
-    The UI used to assemble this URL from ``ui.setup_host`` / ``ui.setup_port``
-    and got it wrong twice — the configured port, then the address family. All
-    four ways it can be wrong (family, port, ``localhost`` resolution, and the
-    ``VIBE_UI_PORT`` override) are already answered by one existing authority,
-    so the payload must equal that authority's answer for every case here.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    if localhost_family is not None:
-        monkeypatch.setattr(runtime, "resolve_localhost_family", lambda: localhost_family)
-    if port_env is None:
-        monkeypatch.delenv("VIBE_UI_PORT", raising=False)
-    else:
-        monkeypatch.setenv("VIBE_UI_PORT", port_env)
-    config = api.save_config(_full_config_payload())
-    config.ui.setup_host = setup_host
-    config.ui.setup_port = 15130
-
-    payload = api.client_config_payload(config)
-
-    assert payload["local_ui_origin"] == expected
-    assert payload["local_ui_origin"] == remote_access.origin_service_for_pairing(config)
-
-
-def test_client_config_payload_omits_the_local_ui_origin_it_cannot_resolve(
-    monkeypatch, tmp_path, sqlite_schema_db_factory
-):
-    """An unreadable port drops the address, it does not fail the whole response.
-
-    Every settings page bootstraps from this endpoint, and the address is one
-    optional line of copy on one card, so the key is absent and the UI falls
-    back to wording that names no address.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
-    config = api.save_config(_full_config_payload())
-    config.ui.setup_port = "not-a-port"
-
-    payload = api.client_config_payload(config)
-
-    assert "local_ui_origin" not in payload
-    assert payload["ui"]["setup_host"] == "127.0.0.1"
-
-
-def test_save_config_never_persists_a_derived_response_key(
-    monkeypatch, tmp_path, sqlite_schema_db_factory
-):
-    """Whatever GET /api/config adds beyond the stored config stays out of it.
-
-    Settings pages POST back the payload they fetched. Two mechanisms keep a
-    projection out of the stored config — ``save_config`` strips the declared
-    set, and ``from_payload`` drops any key matching no config field — and the
-    strip is what covers a projection whose name would collide with a real
-    field. So the load-bearing assertion here is the first one: the response's
-    extra keys must be exactly the declared set, which is what makes a
-    projection added later covered by both mechanisms without editing this test.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    config = api.save_config(_full_config_payload())
-    payload = api.client_config_payload(config)
-
-    # The response's extra top-level keys ARE the declared set: a projection added
-    # to the producer without declaring it fails here rather than reaching disk.
-    assert set(payload) - set(api.config_to_payload(config)) == set(api._DERIVED_CONFIG_RESPONSE_KEYS)
-
-    api.save_config(payload)
-
-    stored = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
-    assert set(api._DERIVED_CONFIG_RESPONSE_KEYS).isdisjoint(stored)
