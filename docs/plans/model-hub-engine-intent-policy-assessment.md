@@ -1,17 +1,17 @@
 # Model Hub engine reasoning-intent assessment
 
-Status (2026-09-09): inactive source/test candidate with a local configured-
-storage correction under independent inspection. Codex's third findings-bearing
-head exposed original user-directory overrides missing from pre-write protection.
-The orchestrator independently reproduced the defect in fake task directories
-and released only recipe/test/doc correction and pure validation. Guest,
-kernel, Go/build/wire execution, push and review mutation remain held for this
-correction. The preceding second-round recipe genuinely passed 361 pure tests
-and separate complete lane/orchestrator Linux arm64 test/build/wire runs.
-Those exact historical recipe and diagnostic identities remain recorded below;
-they are not execution evidence for the changed admission/propagation bytes.
-Historical macOS, watcher-only failure and earlier receipts are preserved.
-Fresh source acceptance and exact-head Codex/CI/thread gates remain required.
+Status (2026-09-09): inactive, unshipped source/test candidate. The configured-
+storage/preparation and nested private-context correction has independent
+source-functional acceptance for the exact local snapshot recorded below:
+1,076 pure tests, one bounded Linux context diagnostic and independent native
+original-file readback. The orchestrator explicitly adjusted its supplementary
+source-evidence criterion; the old Watch's raw outer streams remain unavailable
+and complete original transport accounting remains unmet. No new recipe
+Go/build/wire/fullphase or selected-engine-build execution is claimed.
+The preceding second-round recipe's 361 pure tests and separate complete
+lane/orchestrator Linux arm64 test/build/wire runs remain historical, as do
+the macOS, watcher-only failure and earlier receipt qualifications.
+Fresh exact-head Codex/CI gates and zero unresolved threads remain required.
 Shipping additionally needs separate provenance/publication authority. No Avibe
 runtime code, config, manifest, guard or workflow changed; the installed engine
 behavior is unchanged.
@@ -47,7 +47,7 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
-## Third reviewed-head configured-storage correction — local only
+## Third reviewed-head configured-storage correction — source accepted, local only
 
 The complete independent review inventory contains three findings-bearing
 heads, eight resolved historical threads and one current unresolved finding,
@@ -115,16 +115,83 @@ A legitimate fresh task exercises actual directory creation, metadata-free
 recipe copying and local Git initialization; it performs no fetch, export,
 download, extraction or installation. Shell refusal stops later instructions.
 No real configured values, production contents or guest operations are used.
-The complete maintained pure suite now passes 1,076 tests (the prior 733 plus
-343 preparation consumers) under the existing
-deny-network/deny-production-write envelope; pinned Ruff 0.4.9 and
-document/AST/whitespace checks pass. These are source-level consuming tests,
-not a live sudo/namespace attestation or a new-head engine execution. The
-narrow direct-sudo/proc context handoff remains unexecuted and unchanged by
-this preparation repair; unavailable original context still fails closed.
-The original native Go patch and all frozen source/fixture/toolchain
-declarations remain unchanged. Fresh independent inspection and any separately
-selected kernel/source revalidation are still required for this correction.
+At the preparation-repair checkpoint, the complete maintained pure suite passed
+1,076 tests (the prior 733 plus 343 preparation consumers). The orchestrator
+independently inspected the exact source and repeated all 1,076 tests, with no
+skips, under the deny-network/deny-production-write envelope; pinned Ruff 0.4.9
+and document/AST/whitespace checks passed. These are existing measured results,
+not new test invocations during this assessment-only finalization. Pure
+consumers alone are not live sudo/namespace or engine-execution evidence.
+
+The recipe README retains its then-unexecuted context-handoff acceptance
+notice as part of the exact accepted pre-execution snapshot; it has not been
+updated by this assessment. The later bounded diagnostic and acceptance below
+supersede that historical status, not its input bytes or failure predicates.
+Unavailable original context still fails closed. The original native Go patch
+and frozen source/fixture/toolchain declarations remain unchanged.
+
+### Incremental context evidence and acceptance limits
+
+The frozen once Watch `0b07a0286efb` actually executed configured-root rejection
+then the private-loopback parent/direct-child diagnostic, retired with exit 0
+and was not retried. Rejection reached the exact
+`ValueError: Task writes must not target protected user state.` before receipt/
+run allocation or state writes, rather than a sudo-layout, digest or argument error.
+Positive execution carried the original context through the existing
+privileged parent, including its additive root identity. Distinct, unambiguous
+outer PID/start/NSpid identities bind both candidate roles to their private
+PIDs and direct parent/child relationships in both views; equal ticks alone
+are not identity. Generated task HOME/XDG/cache remained usable without
+replacing the admitted original-storage context.
+
+After inspecting the source and complete originals, the orchestrator performed
+one separately scoped native unprivileged readback, not a diagnostic replay.
+Its 57,176,009 output bytes matched the lane's readback byte for byte: all 42
+original text captures and seven hash-only inventory roots, including complete
+per-case merged stdout/stderr logs. Original root-owned mode-0640/single-link
+parent and dedicated preflight custody remained separate from supplementary
+observations. Native readback reconsumed both role bindings, full unchanged
+inputs, finite outputs and state, and bounded process/mount/boot cleanup.
+
+All twelve outside-sentinel negatives, both private-loopback positives and
+outside receives `[0, 0]` matched, with UID 501/GID 1000, five zero capability
+sets, `NoNewPrivs=1`, separated mount/network/PID namespaces, readonly inputs
+and exclusive output. Candidate/namespace/driver budgets remained 10/130/160
+seconds. No observed PID/start survivor, including zombies, private PID member,
+task executor or rootfs remained in terminal/native readback checks.
+These are bounded observations, not universal claims about unobservable state.
+
+| Incremental source/evidence artifact | Exact identity |
+| --- | --- |
+| Maintained source commit at execution | `3a74406e0bf6fc466821c1cc43011fb1627b44ce` |
+| Complete 21-file recipe Git tree | `e024eb07cff6df2db9caea0b400e171317b380d4` |
+| Metadata-free tracked recipe SHA-256 | `1c57e02045d48b70b6e0429a877744492db7614cdc9f11bf1319528e56051690` |
+| `root-d-round3-context-source-acceptance.md` SHA-256 | `aa71fc3f8600c009d1a1686628068dda524beb8aac1cb74d3f4ededf520ed8bf` |
+| `root-original-readback.stdout` SHA-256 | `4d18800cd6169f745f3cd87c9983658e2a53c83acaf7696ec6eba11a621b8110` |
+| `root-native-readback-result.json` SHA-256 | `412f3b7be8372740768e2bb77eabd871b784c8bce20400b65549630db4621df0` |
+| Original positive parent receipt SHA-256 | `d0ac5b61a27c8d8b491fb2edbb8c93c64244129b632360d4e6903a9dd9302182` |
+| Dedicated original preflight SHA-256 | `0ec8924144e5393af47228361d5c92b79aeb3a587d8cec4a987d31ffe7fa583b` |
+
+The old Watch's raw outer stdout/stderr was not persisted. Its normalized
+notification survives, but exact trailing stdout whitespace and empty original
+stderr cannot be certified. Complete original transport accounting remains
+**unmet**. The orchestrator explicitly changed its supplementary source-
+acceptance criterion to complete original command/per-case merged logs and
+parent evidence plus independent native readback. This is a recorded criterion
+change, not recovered old streams, acceptance from exit 0, or a waiver of
+storage, custody, identity, cleanup, review or CI checks. Failed host inspection
+evidence remains failed; the native reader's new streams do not replace the
+lost Watch streams.
+
+Acceptance covers only the incremental source/context functionality above,
+not arbitrary privilege wrappers. There was no new `e024eb07` Go/build/wire/
+fullphase or selected-engine-build test; `selected_build=null` is a probe fact.
+The `7ac2386d1` / `5b6d733` fullphase evidence below, setup-only uv,
+observer-versus-verifier identities and historical macOS/Watch limitations
+remain qualified. The tracked recipe digest excludes preserved ignored caches;
+raw worktree identities are not interchangeable with it. This local acceptance
+does not resolve the remote finding or establish fresh exact-head PR gates,
+engine publication authority or shipped behavior.
 
 ## Historical second reviewed-head recipe correction
 
