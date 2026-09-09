@@ -276,13 +276,25 @@ def test_startup_passes_temporary_hub_supply_without_spending_another_window(tmp
 
 
 @pytest.mark.parametrize("protocol", WIRE)
-@pytest.mark.parametrize("streaming", [False, True])
-def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, protocol, streaming):
+@pytest.mark.parametrize("streaming,verified,empty", [
+    (False, True, False), (True, True, False), (False, False, False),
+    (False, True, True), (True, True, True),
+])
+def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, protocol, streaming, verified, empty):
     """Actual client/adapter/gateway calls, no upstream network or paid inference."""
 
     async def run():
         calls = []
         metadata, output, terminal, buffered = WIRE[protocol]
+        if not verified:
+            buffered = b'{"unknown":"permissive compatibility response"}'
+        if empty:
+            output = b""
+            buffered = {
+                "openai_responses": b'{"object":"response","status":"completed","output":[]}',
+                "openai_chat": b'{"object":"chat.completion","choices":[]}',
+                "anthropic": b'{"type":"message","content":[]}',
+            }[protocol]
 
         async def respond(request):
             calls.append(await request.json())
@@ -339,8 +351,8 @@ def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, pr
             assert clock.delays == [30, 60]
             assert adapter._active_transports == 0
             assert gateway.correlation.recovery_snapshot("turn_recovered") == []
-            assert source.id not in service.recovery._sources
-            assert sum(event["kind"] == "recover" for event in service.events.list()) == 1
+            assert (source.id not in service.recovery._sources) is verified
+            assert sum(event["kind"] == "recover" for event in service.events.list()) == int(verified)
         finally:
             await gateway.close()
             await runner.cleanup()
@@ -514,4 +526,70 @@ def test_draft_preview_does_not_clear_live_health_and_mixed_action_blocks_waitin
             await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
         assert failed.value.supply_state == "interrupted"
         assert clock.delays == [] and service.adapter.invocations == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("read", ["agent_chain", "agent_chains", "get_agent_sources", "list_agents"])
+def test_public_live_reads_capture_config_and_health_once(tmp_path, read):
+    async def run():
+        service, _clock = clock_service(tmp_path)
+        await fail(service, service.store.load().sources[0])
+        counts = {"config": 0, "health": 0}
+        load, annotations = service.store.load, service.recovery.annotations
+
+        def capture_config():
+            counts["config"] += 1
+            return load()
+
+        def capture_health(config):
+            counts["health"] += 1
+            return annotations(config)
+
+        service.store.load = capture_config
+        service.recovery.annotations = capture_health
+        args = {
+            "agent_chain": ("codex", "shared-model"),
+            "agent_chains": ("codex",),
+            "get_agent_sources": ("codex",),
+            "list_agents": (),
+        }[read]
+        result = getattr(service, read)(*args)
+        assert result
+        assert counts == {"config": 1, "health": 1}
+    asyncio.run(run())
+
+
+def test_half_open_projection_cannot_hide_action_or_native_blockers(tmp_path):
+    async def run():
+        service, clock = clock_service(tmp_path)
+        source = service.store.load().sources[0]
+        await fail(service, source)
+        clock.advance(1)
+        generation = service._reserve_settlement_generation(source.id)
+        assert service.recovery.claim(source, generation)
+        chain = service.agent_chain("codex", "shared-model")
+        assert chain["chain"][0]["recovery"] == "in_flight"
+        _assert_valid("agent-chain.schema.json", chain)
+        for mutation in [
+            {"runnable": True},
+            {"health": "needs_action", "reason": "models.source.needs_action.credential_revoked"},
+            {"reason": "source_missing"},
+            {"channel": "native_cli", "reason": "native_cli_unavailable"},
+            {"recovery": "eligible"},
+        ]:
+            invalid = copy.deepcopy(chain)
+            invalid["chain"][0].update(mutation)
+            with pytest.raises(AssertionError):
+                _assert_valid("agent-chain.schema.json", invalid)
+        source.state = ModelHubSourceStateConfig(
+            status="needs_action", detail_key="models.source.needs_action.credential_revoked",
+        )
+        blocked = service.agent_chain("codex", "shared-model")
+        assert "recovery" not in blocked["chain"][0]
+        assert blocked["supply_state"] == "interrupted"
+        _assert_valid("agent-chain.schema.json", blocked)
+        for phase in ("eligible", "in_flight"):
+            blocked["chain"][0]["recovery"] = phase
+            with pytest.raises(AssertionError):
+                _assert_valid("agent-chain.schema.json", blocked)
     asyncio.run(run())

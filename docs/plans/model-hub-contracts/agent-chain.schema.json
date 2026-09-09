@@ -101,6 +101,20 @@
         },
         "allOf": [
           {
+            "if": { "required": ["recovery"] },
+            "then": {
+              "properties": {
+                "health": { "const": "healthy" },
+                "reason": { "type": "null" },
+                "retry_at": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "recovery": { "const": "eligible" } }, "required": ["recovery"] },
+            "then": { "properties": { "runnable": { "const": true } } }
+          },
+          {
             "if": { "properties": { "recovery": { "const": "in_flight" } }, "required": ["recovery"] },
             "then": { "properties": { "runnable": { "const": false } } }
           },
@@ -143,7 +157,7 @@
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown or live connection backoff and which has no process blocker; interrupted covers an empty chain or an action/process blocker. A durable blocker cannot be hidden by a simultaneous live backoff."
+      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown, live connection backoff or a half-open owner and which has no process blocker; interrupted covers an empty chain or an action/process blocker. A durable blocker cannot be hidden by simultaneous live recovery."
     }
   },
   "allOf": [

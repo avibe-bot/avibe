@@ -24,10 +24,15 @@ not block unrelated requests.
   response has arrived, so model execution cannot consume it.
 - Audit backend idle reclamation, gateway cancellation, and native caller
   timeouts before closing the change. Record evidence and scope decisions here.
-- Treat a known source cooldown as delayed admission, with one cancellable wait
-  and a fresh resolution at its existing recovery time. Only retry a request
-  that had no runnable candidate; never replay visible output or restart a
-  failed attempt inside the same gateway request.
+- Treat temporary Source failures and cooldowns as delayed admission under one
+  service-owned 120-second recovery window per pending model request. Re-read
+  configuration after cancellable waits and share the window across fallback
+  passes. Retry pre-output failures only; never replay model output.
+- Treat cooldown expiry as eligibility, not success. One pending real request
+  owns half-open admission; only recognized output or verified protocol success
+  records recovery. Window expiry never cancels admitted inference.
+- Pass all-temporary Hub supply through native preflight immediately, so native
+  acceptance and the first model request do not own independent wait windows.
 - Recognize Responses reasoning-text and compatible Chat reasoning-content
   deltas as model output using the existing protocol taxonomy.
 - Keep production configuration and the running service unchanged during
@@ -49,7 +54,7 @@ classification, usage, response replay, source isolation, and shutdown tests.
 | Gateway teardown and cancellation drain | Runs after completion/cancellation | Retain cleanup bounds |
 | Codex and Claude active-session reclamation | Age backstop overrides durable active ownership | Require the existing ownership veto at both reclamation checks; retain repair of orphaned local flags |
 | Codex SSE idle | Native default is 300,000 ms, after HTTP headers | Retain the native policy; zero expires immediately, not disabled. No arbitrary huge override and no early gateway headers |
-| Source cooldown | A waiting route returns 409; Codex does not honor HTTP Retry-After | Delay no-candidate admission until the known retry time once; re-resolve current configuration; use 503 and Retry-After for remaining time-recoverable errors |
+| Source cooldown | A waiting route returns 409; Codex does not honor HTTP Retry-After | One shared recovery window covers pre-output retries and delayed admission; terminal compatibility maps only recovery exhaustion to Codex 400 or Claude/OpenCode 424, with no Retry-After |
 | Prelude output classification | Responses reasoning text and Chat reasoning content were treated as metadata | Extend the existing taxonomy and acceptance fixtures |
 | Prelude storage | Memory spills at 256 KiB; replay has deliberately no total byte ceiling | Preserve lossless replay and cancellation cleanup, not a new response-size rejection policy |
 | Codex local control RPC | 120-second acknowledgement deadline; turns run via notifications | Retain, not an inference deadline; resetting initialization on one slow RPC is a separate transport issue |
@@ -105,6 +110,35 @@ Verified against the installed Codex 0.153.2 and its exact official source tag:
 
 The native SSE cap and a provider's own limits remain outside the removed
 Avibe inference deadlines; this PR does not claim end-to-end infinite patience.
+
+### Bounded recovery compatibility amendment — September 9, 2026
+
+The approved binary audit in `model-hub-retry-experience.md` supersedes the
+earlier once-only gateway cooldown wait. Codex 0.153.2 issued six requests for
+424/422 despite provider retries being zero and unbounded connection retries
+being disabled; 400 produced one. Claude 2.1.263 and OpenCode 1.18.18 produced
+one for 424. All three accepted headers delayed by 121 seconds. These are
+orchestrator-owned binary audit results, not a claim that core unit tests ran
+the native binaries.
+
+The single exhausted domain type/code is `model_hub_recovery_exhausted` with
+neutral wire text, mapped by backend (not upstream protocol). Codex's internal
+400/InvalidRequest transport interpretation is intentional compatibility, not
+the public `invalid_request_error` classification. Original HTTP status and
+Source failure reasons remain in provenance. Only exhausted automatic recovery
+uses this branch; auth, request incompatibility, engine errors and post-output
+failure retain their established behavior.
+
+Hub-only launch injection sets Codex provider `request_max_retries=0` and
+`features.unbounded_connection_retries=false`, plus Claude environment and
+settings `CLAUDE_CODE_MAX_RETRIES=0`. Codex `stream_max_retries`, Claude watchdog,
+and normal continuation remain unchanged. The OpenCode native poll-loop
+consumer and all native terminal/rendering integration are orchestrator-owned.
+
+The received-terminal audit does not prove exactly-once behavior if the
+terminal response is lost. Existing request identity does not identify every
+native invocation across arrivals. No prompt-based dedupe, Turn blackout or
+Source blackout is introduced to hide that transport residual.
 
 ## Validation evidence
 

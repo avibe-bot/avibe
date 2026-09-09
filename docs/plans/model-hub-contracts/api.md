@@ -889,7 +889,17 @@ turn without changing the effective plan or origin.
 Each item carries `channel`, Source-global health or the distinct live `backoff`
 overlay, process-aware `runnable`, and nullable `reason`. The complete axiom is:
 
-`runnable = source-health-permits AND no-live-backoff AND process-available`.
+`runnable = source-health-permits AND no-live-backoff AND no-half-open-owner AND process-available`.
+
+An affected hop optionally includes `recovery: "eligible" | "in_flight"`.
+Expiry only makes it eligible; it does not write Source state or emit a
+recovery event. `in_flight` means a single real request owns half-open
+admission and forces `runnable: false`. With no stronger blocker its read
+health is `healthy`, `reason` and `retry_at` are null, and it rolls up as
+temporary `waiting`. `needs_action`, `error`, Source/model absence and native
+process unavailability retain precedence and cannot become temporary through
+this annotation. The field is absent outside eligible/in-flight recovery,
+including future cooldown and network deadlines.
 
 Process availability is definitionally true for `channel: "hub"` in v2; there is no
 configuration knob for it. For `native_cli`, `reason: "native_cli_unavailable"` is an
@@ -1035,10 +1045,15 @@ The backoff deadline expiring makes the hop runnable without persistence. Before
 chain, AgentSupply, or probe response is validated and serialized, the read assembler
 captures one assembly time and normalizes every expired live overlay to that Source's
 underlying non-backoff health and runnability; it never emits a stale `backoff` or expired
-live `retry_at`. The first later user-visible model-output byte produced by that same
-affected Source, Source endpoint/credential replacement, or process reconstruction
+live `retry_at`. The first later recognized model output or `SUCCESS` with
+`recovery_verified: true` produced by that same affected Source, Source
+endpoint/credential replacement, or process reconstruction
 clears its deadline and consecutive-failure streak. Output from a different fallback
-Source does not clear the affected Source's streak. The delay is capped at 30 seconds.
+Source does not clear the affected Source's streak. Unknown buffered HTTP 200
+admission, including its compatibility `stream_started: true`, is not recovery
+evidence. Actual streaming output is the separate handle observer fact;
+recognized empty protocol completion is valid success. The local network
+delay is capped at 30 seconds; valid longer upstream retry advice is retained.
 For a native hop whose process is simultaneously unavailable, the live deadline remains
 visible but `native_cli_unavailable` takes the single reason slot and the chain remains
 `interrupted`; restoring the process reveals any still-live connection backoff.
@@ -1057,6 +1072,90 @@ untouched by unclassified transport failure. Probe connection failure uses the s
 closed live key and validates only as `channel: hub`, `reachable: false`, and
 `latency_ms: null`; native probes and Hub probes with measured latency cannot carry it.
 It never reports the removed persistent network/timeout cooldown keys.
+
+## Live request recovery and terminal projection
+
+The service is the only recovery-policy owner. `resolve_with_recovery` is the
+gateway entry point; `resolve` remains a single walk for manual probes and
+explicit characterization tests. §4.3 of `model-hub.md` owns the delay families,
+jitter, Retry-After validation, identity fencing and the shared 120-second
+admission window. `service._invoke_admitted` reserves the existing attempt
+generation while holding mutation exclusion, after exact-route revalidation
+and before half-open claim/transport admission. Its admission callback forwards
+that generation; settlement never mints one.
+
+`TurnCorrelationRegistry.recovery_snapshot(turn_id: str) -> list[dict]` is a
+read-only, in-memory hook for existing `turn_state` consumers. Each item is one
+pending model request, not one Session or Source:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `request_id` | nonempty string | existing gateway request correlation identity |
+| `phase` | `"waiting" \| "attempting"` | delayed admission or an admitted recovery attempt |
+| `attempt_count` | integer, at least 0 | admitted attempts in this request, including the first attempt |
+| `started_at` | aware UTC ISO-8601 string | beginning of the request's automatic recovery window |
+| `window_end` | aware UTC ISO-8601 string | fixed window end; never reset at fallback |
+| `source_id` | string or null | current affected/attempted Source |
+| `reason` | string or null | structured recovery family, never raw upstream text |
+| `next_eligible_at` | aware UTC ISO-8601 string or null | scheduled admission; null while owned/in flight or unscheduled |
+
+No snapshot is published before recovery is needed. `started_at` remains
+stable across waits and reloads, so a consumer can debounce its existing
+working indicator for five seconds without deriving policy constants.
+`GatewayTurnTerminalizer.update_recovery(snapshot)` binds service observations
+to the existing request id. It clears on completion/cancellation and rejects
+late updates after request finalization. There are no persisted snapshots,
+new endpoints, event families, notices, outbox entries or per-second updates.
+
+The registry accepts optional `on_recovery_changed: Callable[[str], None]`.
+It calls this with the Turn id after releasing its lock, only for material
+snapshot changes or clears. The orchestrator binds it to the existing
+SessionTurnManager live owner and `session.activity`/`turn_state` flow.
+Snapshot reads return defensive copies and exclude ambiguous, poisoned,
+untracked, closed, frozen, missing or mismatched-owner traces. Shared OpenCode
+processes without exact Turn correlation therefore expose no snapshot;
+this hook does not infer identity from prompts or native thread headers.
+
+`terminal_projection(turn_id: str, *, backend: str) ->
+TurnOutcomeProjectionInput | None` is the corresponding authoritative terminal
+read. Under the same lock it requires exact backend/scope ownership,
+unambiguous attribution, no pending attempts, and an existing non-served,
+non-canceled terminal outcome. Stop/frozen and poisoned/untracked traces
+return null. Normally closed but still live exact terminal traces remain
+readable until settlement; historical store records never override unrelated
+native errors. A backend callback reporting an already committed Hub failure
+preserves it: `record_turn_outcome -> fail_hub_attempt -> terminal_projection`
+does not freeze it as rejection of served content. Real served-to-protocol
+rejection and Stop retain their original guards.
+
+### Recovery-exhausted native wire compatibility
+
+Only exhaustion of automatic temporary recovery uses this exact terminal body:
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "model_hub_recovery_exhausted",
+    "code": "model_hub_recovery_exhausted",
+    "message": "Automatic recovery has ended. Try again or choose another model."
+  }
+}
+```
+
+The HTTP status is 400 for backend `codex`, 424 for backend `claude` or
+`opencode`, independently of protocol. No Retry-After, raw upstream text or
+upstream error detail is sent on this branch. Real provenance remains unchanged;
+the wire status is not reclassified as a Source/request failure. In particular,
+Codex's internal InvalidRequest interpretation is an intentional transport
+compatibility measure, not public `invalid_request_error`.
+
+Auth, invalid-request, engine and post-output failures are not remapped.
+Hub launch injection disables only Codex provider request retries and
+unbounded connection retries, plus Claude request retries in environment and
+settings. Stream retries, watchdog and ordinary continuation are unchanged.
+The binary audit and lost-terminal transport residual are recorded in
+`model-hub-inference-deadlines.md` and `model-hub-retry-experience.md`.
 
 ## Latest recorded turn
 
@@ -1082,6 +1181,12 @@ order. This is diagnostic selection, not a classifier rank/decision change. Neve
 Unknown upstream strings, raw bodies, messages, headers and credentials are not
 retained. These optional observations do not change classification, fallback or Source
 health. Historical records may omit both fields and keep their existing read behavior.
+
+`failed_attempts[].http_status` is independently optional: a strict integer
+100 through 599 when observed, omitted when absent (never boolean or null).
+It records the original upstream status, for example 503 even when native
+compatibility uses 400. Older retained records without it remain readable.
+This additive diagnostic changes neither the failure reason nor classifier.
 
 The dialog independently reads this projection on demand and labels it "Latest recorded
 turn" / "最近已记录回合". Its error panel and details action use the same structured record,

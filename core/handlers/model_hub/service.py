@@ -3696,7 +3696,9 @@ class ModelHubService:
 
     def get_agent_sources(self, backend: str) -> dict:
         config = self.store.load()
-        return self._agent_payload(config, self._agent(config, backend))
+        return self._agent_payload(
+            config, self._agent(config, backend), live_recovery=self.recovery.annotations(config),
+        )
 
     async def set_agent_chain(self, backend: str, model_id: object, payload: object) -> dict:
         if (
@@ -3842,7 +3844,10 @@ class ModelHubService:
         config = self.store.load()
         return self._catalog_models_payload(config.agents[backend])
 
-    def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
+    def _agent_payload(
+        self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig,
+        *, live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
+    ) -> dict:
         backend = cast(BackendName, agent.backend)
         builtin_models = (
             [model.id for model in agent.models]
@@ -3852,13 +3857,15 @@ class ModelHubService:
         requested_model = self._requested_model(agent)
         unavailable_source_ids = self._unavailable_native_sources(config, backend)
         now = self.now()
+        if live_recovery is None:
+            live_recovery = self.recovery_annotations(config)
         resolution = resolve_model_hub_turn(
             config,
             backend,
             requested_model,
             now=now,
             unavailable_source_ids=unavailable_source_ids,
-            live_recovery=self.recovery_annotations(config),
+            live_recovery=live_recovery,
         )
         menu_model_ids = [model.id for model in agent.models]
         model_supply = [
@@ -3871,7 +3878,7 @@ class ModelHubService:
             for model_id in menu_model_ids
             for model_resolution in (resolve_model_hub_turn(
                 config, backend, model_id, now=now, unavailable_source_ids=unavailable_source_ids,
-                live_recovery=self.recovery_annotations(config),
+                live_recovery=live_recovery,
             ),)
         ]
         selected_model_id = (
@@ -3925,7 +3932,7 @@ class ModelHubService:
                     requested,
                     now=now,
                     unavailable_source_ids=unavailable_source_ids,
-                    live_recovery=self.recovery_annotations(config),
+                    live_recovery=live_recovery,
                 )
                 named_agents.append(
                     {
@@ -4147,7 +4154,11 @@ class ModelHubService:
 
     def list_agents(self) -> list[dict]:
         config = self.store.load()
-        return [self._agent_payload(config, config.agents[backend]) for backend in ("claude", "codex", "opencode")]
+        live_recovery = self.recovery.annotations(config)
+        return [
+            self._agent_payload(config, config.agents[backend], live_recovery=live_recovery)
+            for backend in ("claude", "codex", "opencode")
+        ]
 
     def refresh_cli_presence(
         self,
@@ -5008,6 +5019,7 @@ class ModelHubService:
         *,
         now: Optional[datetime] = None,
         unavailable_source_ids: Optional[frozenset[str]] = None,
+        live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
     ) -> dict:
         agent = self._agent(config, backend)
         if agent.mode == "direct":
@@ -5027,7 +5039,7 @@ class ModelHubService:
             model_id,
             now=observed_at,
             unavailable_source_ids=unavailable,
-            live_recovery=self.recovery_annotations(config),
+            live_recovery=live_recovery if live_recovery is not None else self.recovery_annotations(config),
         )
         chain: list[dict] = []
         for inspection in resolution.inspected_hops:
@@ -5090,7 +5102,8 @@ class ModelHubService:
     def agent_chain(self, backend: str, model_id: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable", status=409)
-        return self._agent_chain(self.store.load(), backend, model_id)
+        config = self.store.load()
+        return self._agent_chain(config, backend, model_id, live_recovery=self.recovery.annotations(config))
 
     def agent_chains(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -5105,6 +5118,7 @@ class ModelHubService:
             config,
             cast(BackendName, backend),
         )
+        live_recovery = self.recovery.annotations(config)
         return [
             self._agent_chain(
                 config,
@@ -5112,6 +5126,7 @@ class ModelHubService:
                 model_id,
                 now=observed_at,
                 unavailable_source_ids=unavailable_source_ids,
+                live_recovery=live_recovery,
             )
             for model_id in self._agent_model_ids(agent, requested_model)
         ]
