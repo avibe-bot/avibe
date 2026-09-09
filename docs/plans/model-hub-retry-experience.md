@@ -448,3 +448,50 @@ No subtask may modify another lane's files or open/merge a PR independently.
 All work is integrated into one implementation PR and validated at its exact
 head. Any missing cross-boundary behavior is reported to the orchestrator, not
 silently omitted from the accepted contract.
+
+### Native terminal compatibility decision
+
+The domain result for an exhausted automatic recovery episode is
+`model_hub_recovery_exhausted`, in both `error.type` and `error.code`. Its wire
+message is exactly:
+
+> Automatic recovery has ended. Try again or choose another model.
+
+The JSON envelope has top-level `type: error`. It includes no upstream body,
+provider diagnostic, absolute retry time, or `Retry-After`. Provenance retains
+the actual failure and supply facts; localized user presentation reads those
+facts rather than interpreting the transport status as a user mistake.
+
+Native compatibility testing on 2026-09-09 found that a uniform 424 or 422 is
+not terminal for Codex 0.153.2: its outer loop made six requests even with
+provider HTTP retries disabled. The same closed error at 400 made one request.
+Claude 2.1.263 and OpenCode 1.18.18 made one request at 424. Therefore the
+gateway maps this domain result to HTTP 400 for Codex and HTTP 424 for Claude
+and OpenCode, by backend identity, not by the selected wire protocol. This is
+an intentional Codex transport-compatibility mapping: Codex internally calls
+400 `InvalidRequest`, but the Hub neither emits `invalid_request_error` nor
+claims the user's input is invalid. Do not remap unrelated authentication,
+request-validation, post-output, or local-engine failures to this result.
+
+Hub launches set Codex provider `request_max_retries=0` and
+`features.unbounded_connection_retries=false`; `stream_max_retries` remains
+unchanged. Claude Hub launches fix `CLAUDE_CODE_MAX_RETRIES=0` in both process
+environment and launch settings. Keep its independent normal stream
+continuation and fallback behavior; the native audit also verified that 424
+is terminal with its retry watchdog enabled. Direct-native launches and
+user-owned configuration are unchanged.
+
+OpenCode's Avibe-side automatic `continue` is bypassed only for a current
+assistant error already admitted by the existing baseline/liveness checks,
+with a bound Hub launch, `APIError`, integer `statusCode=424`, and exact
+`error.type` and `error.code` in parsed `responseBody`. Never parse the
+truncated diagnostic text or disable the global retry setting. Explicit
+Retry and ordinary native continuation keep their existing ownership.
+
+The isolated native audit also held response headers for 121 seconds before
+the selected terminal response; all three main calls remained single requests.
+This is native caller evidence, not integrated controller or Incus acceptance.
+A lost terminal response still cannot be distinguished from a later legitimate
+model call using today's routing/Turn identifiers. No exactly-once guarantee,
+prompt hash, Turn blacklist, or Source blacklist is introduced to hide that
+transport-delivery limit.
