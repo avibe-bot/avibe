@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { ChevronDown, Loader2, RefreshCw } from 'lucide-react';
+import clsx from 'clsx';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
@@ -10,7 +11,10 @@ import { useMemoryResource } from './useMemoryResource';
 import { memoryOriginLabelKey } from './memoryOrigin';
 
 type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
-type Translate = (key: string) => string;
+type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+const DISCLOSURE_TRIGGER_CLASSES =
+  'flex min-w-0 items-center gap-1.5 rounded text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
 const ProfileDetail: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-muted">
@@ -18,6 +22,71 @@ const ProfileDetail: React.FC<{ label: string; value: string }> = ({ label, valu
     {value}
   </p>
 );
+
+/** Independently collapsed evidence disclosure nested inside an already-expanded entry. */
+const CollapsibleEvidence: React.FC<{ label: string; value: string }> = ({ label, value }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        className={clsx(DISCLOSURE_TRIGGER_CLASSES, 'text-[11px] font-medium text-muted hover:text-foreground')}
+      >
+        <ChevronDown className={clsx('size-3 shrink-0 transition-transform', !open && '-rotate-90')} />
+        <span>{label}</span>
+      </button>
+      {open ? <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-muted">{value}</p> : null}
+    </div>
+  );
+};
+
+/**
+ * One explicit-info or implicit-trait row. Closed shows only the label badge
+ * plus chevron; the whole row is the disclosure trigger. Expanding never
+ * auto-opens the nested evidence disclosure.
+ */
+const ProfileEntry: React.FC<{
+  label: ReactNode;
+  description: string;
+  basisLabel?: string;
+  basisValue?: string | null;
+  evidenceLabel: string;
+  evidenceValue?: string | null;
+}> = ({ label, description, basisLabel, basisValue, evidenceLabel, evidenceValue }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-l-2 border-border pl-3">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        className={clsx(DISCLOSURE_TRIGGER_CLASSES, 'w-full py-0.5')}
+      >
+        {/* No flex-grow: hug short labels like the app's other badges; min-w-0 + shrink
+            let a long label give up space to the chevron and wrap instead of overflowing. */}
+        <Badge variant="secondary" className="min-w-0 shrink whitespace-normal break-words text-left">
+          {label}
+        </Badge>
+        <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', !open && '-rotate-90')} />
+      </button>
+      {open ? (
+        <div className="mt-1">
+          <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{description}</p>
+          {basisValue ? <ProfileDetail label={basisLabel ?? ''} value={basisValue} /> : null}
+          {evidenceValue ? <CollapsibleEvidence label={evidenceLabel} value={evidenceValue} /> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+/** A blank/whitespace-only category or trait still needs a discoverable, deterministic label. */
+const resolveEntryLabel = (t: Translate, raw: string | null, index: number): string => {
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : t('memory.profile.entryFallback', { number: index + 1 });
+};
 
 /** Render provider values as inert text nodes, never as Markdown or HTML. */
 export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Translate }> = ({ profile, t }) => (
@@ -33,11 +102,13 @@ export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Tran
         <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.explicitInfo')}</h3>
         <div className="mt-2 flex flex-col gap-3">
           {profile.explicit_info.map((info, index) => (
-            <div key={`${info.description}:${index}`} className="border-l-2 border-border pl-3">
-              {info.category ? <Badge variant="secondary">{info.category}</Badge> : null}
-              <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{info.description}</p>
-              {info.evidence ? <ProfileDetail label={t('memory.profile.evidence')} value={info.evidence} /> : null}
-            </div>
+            <ProfileEntry
+              key={`${info.description}:${index}`}
+              label={resolveEntryLabel(t, info.category, index)}
+              description={info.description}
+              evidenceLabel={t('memory.profile.evidence')}
+              evidenceValue={info.evidence}
+            />
           ))}
         </div>
       </section>
@@ -47,12 +118,15 @@ export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Tran
         <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.implicitTraits')}</h3>
         <div className="mt-2 flex flex-col gap-3">
           {profile.implicit_traits.map((trait, index) => (
-            <div key={`${trait.description}:${index}`} className="border-l-2 border-border pl-3">
-              {trait.trait ? <Badge variant="secondary">{trait.trait}</Badge> : null}
-              <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{trait.description}</p>
-              {trait.basis ? <ProfileDetail label={t('memory.profile.basis')} value={trait.basis} /> : null}
-              {trait.evidence ? <ProfileDetail label={t('memory.profile.evidence')} value={trait.evidence} /> : null}
-            </div>
+            <ProfileEntry
+              key={`${trait.description}:${index}`}
+              label={resolveEntryLabel(t, trait.trait, index)}
+              description={trait.description}
+              basisLabel={t('memory.profile.basis')}
+              basisValue={trait.basis}
+              evidenceLabel={t('memory.profile.evidence')}
+              evidenceValue={trait.evidence}
+            />
           ))}
         </div>
       </section>
@@ -97,6 +171,24 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
     void reload();
   }, [reload]);
 
+  // `data` is a fresh object on every successful load, even when its contents are
+  // unchanged. Entry keys below are content-derived (kind/date/index), so an
+  // unchanged reload would otherwise reuse the same mounted entries and keep
+  // their disclosure state open. Bumping this on every reload that *replaces*
+  // an already-loaded profile forces a full remount, matching the
+  // initially-closed contract — but only from the second load onward, so the
+  // very first successful paint (no previous profile to replace) stays a
+  // single render. Adjusted during render (React's sanctioned "derived state"
+  // idiom), not in an effect, so there is no extra committed render in between.
+  const [previousData, setPreviousData] = useState<MemoryItemsOk | null>(null);
+  const [profileGeneration, setProfileGeneration] = useState(0);
+  if (data && previousData && previousData !== data) {
+    setPreviousData(data);
+    setProfileGeneration((prev) => prev + 1);
+  } else if (data !== previousData) {
+    setPreviousData(data);
+  }
+
   if (!enabled) {
     return <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">{t('memory.profile.disabledHint')}</div>;
   }
@@ -138,7 +230,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         <div className="flex flex-col gap-2">
           {items.map((item, index) => (
             <MemoryProfileItemBlock
-              key={`${item.kind}:${item.date ?? ''}:${index}`}
+              key={`${profileGeneration}:${item.kind}:${item.date ?? ''}:${index}`}
               item={item}
               t={t}
             />
