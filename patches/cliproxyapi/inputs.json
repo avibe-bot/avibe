@@ -4,6 +4,9 @@
   "source_sha": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
   "go_version": "go1.26.4",
   "avibe_fixture_base": "76e269c9a9dfd3a6286ce0da81b77316ca4be38a",
+  "avibe_fixture_tree": "27f32c68b3b9c6b1d40fcde3a034838b58ca0636",
+  "avibe_fixture_archive_sha256": "3352c66c7b88c35ce7851a4bcfbeb3ac2e6d842199ef7dcf7c93534c0233c4cc",
+  "avibe_fixture_source_sha256": "61c9616c760f9bbe4750c507073deea183064ec7f55dbacc2174eac9c474031e",
   "sha256": {
     "internal/registry/models/models.json": "b19b2655a4f294605d3a347be16e67ef6ea776d70cedbd69c36629f3dbb945d9",
     "internal/registry/models/codex_client_models.json": "a044aa222836b32091fdf4c9c34030443cb8717dea65db875cf705406c332fd6",

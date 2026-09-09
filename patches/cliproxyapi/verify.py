@@ -11,7 +11,8 @@ import subprocess
 import sys
 import tempfile
 
-from isolation import isolated_environment, sandbox_prefix
+from isolation import isolated_environment, namespace_receipt, sandbox_prefix
+from fixture import fixture_identity, verify_fixture
 
 
 HERE = Path(__file__).resolve().parent
@@ -47,6 +48,7 @@ def main() -> None:
     parser.add_argument("phase", choices=("apply", "test", "build", "wire"))
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--state", required=True, type=Path)
+    parser.add_argument("--fixture", type=Path, help="Complete verified Avibe commit export; required for build/wire.")
     args = parser.parse_args()
     source = args.source.resolve(strict=True)
     state = args.state.resolve()
@@ -71,7 +73,15 @@ def main() -> None:
     )
     patch_sha = verify_candidate(source)
     env = isolated_environment(state)
+    if args.phase in ("test", "wire") and sys.platform == "darwin":
+        raise RuntimeError("Network tests require the approved private Linux namespace; no localhost wildcard fallback.")
     prefix = sandbox_prefix(state)
+    if sys.platform == "linux":
+        proof = namespace_receipt()
+        if Path(proof["source"]) != source or (args.phase == "build" and proof["network"] != "none"):
+            raise RuntimeError("Source/build network mode does not match the envelope.")
+        if args.phase in ("test", "wire") and proof["network"] != "loopback":
+            raise RuntimeError("Network suites need the private loopback envelope.")
     go = shutil.which("go")
     if not go:
         raise RuntimeError("Go is required; see README.md for isolated prerequisite download.")
@@ -80,6 +90,19 @@ def main() -> None:
         raise RuntimeError(f"Wrong Go version: {version.strip()}")
     build_identity = {"source_sha": receipt["source_sha"], "patch_sha256": patch_sha,
                       "frozen_inputs": receipt["sha256"], "go_version": version.strip()}
+    fixture = None
+    if args.phase in ("build", "wire"):
+        if args.fixture is None:
+            raise ValueError("Use --fixture with the complete frozen Avibe export.")
+        fixture = args.fixture.resolve(strict=True)
+        if sys.platform == "linux" and Path(proof["fixture"]) != fixture:
+            raise RuntimeError("Fixture is not the read-only envelope mount.")
+        fixture_info = fixture_identity(fixture, receipt)
+        build_identity["avibe_fixture"] = fixture_info
+        build_identity["recipe_sha256"] = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(HERE.glob("*.py"))
+        }
     if args.phase == "test":
         commands = [
             [go, "test", "-mod=readonly", "-p=1", "-count=1",
@@ -103,7 +126,8 @@ def main() -> None:
             raise RuntimeError("Candidate binary changed after build.")
         wire_state = Path(tempfile.mkdtemp(prefix="wire-", dir=state)) / "run"
         commands = [[sys.executable, str(HERE / "wire_matrix.py"),
-                     "--binary", str(state / "bin/cli-proxy-api"), "--state", str(wire_state)]]
+                     "--binary", str(state / "bin/cli-proxy-api"), "--state", str(wire_state),
+                     "--fixture", str(fixture), "--fixture-sha256", fixture_info["source_sha256"]]]
     for index, command in enumerate(commands):
         log = state / f"{args.phase}-{index}.log"
         with log.open("wb") as output:
@@ -116,10 +140,21 @@ def main() -> None:
             raise SystemExit(result.returncode)
     verify_inputs(source)
     verify_candidate(source)
+    if fixture is not None:
+        verify_fixture(fixture, fixture_info["source_sha256"])
     if args.phase == "build":
         build_identity["binary_sha256"] = hashlib.sha256((state / "bin/cli-proxy-api").read_bytes()).hexdigest()
         build_identity["command"] = commands[0][1:]
         (state / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
+    elif args.phase == "wire":
+        wire_identity = {
+            **build_identity, "binary_sha256": previous_build["binary_sha256"],
+            "artifacts": {
+                name: hashlib.sha256((wire_state / name).read_bytes()).hexdigest()
+                for name in ("matrix.json", "integration.json", "lifecycle.json")
+            },
+        }
+        (wire_state / "receipt.json").write_text(json.dumps(wire_identity, indent=2) + "\n")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,11 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: maintained inactive source/test candidate implemented and locally
-validated. Shipping is blocked on separate source/provenance and publication
+Status: maintained inactive source/test candidate implemented. All maintained
+Go suites, diagnostic build and complete wire matrix pass in the repaired
+Linux isolation. The approved fixture correction consumes the frozen
+adapter/supervisor lifecycle; the earlier watcher-only failure is preserved.
+Independent orchestrator source acceptance and current-head PR gates remain.
+Shipping is blocked on separate source/provenance and publication
 authority. No Avibe runtime code, config, manifest, guard, or workflow changed;
 the currently pinned/installed engine behavior is unchanged.
 
@@ -47,7 +51,10 @@ six specified root-owned documentation commits into this Avibe branch.
 
 The maintained home is `patches/cliproxyapi/`. Its patch includes the Go tests;
 the small apply/test recipe validates the exact base, frozen catalogs, locked
-modules, Go version, changed-file inventory and file hashes. A build receipt
+modules, Go version, changed-file inventory and file hashes. The revised recipe
+also binds the complete immutable Avibe fixture and imported recipe identity.
+The fixture is an exact tracked commit export, not mutable current-worktree
+imports; dirty exports fail before and after execution. A build receipt
 binds the wire-tested binary to those inputs and the patch digest. It refuses
 dirty source on apply, unrelated candidate edits, stale binaries, and hosts
 without the verified egress-isolation mechanism.
@@ -105,7 +112,27 @@ conversions retain capability-free conversion, now source-aware. Configured
 unknown rows remain `UserDefined=false`: the missing-metadata branch is an
 explicit boundary policy, not a changed registration claim.
 
-### Local acceptance evidence
+### Historical local evidence and repaired acceptance status
+
+The results below came from the earlier macOS wildcard-loopback envelope.
+They are source behavior observations, not sufficient evidence of test-owned
+listener isolation or the newly enforced fixture receipt closure. The Linux
+Go/build rerun passed. Wire passed all 380 policy, 24 identity and three image
+cases before its watcher-only replacement failed; cancellation/reuse did not
+execute. These partial results are not complete wire acceptance.
+The corrected lifecycle rerun subsequently passed all three phases, including
+all original matrix/identity/image cases, real child replacement and failed
+replacement rollback/recovery, invalid Source refusal, cancellation/reuse and
+failed-startup cleanup. Each phase's original parent receipt has twelve blocked
+outside attempts, zero sentinel connections, unchanged complete inputs/outer
+mounts, and reaped processes/removed rootfs. Three normal children exited zero;
+the two deliberately failing children exited 23 as asserted by the consumer.
+The policy and integration artifacts retain their original complete hashes.
+The revised fixture/parent/probe/connection pure suite passes 225 cases under deny-all
+network. Actual no-network and private-loopback probes pass with zero outside
+sentinel connections; a deliberate nonzero command retains a failed terminal
+receipt. Original failed probe evidence remains preserved. These probes are
+not full engine acceptance or a shipped repair.
 
 - The maintained Go recipe passes shared thinking/provider tests,
   `internal/modelconfig`, selected-model helpers, `sdk/cliproxy/auth`, existing
@@ -117,13 +144,15 @@ explicit boundary policy, not a changed registration claim.
   two expected conversion-only 400s with zero upstream requests. Full endpoint,
   upstream model, selected fake key, non-ASCII content, reasoning fields and
   cross-Source exclusion are checked. Generated Avibe registration, origin/key
-  replacement via the config watcher, streaming, cancellation and reuse pass.
+  replacement via the former config-watcher fixture, streaming, cancellation
+  and reuse passed only in that historical envelope.
 - Actual manager + Claude HTTP tests distinguish two Sources with the same
   alias/upstream name but different metadata, then replace one key/snapshot.
   Fake subscription tests cover Claude/Codex HTTP, Codex WebSocket, Kimi
   Messages delegation, Kimi native/legacy Chat and xAI Responses. xAI's final
   egress matrix has 80 cases; Kimi's native/legacy matrix has 40. They use
-  rejecting transports plus OS egress rejection, not provider accounts.
+  rejecting transports, not provider accounts; the old OS loopback wildcard
+  is not evidence of test-owned listener enforcement.
 - 24 additional actual-engine requests preserve full long UTF-8 identities
   beyond 16 KiB, including identical long heads with distinct tails and a
   route-only model, on all three API-key protocols and both stream modes.
@@ -453,34 +482,53 @@ The harness SHA-256 is
 The maintained entry point is now `patches/cliproxyapi/verify.py`, using
 `wire_matrix.py` and the repository's existing mock.
 
-Hermetic construction:
+Maintained hermetic construction (corrected Linux lane rerun passed):
 
 1. Fetch only the exact engine commit into a new task directory. Give Go its
    own HOME, TMPDIR, module/build caches, and `GOENV=off`. Use the exact
    toolchain and `-mod=readonly`; dependency downloads are preparation, not
    upstream account probes.
-2. Reuse Avibe's stdlib-only
+2. Export the complete frozen Avibe commit and verify its tree, archive and
+   path-independent source digest. Reuse that export's stdlib-only
    `tests/e2e/drivers/mock_llm_upstream.py`, with one ephemeral loopback
    listener per protocol. Generate fake-key config in a test-owned home.
-   Spawn the newly built binary, never the installer or managed live runtime.
-3. On this macOS host, the baseline used `sandbox-exec` to deny all outbound
-   networking except localhost, deny filesystem writes except the task
-   directory and `/dev`, and deny reads of the user's Avibe/backend homes.
-   Give the child an explicit minimal environment and distinct XDG dirs.
-   `--local-model`, disabled panel updates/plugins, and a dead loopback
-   HTTP(S) proxy supplement that boundary. The real Antigravity version
-   updater attempted only the dead loopback proxy; no external request ran.
-   `--local-model` alone is insufficient.
-4. For portable CI, use the existing SDK/Go test pattern with the actual auth
-   manager, configured registration, and real executor, plus a rejecting
-   transport that permits only test-owned listeners. Start the actual HTTP API
-   for the end-to-end layer. Alternatively run the real binary and mock in a
-   test-owned network namespace with loopback only. Do not rely on fake
-   adapter tests or a proxy environment variable alone.
+   Use frozen `CLIProxyEngineAdapter.sync_sources` and `EngineSupervisor`.
+   The existing constructor seams select only the preverified diagnostic binary,
+   task environment/log and fresh private port, never an installed runtime.
+   Real state validation, routing/idle barrier, transaction, atomic writer,
+   health checks and owned-child stop/start remain the product's responsibility.
+3. Use the approved temporary Linux mount/network/PID/chroot envelope,
+   making mounts private before binding. Keep source, frozen fixture, recipe
+   and toolchain read-only, expose only task state for writes, hide guest/user
+   homes and namespace handles, close inherited descriptors, then drop
+   UID/GID/groups/capabilities and set no-new-privileges. Compile with networking
+   disabled; dynamic Go listeners, engine and replacement mocks run together
+   on the namespace's private loopback. No veth or host network is added.
+4. Require actual IPv4/IPv6 outside-sentinel negatives and private positives,
+   plus failure/process/mount cleanup receipts before the full suite. Parent
+   receipts are exclusively opened outside child mounts before execution;
+   preflight reaches an unlinked supervisor channel closed before candidate
+   launch. Never trust a later child-writable probe file. The earlier macOS
+   localhost wildcard is retired; its remaining pure/compile path denies all
+   egress. Rejecting executor transports and a dead proxy are complementary
+   checks, not OS isolation. `--local-model` alone is insufficient.
 5. Assert native reasoning fragments, required conversion results, explicit
    negatives, no intent injection on native absence, correct model/prefix/
    credential replacement, non-ASCII preservation, response streaming, and
    cancellation. Stop and reap the child and all mock threads in `finally`.
+   Consume each returned supervisor connection, including changed port/token.
+   Actual-child failure regressions verify Source validation before restart,
+   replacement rollback/recovery and failed-startup cleanup. Preserve all
+   generated registrations; the labeled engine-only empty profile is applied
+   only in the process seam before each launch.
+
+The first Linux wire fixture depended on direct-file watcher reload after
+atomic configuration replacement and timed out. The pinned watcher watches
+the file itself; a raw inotify event trace was not recorded. This is a separate
+diagnostic limitation, not an established Avibe Source replacement regression:
+the frozen product explicitly restarts its owned child. The approved fixture
+correction consumes that lifecycle without modifying the watcher, extending
+deadlines, writing in place, or mocking successful restart.
 
 The promoted maintained engine tests cover:
 

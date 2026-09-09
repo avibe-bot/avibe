@@ -12,6 +12,7 @@ engine or reads an installed engine's state.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import binascii
 import copy
@@ -31,41 +32,147 @@ import zlib
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from isolation import isolated_environment
+import yaml
+
+from fixture import verify_fixture
+from isolation import isolated_environment, namespace_receipt
 
 
-AVIBE = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(AVIBE))
-
-import yaml  # noqa: E402
-
-from config.atomic_io import write_atomic  # noqa: E402
-from vibe.model_hub_runtime.config import write_engine_config  # noqa: E402
-from vibe.model_hub_runtime.state import EngineStateStore, RuntimeSecrets, SourceRecord  # noqa: E402
-
-
-spec = importlib.util.spec_from_file_location(
-    "mock_upstream", AVIBE / "tests/e2e/drivers/mock_llm_upstream.py",
-)
-mock_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mock_module)
 opener = build_opener(ProxyHandler({}))
 PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
 PATHS = dict(zip(PROTOCOLS, ("/v1/messages", "/v1/responses", "/v1/chat/completions")))
 PROFILES = ("known", "known_nil", "unknown", "narrow", "empty")
-TOKEN = "fake-intent-gateway"
 TEXT = "中文 fixture — reasoning intent"
 
 
-def request(url, body=None):
-    headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+def request(connection, path, body=None):
+    headers = {"Authorization": f"Bearer {connection.gateway_token}", "Content-Type": "application/json"}
     raw = None if body is None else json.dumps(body, ensure_ascii=False).encode()
     try:
-        response = opener.open(Request(url, data=raw, headers=headers), timeout=12)
+        response = opener.open(Request(connection.base_url + path, data=raw, headers=headers), timeout=12)
     except HTTPError as exc:
         response = exc
     with response:
         return response.status, response.read()
+
+
+def supplement_empty_profile(config):
+    """Assert generated registrations; add only the labeled ENGINE-only case."""
+    for section in ("claude-api-key", "codex-api-key", "openai-compatibility"):
+        for entry in config[section]:
+            for model in entry["models"]:
+                assert model["name"] == model["alias"]
+                if entry["prefix"].endswith("-narrow"):
+                    assert model["thinking"] == {"levels": ["high", "low"]}
+                else:
+                    assert "thinking" not in model
+                if entry["prefix"].endswith("-empty"):
+                    # The frozen product deliberately does not generate this.
+                    model["thinking"] = {}
+
+
+class DiagnosticInstaller:
+    """Only the preverified task binary; no installed-state or download lookup."""
+
+    def __init__(self, binary):
+        self.binary = binary
+
+    def status(self):
+        return {"installed": True, "version": "inactive-source-diagnostic",
+                "install_dir": str(self.binary.parent)}
+
+    def resolve_engine_path(self):
+        return self.binary
+
+
+class FrozenEngine:
+    """Constructor seams only; frozen Avibe owns validation, health and lifecycle."""
+
+    def __init__(self, binary, state, store, log):
+        from core.handlers.model_hub.adapter import SourceBinding
+        from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+        from vibe.model_hub_runtime.supervisor import EngineSupervisor
+
+        self.binding_type = SourceBinding
+        self.binary, self.state, self.store, self.log = binary, state, store, log
+        self.processes, self.ports, self.launches = [], [], []
+        self.fail_next = False
+        self.loop = asyncio.Runner()
+        self.supervisor = EngineSupervisor(
+            installer=DiagnosticInstaller(binary), state_store=store,
+            process_factory=self.launch, port_allocator=self.allocate_port,
+        )
+        self.adapter = CLIProxyEngineAdapter(supervisor=self.supervisor, state_store=store)
+
+    def allocate_port(self):
+        # Force a changed connection to catch stale-port consumers on restart.
+        while True:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            if port not in self.ports:
+                self.ports.append(port)
+                return port
+
+    def launch(self, command, **kwargs):
+        from config.atomic_io import write_atomic
+
+        assert command[0] == str(self.binary) and command[1] == "-config"
+        config_path = Path(command[2]).resolve(strict=True)
+        assert config_path.is_relative_to(self.store.root)
+        config = yaml.safe_load(config_path.read_text())
+        supplement_empty_profile(config)
+        write_atomic(config_path, yaml.safe_dump(config, sort_keys=False))
+        # Preserve the product's cwd/stdin/umask/process-group ownership. Only
+        # task-local environment, output and local-catalog selection differ.
+        kwargs["env"] = {**kwargs["env"], **isolated_environment(self.state)}
+        kwargs["stdout"], kwargs["stderr"] = self.log, subprocess.STDOUT
+        failure = self.fail_next
+        self.fail_next = False
+        actual = [sys.executable, "-B", "-c", "raise SystemExit(23)"] if failure else [*command, "--local-model"]
+        process = subprocess.Popen(actual, **kwargs)
+        self.processes.append(process)
+        self.launches.append({"pid": process.pid, "injected_exit": 23 if failure else None,
+                              "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest()})
+        return process
+
+    def sync(self, sources):
+        bindings = [
+            self.binding_type(**{name: getattr(source, name) for name in (
+                "source_id", "vendor", "protocol", "base_url", "credential_ref",
+                "allowed_origins", "model_ids", "model_reasoning_efforts", "route_model_ids",
+            )})
+            for source in sources
+        ]
+        self.loop.run(self.adapter.sync_sources(bindings))
+
+    def connection(self):
+        client = self.supervisor.client_if_running()
+        assert client is not None
+        return client.connection
+
+    def close(self):
+        try:
+            self.supervisor.stop()
+        finally:
+            self.loop.close()
+            assert all(process.poll() is not None for process in self.processes)
+
+
+def wait_registered(engine, expected_routes):
+    connection = engine.connection()
+    deadline = time.monotonic() + 20
+    while True:
+        assert engine.processes[-1].poll() is None
+        try:
+            status, raw = request(connection, "/v1/models")
+            registered = {model["id"] for model in json.loads(raw).get("data", [])}
+            if status == 200 and expected_routes <= registered:
+                return connection
+        except (URLError, TimeoutError):
+            pass
+        assert time.monotonic() < deadline, "fixture registration deadline"
+        time.sleep(0.1)
 
 
 def payload(protocol, model, intent, stream):
@@ -201,7 +308,7 @@ def image_and_text(body, protocol):
     return text, images
 
 
-def integration_consumers(port, targets, long_targets, mocks):
+def integration_consumers(connection, targets, long_targets, mocks, mock_module):
     results = []
     for protocol in PROTOCOLS:
         for route, model, key in long_targets[protocol]:
@@ -209,7 +316,7 @@ def integration_consumers(port, targets, long_targets, mocks):
                 for mock in mocks.values():
                     mock.reset_requests()
                 status, response = request(
-                    f"http://127.0.0.1:{port}{PATHS[protocol]}",
+                    connection, PATHS[protocol],
                     payload(protocol, route, "strong", stream),
                 )
                 assert status == 200 and b"mock response" in response
@@ -223,7 +330,7 @@ def integration_consumers(port, targets, long_targets, mocks):
                 assert outbound["path"] == PATHS[protocol]
                 values = set(outbound["headers"].values())
                 assert key in values or f"Bearer {key}" in values
-                assert f"Bearer {TOKEN}" not in values
+                assert f"Bearer {connection.gateway_token}" not in values
                 results.append({"kind": "long-id", "protocol": protocol, "stream": stream,
                                 "utf8_bytes": len(model.encode()), "identity": model})
 
@@ -241,7 +348,7 @@ def integration_consumers(port, targets, long_targets, mocks):
             add_images(body, protocol, images)
             size = len(json.dumps(body, ensure_ascii=False).encode())
             assert 42 * 1024 * 1024 <= size < 43 * 1024 * 1024
-            status, response = request(f"http://127.0.0.1:{port}{PATHS[protocol]}", body)
+            status, response = request(connection, PATHS[protocol], body)
             assert status == 200 and b"mock response" in response, f"{protocol} large request returned {status}"
             captured = mocks[protocol].requests()
             assert len(captured) == 1
@@ -250,7 +357,7 @@ def integration_consumers(port, targets, long_targets, mocks):
             assert outbound["path"] == PATHS[protocol] and outbound["body"]["model"] == model
             values = set(outbound["headers"].values())
             assert key in values or f"Bearer {key}" in values
-            assert f"Bearer {TOKEN}" not in values
+            assert f"Bearer {connection.gateway_token}" not in values
             text, actual_images = image_and_text(outbound["body"], protocol)
             # Compare exact data independently of allowed envelope/cache changes.
             assert text == [TEXT] and actual_images == images
@@ -268,41 +375,31 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--state", required=True, type=Path)
+    parser.add_argument("--fixture", required=True, type=Path)
+    parser.add_argument("--fixture-sha256", required=True)
     args = parser.parse_args()
     binary, state = args.binary.resolve(strict=True), args.state.resolve()
+    fixture = args.fixture.resolve(strict=True)
+    envelope = namespace_receipt()
+    if envelope["network"] != "loopback" or Path(envelope["fixture"]) != fixture or not state.is_relative_to(Path(envelope["state"])):
+        raise RuntimeError("Wire fixture must run within its private loopback and read-only source envelope.")
+    verify_fixture(fixture, args.fixture_sha256)
+    # All Avibe imports resolve from the verified commit export, not this
+    # recipe's checkout or caller cwd. The clean child has no PYTHONPATH.
+    sys.path.insert(0, str(fixture))
+    from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, SourceRecord
+    from vibe.model_hub_runtime.supervisor import EngineUnavailableError
+
+    spec = importlib.util.spec_from_file_location(
+        "mock_upstream", fixture / "tests/e2e/drivers/mock_llm_upstream.py",
+    )
+    mock_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mock_module)
     # An existing evidence run is preserved, never overwritten.
     state.mkdir(parents=True, exist_ok=False)
-    env = isolated_environment(state)
     store = EngineStateStore(state / "engine-state")
-    store.auth_dir.mkdir(parents=True)
-    with socket.socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
     rows, sources, targets, long_targets = [], [], {}, {}
-    config_path = state / "config.yaml"
-    secrets = RuntimeSecrets(management_key="fake-intent-management", gateway_token=TOKEN)
-
-    def write_sources():
-        store.replace_sources(sources)
-        assert store.list_sources() == sources
-        write_engine_config(
-            config_path, host="127.0.0.1", port=port, auth_dir=store.auth_dir,
-            runtime_secrets=secrets, sources=store.list_sources(), state_store=store,
-        )
-        config = yaml.safe_load(config_path.read_text())
-        for section in ("claude-api-key", "codex-api-key", "openai-compatibility"):
-            for entry in config[section]:
-                for model in entry["models"]:
-                    assert model["name"] == model["alias"]
-                    if entry["prefix"].endswith("-narrow"):
-                        assert model["thinking"] == {"levels": ["high", "low"]}
-                    else:
-                        assert "thinking" not in model
-                    if entry["prefix"].endswith("-empty"):
-                        # Supplementary ENGINE-only empty-object profile. Avibe
-                        # deliberately does not manufacture this registration.
-                        model["thinking"] = {}
-        write_atomic(config_path, yaml.safe_dump(config, sort_keys=False))
+    lifecycle = {}
 
     with ExitStack() as stack:
         mocks = {protocol: stack.enter_context(mock_module.MockLLMUpstream()) for protocol in PROTOCOLS}
@@ -340,29 +437,19 @@ def main():
                 route_model_ids=(long_models[3],), prefix=prefix,
             ))
             long_targets[protocol] = [(f"{prefix}/{model}", model, key) for model in long_models]
-        write_sources()
+        # Seed deterministic test prefixes, then validate the entire projection
+        # through the real adapter/state owner before the initial child launch.
+        store.replace_sources(sources)
         expected_routes = {target[0] for target in targets.values()}
         expected_routes.update(target[0] for values in long_targets.values() for target in values)
         with (state / "engine.log").open("wb") as log:
-            # The parent verify.py starts this entire harness under the sandbox.
-            process = subprocess.Popen(
-                [str(binary), "--config", str(config_path), "--local-model"],
-                cwd=state, env=env, stdout=log, stderr=subprocess.STDOUT,
-            )
+            engine = FrozenEngine(binary, state, store, log)
             try:
-                deadline = time.monotonic() + 20
-                while True:
-                    if process.poll() is not None:
-                        raise RuntimeError(f"test engine exited {process.returncode}")
-                    try:
-                        status, raw = request(f"http://127.0.0.1:{port}/v1/models")
-                        registered = {model["id"] for model in json.loads(raw).get("data", [])}
-                        if status == 200 and expected_routes <= registered:
-                            break
-                    except (URLError, TimeoutError):
-                        pass
-                    assert time.monotonic() < deadline, "fixture registration deadline"
-                    time.sleep(0.1)
+                engine.sync(sources)
+                assert store.list_sources() == sources and not engine.processes
+                initial = engine.supervisor.ensure_running()
+                connection = wait_registered(engine, expected_routes)
+                assert connection == initial
                 for target in PROTOCOLS:
                     for frontend in PROTOCOLS:
                         intents = ["strong", "none", "absent"]
@@ -377,7 +464,7 @@ def main():
                                     for mock in mocks.values():
                                         mock.reset_requests()
                                     body = payload(frontend, route, intent, stream)
-                                    status, response = request(f"http://127.0.0.1:{port}{PATHS[frontend]}", body)
+                                    status, response = request(connection, PATHS[frontend], body)
                                     captured = mocks[target].requests()
                                     assert not any(mock.requests() for protocol, mock in mocks.items() if protocol != target)
                                     assert len(captured) <= 1
@@ -388,7 +475,7 @@ def main():
                                         assert TEXT in json.dumps(outbound["body"], ensure_ascii=False)
                                         values = set(outbound["headers"].values())
                                         assert key in values or f"Bearer {key}" in values
-                                        assert f"Bearer {TOKEN}" not in values
+                                        assert f"Bearer {connection.gateway_token}" not in values
                                         assert b"mock response" in response
                                     row = {
                                         "frontend": frontend, "upstream": target, "profile": profile,
@@ -399,32 +486,73 @@ def main():
                                     rows.append(row)
                                     assert_policy(row)
 
-                integration = integration_consumers(port, targets, long_targets, mocks)
+                integration = integration_consumers(connection, targets, long_targets, mocks, mock_module)
                 (state / "integration.json").write_text(json.dumps(integration, ensure_ascii=False, indent=2))
 
-                # Replace one Source's origin and fake credential through the
-                # real config writer and watcher; route identity stays stable.
+                # Consume the real frozen adapter transaction, barrier, config
+                # writer and supervisor stop/start. No watcher-only contract.
                 replacement_mock = stack.enter_context(mock_module.MockLLMUpstream())
                 replacement_mock.configure(protocol="openai_responses")
                 index = next(i for i, source in enumerate(sources) if source.prefix == "intent-openai-responses-unknown")
                 previous = sources[index]
                 base = replacement_mock.url + "/v1"
                 key = "fake-replaced-source-key"
-                sources[index] = replace(previous, base_url=base, allowed_origins=(replacement_mock.url,),
-                                         credential_ref=store.store_api_key(key, protocol=previous.protocol, base_url=base))
-                write_sources()
+                candidate = replace(previous, base_url=base, allowed_origins=(replacement_mock.url,),
+                                    credential_ref=store.store_api_key(key, protocol=previous.protocol, base_url=base))
+                next_sources = [candidate if i == index else source for i, source in enumerate(sources)]
                 route, model, old_key = targets["openai_responses", "unknown"]
-                deadline = time.monotonic() + 10
-                while not replacement_mock.requests():
-                    status, _ = request(f"http://127.0.0.1:{port}/v1/responses",
-                                        payload("openai_responses", route, "future", False))
-                    assert status == 200
-                    assert time.monotonic() < deadline, "fixture config replacement deadline"
-                    time.sleep(0.1)
+
+                # Focused real consumer: invalid credentials fail validation
+                # before any child is stopped or projection is committed.
+                original_child = engine.processes[-1]
+                invalid = [replace(candidate, credential_ref=previous.credential_ref)
+                           if i == index else source for i, source in enumerate(sources)]
+                try:
+                    engine.sync(invalid)
+                except EngineStateError as exc:
+                    assert "credential does not match" in str(exc)
+                else:
+                    raise AssertionError("source validation was bypassed")
+                assert store.list_sources() == sources
+                assert len(engine.processes) == 1 and original_child.poll() is None
+                lifecycle["invalid_source_no_restart"] = "pass"
+
+                # A genuinely exiting child exercises the product's rollback,
+                # recovery health check, and failure cleanup, not a restart mock.
+                engine.fail_next = True
+                try:
+                    engine.sync(next_sources)
+                except EngineUnavailableError as exc:
+                    assert exc.error_key == "models.engine.health_failed"
+                else:
+                    raise AssertionError("failed replacement did not surface")
+                assert store.list_sources() == sources
+                assert len(engine.processes) == 3
+                assert original_child.poll() is not None and engine.processes[1].poll() == 23
+                connection = wait_registered(engine, expected_routes)
+                assert connection.base_url != initial.base_url
+                for mock in [*mocks.values(), replacement_mock]:
+                    mock.reset_requests()
+                status, _ = request(connection, "/v1/responses", payload("openai_responses", route, "future", False))
+                assert status == 200 and not replacement_mock.requests()
+                captured = mocks["openai_responses"].requests()
+                assert len(captured) == 1 and captured[0]["body"]["model"] == model
+                assert captured[0]["headers"]["authorization"] == f"Bearer {old_key}"
+                lifecycle["failed_replacement_rollback_and_recovery"] = "pass"
+
+                previous_connection, previous_child = connection, engine.processes[-1]
+                engine.sync(next_sources)
+                assert store.list_sources() == next_sources
+                assert len(engine.processes) == 4 and previous_child.poll() is not None
+                assert engine.processes[-1].poll() is None
+                connection = wait_registered(engine, expected_routes)
+                assert connection.base_url != previous_connection.base_url
+                assert store.get_source(previous.source_id).prefix == previous.prefix
+                assert store.get_source(previous.source_id).route_model_ids == previous.route_model_ids
                 for stream in (False, True):
                     for mock in [*mocks.values(), replacement_mock]:
                         mock.reset_requests()
-                    status, _ = request(f"http://127.0.0.1:{port}/v1/responses",
+                    status, _ = request(connection, "/v1/responses",
                                         payload("openai_responses", route, "none", stream))
                     assert status == 200 and not any(mock.requests() for mock in mocks.values())
                     captured = replacement_mock.requests()
@@ -432,7 +560,9 @@ def main():
                     assert captured[0]["body"]["model"] == model
                     assert captured[0]["body"]["reasoning"]["effort"] == "none"
                     assert captured[0]["headers"]["authorization"] == f"Bearer {key}"
-                    assert old_key not in captured[0]["headers"].values()
+                    values = set(captured[0]["headers"].values())
+                    assert not {old_key, f"Bearer {old_key}", f"Bearer {connection.gateway_token}"} & values
+                lifecycle["committed_replacement_stream_and_nonstream"] = "pass"
 
                 # HTTP client cancellation plus immediate reuse of the same
                 # source. Precise upstream context cancellation is also covered
@@ -440,41 +570,59 @@ def main():
                 mock = mocks["anthropic"]
                 mock.configure(stream="pause_after_first_output")
                 route, _, _ = targets["anthropic", "unknown"]
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                connection.request("POST", "/v1/messages",
+                http_connection = http.client.HTTPConnection("127.0.0.1", int(connection.base_url.rsplit(":", 1)[1]), timeout=5)
+                http_connection.request("POST", "/v1/messages",
                                    json.dumps(payload("anthropic", route, "strong", True)).encode(),
-                                   {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
-                response = connection.getresponse()
+                                   {"Authorization": f"Bearer {connection.gateway_token}", "Content-Type": "application/json"})
+                response = http_connection.getresponse()
                 assert response.status == 200
                 while True:
                     line = response.readline()
                     assert line, "stream ended before first output"
                     if b"mock response" in line:
                         break
-                if connection.sock is not None:
-                    connection.sock.shutdown(socket.SHUT_RDWR)
+                if http_connection.sock is not None:
+                    http_connection.sock.shutdown(socket.SHUT_RDWR)
                 response.close()
-                connection.close()
+                http_connection.close()
                 mock.configure(stream="healthy")
-                status, _ = request(f"http://127.0.0.1:{port}/v1/messages",
+                status, _ = request(connection, "/v1/messages",
                                     payload("anthropic", route, "future", False))
                 assert status == 200
+                lifecycle["cancellation_and_reuse"] = "pass"
+
+                # Failed startup with no prior child cannot leave an owned
+                # listener/process behind. Product stop/health failure owns it.
+                engine.supervisor.stop()
+                engine.fail_next = True
+                try:
+                    engine.supervisor.ensure_running()
+                except EngineUnavailableError as exc:
+                    assert exc.error_key == "models.engine.health_failed"
+                else:
+                    raise AssertionError("failed startup did not surface")
+                assert engine.supervisor.client_if_running() is None
+                assert len(engine.processes) == 5 and engine.processes[-1].poll() == 23
+                lifecycle["failed_startup_cleanup"] = "pass"
             finally:
                 (state / "matrix.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2))
-                process.terminate()
                 try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-        assert process.poll() is not None
+                    engine.close()
+                finally:
+                    lifecycle["children"] = [
+                        {**launch, "returncode": process.poll()}
+                        for launch, process in zip(engine.launches, engine.processes)
+                    ]
+                    (state / "lifecycle.json").write_text(json.dumps(lifecycle, indent=2))
     assert len(rows) == 380
     for row in rows:
         if row["stream"]:
             peer = next(item for item in rows if all(item[key] == row[key] for key in ("frontend", "upstream", "profile", "intent")) and not item["stream"])
             assert row["out"] == peer["out"]
+    verify_fixture(fixture, args.fixture_sha256)
     print(json.dumps({"matrix_cases": len(rows), "successful": sum(row["status"] == 200 for row in rows),
                       "replacement": "pass", "cancellation_and_reuse": "pass", "processes_reaped": True,
+                      "lifecycle_regressions": lifecycle,
                       "long_identity_cases": 24, "multi_image_cases": 3,
                       "matrix_file": str(state / "matrix.json"), "integration_file": str(state / "integration.json")}))
 
