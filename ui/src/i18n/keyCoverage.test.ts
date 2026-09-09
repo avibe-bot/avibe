@@ -2,10 +2,10 @@
 // that never reached the bundles renders as the raw key: removing a provider
 // showed `settings.models.sourceDetail.gone` where a sentence belonged.
 //
-// So the guard states the property — every literal key the app asks for has copy
-// in BOTH locales — and EXTRACTS the key list from the components themselves. A
-// key, or a whole new surface added later, is covered without editing this file,
-// which a hand-written list could never promise.
+// So the guard states the property — every key the app can be known to ask for
+// has copy in BOTH locales — and EXTRACTS the key list from the components
+// themselves. A key, or a whole new surface added later, is covered without
+// editing this file, which a hand-written list could never promise.
 //
 // The root is `src/`, so the property belongs to the app rather than to one
 // directory. It was scoped to the Model Hub for exactly as long as it had to be:
@@ -36,14 +36,25 @@
 // listed as keys here, so a second site asking for a list is covered the day it
 // is written.
 //
-// That axis is closed, not merely sampled: the app passes exactly three i18next
-// options at a `t()` call. `count` (90 sites) and `returnObjects` (1 site) are
-// modelled above. `defaultValue` appears at 42 sites and EVERY one names a
-// dynamic key — zero literal keys sit behind one — so it cannot hide a literal
-// this guard would otherwise demand copy for; the two are disjoint by
-// construction rather than by policy. There is no `context` anywhere in `src/`.
-// A fourth option would arrive with its own call sites and its own meaning of
-// "has copy", and belongs here the same way these do.
+// That axis is closed by a MODEL rather than by a list of options, which is what
+// it finally became: one question — how much copy does this call DEMAND — with
+// three answers. `exact`, the options were a readable object literal, so `count`
+// and `returnObjects` say precisely which shape the call consumes. `any`, the
+// options arrived as an identifier, a conditional, or a spread (6 sites), so
+// nothing can be claimed about the shape and the honest demand is that the name
+// resolve at all. `none`, the call carries its own `defaultValue`, so it renders
+// that when the bundles have nothing and can never show a raw key.
+//
+// An earlier round called `defaultValue` disjoint from literal keys "by
+// construction": all 42 sites named a dynamic key, so none could hide a literal.
+// Expanding templates (below) broke that — 18 of those sites now name a key this
+// file knows, 7 distinct — and the disjointness was never the point. A demand of
+// `none` narrows what EXISTENCE asks and narrows nothing else: the name still
+// enters the candidate pool, so copy kept in one locale and dropped from the
+// other is still a PARITY gap, still one locale rendering an English fallback
+// beside a translated surface. There is no `context` anywhere in `src/`. A
+// fourth option would arrive with its own meaning of "has copy" and belongs in
+// this question the same way these three do.
 //
 // Reading the tree is also what lets the sweep follow the app's second way of
 // naming a key: an `i18nKey`, which `<Trans>` takes as a prop when the copy wraps
@@ -52,14 +63,35 @@
 // Neither site reliably hands over a bare literal, though, so what is taken from
 // one is the SET of values it can be statically KNOWN to name: both branches of a
 // ternary, either side of a `??` fallback, through any number of wrappers that
-// preserve the value, with every dynamic leaf staying invisible by design.
-// Recognising shapes one at a time instead is what left `remoteAccess.flowStep1`
-// and the 94 keys named through a conditional or a fallback deletable while this
-// guard was green.
+// preserve the value, and — because the sweep runs against a TYPED program — the
+// product of a template whose substitutions each have a finite string-literal
+// type. A leaf the compiler cannot narrow that far stays invisible. Recognising
+// shapes one at a time instead is what left `remoteAccess.flowStep1` and the 94
+// keys named through a conditional or a fallback deletable while this guard was
+// green.
 //
-// That is total over statically-known EXPRESSIONS, and it is only half of what
-// this file needs, because it says nothing about the POSITIONS a key is written
-// in. Calling the class closed on the expression axis alone is what let the next
+// That template case is the round a reviewer proved with a deletion: `App.tsx`
+// writes t(`remoteAuthorization.${state}.title`), and `state` is a four-member
+// union, so four real keys were nameable only there and deletable in silence.
+// Reading the parts cannot answer it — TypeScript types the whole expression as
+// plain `string` — so the sweep asks the CHECKER what each substitution can be
+// and expands only when every member of that type is a string literal. 113 of
+// the app's 164 template sites answer; 51 stay genuinely dynamic. The cost is a
+// `ts.Program` over `src/`: 513 root files, ~1.5s, pinned here so a later
+// blow-up to ten seconds is noticed rather than absorbed.
+//
+// A union is an UPPER BOUND on what reaches a call site, though, never the exact
+// set. Two spans of one template can be correlated by dataflow that expanding
+// each span independently cannot see, and a runtime guard can narrow a value in
+// ways the compiler does not track. So expansion also names a few combinations
+// the app can never ask for — six today — and those are classified in the
+// residue pin below, exactly like a Monaco token or a storage key. That is what
+// an upper bound costs, and it fails in the safe direction: a name too many gets
+// classified by hand, a name too few goes unnoticed forever.
+//
+// All of that is the EXPRESSION axis, and it is only half of what this file
+// needs, because it says nothing about the POSITIONS a key is written in.
+// Calling the class closed on the expression axis alone is what let an earlier
 // round land: `steps/TelegramConfig.tsx` hands `shared/ProxyUrlField` a literal
 // `labelKey`, `lib/agentGraph.ts` keeps a whole table of them, and 75 keys reach
 // `t()` only that way, through eighteen differently-named props. Adding those
@@ -67,13 +99,20 @@
 //
 // So this file states THREE properties, and only the first needs positions.
 //
-//   EXISTENCE — every key named literally at a `t()` or an `i18nKey` position has
-//   copy in both locales. Position-bound of necessity: to demand that a key
-//   exist, something has to know it is a key.
+//   EXISTENCE — every key a `t()` or an `i18nKey` position can be KNOWN to name,
+//   written as a literal or assembled by a template the checker can expand, has
+//   the copy that call demands in both locales. Position-bound of necessity: to
+//   demand that a key exist, something has to know it is a key. It asks nothing
+//   of a name NO locale resolves, because nothing at a call site can tell a key
+//   deleted from both bundles apart from a name that was never a key — that is
+//   RESIDUE's question, so the two partition rather than overlap, and such a
+//   name still fails one property over, as an unclassified newcomer in the pin.
 //
-//   PARITY — every dotted string literal anywhere in `src/` that resolves in
-//   EITHER locale resolves in BOTH. No positions, no prop names, no dataflow: a
-//   literal becomes a candidate because of how it READS, and the bundles decide
+//   PARITY — every name the app can ask for — every dotted string literal
+//   anywhere in `src/`, plus every key expanded out of a template — that
+//   resolves in EITHER locale resolves in BOTH. No positions, no prop names, no
+//   dataflow beyond that expansion: a name becomes a candidate because of how it
+//   READS or how it was assembled, and the bundles decide
 //   whether it is a key. `labelKey="telegramConfig.proxyUrl"` is covered not
 //   because this file learned the name `labelKey` but because that string is in
 //   the bundles — so a prop, a data table, or a carrier nobody has invented yet
@@ -82,17 +121,19 @@
 //   family kept in one locale and dropped from the other is a gap here rather
 //   than a stem that quietly falls out.
 //
-// What PARITY cannot do is find a key missing from BOTH locales: a literal absent
+// What PARITY cannot do is find a key missing from BOTH locales: a name absent
 // from both is indistinguishable from a Monaco theme token, an event-channel
-// name, or a storage key, and 61 of those sit in `src/` today. EXISTENCE covers
-// that case only where it can see a position, which a carrier-only key does not
-// have — delete `telegramConfig.proxyUrl` from both bundles and neither property
-// notices, while `ProxyUrlField` renders the raw key.
+// name, or a storage key, and 67 of those sit in `src/` today. EXISTENCE cannot
+// cover that case either, for the same reason and by the same deliberate
+// deferral — delete `telegramConfig.proxyUrl` from both bundles and neither
+// property notices, while `ProxyUrlField` renders the raw key.
 //
-//   RESIDUE — the literals that resolve in NEITHER locale are pinned, by exact
-//   set equality, to the classified list below. Not a count: a count lets one
-//   literal leave as another enters. A key deleted from both bundles joins that
-//   set, the set stops matching, and the suite fails.
+//   RESIDUE — the names that resolve in NEITHER locale are pinned, by exact set
+//   equality, to the classified list below. Not a count: a count lets one name
+//   leave as another enters. A key deleted from both bundles joins that set, the
+//   set stops matching, and the suite fails. This is the only property that can
+//   catch that, which is why the other two hand it the case rather than each
+//   guessing at it.
 //
 // The pin is an enumeration, which is what the three rounds above kept getting
 // wrong — but it enumerates the RESIDUE, not the positions, and that inverts the
@@ -102,8 +143,18 @@
 // known lint violations for the same reason.
 //
 // So the cost of the pin is a line whenever a genuinely new non-key dotted
-// literal appears, and the thing it buys is that no key can leave the bundles
-// unnoticed, whatever position it was written in.
+// literal appears, and what it buys is exactly this, no more: no LITERAL-NAMED
+// key, and no key assembled by a template whose substitutions are a finite
+// string-literal union, can leave the bundles unnoticed — whatever position it
+// was written in.
+//
+// Not more than that, and the residual is worth stating precisely rather than
+// rounding away. 51 template sites stay genuinely dynamic, so the keys only they
+// name remain invisible here. And 852 of the bundles' 4264 leaves are reached by
+// no name in `src/` at all: pinning THOSE would be a maintenance contract over
+// copy that churns with every feature, not over 67 stable non-keys, so it is a
+// separate decision rather than something this change makes on the way past —
+// tracked in #1968.
 //
 // All three ask about COPY rather than about a key existing, and that is the last
 // thing worth saying here. Asking whether a key EXISTS is a weaker question that
@@ -159,11 +210,31 @@ import zh from './zh.json';
 const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MODEL_HUB = join('components', 'settings', 'models');
 
-/** A call site: the key it names, and the options that change what copy it needs. */
-type Reference = { key: string; counted: boolean; listed: boolean };
+/**
+ * A call site: the key it names, and how much copy the call demands of it.
+ *
+ * `demand` is the options axis asked as ONE question rather than as a list of
+ * options, so it stays total over that axis:
+ *
+ *   exact — the options were readable, so the shape the call consumes is known
+ *   exactly, and `counted` and `listed` say what it is.
+ *   any — the options could not be read: an identifier, a conditional, or an
+ *   object hiding a spread. Weaker than `counted` and `listed` both being
+ *   false, which is a claim about what the call passes.
+ *   none — the call carries its own `defaultValue`, so it renders that when the
+ *   bundles have nothing and can never show a raw key.
+ *
+ * A name still has to agree across locales under every demand, including
+ * `none`: copy kept in one locale and dropped from the other leaves the other
+ * rendering an English fallback. So `demand` narrows what EXISTENCE asks, never
+ * whether PARITY and RESIDUE see the name.
+ */
+type Demand = 'exact' | 'any' | 'none';
+type Reference = { key: string; counted: boolean; listed: boolean; demand: Demand };
 
 /** How a reference reads in a failure report: the key, and how it was called. */
 const label = (reference: Reference): string => {
+  if (reference.demand === 'any') return `${reference.key} (opaque options)`;
   const called = [reference.counted ? 'count' : '', reference.listed ? 'returnObjects' : ''].filter(Boolean);
   return called.length > 0 ? `${reference.key} (${called.join(', ')})` : reference.key;
 };
@@ -177,6 +248,22 @@ const passesOption = (options: ts.Expression | undefined, name: string): boolean
   && ts.isObjectLiteralExpression(options)
   && options.properties.some((property) => nameOf(property.name) === name);
 
+/**
+ * How much copy the call DEMANDS of its key — the options axis as one question.
+ *
+ * A spread or a computed name inside the object is as unreadable as an
+ * identifier standing where the object should be: `{ ...options }` may carry
+ * `count`, so claiming the call passes none of it would demand a bare key of a
+ * plural family. `defaultValue` is decided first because seeing it is enough —
+ * whatever else the object hides, that call renders its own fallback.
+ */
+const demandOf = (options: ts.Expression | undefined): Demand => {
+  if (options === undefined) return 'exact';
+  if (!ts.isObjectLiteralExpression(options)) return 'any';
+  if (passesOption(options, 'defaultValue')) return 'none';
+  return options.properties.every((property) => nameOf(property.name) !== undefined) ? 'exact' : 'any';
+};
+
 /** The operators that pick one of their operands, so both can name a key. */
 const CHOICE_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.AmpersandAmpersandToken,
@@ -185,27 +272,55 @@ const CHOICE_OPERATORS = new Set<ts.SyntaxKind>([
 ]);
 
 /**
+ * The strings a TYPE can be known to be — finite, or nothing at all.
+ *
+ * A union answers only if every member is a string literal: one `string` member
+ * makes the whole set open, and an open set is not something this file may
+ * expand. `undefined` therefore means "unknowable", never "empty".
+ */
+const literalTypes = (type: ts.Type): string[] | undefined => {
+  const parts = type.isUnion() ? type.types : [type];
+  const strings: string[] = [];
+  for (const part of parts) {
+    if (!part.isStringLiteral()) return undefined;
+    strings.push(part.value);
+  }
+  return strings.length > 0 ? strings : undefined;
+};
+
+/**
  * Every key an expression can be statically KNOWN to name — the one thing this
  * file asks of a key expression, and the whole of its boundary.
  *
  * A key argument is often not a bare literal. It is a ternary picking a title
  * (`t(adding ? '…addTitle' : '…editTitle')`), a `??` naming the fallback
- * (`t(item?.labelKey ?? 'nav.settings')`), or either wrapped in something that
- * does not change the value. So an expression yields a SET: a choice
- * contributes every branch, a wrapper is transparent, and a literal is itself.
+ * (`t(item?.labelKey ?? 'nav.settings')`), a template assembling a family
+ * member (`` t(`remoteAuthorization.${state}.title`) ``), or any of those
+ * wrapped in something that does not change the value. So an expression yields
+ * a SET: a choice contributes every branch, a wrapper is transparent, a
+ * template contributes every string its substitutions can produce, and a
+ * literal is itself.
  *
- * Every other leaf yields nothing and stays invisible by design — a variable, a
- * property, a call result, an index into a lookup table, or a template with a
- * substitution. Those are the app's dynamic keys, which is also where its
- * `defaultValue` fallbacks live; this guard cannot know what they resolve to and
- * does not guess. A choice with one dynamic branch still protects the branch it
- * can read, rather than giving up on the whole call.
+ * A substitution is read from the TYPE when a checker is available, which is
+ * the only thing here that needs one. `state: 'revoked' | 'unavailable'` is a
+ * finite set of strings, so the template names a finite set of keys, and
+ * knowing that costs a `ts.Program`. Nothing else in this file does — the
+ * syntax tree answers every other shape, and a template of literals
+ * (`` `${adding ? 'add' : 'edit'}.title` ``) expands with no checker at all.
  *
- * Being total over the static forms rather than a list of recognised ones is the
- * point: a shape nobody enumerated was a key this guard silently stopped
+ * Every remaining leaf yields nothing and stays invisible by design — a
+ * variable, property, or call result whose type is `string`, and an index into
+ * a lookup table. Those are the app's genuinely dynamic keys, which is also
+ * where its `defaultValue` fallbacks live; this guard cannot know what they
+ * resolve to and does not guess. A choice or a template with one unknowable
+ * part still protects the parts it can read, rather than giving up on the whole
+ * call.
+ *
+ * Being total over the knowable forms rather than a list of recognised ones is
+ * the point: a shape nobody enumerated was a key this guard silently stopped
  * protecting, and shapes were exactly what kept getting missed.
  */
-const staticKeys = (node: ts.Expression | undefined): string[] => {
+const staticKeys = (node: ts.Expression | undefined, checker?: ts.TypeChecker): string[] => {
   if (node === undefined) return [];
   if (ts.isStringLiteralLike(node)) return [node.text];
   // Wrappers that preserve the value: `('k')`, `'k' as const`, `'k' satisfies T`,
@@ -217,24 +332,59 @@ const staticKeys = (node: ts.Expression | undefined): string[] => {
     || ts.isTypeAssertionExpression(node)
     || ts.isNonNullExpression(node)
   ) {
-    return staticKeys(node.expression);
+    return staticKeys(node.expression, checker);
   }
-  if (ts.isConditionalExpression(node)) return [...staticKeys(node.whenTrue), ...staticKeys(node.whenFalse)];
+  if (ts.isConditionalExpression(node)) {
+    return [...staticKeys(node.whenTrue, checker), ...staticKeys(node.whenFalse, checker)];
+  }
   if (ts.isBinaryExpression(node) && CHOICE_OPERATORS.has(node.operatorToken.kind)) {
-    return [...staticKeys(node.left), ...staticKeys(node.right)];
+    return [...staticKeys(node.left, checker), ...staticKeys(node.right, checker)];
+  }
+  if (ts.isTemplateExpression(node)) {
+    // The product of the parts, in order. TypeScript itself types this
+    // expression as plain `string` outside a const context, so the spans are
+    // expanded here rather than asked of the whole template.
+    let assembled = [node.head.text];
+    for (const span of node.templateSpans) {
+      const parts = staticKeys(span.expression, checker);
+      if (parts.length === 0) return [];
+      assembled = assembled.flatMap((prefix) => parts.map((part) => `${prefix}${part}${span.literal.text}`));
+    }
+    return assembled;
+  }
+  if (checker !== undefined) {
+    const known = literalTypes(checker.getTypeAtLocation(node));
+    if (known !== undefined) return known;
   }
   return [];
 };
 
-/** `t(…)`, whose options say whether the call selects a plural. */
-const translationCall = (node: ts.Node): Reference[] => {
+/**
+ * `t(…)`, whose options say what copy the call needs.
+ *
+ * The options argument is READABLE when it is an object literal whose every
+ * property NAMES itself: then every option the call passes is written there, so
+ * the demand is exact. `count` selects a
+ * plural family, `returnObjects` says the caller maps a list, and
+ * `defaultValue` says the call renders its own fallback, which demands no copy
+ * at all. That is the whole options axis the app uses; there is no `context`
+ * in `src/`.
+ *
+ * Anything else — an identifier, a conditional, an object hiding a spread —
+ * demands `any`: not "no options", which is what this file used to read it as,
+ * but "unknown options". Those are different claims, and conflating them made
+ * `` t(`settings.models.shell.${key}`, allDirect ? { count } : undefined) ``
+ * look like an uncounted call against a plural-only family.
+ */
+const translationCall = (node: ts.Node, checker?: ts.TypeChecker): Reference[] => {
   if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression) || node.expression.text !== 't') {
     return [];
   }
   const [key, options] = node.arguments;
+  const demand = demandOf(options);
   const counted = passesOption(options, 'count');
   const listed = passesOption(options, 'returnObjects');
-  return staticKeys(key).map((found) => ({ key: found, counted, listed }));
+  return staticKeys(key, checker).map((found) => ({ key: found, counted, listed, demand }));
 };
 
 /**
@@ -250,16 +400,18 @@ const translationCall = (node: ts.Node): Reference[] => {
  * and so is not one of these; a value that is there but dynamic yields nothing,
  * exactly as it does at a `t()` call.
  */
-const i18nKeyReference = (node: ts.Node): Reference[] => {
+const i18nKeyReference = (node: ts.Node, checker?: ts.TypeChecker): Reference[] => {
   if (ts.isJsxAttribute(node) && nameOf(node.name) === 'i18nKey') {
     const value = node.initializer;
     const counted = ts.isJsxAttributes(node.parent)
       && node.parent.properties.some((property) => ts.isJsxAttribute(property) && nameOf(property.name) === 'count');
-    const keys = value !== undefined && ts.isJsxExpression(value) ? staticKeys(value.expression) : staticKeys(value);
-    return keys.map((found) => ({ key: found, counted, listed: false }));
+    const keys = value !== undefined && ts.isJsxExpression(value)
+      ? staticKeys(value.expression, checker)
+      : staticKeys(value, checker);
+    return keys.map((found) => ({ key: found, counted, listed: false, demand: 'exact' }));
   }
   if (ts.isPropertyAssignment(node) && nameOf(node.name) === 'i18nKey') {
-    return staticKeys(node.initializer).map((found) => ({ key: found, counted: false, listed: false }));
+    return staticKeys(node.initializer, checker).map((found) => ({ key: found, counted: false, listed: false, demand: 'exact' }));
   }
   return [];
 };
@@ -275,30 +427,27 @@ const i18nKeyReference = (node: ts.Node): Reference[] => {
  * contract declares are covered by the models page's own
  * `contractLocaleKeys.test.ts`.
  *
- * `counted` is what the call can be SEEN to pass — a `count` property, written
- * long or shorthand. An options object that hides one behind a spread reads as
- * uncounted and is probed without one, which against a plural-only key fails
- * this guard rather than passing it. A bare `t(…)` that is not i18next at all
- * would likewise be asked for copy it does not need. Both residuals stay a loud
- * failure someone looks at, never a raw key shipped past a green CI.
+ * `counted` and `listed` are what the call can be SEEN to pass, and they mean
+ * something only under a demand of `exact`; anything unreadable answers `any`
+ * instead of claiming the call passes nothing. What stays a residual is a bare
+ * `t(…)` that is not i18next at all: it would be asked for copy it does not
+ * need, and that is a loud failure someone looks at, never a raw key shipped
+ * past a green CI.
  *
  * A key's namespace is not part of this: every `useTranslation()` in the app
  * takes the default one, so a key resolves against `translation` exactly as the
  * probes below resolve it.
+ *
+ * The checker is optional because only one shape needs it — a template whose
+ * substitution is a typed variable. Without one the sweep is narrower, never
+ * wrong.
  */
-export const collectReferences = (source: string, fileName = 'fixture.tsx'): Reference[] => {
-  const file = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+const referencesIn = (file: ts.SourceFile, checker?: ts.TypeChecker): Reference[] => {
   const found = new Map<string, Reference>();
   const visit = (node: ts.Node) => {
     // Keyed by the shape too, because one key named by a counted and by an
     // uncounted call site needs both kinds of copy to be there.
-    for (const reference of [...translationCall(node), ...i18nKeyReference(node)]) {
+    for (const reference of [...translationCall(node, checker), ...i18nKeyReference(node, checker)]) {
       found.set(label(reference), reference);
     }
     ts.forEachChild(node, visit);
@@ -306,6 +455,17 @@ export const collectReferences = (source: string, fileName = 'fixture.tsx'): Ref
   visit(file);
   return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
 };
+
+export const collectReferences = (source: string, fileName = 'fixture.tsx'): Reference[] =>
+  referencesIn(
+    ts.createSourceFile(
+      fileName,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    ),
+  );
 
 /** A string that READS like a key: dotted segments, nothing else assumed. */
 const DOTTED = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
@@ -353,10 +513,50 @@ const sourceFiles = (dir: string): string[] =>
     return [path];
   });
 
+/**
+ * The whole app as one typed program, which is what makes a template key
+ * knowable.
+ *
+ * Built from an explicit walk of `src/` rather than from a tsconfig, because
+ * `tsconfig.app.json` does not include `App.tsx` — and `App.tsx` is where
+ * `` t(`remoteAuthorization.${state}.title`) `` is written. A program that
+ * silently omitted it would expand nothing there and stay green, which is the
+ * failure this whole file exists to refuse.
+ *
+ * The options are the app's, inline: a tsconfig that stops covering a file is
+ * exactly the input this must not depend on. `paths` matters because a source
+ * file imports `@/…`, and an unresolved import types its values as `any`, which
+ * is not a finite union and so expands to nothing.
+ *
+ * Cost, measured: ~2s over 513 files, once for the suite. That is the price of
+ * the type checker and it is pinned here so a later blow-up — a 10s program —
+ * is noticed as a regression rather than absorbed.
+ */
+const typedApp = (files: string[]): ts.Program =>
+  ts.createProgram(files, {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    jsx: ts.JsxEmit.ReactJSX,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    esModuleInterop: true,
+    resolveJsonModule: true,
+    baseUrl: resolve(APP_SOURCE, '..'),
+    paths: { '@/*': ['src/*'] },
+  });
+
 const referencedCallSites = (): Reference[] => {
+  const files = sourceFiles(APP_SOURCE);
+  const program = typedApp(files);
+  const checker = program.getTypeChecker();
   const found = new Map<string, Reference>();
-  for (const file of sourceFiles(APP_SOURCE)) {
-    for (const reference of collectReferences(readFileSync(file, 'utf8'), file)) {
+  for (const file of files) {
+    const source = program.getSourceFile(file);
+    // A file the program could not load would silently contribute no keys.
+    expect(source, `${relative(APP_SOURCE, file)} is missing from the program`).toBeDefined();
+    for (const reference of referencesIn(source as ts.SourceFile, checker)) {
       found.set(label(reference), reference);
     }
   }
@@ -411,7 +611,7 @@ const computeRepresentativeCounts = (lng: string): number[] => {
   return [...reached.values()];
 };
 
-/** Every options object the call site can reach, and so must have copy for. */
+/** Every options object a readable call site can reach, and so must have copy for. */
 const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
   (reference.counted ? representativeCounts(lng).map((count) => ({ count })) : [{}]);
 
@@ -566,6 +766,27 @@ const NON_KEY_LITERALS = [
   // true of this guard. Deleting product code is out of scope for this PR.
   'workbench.createDialog.kindTask',
   'workbench.createDialog.kindWatch',
+
+  // Combinations a template's types allow and the app cannot reach. A union is
+  // an upper bound on what arrives at a call site, never the exact set, so
+  // expanding one names keys alongside the real ones — and the two are told
+  // apart the same way every other name here is: by the bundles. These have
+  // copy in neither locale because nothing ever asks for them.
+  //
+  // `OAuthConnectDialog` picks the prefix and the leaf from the SAME condition
+  // (`disabled ? 'opt' : 'badge'` beside `badgeKey = disabled ? 'added' : …`),
+  // so only 4 of the 8 products exist; the other 4 are these. Correlation
+  // between spans is real dataflow, and no expansion of independent parts can
+  // see it.
+  'settings.models.addSub.badge.added',
+  'settings.models.addSub.opt.recommended',
+  'settings.models.addSub.opt.secondary',
+  'settings.models.addSub.opt.supportedNotRecommended',
+  // `ShowPageSharingSettings` renders this behind
+  // `['conflict', 'invalid', 'error'].includes(gate)`, which narrows nothing
+  // for the compiler, so the other two members of `Gate` expand too.
+  'chat.showPage.sharingErrors.ready',
+  'chat.showPage.sharingErrors.share_id_taken',
 ];
 
 /** Every dotted literal the app carries, wherever it sits, sorted. */
@@ -576,6 +797,20 @@ const appDottedLiterals = (): string[] => {
   }
   return [...literals].sort((a, b) => a.localeCompare(b));
 };
+
+/**
+ * Every name the app can ask a bundle for: the dotted literals it writes, plus
+ * the keys its call sites are known to name.
+ *
+ * Those two nearly coincide, and the difference is the whole point — a key no
+ * literal spells. `remoteAuthorization.revoked.title` is assembled from a
+ * template, so it appears nowhere in `src/` as a string, and deleting it from
+ * BOTH locales was invisible to every property in this file until the
+ * expansion above put the assembled name into this pool.
+ */
+const appCandidateKeys = (referenced: Reference[]): string[] =>
+  [...new Set([...appDottedLiterals(), ...referenced.map((reference) => reference.key)])]
+    .sort((a, b) => a.localeCompare(b));
 
 /** The literals no locale resolves, sorted for comparison against the pin. */
 export const residueOf = (
@@ -636,10 +871,29 @@ const consumable = (value: unknown, reference: Reference): boolean =>
       && value.every((entry) => rendersAsCopy(entry, reference.key))
     : rendersAsCopy(value, reference.key);
 
+/**
+ * What a locale owes a call site, which is exactly what the call demands.
+ *
+ * An `exact` call names its own shape, so every option set it can reach has to
+ * come back consumable. An `any` call names none of it: the options could hide
+ * a `count`, a `returnObjects`, or a `defaultValue`, and picking one shape
+ * would be inventing a fact. So it is asked the same question a bare literal is
+ * asked — does this name have copy under it — the weakest demand that still
+ * fails when copy is deleted, and one this file already has a predicate for
+ * rather than a third notion. A `none` call renders its own fallback and is
+ * filtered out before this, since there is no copy it can fail to find.
+ *
+ * The residual is stated rather than hidden: an opaque options object that
+ * hides a `defaultValue` would be asked for copy the call does not need. That
+ * is a loud failure someone reads, never a raw key shipped past a green CI, and
+ * of the 6 opaque sites in `src/` today none is one.
+ */
 const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean =>
-  probes(lng, reference).some(
-    (options) => !consumable(instance.t(reference.key, { ...options, returnObjects: true }), reference),
-  );
+  (reference.demand === 'any'
+    ? !resolvesIn(instance, lng, reference.key)
+    : probes(lng, reference).some(
+      (options) => !consumable(instance.t(reference.key, { ...options, returnObjects: true }), reference),
+    ));
 
 describe('app i18n key coverage', () => {
   const referenced = referencedCallSites();
@@ -649,8 +903,9 @@ describe('app i18n key coverage', () => {
     // silently stops matching reports coverage it never had. So this pins the
     // whole boundary rather than a sample of it — every static form the collector
     // must see through, every dynamic leaf it must decline, the two places a key
-    // is named, and `count`, whose loss would quietly stop asking for plural
-    // copy. A form added to `staticKeys` later fails here until it is stated.
+    // is named, all three demands, and `count`, whose loss would quietly stop
+    // asking for plural copy. A form added to `staticKeys` later, or an options
+    // shape read differently, fails here until it is stated.
     const fixture = `
       const label = t('fixture.literal');
       const quoted = t("fixture.double");
@@ -661,8 +916,24 @@ describe('app i18n key coverage', () => {
       const shorthand = t('fixture.shorthand', { count });
       const alongside = t('fixture.alongside', { count: total, name: 'x' });
       const interpolated = t('fixture.interpolated', { name: 'x' });
-      const spread = t('fixture.spread', { ...options });
       const nested = t('fixture.outer', { hint: t('fixture.inner', { count: 3 }) });
+
+      // How much copy the call DEMANDS. Options nobody can read are unknown, not
+      // absent — an object hiding a spread or a computed name included, since
+      // either may be the \`count\` that picks a plural family. A call carrying its
+      // own fallback demands nothing, and is still a name the bundles must agree
+      // on, so it is collected rather than dropped.
+      const spread = t('fixture.spread', { ...options });
+      const computedOption = t('fixture.computed', { [dynamicOption]: 2 });
+      const carriedOptions = t('fixture.carried', options);
+      const chosenOptions = t('fixture.chosen', many ? { count } : undefined);
+      const defaulted = t('fixture.defaulted', { defaultValue: 'Background work' });
+      const defaultedHiding = t('fixture.defaultedSpread', { defaultValue: 'x', ...options });
+
+      // A template is the product of its parts, and needs no checker when every
+      // part is written out.
+      const assembled = t(\`fixture.\${'left'}.\${'tail'}\`);
+      const branched = t(\`fixture.\${adding ? 'on' : 'off'}.label\`, { count: total });
 
       // Choices: every branch can be the key that renders.
       const ternary = t(adding ? 'fixture.yes' : 'fixture.no');
@@ -701,37 +972,45 @@ describe('app i18n key coverage', () => {
       void t(\`fixture.\${dynamic}\`);
     `;
     expect(collectReferences(fixture)).toEqual([
-      { key: 'fixture.a', counted: false, listed: false },
-      { key: 'fixture.alongside', counted: true, listed: false },
-      { key: 'fixture.andThen', counted: false, listed: false },
-      { key: 'fixture.asserted', counted: false, listed: false },
-      { key: 'fixture.b', counted: false, listed: false },
-      { key: 'fixture.bang', counted: false, listed: false },
-      { key: 'fixture.braced', counted: false, listed: false },
-      { key: 'fixture.c', counted: false, listed: false },
-      { key: 'fixture.double', counted: false, listed: false },
-      { key: 'fixture.fallback', counted: false, listed: false },
-      { key: 'fixture.inner', counted: true, listed: false },
-      { key: 'fixture.interpolated', counted: false, listed: false },
-      { key: 'fixture.knownBranch', counted: false, listed: false },
-      { key: 'fixture.literal', counted: false, listed: false },
-      { key: 'fixture.no', counted: false, listed: false },
-      { key: 'fixture.oneWay', counted: true, listed: false },
-      { key: 'fixture.orElse', counted: false, listed: false },
-      { key: 'fixture.otherWay', counted: true, listed: false },
-      { key: 'fixture.outer', counted: false, listed: false },
-      { key: 'fixture.paren', counted: false, listed: false },
-      { key: 'fixture.shorthand', counted: true, listed: false },
-      { key: 'fixture.spread', counted: false, listed: false },
-      { key: 'fixture.table', counted: false, listed: false },
-      { key: 'fixture.tableNo', counted: false, listed: false },
-      { key: 'fixture.tableYes', counted: false, listed: false },
-      { key: 'fixture.trans', counted: false, listed: false },
-      { key: 'fixture.transCount', counted: true, listed: false },
-      { key: 'fixture.transNo', counted: false, listed: false },
-      { key: 'fixture.transYes', counted: false, listed: false },
-      { key: 'fixture.wrapped', counted: true, listed: false },
-      { key: 'fixture.yes', counted: false, listed: false },
+      { key: 'fixture.a', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.alongside', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.andThen', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.asserted', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.b', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.bang', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.braced', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.c', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.carried', counted: false, listed: false, demand: 'any' },
+      { key: 'fixture.chosen', counted: false, listed: false, demand: 'any' },
+      { key: 'fixture.computed', counted: false, listed: false, demand: 'any' },
+      { key: 'fixture.defaulted', counted: false, listed: false, demand: 'none' },
+      { key: 'fixture.defaultedSpread', counted: false, listed: false, demand: 'none' },
+      { key: 'fixture.double', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.fallback', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.inner', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.interpolated', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.knownBranch', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.left.tail', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.literal', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.no', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.off.label', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.on.label', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.oneWay', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.orElse', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.otherWay', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.outer', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.paren', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.shorthand', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.spread', counted: false, listed: false, demand: 'any' },
+      { key: 'fixture.table', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.tableNo', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.tableYes', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.trans', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.transCount', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.transNo', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.transYes', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.wrapped', counted: true, listed: false, demand: 'exact' },
+      { key: 'fixture.yes', counted: false, listed: false, demand: 'exact' },
     ]);
   });
 
@@ -745,24 +1024,49 @@ describe('app i18n key coverage', () => {
     expect(files.some((file) => file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     expect(files.some((file) => !file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     // The raw key that opened the lane, on the source remove flow.
-    expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false, listed: false, demand: 'exact' });
     // The `<Trans>` prop carrying the Avibe Cloud link.
-    expect(referenced).toContainEqual({ key: 'remoteAccess.flowStep1', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'remoteAccess.flowStep1', counted: false, listed: false, demand: 'exact' });
     // Both branches of the permissions dialog title, and the inner branch of its
     // nested conflict ternary.
-    expect(referenced).toContainEqual({ key: 'permissions.access.addTitle', counted: false, listed: false });
-    expect(referenced).toContainEqual({ key: 'permissions.access.editTitle', counted: false, listed: false });
-    expect(referenced).toContainEqual({ key: 'permissions.states.pairingChangedBody', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'permissions.access.addTitle', counted: false, listed: false, demand: 'exact' });
+    expect(referenced).toContainEqual({ key: 'permissions.access.editTitle', counted: false, listed: false, demand: 'exact' });
+    expect(referenced).toContainEqual({ key: 'permissions.states.pairingChangedBody', counted: false, listed: false, demand: 'exact' });
     // The `??` fallbacks: the settings breadcrumb and the OAuth success toast.
-    expect(referenced).toContainEqual({ key: 'nav.settings', counted: false, listed: false });
-    expect(referenced).toContainEqual({ key: 'settings.models.oauth.status.success', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'nav.settings', counted: false, listed: false, demand: 'exact' });
+    expect(referenced).toContainEqual({ key: 'settings.models.oauth.status.success', counted: false, listed: false, demand: 'exact' });
     // A counted site, which needs copy no bare probe asks for.
     expect(referenced.some((reference) => reference.counted)).toBe(true);
+    // A key no literal in `src/` spells, assembled from a template whose
+    // substitution the type checker pins to a finite set of strings. `App.tsx`
+    // writes `` t(`remoteAuthorization.${state}.title`) `` and nothing else
+    // names these; before the program above, deleting them was invisible here.
+    expect(referenced.map((reference) => reference.key)).toEqual(
+      expect.arrayContaining([
+        'remoteAuthorization.revoked.title',
+        'remoteAuthorization.revoked.body',
+        'remoteAuthorization.unavailable.title',
+        'remoteAuthorization.unavailable.body',
+      ]),
+    );
   });
+
+  // A key NO locale resolves is not an existence gap: nothing here can tell it
+  // apart from a name the bundles never had, which is RESIDUE's question and
+  // where it gets classified by hand. So the properties partition rather than
+  // overlap, and a key deleted from BOTH locales still fails — as an
+  // unclassified newcomer in the pin, naming itself just as loudly.
+  const unresolvedEverywhere = new Set(residueOf(referenced.map((reference) => reference.key), BUNDLES));
 
   it.each(BUNDLES)('translates every referenced call site in $lng', ({ lng, bundle }) => {
     const instance = localeInstance(lng, bundle);
-    expect(referenced.filter((reference) => missingCopy(instance, lng, reference)).map(label)).toEqual([]);
+    expect(
+      referenced
+        .filter((reference) => reference.demand !== 'none')
+        .filter((reference) => !unresolvedEverywhere.has(reference.key))
+        .filter((reference) => missingCopy(instance, lng, reference))
+        .map(label),
+    ).toEqual([]);
   });
 
   it('reports a NAME as having copy under it when any leaf under it renders', () => {
@@ -795,8 +1099,8 @@ describe('app i18n key coverage', () => {
     // — `count` selects which copy, `returnObjects` selects the container, and no
     // third option in `src/` changes either. A value shape added to this table
     // must be classified; one omitted fails to compile the row it belongs in.
-    const plain = { key: 'k', counted: false, listed: false };
-    const listed = { key: 'k', counted: false, listed: true };
+    const plain: Reference = { key: 'k', counted: false, listed: false, demand: 'exact' };
+    const listed: Reference = { key: 'k', counted: false, listed: true, demand: 'exact' };
 
     const table: Array<{ value: unknown; plain: boolean; listed: boolean; why: string }> = [
       { value: 'Copy', plain: true, listed: false, why: 'a string is copy; `.map` throws on it' },
@@ -832,12 +1136,12 @@ describe('app i18n key coverage', () => {
     `;
     const references = collectReferences(source);
     expect(references).toEqual([
-      { key: 'fixture.listA', counted: false, listed: true },
-      { key: 'fixture.listB', counted: false, listed: true },
-      { key: 'fixture.plain', counted: false, listed: false },
+      { key: 'fixture.listA', counted: false, listed: true, demand: 'exact' },
+      { key: 'fixture.listB', counted: false, listed: true, demand: 'exact' },
+      { key: 'fixture.plain', counted: false, listed: false, demand: 'exact' },
     ]);
 
-    const listed = { key: 'fixture.listA', counted: false, listed: true };
+    const listed: Reference = { key: 'fixture.listA', counted: false, listed: true, demand: 'exact' };
     const check = (value: unknown) =>
       missingCopy(localeInstance('en', { fixture: { listA: value } }), 'en', listed);
 
@@ -848,15 +1152,15 @@ describe('app i18n key coverage', () => {
     expect(check('one, two')).toBe(true);
     // And a plain call is unaffected: a string is all it ever needed.
     expect(missingCopy(localeInstance('en', { fixture: { plain: 'Plain' } }), 'en', {
-      key: 'fixture.plain', counted: false, listed: false,
+      key: 'fixture.plain', counted: false, listed: false, demand: 'exact',
     })).toBe(false);
 
     // The whole options axis, measured on this head rather than assumed: the app
-    // passes exactly three i18next options at a `t()` call. `count` and
-    // `returnObjects` are modelled above. `defaultValue` appears at 42 call sites
-    // and EVERY ONE names a dynamic key — zero literal keys sit behind one — so it
-    // cannot be hiding a literal this guard would otherwise demand copy for. There
-    // is no `context` anywhere in `src/`.
+    // passes exactly three i18next options at a `t()` call, across 4024 of them.
+    // `count` and `returnObjects` are modelled above. `defaultValue` is the third
+    // (42 sites) and is answered by `demand`, not by a claim that it never meets
+    // a key this guard knows — it does, at 18 of those sites, since templates
+    // started expanding. There is no `context` anywhere in `src/`.
   });
 
   it('collects dotted literals wherever they sit, with no position enumerated', () => {
@@ -967,6 +1271,42 @@ describe('app i18n key coverage', () => {
     expect(NON_KEY_LITERALS).not.toContain('telegramConfig.proxyUrl');
   });
 
+  it('hands a call-site key no locale resolves to the pin, and keeps the name either way', () => {
+    // The partition, from the call-site side. This is the key a reviewer deleted
+    // from both bundles to show the guard silent — `App.tsx` names it through a
+    // template the checker now expands. Even so, EXISTENCE cannot be the one to
+    // answer: nothing at a call site tells a key deleted from every locale apart
+    // from a name that was never a key, which is why it steps aside and the pin
+    // names it instead. Two properties, one case, no overlap.
+    const referenced = collectReferences(`
+      const Banner = () => <p>{t('remoteAuthorization.revoked.title')}</p>;
+    `);
+    const names = referenced.map((reference) => reference.key);
+    const gone = [
+      { lng: 'en', bundle: { remoteAuthorization: { revoked: { body: 'Access was revoked.' } } } },
+      { lng: 'zh', bundle: { remoteAuthorization: { revoked: { body: '访问已被撤销。' } } } },
+    ];
+    expect(parityGaps(names, gone)).toEqual([]);
+    expect(residueOf(names, gone)).toEqual(['remoteAuthorization.revoked.title']);
+    expect(NON_KEY_LITERALS).not.toContain('remoteAuthorization.revoked.title');
+
+    // And a demand of `none` narrows only what copy is required, never whether
+    // the name is watched: a call carrying its own fallback still may not have
+    // copy in one locale and an English fallback in the other.
+    const defaulted = collectReferences(`
+      const title = t('harness.createDialog.kindTask', { defaultValue: 'Background work' });
+    `);
+    expect(defaulted).toEqual([
+      { key: 'harness.createDialog.kindTask', counted: false, listed: false, demand: 'none' },
+    ]);
+    expect(
+      parityGaps(defaulted.map((reference) => reference.key), [
+        { lng: 'en', bundle: { harness: { createDialog: { kindTask: 'Background work' } } } },
+        { lng: 'zh', bundle: { harness: { createDialog: { kindWatch: '后台监听' } } } },
+      ]),
+    ).toEqual([{ key: 'harness.createDialog.kindTask', present: ['en'], absent: ['zh'] }]);
+  });
+
   it('treats a blanked value as missing copy, in one locale or in every locale', () => {
     // A key can be emptied as well as deleted, and an empty value renders a blank
     // label rather than a raw key, which is the quieter of the two failures. The
@@ -1002,15 +1342,15 @@ describe('app i18n key coverage', () => {
     // renders as nothing is empty of copy whichever character made it so.
   });
 
-  it('pins the literals that are not keys, so no key can leave both locales unseen', () => {
+  it('pins the names that are not keys, so no key can leave both locales unseen', () => {
     // Exact set equality, not a count: a count lets one literal leave as another
     // enters. Sorted on both sides so the list above can stay grouped by class.
-    expect(residueOf(appDottedLiterals(), BUNDLES)).toEqual(
+    expect(residueOf(appCandidateKeys(referenced), BUNDLES)).toEqual(
       [...NON_KEY_LITERALS].sort((a, b) => a.localeCompare(b)),
     );
   });
 
-  it('keeps every dotted literal in the app resolving in both locales or neither', () => {
-    expect(parityGaps(appDottedLiterals(), BUNDLES)).toEqual([]);
+  it('keeps every name the app can ask for resolving in both locales or neither', () => {
+    expect(parityGaps(appCandidateKeys(referenced), BUNDLES)).toEqual([]);
   });
 });
