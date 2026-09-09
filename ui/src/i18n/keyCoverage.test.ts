@@ -105,23 +105,46 @@
 // literal appears, and the thing it buys is that no key can leave the bundles
 // unnoticed, whatever position it was written in.
 //
-// All three ask ONE question of a value — `isRenderable` — and that is the last
-// thing worth saying here. Asking whether a key EXISTS instead is a weaker
-// question that looks identical until a value goes empty, and it cost two rounds
-// of one root cause: a `returnObjects` array emptied in one locale passed, then a
-// key blanked to `''` in BOTH locales passed as well, resolving everywhere and so
-// never reaching RESIDUE while the surface rendered a blank label. One predicate
-// means a value-shaped hole cannot be open in one property and closed in another.
+// All three ask about COPY rather than about a key existing, and that is the last
+// thing worth saying here. Asking whether a key EXISTS is a weaker question that
+// looks identical until a value goes empty, and it cost two rounds of one root
+// cause: a `returnObjects` array emptied in one locale passed, then a key blanked
+// to `''` in BOTH locales passed as well, resolving everywhere and so never
+// reaching RESIDUE while the surface rendered a blank label.
 //
-// Its boundary is exactly: a nonblank string that is not the key itself, or a
-// nonempty collection whose every entry is renderable, plus a list where the
-// call asked for one. That is a claim about copy being THERE. Whether the copy
-// is RIGHT — accurate, idiomatic, actually translated rather than English pasted
-// into `zh.json` — no scanner decides, and this one does not pretend to. Nor
-// does it read further than the call: the guard reads the call site's OPTIONS,
-// it does not guess the consumer's TypeScript assertion. `as string[]` on a
-// `t()` result is a claim the compiler accepts and nobody checks; that is a
-// product-code question, tracked in #1967, not something this file can see.
+// Copy is a LEAF — `rendersAsCopy`, one definition, one site: a nonblank string
+// that is not the key echoed back. Whitespace-only counts as blank, because a
+// value that renders as nothing is empty of copy whichever character made it so.
+// Nothing else is copy; nobody renders a subtree.
+//
+// What differs is the CONTAINER it has to arrive in, and that is decided by who
+// is asking — which is the distinction three review rounds were spent finding:
+//
+//   A CALL SITE consumes an exact shape. A plain call renders the value, so the
+//   value must be copy. A `returnObjects` call renders each entry, so the value
+//   must be a nonempty list of copy. An object passes neither: i18next hands a
+//   plain call its diagnostic instead of a string, and `MemorySettingsPanel`
+//   hands React an object child. `consumable` is total over the shapes i18next
+//   can return, under both call shapes, and the fixture states that table.
+//
+//   A BARE LITERAL has no call site to read, and it may be a key PREFIX rather
+//   than a key: `harness.runStatus` resolves to an object node that
+//   `HarnessPage` completes at runtime. So PARITY and RESIDUE ask the subtree
+//   question — `isRenderable`, is there copy under this name, nothing empty
+//   under it — because dropping that whole subtree from one locale is a real
+//   gap, and calling the prefix a non-key would hide it.
+//
+// One leaf, two containers, each owned by the property that can know it. Reusing
+// the subtree reading at a call site is what let an object value pass as copy;
+// using the call reading on a prefix would drop two real keys into RESIDUE.
+//
+// That whole claim is about copy being THERE. Whether the copy is RIGHT —
+// accurate, idiomatic, actually translated rather than English pasted into
+// `zh.json` — no scanner decides, and this one does not pretend to. Nor does it
+// read further than the call: the guard reads the call site's OPTIONS, it does
+// not guess the consumer's TypeScript assertion. `as string[]` on a `t()` result
+// is a claim the compiler accepts and nobody checks; that is a product-code
+// question, tracked in #1967, not something this file can see.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -414,8 +437,11 @@ const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
  * Whether the copy is CORRECT — right register, right meaning, right locale —
  * is not decidable here and stays human territory.
  */
+const rendersAsCopy = (value: unknown, key: string): boolean =>
+  typeof value === 'string' && value.trim() !== '' && value !== key;
+
 const isRenderable = (value: unknown, key: string): boolean => {
-  if (typeof value === 'string') return value.trim() !== '' && value !== key;
+  if (typeof value === 'string') return rendersAsCopy(value, key);
   if (Array.isArray(value)) return value.length > 0 && value.every((entry) => isRenderable(entry, key));
   if (typeof value === 'object' && value !== null) {
     const entries = Object.values(value);
@@ -588,18 +614,32 @@ export const parityGaps = (
  * The symptom this guard exists for, stated exactly: nothing the call site can
  * render comes back.
  *
- * A call reading `returnObjects` needs a LIST, not merely something renderable.
- * `MemorySettingsPanel` maps its result, so a value turned into an object or a
- * plain string is renderable by every other measure and still throws on `.map`.
- * The requirement is read off the call, exactly as `count` is, so a second site
+ * A call site names an exact shape, and only copy in THAT shape reaches a screen
+ * through it. A plain call renders the value itself, so the value has to be a
+ * string; turn it into an object and i18next hands back its diagnostic instead
+ * of copy. A call reading `returnObjects` maps the value, so it has to be a list
+ * of strings; turn it into an object, a plain string, or a list of objects and
+ * `MemorySettingsPanel` throws on `.map` or hands React an object child.
+ *
+ * That shape is read off the call, exactly as `count` is, so a second site
  * asking for a list is covered without naming its keys here.
+ *
+ * The subtree reading (`isRenderable`) is deliberately NOT used here. It answers
+ * a different question — does this NAME have copy under it — which is the right
+ * question for a bare literal that may be a key prefix, and the wrong one for a
+ * call site, because no consumer renders a subtree.
  */
+const consumable = (value: unknown, reference: Reference): boolean =>
+  reference.listed
+    ? Array.isArray(value)
+      && value.length > 0
+      && value.every((entry) => rendersAsCopy(entry, reference.key))
+    : rendersAsCopy(value, reference.key);
+
 const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean =>
-  probes(lng, reference).some((options) => {
-    const value = instance.t(reference.key, { ...options, returnObjects: true });
-    if (!isRenderable(value, reference.key)) return true;
-    return reference.listed && !Array.isArray(value);
-  });
+  probes(lng, reference).some(
+    (options) => !consumable(instance.t(reference.key, { ...options, returnObjects: true }), reference),
+  );
 
 describe('app i18n key coverage', () => {
   const referenced = referencedCallSites();
@@ -725,22 +765,61 @@ describe('app i18n key coverage', () => {
     expect(referenced.filter((reference) => missingCopy(instance, lng, reference)).map(label)).toEqual([]);
   });
 
-  it('reports a bundle value as copy only when the value itself renders', () => {
-    // EXISTENCE asks the VALUE, not a `t()` projection, so this pins what a value
-    // has to carry. The array cases are the ones that were passing wrongly: the
-    // probe used to re-call `t()` without the caller's `returnObjects`, take
-    // i18next's object-instead-of-string diagnostic as copy, and stay green while
-    // the surface rendered nothing.
+  it('reports a NAME as having copy under it when any leaf under it renders', () => {
+    // The subtree question, which is what PARITY and RESIDUE ask. A dotted literal
+    // is not always a leaf: `harness.runStatus` is a PREFIX that `HarnessPage`
+    // completes at runtime, and it resolves to an object node. Dropping that whole
+    // subtree from one locale is a real gap, so the object branch is load-bearing
+    // here — and wrong at a call site, which is the next test.
     expect(isRenderable('Disclosure', 'k')).toBe(true);
     expect(isRenderable('', 'k')).toBe(false);
+    expect(isRenderable('   ', 'k')).toBe(false);
     expect(isRenderable('k', 'k')).toBe(false); // i18next echoes the key when it has none
     expect(isRenderable(['one', 'two'], 'k')).toBe(true);
     expect(isRenderable([], 'k')).toBe(false); // the disclosure list, emptied
     expect(isRenderable(['one', ''], 'k')).toBe(false); // a blank row is missing copy too
-    expect(isRenderable({ a: 'one' }, 'k')).toBe(true);
+    expect(isRenderable({ a: 'one' }, 'k')).toBe(true); // a prefix: copy lives under it
     expect(isRenderable({}, 'k')).toBe(false);
     expect(isRenderable(undefined, 'k')).toBe(false);
     expect(isRenderable(42, 'k')).toBe(false);
+  });
+
+  it('decides a CALL by the exact shape it consumes, over every shape i18next returns', () => {
+    // Nobody renders a subtree. A call site renders either the value (plain) or
+    // each entry of it (`returnObjects`), so what reaches a screen is always a
+    // LEAF string, and the container it has to arrive in is fixed by the call.
+    //
+    // Stated as a total table rather than as the cases a review has reached so
+    // far: every shape i18next can hand back, judged under both call shapes. The
+    // call shapes are exhaustive because the options census above measured them
+    // — `count` selects which copy, `returnObjects` selects the container, and no
+    // third option in `src/` changes either. A value shape added to this table
+    // must be classified; one omitted fails to compile the row it belongs in.
+    const plain = { key: 'k', counted: false, listed: false };
+    const listed = { key: 'k', counted: false, listed: true };
+
+    const table: Array<{ value: unknown; plain: boolean; listed: boolean; why: string }> = [
+      { value: 'Copy', plain: true, listed: false, why: 'a string is copy; `.map` throws on it' },
+      { value: '', plain: false, listed: false, why: 'blank' },
+      { value: '   ', plain: false, listed: false, why: 'renders as nothing' },
+      { value: 'k', plain: false, listed: false, why: 'i18next echoing the key' },
+      { value: ['one', 'two'], plain: false, listed: true, why: 'a list; rendered directly it is not copy' },
+      { value: [], plain: false, listed: false, why: 'the disclosure list, emptied' },
+      { value: ['one', ''], plain: false, listed: false, why: 'a blank row is missing copy' },
+      { value: [{ text: 'one' }], plain: false, listed: false, why: 'React throws on an object child' },
+      { value: [['one']], plain: false, listed: false, why: 'a nested list is not a row of copy' },
+      { value: { label: 'Copy' }, plain: false, listed: false, why: 'a prefix, not copy any call renders' },
+      { value: {}, plain: false, listed: false, why: 'empty' },
+      { value: undefined, plain: false, listed: false, why: 'no value at all' },
+      { value: null, plain: false, listed: false, why: 'no value at all' },
+      { value: 42, plain: false, listed: false, why: 'not copy' },
+      { value: true, plain: false, listed: false, why: 'not copy' },
+    ];
+
+    for (const row of table) {
+      expect(consumable(row.value, plain), `plain: ${row.why}`).toBe(row.plain);
+      expect(consumable(row.value, listed), `listed: ${row.why}`).toBe(row.listed);
+    }
   });
 
   it('requires a list where the call site reads returnObjects, not merely copy', () => {
