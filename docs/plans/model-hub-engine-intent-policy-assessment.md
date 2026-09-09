@@ -1,10 +1,16 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: maintained inactive source/test candidate implemented. All maintained
-Go suites, diagnostic build and complete wire matrix pass in the repaired
-Linux isolation. The approved fixture correction consumes the frozen
-adapter/supervisor lifecycle; the earlier watcher-only failure is preserved.
-Independent orchestrator source acceptance and current-head PR gates remain.
+Status: maintained inactive engine source/test candidate implemented; the
+second-round recipe correction passes 361 deny-network pure consumers,
+pinned Ruff 0.4.9 and source/document syntax checks.
+Earlier Linux lane and independent orchestrator runs passed all maintained
+Go suites, diagnostic build and complete wire matrix on the prior recipe.
+Those runs do not accept the newly diagnosed toolchain/input, output,
+privileged-entry, scratch-layout or deadline boundaries. Revised privileged
+probes and engine execution remain held until independent source inspection.
+The frozen adapter/supervisor lifecycle and native-intent Go patch are
+unchanged; the earlier watcher-only failure and every prior receipt remain.
+Fresh orchestrator source acceptance and exact-head PR gates remain required.
 Shipping is blocked on separate source/provenance and publication
 authority. No Avibe runtime code, config, manifest, guard, or workflow changed;
 the currently pinned/installed engine behavior is unchanged.
@@ -39,6 +45,40 @@ Maintain the candidate source/test patch against the exact upstream commit,
 with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
+
+## Second reviewed-head recipe correction
+
+The same orchestrator independently diagnosed the full history before
+authorizing repair: two findings-bearing heads, with repeated
+execution-input provenance and isolation-ownership classes. The circuit
+breaker paused edits/pushes; the recorded scope decision released only this
+one coherent recipe/test/documentation correction and deny-network pure tests.
+No engine thinking, registration, auth, payload, normalizer or suffix policy
+change is part of this round.
+
+The existing owners remain:
+
+| Boundary | Owning correction |
+| --- | --- |
+| Execution inputs | Verify the actual full Go extraction against the pinned archive before Go runs; bind archive/tree/selected executable, source, fixture and recipe identities before/after. Measure the existing venv/lock and explicitly label guest Python/OS/util-linux and setup-only uv trust, not unverified provenance claims. |
+| Invocation outputs | Parent reserves one new output directory using its existing receipt identity. Verifier owns exclusive logs/binary/candidate records there; wire explicitly selects and verifies a prior build mounted readonly. Shared caches are not a mutable latest-artifact pointer. |
+| Writable roots | One canonical pre-write validator protects broad/home/protected paths across environment, exporter, verifier and wire consumers, including sudo's invoking user. The privileged CLI supports only narrow canonical `/tmp` or `/var/tmp` children and keeps hidden-home probes strict. |
+| Privileged entry | Public CLI always runs `unshare`; no internal flags select re-entry. A fixed child trampoline receives an unlinked parent-owned control descriptor and checks all actual kernel namespace identities before the first mutation. Original preflight/terminal custody remains separate and closes before candidate launch. |
+| Deadlines | One derived phase budget is consumed by command executor, parent and caller. Three permitted sequential Go commands fit the complete test envelope, with bounded input/preflight/setup/cleanup allowances and failure/timeout evidence. |
+
+The detailed verified/measured/trusted/setup-only inventory is maintained in
+`patches/cliproxyapi/README.md`. In particular, a frozen lock plus a measured
+venv is not archive attestation of Python distributions, and shared Go caches
+retain the existing Go trust model rather than a new production provenance
+contract. Candidate artifacts remain supplementary evidence; only the
+parent-owned receipt records trusted preflight and cleanup.
+
+Pure consumers cover the original entry points, substituted compiler and
+runtime/tool files, canonical path aliases, repeat test/build/wire runs,
+output collisions, partial failures, stale build selection and fake-clock
+deadline propagation. Kernel probes, complete source execution and independent
+rerun of the revised bytes are still pending, not silently inherited from
+the successful historical runs below. Publication remains separately blocked.
 
 ## Completed source-only implementation
 

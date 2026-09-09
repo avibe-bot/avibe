@@ -28,26 +28,34 @@ checkout is not the maintained source of truth. See the English assessment in
 ## Apply and verify
 
 Use an explicitly authorized, already-running Linux development guest with
-Git, Python 3.12+, util-linux (`unshare`, `mount`, `setpriv`), iproute2 and
+Git, Python 3.12, util-linux (`unshare`, `mount`, `setpriv`), iproute2 and
 transient sudo. This recipe does not provision a guest or change packages,
 services, routes or Incus resources. Its macOS `sandbox-exec` path now denies
-all egress and is only for pure-source or compile diagnostics; network suites
-have no macOS fallback.
+all egress and is only for pure-source diagnostics. Executing the pinned
+Linux arm64 Go toolchain, including compilation, requires the Linux envelope;
+there is no macOS engine-build or network-suite fallback.
 
-Acceptance status: 225 pure fixture/receipt/probe/connection tests pass, and actual
-no-network, private-loopback and deliberate nonzero probes have the expected
-results. All three Linux Go suites and the network-none diagnostic build
-passed. The first Linux wire run passed 380 policy, 24 identity and three
-large-image cases, then failed its watcher-only replacement deadline.
-The corrected real adapter/supervisor lifecycle rerun passed all three phases,
-including the complete wire matrix, replacement/rollback/startup failure
-consumers, cancellation/reuse and cleanup. Independent orchestrator source
-acceptance and current-head PR gates remain required. Historical
-macOS tests allowed arbitrary host loopback; they do not prove the repaired
-test-owned listener isolation.
+Current acceptance boundary: the second reviewed head exposed incomplete
+toolchain verification, per-invocation output ownership, pre-write validation,
+private-entry enforcement and deadline propagation. The orchestrator diagnosed
+the repeated classes and approved one bounded recipe-only correction.
+The revised recipe passes 361 deny-network pure consumers, pinned Ruff 0.4.9
+and source/document syntax gates. **Its privileged probes and Go/build/wire execution remain held until fresh
+independent inspection**. Earlier Linux lane and independent orchestrator
+runs genuinely passed all three Go commands and the complete corrected
+380-case wire/lifecycle matrix, but do not accept these newly repaired paths.
+The earlier watcher-only failure and all historical artifacts remain preserved.
+The still-earlier macOS wildcard-loopback runs are not isolation acceptance.
+No source tests or Avibe PR merge ship an engine repair.
 
-Set `engine_task` to the explicitly allocated guest scratch, not a user home,
-shared checkout or broad temporary-directory root. Copy this directory into
+Set `engine_task` to an explicitly allocated, canonical, dedicated child of
+`/tmp` or `/var/tmp`, never either broad root. The privileged CLI rejects home
+layouts and aliases into `/home`, `/root` or `/Users` before setup.
+All writable-root consumers also reject protected `.avibe`, `.vibe_remote`,
+`.codex` and `.claude` data, home/broad ancestors and aliases before any mkdir
+or export, including a root containing a protected symlink's target. The
+privileged parent protects the invoking sudo user's home too.
+Do not use a shared checkout. Copy this directory into
 `"$engine_task/recipe"` without AppleDouble files or Python caches. Preserve
 any existing checkout/evidence; use new task children when needed:
 
@@ -60,17 +68,37 @@ git -C "$engine_task/source" checkout --detach FETCH_HEAD
 mkdir -p "$engine_task/state/home" "$engine_task/state/tmp"
 ```
 
-Only prerequisite preparation may use public networking. `prerequisites.json`
+Only separately authorized prerequisite preparation may use public networking. `prerequisites.json`
 records exact Linux arm64 Go 1.26.4 and uv 0.9.8 archive URLs and SHA256 values.
 Download into scratch, verify hashes before extraction, and extract Go into
 `"$engine_task/toolchain"`. Do not install system packages or use a moving
-toolchain. Download locked Go modules using that Go; no catalog refresh or
+toolchain. Verify the extracted compiler, tools and runtime files against the
+SHA256-verified archive before using Go, not merely its version string:
+
+```sh
+python3 -B - "$engine_task" <<'PY'
+import json, sys
+from pathlib import Path
+task = Path(sys.argv[1])
+sys.path.insert(0, str(task / "recipe"))
+from execution_inputs import verify_go
+pin = json.loads((task / "recipe/prerequisites.json").read_text())["linux_arm64_go"]
+print(json.dumps(verify_go(task / "toolchain", task / "downloads/go.tar.gz",
+                          task / "toolchain/bin/go", pin), indent=2))
+PY
+```
+
+The same verifier is mandatory inside every test/build/wire phase. It rejects
+missing, extra or modified files, changed executable modes, escaping links,
+hard-link aliases, wrong architecture and selection of another compiler.
+The normalized archive/tree identity includes all compiler tools and runtime
+sources, not just `bin/go`. Download locked Go modules using that Go; no catalog refresh or
 provider account is involved:
 
 ```sh
 env -i PATH="$engine_task/toolchain/bin:/usr/bin:/bin" \
   HOME="$engine_task/state/home" \
-  TMPDIR="$engine_task/state/tmp" GOENV=off GOTOOLCHAIN=go1.26.4 \
+  TMPDIR="$engine_task/state/tmp" GOENV=off GOTOOLCHAIN=local \
   GOPATH="$engine_task/state/go" GOMODCACHE="$engine_task/state/mod" \
   GOCACHE="$engine_task/state/cache" GOMAXPROCS=2 GOMEMLIMIT=1536MiB \
   go -C "$engine_task/source" mod download
@@ -100,8 +128,8 @@ PY
 The exporter checks exact commit tree, archive and complete path-independent
 source digest. Actual config writer/state/mock imports use only this export,
 never current-worktree `sys.path`. Build the venv from its frozen `uv.lock`,
-without installing Avibe or running a backend. Set `uv_binary` to the verified
-extracted uv executable:
+without installing Avibe or running a backend. Set `uv_binary` to the uv
+executable extracted during the separately verified setup step:
 
 ```sh
 env -i PATH=/usr/bin:/bin HOME="$engine_task/state/home" \
@@ -122,7 +150,11 @@ refused; it never resets, stashes, or overwrites someone else's changes:
 
 The namespace envelope is mandatory. Inspect its exact source, then run
 `/bin/true` in `none` and `loopback` modes plus `/bin/false` to confirm failed
-receipt/cleanup behavior. Use new receipt names every time; collisions fail
+receipt/cleanup behavior. Also use the bounded `timeout` phase with a harmless
+`/bin/sh -c 'sleep 30 & wait'` to check PID-namespace teardown after the
+one-second candidate deadline. The nonzero/timeout terminal receipts must
+remain **failed**, even when those diagnostic expectations pass.
+Use new receipt names every time; collisions fail
 closed and preserve prior evidence. Example:
 
 ```sh
@@ -130,29 +162,54 @@ sudo -n /usr/bin/python3 -B "$engine_task/recipe/namespace.py" \
   --root "$engine_task" --source "$engine_task/source" \
   --fixture "$fixture_root" --state "$engine_task/state" \
   --recipe "$engine_task/recipe" --toolchain "$engine_task/toolchain" \
-  --python-env "$engine_task/venv" --network none \
+  --python-env "$engine_task/venv" \
+  --go-archive "$engine_task/downloads/go.tar.gz" --phase probe --network none \
   --receipt probe-none-unique.json -- /bin/true
 ```
 
 After independent probe acceptance, the following narrow helper runs the
 maintained phases with the same mounted inputs. Build uses `none`; test/wire
-use the private loopback. Run phases sequentially:
+use the private loopback. The small caller imports the same derived budget
+as the parent and verifier; a managed Watch must have timeout/lifetime 0
+and must not impose a shorter total timeout. Run phases sequentially:
 
 ```sh
 run_phase() {
-  sudo -n /usr/bin/python3 -B "$engine_task/recipe/namespace.py" \
-    --root "$engine_task" --source "$engine_task/source" \
-    --fixture "$fixture_root" --state "$engine_task/state" \
-    --recipe "$engine_task/recipe" --toolchain "$engine_task/toolchain" \
-    --python-env "$engine_task/venv" --network "$2" --receipt "$3" -- \
-    "$engine_task/venv/bin/python" -B "$engine_task/recipe/verify.py" "$1" \
-    --source "$engine_task/source" --state "$engine_task/state" \
-    --fixture "$fixture_root"
+  "$engine_task/venv/bin/python" -B - \
+    "$engine_task" "$fixture_root" "$1" "$2" "$3" "${4-}" <<'PY'
+import subprocess, sys
+from pathlib import Path
+task, fixture = Path(sys.argv[1]), Path(sys.argv[2])
+phase, network, receipt, build = sys.argv[3:]
+recipe = task / "recipe"
+sys.path.insert(0, str(recipe))
+from budgets import PHASES
+command = ["sudo", "-n", "/usr/bin/python3", "-B", str(recipe / "namespace.py")]
+paths = {"root": task, "source": task / "source", "fixture": fixture,
+         "state": task / "state", "recipe": recipe, "toolchain": task / "toolchain",
+         "python-env": task / "venv", "go-archive": task / "downloads/go.tar.gz"}
+for name, path in paths.items():
+    command += ["--" + name, str(path)]
+selection = ["--build", build] if build else []
+command += ["--phase", phase, "--network", network, "--receipt", receipt, *selection, "--",
+            str(task / "venv/bin/python"), "-B", str(recipe / "verify.py"), phase,
+            "--source", str(task / "source"), "--state", str(task / "state"),
+            "--fixture", str(fixture), *selection]
+subprocess.run(command, check=True, close_fds=True, timeout=PHASES[phase].driver_seconds)
+PY
 }
-run_phase build none build-unique.json
-run_phase test loopback test-unique.json
-run_phase wire loopback wire-unique.json
+run_phase test loopback test-unique.json &&
+run_phase build none build-unique.json &&
+run_phase wire loopback wire-unique.json "$engine_task/runs/build-unique.json"
 ```
+
+`budgets.py` is the single deadline owner: test permits three sequential
+600-second commands, plus input/preflight/setup/cleanup allowances. Its
+candidate, namespace and caller limits are 1980, 2100 and 2130 seconds.
+Build/wire have one 600-second command and limits 780/900/930 seconds.
+The parent also checks that the phase uses its required network mode before
+setup. A timeout or early failure retains evidence and never starts a later
+phase automatically.
 
 The private network has only its own loopback: dynamic Go `httptest`, engine
 and replacement mock listeners share it, while guest/host listeners and
@@ -161,6 +218,23 @@ any bind. Source, fixture, recipe and toolchain are read-only; task state is
 writable. Guest/user homes and namespace handles are hidden. Child code runs
 without capabilities or supplementary groups, with no-new-privileges and no
 inherited supervisor descriptors. PID 1 exit destroys remaining descendants.
+There are no public internal re-entry flags: the public CLI always invokes
+util-linux `unshare`. A fixed isolated-Python trampoline consumes an unlinked
+root-owned control descriptor, closes it, and compares all three actual
+kernel namespace identities with the parent-captured identities before the
+first mount or interface operation. Caller-supplied dictionaries cannot select
+the private path. This protects the approved CLI, not arbitrary root Python.
+
+Each parent receipt name owns exactly one fresh `runs/<receipt-name>/`
+directory for the invocation's logs, HOME/temp, binary and candidate records.
+Only that output is writable; the parent-owned `runs` collection and other
+runs are not mounted. Shared task caches remain separate under `state`.
+Wire must explicitly select a prior successful build output, which is mounted
+read-only. It verifies that build's identity, receipt, binary and complete
+artifact-tree digest and binds the selection into its own `wire.json`.
+There is no fixed `build.json`, binary or hidden latest pointer in shared
+state. Failures, output collisions and later invocations preserve earlier
+files; the recipe never deletes a run directory.
 
 Parent receipts live under `"$engine_task/receipts"`, outside child mounts.
 They are exclusively opened before execution. Original preflight travels
@@ -170,13 +244,29 @@ parent receipts and before/after input/lifecycle evidence outside candidate
 state. Both unrelated outside IPv4/IPv6 sentinels must observe zero connections.
 A failed preflight, command or cleanup is never a passing receipt.
 
-`inputs.json` freezes source identity, both committed catalogs, `go.sum` and
-Go version, plus Avibe's commit/tree/archive/complete source digest.
-`patched-files.json` verifies the entire changed-file inventory
-and bytes; unrelated edits/untracked files fail closed. The build receipt
-binds the binary digest to the exact patch, toolchain, fixture and recipe.
-Fixture and source are verified before and after execution. Wire tests
-refuse a stale or replaced binary. Tests/builds use `GOPROXY=off`, checksum
+The parent terminal receipt is still the sole trusted preflight/cleanup
+record. Candidate `build.json`/`wire.json` and logs are supplementary artifacts,
+not privileged attestations. Parent build selection reads only its own
+no-follow, regular-file terminal receipt before execution; it never reads or
+chowns child-controlled artifact paths after execution.
+
+### Execution-input inventory
+
+| Input | Owner and actual evidence |
+| --- | --- |
+| Engine base/patch/catalogs/`go.sum` | `verify_inputs` and `verify_candidate` require the exact base, complete changed-file inventory and fixed bytes; the complete source digest is also bound before/after. No source refresh. |
+| Go archive/extraction/selected compiler | `execution_inputs.verify_go` verifies the archive SHA and normalized full extracted tree before any Go invocation, enforces Linux arm64 and the selected executable, then repeats verification after commands. Raw `go version` is separately captured; a version string is not provenance. |
+| Frozen Avibe fixture | Complete tracked commit export, tree/archive/source hashes, checked before/after. The actual writer/state/mock imports use only this readonly export. |
+| Recipe | Complete tree digest includes Python, declarations, patch, tests and documentation, rather than claiming identity for an unmeasured script subset. |
+| Python/venv/lock | Existing guest Python 3.12 and frozen-lock venv setup are a trusted prerequisite. The selected venv/interpreter, complete venv tree and frozen `uv.lock`/`pyproject.toml` digests are measured before/after. This is **not** archive attestation of Python or independent proof that every installed distribution matches the lock. |
+| Guest OS/Python/util-linux | Existing authorized guest trusted base, not newly pinned or provisioned by this recipe. Namespace, privilege, mount and sentinel facts are measured by the parent/probe. |
+| uv | Setup-only declared archive/version. Preparation verifies its archive manually before extraction; execution phases do not invoke uv or claim to attest its extraction. |
+| Module/build caches | Shared task state prepared through Go's locked-module workflow, not a new cryptographically attested dependency distribution. `go.sum`, readonly module mode and offline operation remain enforced; cache contents are not promoted to frozen source or a production reproducibility claim. |
+
+The test/build/wire input records bind every verified or measured field above
+with its stated trust category. Source, Go, fixture, recipe and measured venv
+are rechecked even after a command fails. Wire refuses stale or changed
+selected-build artifacts. Tests/builds use `GOPROXY=off`, checksum
 verification, `-mod=readonly`, `GOMAXPROCS=2`, `-p=1`, isolated HOME/XDG/cache,
 and private-network OS isolation. The Go memory setting is a soft limit, not an
 OS memory cap.

@@ -9,10 +9,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 
-from isolation import isolated_environment, namespace_receipt, sandbox_prefix
-from fixture import fixture_identity, verify_fixture
+from budgets import PHASES
+from execution_inputs import file_sha256, python_identity, records_sha256, regular_file, tree_records, verify_go
+from isolation import isolated_environment, namespace_receipt, validate_state_root
+from fixture import fixture_identity, source_digest
 
 
 HERE = Path(__file__).resolve().parent
@@ -43,18 +44,72 @@ def verify_candidate(source: Path) -> str:
     return hashlib.sha256((HERE / "native-intent.patch").read_bytes()).hexdigest()
 
 
+def write_json(path: Path, value: dict) -> None:
+    """Candidate evidence is exclusive; the parent terminal receipt stays separate."""
+    with path.open("x") as output:
+        output.write(json.dumps(value, indent=2) + "\n")
+
+
+def input_identity(source: Path, fixture: Path, proof: dict, go: Path) -> dict:
+    receipt = verify_inputs(source)
+    patch_sha = verify_candidate(source)
+    prerequisites = json.loads((HERE / "prerequisites.json").read_text())
+    toolchain = verify_go(
+        Path(proof["toolchain"]), Path(proof["go_archive"]), go, prerequisites["linux_arm64_go"],
+    )
+    return {
+        "source_sha": receipt["source_sha"], "patch_sha256": patch_sha,
+        "frozen_inputs": receipt["sha256"], "source_full_sha256": source_digest(source),
+        "go": toolchain, "avibe_fixture": fixture_identity(fixture, receipt),
+        "recipe_tree_sha256": source_digest(HERE),
+        "python_trusted_setup": python_identity(Path(proof["python_env"]), fixture),
+        "setup_only": {"uv": prerequisites["linux_arm64_uv"],
+                       "scope": "declared setup prerequisite, not executed or archive-attested by this phase"},
+    }
+
+
+def build_artifacts(root: Path) -> dict:
+    records = tree_records(root)
+    records.pop("build.json", None)
+    return records
+
+
+def select_build(root: Path, proof: dict, identity: dict) -> dict:
+    selection = proof["selected_build"]
+    if selection is None or root != Path(selection["output"]):
+        raise RuntimeError("Wire must select the envelope's explicit read-only prior build.")
+    if (root / "bin").is_symlink() or not (root / "bin").is_dir():
+        raise RuntimeError("Build binary directory must be a real directory.")
+    with regular_file(root / "build.json") as source:
+        raw = source.read()
+    previous = json.loads(raw)
+    if previous["invocation"] != selection["receipt"] or previous["inputs"] != identity:
+        raise RuntimeError("Selected build is stale or belongs to different verified inputs.")
+    if previous["artifacts_sha256"] != records_sha256(build_artifacts(root)):
+        raise RuntimeError("Selected build output was substituted or changed.")
+    binary_sha = file_sha256(root / "bin/cli-proxy-api")
+    if previous["binary_sha256"] != binary_sha:
+        raise RuntimeError("Selected diagnostic binary changed.")
+    return {
+        **selection, "build_receipt_sha256": hashlib.sha256(raw).hexdigest(),
+        "binary_sha256": binary_sha, "artifacts_sha256": previous["artifacts_sha256"],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("apply", "test", "build", "wire"))
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--state", required=True, type=Path)
-    parser.add_argument("--fixture", type=Path, help="Complete verified Avibe commit export; required for build/wire.")
+    parser.add_argument("--fixture", type=Path, help="Complete verified Avibe commit export; required for execution.")
+    parser.add_argument("--build", type=Path, help="Explicit previous build output, required only for wire.")
     args = parser.parse_args()
-    source = args.source.resolve(strict=True)
-    state = args.state.resolve()
+    # Public consumers refuse protected aliases BEFORE any setup/output write.
+    state = validate_state_root(args.state)
+    source = validate_state_root(args.source).resolve(strict=True)
     if source == state or state.is_relative_to(source):
         raise ValueError("Evidence/cache state must be outside the source checkout.")
-    receipt = verify_inputs(source)
+    verify_inputs(source)
     if args.phase == "apply":
         status = subprocess.check_output(
             ["git", "-C", str(source), "status", "--porcelain"], text=True,
@@ -71,38 +126,40 @@ def main() -> None:
         ["git", "-C", str(source), "apply", "--reverse", "--check", str(HERE / "native-intent.patch")],
         check=True,
     )
-    patch_sha = verify_candidate(source)
-    env = isolated_environment(state)
-    if args.phase in ("test", "wire") and sys.platform == "darwin":
-        raise RuntimeError("Network tests require the approved private Linux namespace; no localhost wildcard fallback.")
-    prefix = sandbox_prefix(state)
-    if sys.platform == "linux":
-        proof = namespace_receipt()
-        if Path(proof["source"]) != source or (args.phase == "build" and proof["network"] != "none"):
-            raise RuntimeError("Source/build network mode does not match the envelope.")
-        if args.phase in ("test", "wire") and proof["network"] != "loopback":
-            raise RuntimeError("Network suites need the private loopback envelope.")
-    go = shutil.which("go")
-    if not go:
-        raise RuntimeError("Go is required; see README.md for isolated prerequisite download.")
-    version = subprocess.check_output([*prefix, go, "version"], cwd=source, env=env, text=True)
-    if version.split()[2] != receipt["go_version"]:
+    verify_candidate(source)
+    proof = namespace_receipt()
+    budget = PHASES[args.phase]
+    expected_network = "none" if args.phase == "build" else "loopback"
+    if (proof["phase"] != args.phase or proof["budget"] != budget.receipt()
+            or Path(proof["source"]) != source or Path(proof["state"]) != state
+            or Path(proof["recipe"]) != HERE
+            or proof["network"] != expected_network):
+        raise RuntimeError("Phase/source/state/network/budget does not match the parent envelope.")
+    output = validate_state_root(Path(proof["output"])).resolve(strict=True)
+    if output == state or output.is_relative_to(state) or state.is_relative_to(output):
+        raise RuntimeError("Per-invocation output and shared cache must be disjoint.")
+    if args.fixture is None or args.fixture.resolve(strict=True) != Path(proof["fixture"]):
+        raise ValueError("Select the complete frozen read-only Avibe fixture.")
+    fixture = args.fixture.resolve(strict=True)
+    if (args.phase == "wire") != (args.build is not None):
+        raise ValueError("Only wire must select an explicit prior build.")
+    go_name = shutil.which("go")
+    if not go_name:
+        raise RuntimeError("The exact pinned Go extraction is required.")
+    go = Path(go_name).resolve(strict=True)
+    write_json(output / "invocation.json", {"parent_receipt": proof["receipt"], "phase": args.phase,
+                                           "budget": budget.receipt()})
+    identity = input_identity(source, fixture, proof, go)
+    write_json(output / "inputs-before.json", identity)
+    env = isolated_environment(output, cache=state, go=go)
+    version = subprocess.check_output(
+        [str(go), "version"], cwd=source, env=env, text=True, timeout=budget.input_seconds,
+    )
+    if version.strip() != f"go version {identity['go']['version']} linux/arm64":
         raise RuntimeError(f"Wrong Go version: {version.strip()}")
-    build_identity = {"source_sha": receipt["source_sha"], "patch_sha256": patch_sha,
-                      "frozen_inputs": receipt["sha256"], "go_version": version.strip()}
-    fixture = None
-    if args.phase in ("build", "wire"):
-        if args.fixture is None:
-            raise ValueError("Use --fixture with the complete frozen Avibe export.")
-        fixture = args.fixture.resolve(strict=True)
-        if sys.platform == "linux" and Path(proof["fixture"]) != fixture:
-            raise RuntimeError("Fixture is not the read-only envelope mount.")
-        fixture_info = fixture_identity(fixture, receipt)
-        build_identity["avibe_fixture"] = fixture_info
-        build_identity["recipe_sha256"] = {
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(HERE.glob("*.py"))
-        }
+    with (output / "go-version.txt").open("x") as stream:
+        stream.write(version)
+    selected = None
     if args.phase == "test":
         commands = [
             [go, "test", "-mod=readonly", "-p=1", "-count=1",
@@ -114,47 +171,54 @@ def main() -> None:
              "./internal/runtime/executor"],
         ]
     elif args.phase == "build":
-        (state / "bin").mkdir(exist_ok=True)
+        (output / "bin").mkdir()
         commands = [[go, "build", "-mod=readonly", "-p=1", "-trimpath", "-buildvcs=false",
-                     "-o", str(state / "bin/cli-proxy-api"), "./cmd/server"]]
+                     "-o", str(output / "bin/cli-proxy-api"), "./cmd/server"]]
     else:
-        previous_build = json.loads((state / "build.json").read_text())
-        for name, value in build_identity.items():
-            if previous_build[name] != value:
-                raise RuntimeError("Binary is not from the current frozen candidate; rebuild before wire tests.")
-        if previous_build["binary_sha256"] != hashlib.sha256((state / "bin/cli-proxy-api").read_bytes()).hexdigest():
-            raise RuntimeError("Candidate binary changed after build.")
-        wire_state = Path(tempfile.mkdtemp(prefix="wire-", dir=state)) / "run"
+        build_root = args.build.resolve(strict=True)
+        selected = select_build(build_root, proof, identity)
+        wire_state = output / "wire"
         commands = [[sys.executable, str(HERE / "wire_matrix.py"),
-                     "--binary", str(state / "bin/cli-proxy-api"), "--state", str(wire_state),
-                     "--fixture", str(fixture), "--fixture-sha256", fixture_info["source_sha256"]]]
-    for index, command in enumerate(commands):
-        log = state / f"{args.phase}-{index}.log"
-        with log.open("wb") as output:
-            result = subprocess.run(
-                [*prefix, *command], cwd=source, env=env,
-                stdout=output, stderr=subprocess.STDOUT, timeout=600,
-            )
-        print(f"{args.phase}-{index}: exit {result.returncode}; evidence: {log}", flush=True)
-        if result.returncode:
-            raise SystemExit(result.returncode)
-    verify_inputs(source)
-    verify_candidate(source)
-    if fixture is not None:
-        verify_fixture(fixture, fixture_info["source_sha256"])
+                     "--binary", str(build_root / "bin/cli-proxy-api"), "--state", str(wire_state),
+                     "--fixture", str(fixture), "--fixture-sha256", identity["avibe_fixture"]["source_sha256"]]]
+    if len(commands) != budget.commands:
+        raise RuntimeError("Command plan does not match its complete phase allowance.")
+    try:
+        for index, command in enumerate(commands):
+            log = output / f"{args.phase}-{index}.log"
+            with log.open("xb") as stream:
+                result = subprocess.run(
+                    command, cwd=source, env=env, stdin=subprocess.DEVNULL, close_fds=True,
+                    stdout=stream, stderr=subprocess.STDOUT, timeout=budget.command_seconds,
+                )
+            print(f"{args.phase}-{index}: exit {result.returncode}; evidence: {log}", flush=True)
+            if result.returncode:
+                raise SystemExit(result.returncode)
+    finally:
+        # Failure evidence and all prior runs remain in place. The parent owns
+        # the terminal verdict; these files do not impersonate that receipt.
+        after = input_identity(source, fixture, proof, go)
+        write_json(output / "inputs-after.json", after)
+        if after != identity:
+            raise RuntimeError("Execution inputs changed during the phase.")
+        if selected is not None and select_build(build_root, proof, identity) != selected:
+            raise RuntimeError("Selected build changed during wire execution.")
     if args.phase == "build":
-        build_identity["binary_sha256"] = hashlib.sha256((state / "bin/cli-proxy-api").read_bytes()).hexdigest()
-        build_identity["command"] = commands[0][1:]
-        (state / "build.json").write_text(json.dumps(build_identity, indent=2) + "\n")
+        write_json(output / "build.json", {
+            "invocation": proof["receipt"], "inputs": identity,
+            "binary_sha256": file_sha256(output / "bin/cli-proxy-api"),
+            "artifacts_sha256": records_sha256(build_artifacts(output)),
+            "command": [str(part) for part in commands[0][1:]],
+        })
     elif args.phase == "wire":
         wire_identity = {
-            **build_identity, "binary_sha256": previous_build["binary_sha256"],
+            "invocation": proof["receipt"], "inputs": identity, "selected_build": selected,
             "artifacts": {
-                name: hashlib.sha256((wire_state / name).read_bytes()).hexdigest()
+                name: file_sha256(wire_state / name)
                 for name in ("matrix.json", "integration.json", "lifecycle.json")
             },
         }
-        (wire_state / "receipt.json").write_text(json.dumps(wire_identity, indent=2) + "\n")
+        write_json(output / "wire.json", wire_identity)
 
 
 if __name__ == "__main__":

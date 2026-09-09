@@ -35,7 +35,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 import yaml
 
 from fixture import verify_fixture
-from isolation import isolated_environment, namespace_receipt
+from isolation import isolated_environment, namespace_receipt, validate_state_root
 
 
 opener = build_opener(ProxyHandler({}))
@@ -89,6 +89,7 @@ class FrozenEngine:
     """Constructor seams only; frozen Avibe owns validation, health and lifecycle."""
 
     def __init__(self, binary, state, store, log):
+        state = validate_state_root(state)
         from core.handlers.model_hub.adapter import SourceBinding
         from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
         from vibe.model_hub_runtime.supervisor import EngineSupervisor
@@ -378,10 +379,14 @@ def main():
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--fixture-sha256", required=True)
     args = parser.parse_args()
-    binary, state = args.binary.resolve(strict=True), args.state.resolve()
+    state = validate_state_root(args.state)
+    binary = args.binary.resolve(strict=True)
     fixture = args.fixture.resolve(strict=True)
     envelope = namespace_receipt()
-    if envelope["network"] != "loopback" or Path(envelope["fixture"]) != fixture or not state.is_relative_to(Path(envelope["state"])):
+    if (envelope["network"] != "loopback" or Path(envelope["fixture"]) != fixture
+            or not state.is_relative_to(Path(envelope["output"]))
+            or envelope["selected_build"] is None
+            or binary != Path(envelope["selected_build"]["output"]) / "bin/cli-proxy-api"):
         raise RuntimeError("Wire fixture must run within its private loopback and read-only source envelope.")
     verify_fixture(fixture, args.fixture_sha256)
     # All Avibe imports resolve from the verified commit export, not this

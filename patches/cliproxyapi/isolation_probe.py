@@ -60,7 +60,7 @@ def main() -> None:
         for host, port in zip(("127.0.0.1", "::1"), proof["sentinel_ports"])
         for kind in ("http", "websocket", "http-proxy", "connect-proxy", "direct-ip", "subprocess")
     ]
-    for name in ("source", "fixture", "recipe"):
+    for name in ("source", "fixture", "recipe", "toolchain", "python_env"):
         target = Path(proof[name]) / ".isolation-write-probe"
         try:
             target.write_bytes(b"must-not-write")
@@ -76,6 +76,18 @@ def main() -> None:
     representative_write = state / "writable-state-probe"
     representative_write.write_bytes(b"test-owned")
     representative_write.unlink()
+    output = Path(proof["output"])
+    representative_write = output / "writable-output-probe"
+    representative_write.write_bytes(b"this-invocation-only")
+    representative_write.unlink()
+    if proof["selected_build"] is not None:
+        target = Path(proof["selected_build"]["output"]) / ".isolation-write-probe"
+        try:
+            target.write_bytes(b"must-not-write")
+        except OSError:
+            pass
+        else:
+            raise AssertionError("Previous build output is writable.")
 
     positive = []
     if proof["network"] == "loopback":
@@ -106,7 +118,9 @@ def main() -> None:
                     thread.join(timeout=2)
                 assert not thread.is_alive()
     result = {**proof, "isolation_probe": "pass", "blocked_attempts": attempts, "positive_listeners": positive,
-              "readonly_source_fixture_recipe": True, "task_state_write": True}
+              "readonly_source_fixture_recipe": True, "readonly_toolchain_python": True,
+              "previous_build_readonly": proof["selected_build"] is not None,
+              "task_state_write": True, "exclusive_output_write": True}
     # The privileged supervisor captures this dedicated preflight stdout before
     # candidate execution. No proof is published into mutable candidate state.
     print(json.dumps(result), flush=True)

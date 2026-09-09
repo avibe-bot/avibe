@@ -11,6 +11,8 @@ import subprocess
 import tarfile
 import tempfile
 
+from isolation import validate_state_root
+
 
 def source_digest(root: Path) -> str:
     """Bind every exported file/link and reject links leaving the export."""
@@ -41,6 +43,7 @@ def verify_fixture(root: Path, expected: str) -> None:
 
 def export_fixture(repository: Path, state: Path, receipt: dict) -> tuple[Path, dict]:
     """An exact commit archive ignores staged, dirty and untracked worktree files."""
+    state = validate_state_root(state)
     base = receipt["avibe_fixture_base"]
     tree = subprocess.check_output(
         ["git", "-C", str(repository), "rev-parse", f"{base}^{{tree}}"], text=True,
