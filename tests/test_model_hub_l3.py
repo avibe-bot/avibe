@@ -501,6 +501,8 @@ def _terminal_resolution_facts(
                 retry_at=source.state.retry_at if source is not None else None,
                 backoff=False,
                 recovery=None,
+                cooldown=(source is not None and source.state.status == "cooldown"),
+                cooldown_reason=None,
             ),
         )
         if blocker_reason is not None or (source is not None and source.state.status == "cooldown")

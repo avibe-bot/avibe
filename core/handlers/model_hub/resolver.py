@@ -35,6 +35,9 @@ class SourceRecoveryAnnotation:
     reason: str
     retry_at: str | None = None
     in_flight: bool = False
+    # Recovery retires only this exact old disk observation, never a later
+    # cooldown in a fresh config or a draft with the same Source identity.
+    retired_cooldown: tuple[str | None, str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,8 @@ class ExactHopInspection:
     retry_at: str | None
     backoff: bool = False
     recovery: Literal["eligible", "in_flight"] | None = None
+    cooldown: bool = False
+    cooldown_reason: str | None = None
 
     @property
     def temporary_blocker(self) -> bool:
@@ -62,7 +67,7 @@ class ExactHopInspection:
             self.source is not None and self.supply_eligible
             and not self.structural_blocker
             and self.source.state.status not in {"needs_action", "error"}
-            and (self.backoff or self.source.state.status == "cooldown" or self.recovery == "in_flight")
+            and (self.backoff or self.cooldown or self.recovery == "in_flight")
         )
 
     @property
@@ -364,30 +369,38 @@ def inspect_exact_hop(
         structural_blocker = True
     elif source.state.status in {"needs_action", "error"}:
         reason = source.state.detail_key
-    annotation = (live_recovery or {}).get(source.id)
-    backoff = (
-        annotation is not None and annotation.reason == "network"
-        and annotation.retry_at is not None
-        and source.state.status in {"active", "standby"}
-        and configuration_eligible and model_supported
-    )
+    annotation = (live_recovery or {}).get(source.id) if source.supply_channel == "hub" else None
+    backoff = False
     recovery = None
+    cooldown = source.state.status == "cooldown"
+    cooldown_reason = None
     retry_at = source.state.retry_at if source.state.status == "cooldown" else None
     if annotation is not None and supply_eligible and source.state.status not in {"needs_action", "error"}:
         if not structural_blocker:
-            if annotation.retry_at is not None:
+            retired = (
+                cooldown and annotation.retired_cooldown is not None
+                and annotation.retired_cooldown == (source.state.retry_at, source.state.detail_key)
+            )
+            if retired:
+                cooldown = False
+            if annotation.reason != "recovery" and (annotation.reason != "network" or not cooldown):
+                cooldown_reason = annotation.reason
+            if annotation.reason == "recovery":
+                if retired:
+                    runnable = True
+                    retry_at = None
+            elif annotation.retry_at is not None:
                 runnable = False
-                if source.state.status == "cooldown":
-                    retry_at = annotation.retry_at
+                retry_at = annotation.retry_at
+                backoff = annotation.reason == "network" and not cooldown
+                cooldown = not backoff
+                if backoff:
+                    reason = "models.source.backoff.connection_failed"
             else:
                 recovery = "in_flight" if annotation.in_flight else "eligible"
                 runnable = not annotation.in_flight
+                cooldown = False
                 retry_at = None
-        if backoff:
-            retry_at = annotation.retry_at
-            runnable = False
-            if not structural_blocker:
-                reason = "models.source.backoff.connection_failed"
     return ExactHopInspection(
         backend=backend,
         menu_model=menu_model,
@@ -403,6 +416,8 @@ def inspect_exact_hop(
         retry_at=retry_at,
         backoff=backoff,
         recovery=recovery,
+        cooldown=cooldown,
+        cooldown_reason=cooldown_reason,
     )
 
 

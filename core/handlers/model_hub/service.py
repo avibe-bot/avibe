@@ -5060,8 +5060,9 @@ class ModelHubService:
             status = source.state.status
             health = (
                 "backoff" if inspection.backoff
+                else "cooldown" if inspection.cooldown
                 else "healthy"
-                if status in {"active", "standby"} or inspection.recovery is not None
+                if status in {"active", "standby", "cooldown"}
                 else status
             )
             chain.append(
@@ -6217,16 +6218,20 @@ class ModelHubService:
             source = next((item for item in config.sources if item.id == source_id), None)
             if (
                 source is None or not self._settlement_current(source, generation)
+                or source.supply_channel != "hub"
                 or source.state.status in {"needs_action", "error"}
             ):
                 return
             recovered = self.recovery.succeeded(source)
-            if source.state.status == "cooldown":
+            if recovered and source.state.status == "cooldown":
                 previous = self._clone_config(config)
-                source.state = ModelHubSourceStateConfig(
-                    status="active" if source.supply_channel == "native_cli" else "standby",
-                )
-                self._save_runtime_config(previous, config)
+                source.state = ModelHubSourceStateConfig(status="standby")
+                try:
+                    self._save_runtime_config(previous, config)
+                except OSError:
+                    # Inference is authoritative; the policy remembers exactly
+                    # which stale persisted cooldown must not be imported again.
+                    logger.warning("Could not persist Model Hub recovered state")
             if recovered:
                 self._record_event(
                     agent=cast(EventAgent, backend), kind="recover", model_id=model_id,
@@ -6266,7 +6271,13 @@ class ModelHubService:
             retry_at=retry_at.isoformat(),
             detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
         )
-        persisted = self._save_runtime_config(previous, config)
+        try:
+            persisted = self._save_runtime_config(previous, config)
+        except OSError:
+            # HTTP recovery already owns the live deadline. Failed telemetry
+            # cannot replace the upstream result or erase temporary eligibility.
+            logger.warning("Could not persist Model Hub cooldown state")
+            persisted = False
         if persisted and not already_cooling and emit_event:
             self._record_event(
                 agent=agent,
@@ -6319,12 +6330,15 @@ class ModelHubService:
             if not source_settlement_allowed(current.state.status, event_reason):
                 return event_reason, False
             if settlement_rule.status == "cooldown":
-                retry_at, changed = self.recovery.failed(
-                    current, event_reason,
-                    generation=generation,
-                    retry_after=outcome.retry_after if outcome is not None else None,
-                    response_received_at=outcome.response_received_at if outcome is not None else None,
-                )
+                retry_at = None
+                changed = True
+                if current.supply_channel == "hub":
+                    retry_at, changed = self.recovery.failed(
+                        current, event_reason,
+                        generation=generation,
+                        retry_after=outcome.retry_after if outcome is not None else None,
+                        response_received_at=outcome.response_received_at if outcome is not None else None,
+                    )
                 if not changed:
                     return event_reason, False
                 if not settlement_rule.may_write_health:
@@ -6696,6 +6710,7 @@ class ModelHubService:
             await self._mutation_lock.acquire()
             held = True
             generation: int | None = None
+            admission_confirmed = False
 
             def release_exclusion() -> None:
                 nonlocal held
@@ -6704,6 +6719,8 @@ class ModelHubService:
                     self._mutation_lock.release()
 
             def admitted() -> None:
+                nonlocal admission_confirmed
+                admission_confirmed = True
                 release_exclusion()
                 if on_admitted is not None:
                     on_admitted(generation)
@@ -6743,6 +6760,11 @@ class ModelHubService:
                 self.recovery.release(source.id, generation)
                 raise
             finally:
+                if not admission_confirmed:
+                    # A completed local engine failure may return without a
+                    # transport or on_admitted. It owns neither an attempt nor
+                    # a half-open slot after this call, even on normal return.
+                    self.recovery.release(source.id, generation)
                 release_exclusion()
             # A canceled configuration transaction left reconciliation pending.
             # Use its existing owner outside the lock, then revalidate the plan.
@@ -7040,7 +7062,9 @@ class ModelHubService:
             if facts is None:
                 raise AssertionError("no-candidate outcome must carry supply facts")
             raise ModelHubError(
-                "mapping_target_unavailable",
+                RECOVERY_EXHAUSTED_CODE
+                if recovery_request is not None and recovery_request.expired
+                else "mapping_target_unavailable",
                 status=409,
                 supply_state=facts.supply_state,
                 blockers=exact_hop_blockers(projection_resolution),
@@ -7049,11 +7073,14 @@ class ModelHubService:
 
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
+        window_closed = False
+        non_retryable_failure = False
         globally_blocked_source_ids: set[str] = set()
         while True:
-            if recovery_request is not None and recovery_request.expired:
-                break
             async with self._mutation_lock:
+                if recovery_request is not None and recovery_request.expired:
+                    window_closed = not non_retryable_failure
+                    break
                 config = self.store.load()
                 resolution = self._invocation_resolution(
                     config, cast(BackendName, backend), model_id, supply_channel,
@@ -7126,6 +7153,7 @@ class ModelHubService:
             except _InvocationPlanChanged:
                 continue
             except _RecoveryWindowClosed:
+                window_closed = not non_retryable_failure
                 break
             if outcome is None:
                 if cancelled is not None:
@@ -7186,6 +7214,7 @@ class ModelHubService:
                         attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), ())
                     continue
                 except _RecoveryWindowClosed:
+                    window_closed = not non_retryable_failure
                     break
                 if outcome is None:
                     if cancelled is not None:
@@ -7293,6 +7322,7 @@ class ModelHubService:
                     ),
                 )
             if decision.action == "fallback":
+                non_retryable_failure |= decision.reason not in RETRY_DELAYS
                 if recovery_request is not None and decision.reason in RETRY_DELAYS:
                     recovery_request.start()
                     recovery_request.reason = decision.reason
@@ -7325,7 +7355,7 @@ class ModelHubService:
         if final_facts is None:
             raise AssertionError("exhausted outcome must carry supply facts")
         raise ModelHubError(
-            "mapping_target_unavailable",
+            RECOVERY_EXHAUSTED_CODE if window_closed else "mapping_target_unavailable",
             status=503,
             supply_state=final_facts.supply_state,
             blockers=exact_hop_blockers(final_resolution),
@@ -7398,6 +7428,10 @@ class ModelHubService:
                     changed = self.recovery.changed
                     pending.publish("waiting", next_eligible_at=hop.retry_at)
                     await self.recovery.wait(delay, changed)
+                    if pending.expired:
+                        # Preserve this request's admission-expiry cause even
+                        # if an owner succeeded or configuration changed on wake.
+                        raise self._recovery_exhausted(exc) from exc
         finally:
             pending.clear()
 

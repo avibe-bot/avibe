@@ -783,8 +783,12 @@ the remaining window, it ends immediately; an in-flight owner may instead wake
 waiters before their window closes. Window expiry prevents another admission,
 never cancels an already connected slow inference, and never permits replay
 after output. Explicit Stop and downstream disconnection retain cancellation.
+An expired admission remains the explicit exhausted-recovery domain result even
+if another owner recovers or a route changes before this waiter resumes or
+finishes engine preparation. An actual admitted request's permanent, request,
+engine, or post-output failure retains its own terminal classification.
 
-Consecutive failed attempts on the same Source identity use:
+Consecutive failed HTTP attempts on the same Hub Source identity use:
 
 - network: 1, 2, 4, 8, 16, 30 seconds;
 - server error: 30, 60, 120 seconds;
@@ -799,6 +803,12 @@ backoff. Malformed, past, oversized, and non-ASCII advice is ignored with a
 redacted diagnostic. Scheduling and window duration are monotonic; aware UTC
 timestamps are read projections. Network state is never persisted. Existing
 shaped cooldown persistence remains compatible with earlier releases.
+Direct `native_cli` failures do not enter this HTTP coordinator: no Hub handle
+can prove their later success. They retain fixed native cooldowns (server 30,
+rate 60, quota 300 seconds), existing deadline-based launch eligibility and
+native display semantics, without live streaks, half-open ownership or
+timer-generated `recover` events. Unclassified native connection failures remain
+non-persistent and do not create a Hub backoff.
 
 An eligible affected Source admits one real request as half-open owner across
 waiting Sessions. Ownership and stale settlement fencing reuse the existing
@@ -809,6 +819,24 @@ one `recover`; mere timer expiry emits none. Live reads expose optional
 `recovery: eligible | in_flight` on AgentChain hops. `in_flight` is not runnable;
 with no stronger blocker it is temporary `waiting`, with nullable `retry_at`.
 The same annotation feeds service, runtime launch, API chain and AgentSupply reads.
+If the adapter returns a completed local failure without transport admission,
+release the provisional half-open claim on that normal return as well as on
+exception or cancellation. Do not synthesize `on_admitted`, attempt observations
+or retry counts for a request the engine never owned.
+
+Temporary cooldown persistence and recovery bookkeeping are observational.
+A failed write cannot destroy valid output or replace the actual upstream
+failure. The same in-memory policy supplies effective shaped cooldown health,
+deadline and reason even when disk still says `standby`. After verified success,
+it retires only the exact old persisted cooldown observation for the same Source
+identity while that observation remains on disk. Fresh reads must not import it
+again, emit duplicate recovery, or retain its old failure streak. A different
+persisted cooldown, observed on-disk retirement, identity replacement or removal
+invalidates that retirement; action, configuration and inventory blockers still
+win. This is not a permanent healthy override, another freshness generation or
+a persistent recovery record. Canonical hop inspection supplies these private
+effective facts to chain serialization and both terminal blocker projections;
+public health/recovery enums and the public reason whitelist are unchanged.
 
 For an all-temporary chain with Hub supply, runtime preflight prepares the Hub
 launch immediately. The first model request owns the window; no pre-native wait
@@ -1018,7 +1046,7 @@ splits — on whether the user owes an action:
 | --- | --- | --- | --- |
 | `ok` | 正常 | — | serving from the intended head of the chain |
 | `degraded` | 降级 | — | serving via a fallback, and/or some sources in the chain are down |
-| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is a persisted cooldown, live connection backoff, or an in-flight half-open owner — eligibility may return unattended; recovery still needs actual success |
+| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is an effective cooldown, live connection backoff, or an in-flight half-open owner — eligibility may return unattended; recovery still needs actual success |
 | `interrupted` | 无可用来源 | **no** | nothing runnable and the effective chain is empty or at least one hop has a non-self-healing blocker: `needs_action`, `error`, `source_missing`, `model_unsupported`, or `native_cli_unavailable` |
 
 These four values are the **only backend-level supply-health wording**. The Gateway
@@ -1043,7 +1071,7 @@ detail/remedy copy for restoring the sanctioned local CLI; it is never presented
 upstream Source cooldown.
 
 `waiting` exists to keep the surfacing rule below consistent. An agent whose
-sources are *all* in persisted cooldown, live connection backoff, or half-open
+sources are *all* in effective cooldown, live connection backoff, or half-open
 ownership has nothing runnable,
 but nothing is owed either —
 automatic recovery can proceed without user action. Collapsing that into `interrupted` would tell the user to
@@ -1069,7 +1097,7 @@ rollup stays what its name says. One taxonomy, two grains, and only one definiti
 The predicate itself is stated **once, here**, and every contract that carries either
 grain points back at this table rather than restating it: `interrupted` when the chain
 is empty **or at least one blocker needs the user**, `waiting` only when every blocker
-is a persisted cooldown, live connection backoff, or half-open ownership. The asymmetry is deliberate and
+is an effective cooldown, live connection backoff, or half-open ownership. The asymmetry is deliberate and
 load-bearing — `interrupted` is the
 OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
 revoked key is `interrupted`. Reading it as "every member needs the user" leaves that

@@ -1090,7 +1090,29 @@ jitter, Retry-After validation, identity fencing and the shared 120-second
 admission window. `service._invoke_admitted` reserves the existing attempt
 generation while holding mutation exclusion, after exact-route revalidation
 and before half-open claim/transport admission. Its admission callback forwards
-that generation; settlement never mints one.
+that generation; settlement never mints one. A completed pre-admission local
+failure releases its provisional claim without invoking that callback or
+counting an attempt. `native_cli` is outside this HTTP coordinator and retains
+its fixed native cooldown and launch-eligibility semantics.
+
+`SourceRecoveryAnnotation.retired_cooldown` is private, optional evidence naming
+the exact old `(retry_at, detail_key)` observation retired by verified success
+for the live Source identity. It is not a public field or a permanent healthy
+override. The policy drops it when a fresh authority read observes different
+cooldown data, retirement on disk, removal or identity replacement. Draft reads
+cannot consume it for a different cooldown or mutate the live authority.
+`ExactHopInspection.cooldown` and `cooldown_reason` carry effective transient
+facts from that same canonical inspector when persistence fails. Chain health
+and waiting eligibility use the effective cooldown; `exact_hop_blockers`
+retains its existing `cooldown` identity, while `turn_supply_facts` uses only a
+known effective EventReason. Neither invents an upstream status or bypasses
+stronger blockers. No new wire field, enum, classifier or retry owner is added.
+
+Write failure during temporary cooldown or verified-recovery bookkeeping cannot
+replace inference results. An already expired admission remains explicitly
+`model_hub_recovery_exhausted` across owner success and config/engine-preparation
+races; elapsed time cannot relabel an actual permanent, request, engine or
+post-output terminal result.
 
 `TurnCorrelationRegistry.recovery_snapshot(turn_id: str) -> list[dict]` is a
 read-only, in-memory hook for existing `turn_state` consumers. Each item is one

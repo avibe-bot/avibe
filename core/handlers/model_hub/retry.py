@@ -133,6 +133,9 @@ class RecoveryPolicy:
         self.sleep = sleep
         self.window_seconds = window_seconds
         self._sources: dict[str, _SourceRecovery] = {}
+        # Exact persisted observations superseded by verified inference. Keep
+        # them only while a failed save leaves that same cooldown on disk.
+        self._retired_cooldowns: dict[str, tuple] = {}
         self.changed = asyncio.Event()
 
     def notify(self) -> None:
@@ -141,22 +144,43 @@ class RecoveryPolicy:
         previous.set()
 
     def reconcile(self, config: ModelHubConfig) -> None:
-        identities = {source.id: source_identity(source) for source in config.sources}
+        sources = {source.id: source for source in config.sources if source.supply_channel == "hub"}
         removed = [
             source_id for source_id, state in self._sources.items()
-            if identities.get(source_id) != state.identity
+            if source_id not in sources or source_identity(sources[source_id]) != state.identity
         ]
         for source_id in removed:
             del self._sources[source_id]
-        if removed:
+        retired = [
+            source_id for source_id, observation in self._retired_cooldowns.items()
+            if source_id not in sources or self._cooldown_observation(sources[source_id]) != observation
+        ]
+        for source_id in retired:
+            del self._retired_cooldowns[source_id]
+        if removed or retired:
             self.notify()
 
+    @staticmethod
+    def _cooldown_observation(source: ModelHubSourceConfig) -> tuple | None:
+        if source.state.status != "cooldown":
+            return None
+        return source_identity(source), source.state.retry_at, source.state.detail_key
+
     def _state(self, source: ModelHubSourceConfig) -> _SourceRecovery | None:
+        # Native calls have no HTTP attempt/success owner. Their shipped fixed
+        # cooldown and native retry lifecycle remain outside this coordinator.
+        if source.supply_channel != "hub":
+            return None
         state = self._sources.get(source.id)
         if state is not None and state.identity != source_identity(source):
             del self._sources[source.id]
             self.notify()
             state = None
+        retired = self._retired_cooldowns.get(source.id)
+        if retired is not None:
+            if retired == self._cooldown_observation(source):
+                return state
+            del self._retired_cooldowns[source.id]
         # Restore eligibility from shipped cooldowns, never a recovered verdict.
         if state is None and source.state.status == "cooldown" and source.state.retry_at:
             retry_at = parse_model_hub_timestamp(source.state.retry_at)
@@ -186,7 +210,12 @@ class RecoveryPolicy:
         result = {}
         for source in config.sources:
             state = self._state(source)
+            retired = self._retired_cooldowns.get(source.id)
             if state is None:
+                if retired is not None:
+                    result[source.id] = SourceRecoveryAnnotation(
+                        reason="recovery", retired_cooldown=retired[1:],
+                    )
                 continue
             remaining = max(0.0, state.eligible_at - self.monotonic())
             result[source.id] = SourceRecoveryAnnotation(
@@ -194,6 +223,7 @@ class RecoveryPolicy:
                 # Project remaining monotonic time onto the current wall clock.
                 retry_at=(self.now() + timedelta(seconds=remaining)).isoformat() if remaining else None,
                 in_flight=state.owner is not None,
+                retired_cooldown=retired[1:] if retired is not None else None,
             )
         return result
 
@@ -251,6 +281,9 @@ class RecoveryPolicy:
         if state is None:
             return False
         del self._sources[source.id]
+        observation = self._cooldown_observation(source)
+        if observation is not None:
+            self._retired_cooldowns[source.id] = observation
         self.notify()
         return True
 
@@ -260,6 +293,9 @@ class RecoveryPolicy:
         state = self._sources.get(source_id)
         if state is not None and state.identity == previous:
             state.identity = current
+        retired = self._retired_cooldowns.get(source_id)
+        if retired is not None and retired[0] == previous:
+            self._retired_cooldowns[source_id] = (current, *retired[1:])
 
     async def wait(self, delay: float, changed: asyncio.Event) -> None:
         """Wait without owning the configuration lock or a transport."""

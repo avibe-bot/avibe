@@ -104,7 +104,7 @@ def exact_hop_blockers(
         ):
             if inspection.backoff or inspection.recovery == "in_flight":
                 reason = "network" if inspection.backoff else "cooldown"
-            elif inspection.source.state.status == "cooldown":
+            elif inspection.cooldown:
                 reason = "cooldown"
             elif inspection.source.state.detail_key is not None:
                 reason = SOURCE_DETAIL_EVENT_REASONS.get(
@@ -418,9 +418,10 @@ def turn_supply_facts(
         source = inspection.source
         reason = inspection.reason
         if reason not in EVENT_REASON_AUTHORITY and source is not None:
-            reason = SOURCE_DETAIL_EVENT_REASONS.get(
-                source.state.detail_key or "",
-                reason,
+            reason = (
+                inspection.cooldown_reason
+                if inspection.cooldown_reason in EVENT_REASON_AUTHORITY
+                else SOURCE_DETAIL_EVENT_REASONS.get(source.state.detail_key or "", reason)
             )
         if reason not in EVENT_REASON_AUTHORITY:
             continue
