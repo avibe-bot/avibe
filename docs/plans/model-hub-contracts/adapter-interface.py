@@ -130,6 +130,9 @@ class RawCallOutcome:
     retry_after: str | None = None
     # Aware UTC receipt time of those headers, before reading the error body.
     response_received_at: datetime | None = None
+    # Recognized model output or protocol success, independently of permissive
+    # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
+    recovery_verified: bool = False
 
 
 class ObservationOutcome(str, Enum):
