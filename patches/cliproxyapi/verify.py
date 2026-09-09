@@ -12,7 +12,7 @@ import sys
 
 from budgets import PHASES
 from execution_inputs import file_sha256, python_identity, records_sha256, regular_file, tree_records, verify_go
-from isolation import isolated_environment, namespace_receipt, validate_state_root
+from isolation import isolated_environment, namespace_receipt, safe_git, validate_state_root
 from fixture import fixture_identity, source_digest
 
 
@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 
 def verify_inputs(source: Path) -> dict:
     receipt = json.loads((HERE / "inputs.json").read_text())
-    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+    head = safe_git(source, "rev-parse", "HEAD").decode().strip()
     if head != receipt["source_sha"]:
         raise RuntimeError(f"Wrong engine base: {head}")
     for name, expected in receipt["sha256"].items():
@@ -34,7 +34,7 @@ def verify_candidate(source: Path) -> str:
     receipt = json.loads((HERE / "patched-files.json").read_text())
     changed = set()
     for arguments in (["diff", "HEAD", "--name-only", "-z"], ["ls-files", "--others", "-z"]):
-        raw = subprocess.check_output(["git", "-C", str(source), *arguments])
+        raw = safe_git(source, *arguments)
         changed.update(name.decode() for name in raw.split(b"\0") if name)
     if changed != set(receipt):
         raise RuntimeError("Candidate has missing/extra edits or untracked files; preserve and inspect it.")
@@ -112,21 +112,16 @@ def main() -> None:
     proof = namespace_receipt() if args.phase != "apply" else None
     verify_inputs(source)
     if args.phase == "apply":
-        status = subprocess.check_output(
-            ["git", "-C", str(source), "status", "--porcelain"], text=True,
-        )
+        status = safe_git(source, "status", "--porcelain")
         if status:
             raise RuntimeError("Checkout is dirty; preserve it and use a fresh exact-base checkout.")
         patch = HERE / "native-intent.patch"
         for options in (["--check"], []):
-            subprocess.run(["git", "-C", str(source), "apply", *options, str(patch)], check=True)
+            safe_git(source, "apply", *options, str(patch))
         verify_candidate(source)
         return
     # Confirm that the maintained candidate, including its Go tests, is applied.
-    subprocess.run(
-        ["git", "-C", str(source), "apply", "--reverse", "--check", str(HERE / "native-intent.patch")],
-        check=True,
-    )
+    safe_git(source, "apply", "--reverse", "--check", str(HERE / "native-intent.patch"))
     verify_candidate(source)
     budget = PHASES[args.phase]
     expected_network = "none" if args.phase == "build" else "loopback"

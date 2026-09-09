@@ -14,11 +14,11 @@ import json
 import os
 from pathlib import Path
 import resource
+import secrets
 import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 
 from budgets import PHASES
@@ -165,15 +165,26 @@ def run_candidate(args: argparse.Namespace, drop: list[str], env: dict[str, str]
     return result.returncode
 
 
-def open_receipts(args: argparse.Namespace, stack: ExitStack):
+def check_root_descriptor(args: argparse.Namespace, root_fd: int) -> None:
+    """Recheck actual custody and pathname identity, never repair a supplied root."""
+    info = os.fstat(root_fd)
+    named = args.root.lstat()
+    if (args.root.resolve(strict=True) != args.root
+            or not stat.S_ISDIR(info.st_mode) or not stat.S_ISDIR(named.st_mode)
+            or info.st_uid != args.uid or stat.S_IMODE(info.st_mode) != 0o700
+            or (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+            != (named.st_dev, named.st_ino, named.st_mode, named.st_uid)):
+        raise ValueError("Privileged scratch must remain the caller-owned mode-0700 admitted directory.")
+
+
+def open_receipts(args: argparse.Namespace, stack: ExitStack, root_fd: int):
     """Reserve root-owned output and an unnamed probe channel before execution."""
     control = args.root / "receipts"
     for name in ("source", "fixture", "state", "recipe", "toolchain", "python_env", "go_archive", "output"):
         path = getattr(args, name)
         if control == path or control.is_relative_to(path) or path.is_relative_to(control):
             raise ValueError("Parent receipts must be outside every child bind mount.")
-    root_fd = os.open(args.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    stack.callback(os.close, root_fd)
+    check_root_descriptor(args, root_fd)
     created = False
     try:
         os.mkdir("receipts", mode=0o750, dir_fd=root_fd)
@@ -206,10 +217,9 @@ def open_receipts(args: argparse.Namespace, stack: ExitStack):
     return terminal, probe, handoff, control_fd
 
 
-def allocate_output(args: argparse.Namespace, stack: ExitStack) -> None:
+def allocate_output(args: argparse.Namespace, stack: ExitStack, root_fd: int) -> None:
     """One new child-writable output, beneath a parent-owned unmounted directory."""
-    root_fd = os.open(args.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    stack.callback(os.close, root_fd)
+    check_root_descriptor(args, root_fd)
     try:
         os.mkdir("runs", mode=0o750, dir_fd=root_fd)
         created = True
@@ -381,7 +391,11 @@ def main() -> None:
         raise ValueError("The invoking task owner must be non-root.")
     context = sudo_storage_context(args.uid, args.caller_storage_sha256)
     args.storage_context = context.record()
-    args.root = validate_temporary_root(args.root, owner_uid=args.uid, context=context).resolve(strict=True)
+    admitted_root = validate_temporary_root(args.root, owner_uid=args.uid, context=context).resolve(strict=True)
+    if args.root != admitted_root:
+        raise ValueError("Privileged scratch must use its absolute canonical name.")
+    args.root = admitted_root
+    admitted_info = args.root.lstat()
     for name in ("source", "fixture", "state", "recipe", "toolchain", "python_env", "go_archive"):
         path = context.validate(getattr(args, name)).resolve(strict=True)
         if path == args.root or not path.is_relative_to(args.root):
@@ -423,7 +437,13 @@ def main() -> None:
     if not args.command:
         raise ValueError("An explicit test/build command is required.")
     with ExitStack() as stack:
-        terminal, probe, handoff, control_fd = open_receipts(args, stack)
+        root_fd = os.open(args.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        stack.callback(os.close, root_fd)
+        opened_info = os.fstat(root_fd)
+        if (opened_info.st_dev, opened_info.st_ino) != (admitted_info.st_dev, admitted_info.st_ino):
+            raise ValueError("Privileged scratch changed after original path admission.")
+        check_root_descriptor(args, root_fd)
+        terminal, probe, handoff, control_fd = open_receipts(args, stack, root_fd)
         rootfs = None
         sentinels = []
         result = None
@@ -432,8 +452,11 @@ def main() -> None:
         rootfs_removed = False
         try:
             args.selected_build = selected_build_receipt(args, control_fd)
-            allocate_output(args, stack)
-            rootfs = Path(tempfile.mkdtemp(prefix="rootfs-", dir=args.root))
+            allocate_output(args, stack, root_fd)
+            check_root_descriptor(args, root_fd)
+            rootfs_name = "rootfs-" + secrets.token_hex(16)
+            os.mkdir(rootfs_name, mode=0o700, dir_fd=root_fd)
+            rootfs = args.root / rootfs_name
             for family in (socket.AF_INET, socket.AF_INET6):
                 sentinels.append(Sentinel(family))
             values = {
@@ -446,6 +469,7 @@ def main() -> None:
             command = ["/usr/bin/unshare", "--mount", "--net", "--pid", "--fork", "--kill-child=KILL",
                        "/usr/bin/python3", "-I", "-B", "-c", CHILD_TRAMPOLINE,
                        str(Path(__file__).resolve().parent), str(handoff.fileno())]
+            check_root_descriptor(args, root_fd)
             # subprocess.run kills and waits for the launcher on timeout.
             # unshare --kill-child also kills its PID 1 and all its descendants.
             result = subprocess.run(
@@ -463,7 +487,7 @@ def main() -> None:
             try:
                 # Only the exact parent-created, empty mount point is removed.
                 if rootfs is not None:
-                    rootfs.rmdir()
+                    os.rmdir(rootfs.name, dir_fd=root_fd)
                 rootfs_removed = True
             except OSError as exc:
                 cleanup_errors.append(type(exc).__name__)

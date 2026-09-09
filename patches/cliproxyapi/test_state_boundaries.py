@@ -180,7 +180,7 @@ def test_configured_storage_is_rejected_by_every_public_prewrite_consumer(
         root = tmp_path / "looks-like-task"
         root.symlink_to(descendant)
     before = fixture.source_digest(original_storage.parent)
-    monkeypatch.setattr(fixture.subprocess, "check_output", lambda *_a, **_kw: pytest.fail("Git reached."))
+    monkeypatch.setattr(fixture, "safe_git", lambda *_a, **_kw: pytest.fail("Git reached."))
     if consumer == "environment":
         action = lambda: isolation.isolated_environment(root)
     elif consumer == "sandbox":
@@ -683,7 +683,9 @@ def test_documented_preparation_fresh_task_runs_actual_copy_git_and_directory_co
         return copytree(*args, **kwargs)
 
     def execute(command, **kwargs):
-        assert command == ["git", "init", str(task / "source")]
+        assert command[0] == "/usr/bin/git"
+        assert command[-3:] == ["init", "--template=", str(task / "source")]
+        assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
         events.append("git-init")
         return run(command, **kwargs)
 
@@ -707,10 +709,16 @@ def test_documented_preparation_fresh_task_runs_actual_copy_git_and_directory_co
     assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
 
 
-def test_documented_preparation_shell_stops_before_any_later_instruction_on_refusal():
+def test_documented_preparation_shell_stops_before_any_later_instruction_on_refusal(tmp_path):
     block, _ = preparation_entry()
+    # Actual isolated interpreter startup; an absent inspected recipe refuses
+    # before the preparation import. HOST Python path adaptation only.
+    block = block.replace("/usr/bin/python3", sys.executable)
     result = subprocess.run(
-        ["/bin/sh", "-c", "python3() { return 41; }\n" + block + "\nexit 99\n"],
+        ["/bin/sh", "-c", block + "\nexit 99\n"],
+        env={"PATH": "/usr/bin:/bin", "recipe_source": str(tmp_path / "absent-recipe"),
+             "engine_task": str(tmp_path / "absent-task")},
         stdin=subprocess.DEVNULL, capture_output=True, close_fds=True, timeout=5,
     )
     assert result.returncode == 1
+    assert not (tmp_path / "absent-task").exists()

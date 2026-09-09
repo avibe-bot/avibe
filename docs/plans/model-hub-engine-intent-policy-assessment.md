@@ -1,12 +1,16 @@
 # Model Hub engine reasoning-intent assessment
 
-Status (2026-09-09): inactive, unshipped source/test candidate. The configured-
-storage/preparation and nested private-context correction has independent
-source-functional acceptance for the exact local snapshot recorded below:
-1,076 pure tests, one bounded Linux context diagnostic and independent native
-original-file readback. The orchestrator explicitly adjusted its supplementary
-source-evidence criterion; the old Watch's raw outer streams remain unavailable
-and complete original transport accounting remains unmet. No new recipe
+Status: inactive, unshipped source/test candidate, under the fourth-head
+pre-envelope authority correction. The orchestrator accepted the earlier
+configured-storage/preparation and nested private-context functionality only
+for its exact historical snapshot: 1,076 pure tests, one bounded Linux context
+diagnostic and independent native original-file readback. Those results and
+the successful CI on `e2d9c6361350` do not validate the new recipe bytes.
+The current scope is local implementation and HOST-only consuming validation;
+independent source inspection and new exact-head review remain required.
+The orchestrator explicitly adjusted its supplementary source-evidence
+criterion; the old Watch's raw outer streams remain unavailable and complete
+original transport accounting remains UNMET. No new recipe Linux/privileged/
 Go/build/wire/fullphase or selected-engine-build execution is claimed.
 The preceding second-round recipe's 361 pure tests and separate complete
 lane/orchestrator Linux arm64 test/build/wire runs remain historical, as do
@@ -47,9 +51,71 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
-## Third reviewed-head configured-storage correction — source accepted, local only
+## Fourth reviewed-head pre-envelope authority correction — local only
 
-The complete independent review inventory contains three findings-bearing
+The complete review inventory at the recorded scope decision contains four
+findings-bearing heads and twelve original findings: eight resolved historical
+threads and four unresolved threads. Review `5155993490` on
+`e2d9c6361350c65929039338bc23a05ac720f8b7` is terminal with three real findings,
+not a clean pass. They concern caller root custody at the privileged writer
+(`3969819318`), ambient Python executable/import startup (`3969819326`), and
+ambient Git configuration/templates/hooks (`3969819339`). The older configured-
+storage finding `3965522776` remains unresolved/outdated. All seventeen matching
+CI jobs succeeded on that reviewed head; green CI does not override this
+repeated pre-effect authority circuit.
+
+The same orchestrator independently diagnosed the complete inventory and
+authorized correction at the existing owners, without another lifecycle owner
+or engine-intent change. Directory topology and an earlier preparation check
+cannot grant custody to a later privileged writer. Body-only Python tests
+cannot validate interpreter startup, and a sanitized test environment cannot
+establish the real documented Git boundary.
+
+The privileged parent now binds its admitted canonical root to one no-follow
+descriptor, verifies caller UID, directory type and exact mode 0700 before any
+receipt/run/rootfs allocation, and rechecks that identity at the actual
+allocation consumers. Rootfs creation and removal use the same held descriptor;
+pathname replacement refuses without repairing a supplied root or discarding
+prior evidence. Existing original-storage admission, parent receipt/private
+handoff ownership and finite phase budgets remain controlling.
+
+Every pre-envelope README Python entry selects trusted absolute Python with
+isolated startup before explicitly importing the inspected canonical recipe.
+Original HOME/XDG/Avibe/Codex/Claude storage variables remain available for the
+shared original-context capture. The public direct-sudo parent and phase caller
+use the same bootstrap shape; failed context/export command substitutions stop
+their shell rather than continuing with an invalid value.
+
+One command-local Git boundary is reused by preparation, fixture export and
+verify/apply. It uses the trusted executable and an empty init template,
+disables ambient/global/system configuration, hooks and executable helpers,
+and refuses non-bookkeeping local configuration before operational commands.
+This includes local includes, filters, fsmonitor, external diff, worktree
+redirection and alternate transport settings. Source/fixture pins and
+dirty/untracked/identity refusals remain unchanged. No installed Git setting
+is modified; prerequisite networking remains separately authorized future work.
+
+The existing pure consumers retain the earlier assertions and add actual
+mocked-parent allocation/descriptor failures, real shell/isolated-interpreter
+startup with task-only shadows, and real task-only Git repositories exercising
+the maintained callers. Linux privilege/process/kernel seams remain mocked;
+the startup tests explicitly adapt only the trusted HOST Python path and omit
+sudo when invoking a finite fake parent import. No live guest or engine test
+is implied. New measured HOST results belong to the exact returned local
+proposal and its retained commands, not to the historical recipe below.
+
+The README is intentionally changed by this separately authorized fourth-round
+repair. The earlier recipe tree `e024eb07cff6df2db9caea0b400e171317b380d4`
+is historical. Its accepted then-unexecuted README notice and later bounded
+diagnostic remain distinct evidence; neither is silently relabeled as this
+recipe. The native patch, pinned source/fixture/toolchain declarations and
+wire/routing/auth/registration ownership remain unchanged. No push, thread
+mutation, new review trigger, merge or engine publication is authorized by
+this local correction.
+
+## Historical third reviewed-head configured-storage correction — source accepted, local only
+
+The independent review inventory at that checkpoint contained three findings-bearing
 heads, eight resolved historical threads and one current unresolved finding,
 `3965522776`, on reviewed head `79a47b8217463e49e06a80368718ed83068e6dcd`.
 The repeated class is incomplete protection before setup writes, not a new
@@ -123,9 +189,9 @@ and document/AST/whitespace checks passed. These are existing measured results,
 not new test invocations during this assessment-only finalization. Pure
 consumers alone are not live sudo/namespace or engine-execution evidence.
 
-The recipe README retains its then-unexecuted context-handoff acceptance
-notice as part of the exact accepted pre-execution snapshot; it has not been
-updated by this assessment. The later bounded diagnostic and acceptance below
+The historical recipe README retained its then-unexecuted context-handoff
+acceptance notice as part of the exact accepted pre-execution snapshot; the
+assessment-only finalization did not update it. The later bounded diagnostic and acceptance below
 supersede that historical status, not its input bytes or failure predicates.
 Unavailable original context still fails closed. The original native Go patch
 and frozen source/fixture/toolchain declarations remain unchanged.

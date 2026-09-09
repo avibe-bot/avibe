@@ -7,11 +7,10 @@ import io
 import os
 from pathlib import Path
 import stat
-import subprocess
 import tarfile
 import tempfile
 
-from isolation import validate_state_root
+from isolation import safe_git, validate_state_root
 
 
 def source_digest(root: Path) -> str:
@@ -45,12 +44,10 @@ def export_fixture(repository: Path, state: Path, receipt: dict) -> tuple[Path, 
     """An exact commit archive ignores staged, dirty and untracked worktree files."""
     state = validate_state_root(state)
     base = receipt["avibe_fixture_base"]
-    tree = subprocess.check_output(
-        ["git", "-C", str(repository), "rev-parse", f"{base}^{{tree}}"], text=True,
-    ).strip()
+    tree = safe_git(repository, "rev-parse", f"{base}^{{tree}}").decode().strip()
     if tree != receipt["avibe_fixture_tree"]:
         raise RuntimeError("Wrong Avibe fixture tree.")
-    archive = subprocess.check_output(["git", "-C", str(repository), "archive", "--format=tar", base])
+    archive = safe_git(repository, "archive", "--format=tar", base)
     archive_sha = hashlib.sha256(archive).hexdigest()
     if archive_sha != receipt["avibe_fixture_archive_sha256"]:
         raise RuntimeError("Frozen Avibe archive differs from the receipt.")

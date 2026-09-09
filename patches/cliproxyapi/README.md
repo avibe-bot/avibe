@@ -35,7 +35,14 @@ all egress and is only for pure-source diagnostics. Executing the pinned
 Linux arm64 Go toolchain, including compilation, requires the Linux envelope;
 there is no macOS engine-build or network-suite fallback.
 
-Current acceptance boundary: the third reviewed head exposed configured user
+Current acceptance boundary: the fourth reviewed head exposed missing caller
+directory custody at the privileged writer and ambient Python/Git startup
+authority before the namespace. The orchestrator authorized only this local
+recipe/test/document correction and HOST validation. Its new bytes have no
+Linux/privileged/Go/build/wire acceptance. Do not reuse the earlier recipe
+identity or diagnostic as acceptance of these changes.
+
+Historical third-round boundary: the third reviewed head exposed configured user
 storage missing from pre-write protection. The orchestrator diagnosed the
 repeated isolation class and authorized only a bounded recipe/test/doc correction
 and pure validation. Independent inspection of the first 733-consumer correction
@@ -43,9 +50,11 @@ then reproduced a remaining README preparation gap: source/state child aliases
 were not admitted before Git initialization or mkdir. The entry below now checks
 the complete fresh preparation plan before any write. The corrected local recipe
 passes 1,076 maintained pure consumers, pinned Ruff 0.4.9 and
-document/AST/whitespace gates. **Its direct-sudo/proc handoff remains unexecuted;
-privileged probes and Go/build/wire execution remain held pending independent
-inspection.** The preceding
+document/AST/whitespace gates. That exact snapshot subsequently received one
+bounded direct-sudo/context diagnostic and independent native original readback,
+under the assessment's supplementary source criterion. Its OLD Watch raw outer
+streams remain unavailable and complete original transport accounting is UNMET.
+No new privileged probes or Go/build/wire execution are released. The preceding
 second-round recipe genuinely passed 361 pure consumers and separate lane and
 independent orchestrator Linux test/build/wire runs. Those full source results
 remain acceptance of their exact earlier recipe, not these changed admission
@@ -76,14 +85,22 @@ plan using the original context before any mkdir, copy, Git initialization or
 export. It refuses existing contents, including empty children, links and
 prior evidence; preserve them and obtain a separately allocated fresh task.
 Do not run the later steps if this entry fails, or share/mutate its destinations
-with another process while preparing them.
+with another process while preparing them. Every pre-envelope Python command
+below selects the already trusted `/usr/bin/python3` explicitly and uses `-I -B`.
+Isolation ignores cwd, PYTHONPATH, user site and Python startup configuration;
+it does not replace the original HOME/XDG/product variables used by admission.
+Each command explicitly selects the inspected canonical recipe import directory.
+The installed Python and its standard library are trusted prerequisites.
 
 ```sh
-if ! python3 -B - "$recipe_source" "$engine_task" <<'PY'
-import shutil, subprocess, sys
+if ! /usr/bin/python3 -I -B - "$recipe_source" "$engine_task" <<'PY'
+import shutil, sys
 from pathlib import Path
+recipe = Path(sys.argv[1])
+if not recipe.is_absolute() or recipe.resolve(strict=True) != recipe or not recipe.is_dir():
+    raise ValueError("Select the inspected canonical recipe directory.")
 sys.path.insert(0, sys.argv[1])
-from isolation import preparation_directories
+from isolation import preparation_directories, safe_git
 task = Path(sys.argv[2])
 directories = preparation_directories(task)
 for directory in directories:
@@ -91,7 +108,7 @@ for directory in directories:
         directory.mkdir(mode=0o700)
 shutil.copytree(sys.argv[1], task / "recipe",
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "._*", ".DS_Store"))
-subprocess.run(["git", "init", str(task / "source")], check=True, close_fds=True)
+safe_git(task / "source", "init")
 PY
 then
   exit 1
@@ -107,11 +124,32 @@ plan or reuse the entry to reset an existing task. Do not use a shared checkout.
 Fetching prerequisites remains a separate authorization, not part of admission:
 
 ```sh
-git -C "$engine_task/source" fetch --depth=1 \
-  https://github.com/router-for-me/CLIProxyAPI.git \
-  2a6b87aca083a5bf498ac1f68a1b636c500d7aaa
-git -C "$engine_task/source" checkout --detach FETCH_HEAD
+/usr/bin/python3 -I -B - "$engine_task" <<'PY'
+import sys
+from pathlib import Path
+task = Path(sys.argv[1])
+recipe = task / "recipe"
+if not recipe.is_absolute() or recipe.resolve(strict=True) != recipe or not recipe.is_dir():
+    raise ValueError("Select the inspected canonical recipe directory.")
+sys.path.insert(0, str(recipe))
+from isolation import safe_git
+safe_git(task / "source", "fetch", "--depth=1",
+         "https://github.com/router-for-me/CLIProxyAPI.git",
+         "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa")
+safe_git(task / "source", "checkout", "--detach", "FETCH_HEAD")
+PY
 ```
+
+`safe_git` is the same command-local boundary used by fixture export and
+verify/apply. It selects trusted `/usr/bin/git`, an empty init template, no
+system/global/environment configuration, no pager/credential helper, and only
+HTTPS transport. No installed configuration is changed. Local config is read
+without includes and must contain only ordinary core bookkeeping, user name/
+email, remote URL/fetch and branch remote/merge declarations. Other local
+settings (including includes, extensions, hooks, filters, fsmonitor, redirects
+and external diff commands) refuse before an operational command. Diff also
+disables external/textconv execution. Preserve refused repositories unchanged.
+An unusual local configuration needs independent inspection, not a reset.
 
 Only separately authorized prerequisite preparation may use public networking. `prerequisites.json`
 records exact Linux arm64 Go 1.26.4 and uv 0.9.8 archive URLs and SHA256 values.
@@ -123,11 +161,14 @@ toolchain. Verify the extracted compiler, tools and runtime files against the
 SHA256-verified archive before using Go, not merely its version string:
 
 ```sh
-python3 -B - "$engine_task" <<'PY'
+/usr/bin/python3 -I -B - "$engine_task" <<'PY'
 import json, sys
 from pathlib import Path
 task = Path(sys.argv[1])
-sys.path.insert(0, str(task / "recipe"))
+recipe = task / "recipe"
+if not recipe.is_absolute() or recipe.resolve(strict=True) != recipe or not recipe.is_dir():
+    raise ValueError("Select the inspected canonical recipe directory.")
+sys.path.insert(0, str(recipe))
 from execution_inputs import verify_go
 pin = json.loads((task / "recipe/prerequisites.json").read_text())["linux_arm64_go"]
 print(json.dumps(verify_go(task / "toolchain", task / "downloads/go.tar.gz",
@@ -158,10 +199,12 @@ retain that actual path as `fixture_root`. Any preparation on another machine
 requires its own complete original-caller admission, not this task's authority:
 
 ```sh
-fixture_root=$(python3 -B - "$avibe_checkout" "$engine_task" <<'PY'
+fixture_root=$(/usr/bin/python3 -I -B - "$avibe_checkout" "$engine_task" <<'PY'
 import json, sys
 from pathlib import Path
 recipe = Path(sys.argv[2]) / "recipe"
+if not recipe.is_absolute() or recipe.resolve(strict=True) != recipe or not recipe.is_dir():
+    raise ValueError("Select the inspected canonical recipe directory.")
 sys.path.insert(0, str(recipe))
 from fixture import export_fixture
 root, identity = export_fixture(
@@ -170,7 +213,7 @@ root, identity = export_fixture(
 )
 print(root)
 PY
-)
+) || exit 1
 ```
 
 The exporter checks exact commit tree, archive and complete path-independent
@@ -192,7 +235,9 @@ Apply once to a clean exact-base checkout. Reapplying to a dirty checkout is
 refused; it never resets, stashes, or overwrites someone else's changes:
 
 ```sh
-"$engine_task/venv/bin/python" -B "$engine_task/recipe/verify.py" apply \
+/usr/bin/python3 -I -B -c \
+  'import sys; from pathlib import Path; p=Path(sys.argv.pop(1)); assert p.is_absolute() and p.resolve(strict=True)==p and p.is_dir(); sys.path.insert(0,str(p)); import verify; verify.main()' \
+  "$engine_task/recipe" apply \
   --source "$engine_task/source" --state "$engine_task/state"
 ```
 
@@ -206,14 +251,20 @@ Use new receipt names every time; collisions fail
 closed and preserve prior evidence. Example:
 
 ```sh
-caller_storage_sha256=$(python3 -B - "$engine_task/recipe" <<'PY'
+caller_storage_sha256=$(/usr/bin/python3 -I -B - "$engine_task/recipe" <<'PY'
 import sys
+from pathlib import Path
+recipe = Path(sys.argv[1])
+if not recipe.is_absolute() or recipe.resolve(strict=True) != recipe or not recipe.is_dir():
+    raise ValueError("Select the inspected canonical recipe directory.")
 sys.path.insert(0, sys.argv[1])
 from isolation import storage_context
 print(storage_context().fingerprint())
 PY
-)
-/usr/bin/sudo -n /usr/bin/python3 -B "$engine_task/recipe/namespace.py" \
+) || exit 1
+/usr/bin/sudo -n /usr/bin/python3 -I -B -c \
+  'import sys; from pathlib import Path; p=Path(sys.argv.pop(1)); assert p.is_absolute() and p.resolve(strict=True)==p and p.is_dir(); sys.path.insert(0,str(p)); import namespace; namespace.main()' \
+  "$engine_task/recipe" \
   --root "$engine_task" --source "$engine_task/source" \
   --fixture "$fixture_root" --state "$engine_task/state" \
   --recipe "$engine_task/recipe" --toolchain "$engine_task/toolchain" \
@@ -231,19 +282,24 @@ and must not impose a shorter total timeout. Run phases sequentially:
 
 ```sh
 run_phase() {
-  "$engine_task/venv/bin/python" -B - \
+  /usr/bin/python3 -I -B - \
     "$engine_task" "$fixture_root" "$1" "$2" "$3" "${4-}" <<'PY'
 import subprocess, sys
 from pathlib import Path
 task, fixture = Path(sys.argv[1]), Path(sys.argv[2])
 phase, network, receipt, build = sys.argv[3:]
 recipe = task / "recipe"
+if not recipe.is_absolute() or recipe.resolve(strict=True) != recipe or not recipe.is_dir():
+    raise ValueError("Select the inspected canonical recipe directory.")
 sys.path.insert(0, str(recipe))
 from budgets import PHASES
 from isolation import storage_context
 storage = storage_context()
 storage.validate(task)
-command = ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B", str(recipe / "namespace.py")]
+entry = ("import sys; from pathlib import Path; p=Path(sys.argv.pop(1)); "
+         "assert p.is_absolute() and p.resolve(strict=True)==p and p.is_dir(); "
+         "sys.path.insert(0,str(p)); import namespace; namespace.main()")
+command = ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", entry, str(recipe)]
 paths = {"root": task, "source": task / "source", "fixture": fixture,
          "state": task / "state", "recipe": recipe, "toolchain": task / "toolchain",
          "python-env": task / "venv", "go-archive": task / "downloads/go.tar.gz"}
@@ -282,6 +338,14 @@ or changed process fails before any receipt, run, listener, subprocess or mount.
 This deliberately supports the documented direct sudo invocation; another sudo
 process layout is not an excuse for a fallback. Deliberately discarded variables
 cannot be recovered: rerunning from a sanitized shell is not supported.
+
+Before the first privileged allocation, the parent opens the canonical task
+root without following a link and admits its actual directory type, caller UID
+and exact0700 mode. That one ExitStack-owned descriptor is reused for receipts,
+runs and the exclusive rootfs allocation, with custody/name-identity rechecked
+at each consumer. A missing, replaced, unreadable, foreign or wrong-mode root
+fails closed; the parent never repairs its ownership or permissions. Cleanup
+of its empty rootfs uses the same descriptor, not a reopened replacement path.
 
 Root adds its own passwd-home protection, then carries the stable context only
 through the existing unnamed parent control and root-owned private proof.

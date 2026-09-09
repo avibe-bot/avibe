@@ -50,10 +50,14 @@ def phases(tmp_path, monkeypatch):
 
     monkeypatch.setattr(verify.subprocess, "check_output", version)
 
+    def git(source, *arguments):
+        assert source == context.source
+        assert arguments == ("apply", "--reverse", "--check", str(context.recipe / "native-intent.patch"))
+        return b""
+
+    monkeypatch.setattr(verify, "safe_git", git)
+
     def command(command, **kwargs):
-        if command[0] == "git":
-            assert "--reverse" in command and "--check" in command
-            return subprocess.CompletedProcess(command, 0)
         assert kwargs["close_fds"] and kwargs["stdin"] == subprocess.DEVNULL
         assert kwargs["timeout"] == PHASES[context.phase].command_seconds
         context.calls.append([str(part) for part in command])
@@ -217,6 +221,7 @@ def test_documented_outer_caller_uses_the_same_complete_budget(tmp_path, monkeyp
     # The maintained README is an executable caller, not another timeout owner.
     readme = (Path(__file__).parent / "README.md").read_text()
     caller = readme.split("run_phase() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+    (tmp_path / "recipe").mkdir()
     build = str(tmp_path / "runs/prior-build.json") if phase == "wire" else ""
     monkeypatch.setattr(sys, "argv", ["-", str(tmp_path), str(tmp_path / "fixture"),
                                      phase, network, "one-phase.json", build])

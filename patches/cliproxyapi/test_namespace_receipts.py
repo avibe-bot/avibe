@@ -24,7 +24,7 @@ from isolation import STORAGE_ENV, StorageContext, validate_state_root
 def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     storage = StorageContext.capture()
     root = tmp_path / "allocated-task"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     paths = {}
     for name in ("source", "fixture", "state", "recipe", "toolchain", "python_env"):
         paths[name] = root / name
@@ -658,15 +658,17 @@ def test_documented_caller_binds_original_context_and_actual_parent_admission(
     class BeforeFirstWrite(Exception):
         pass
 
-    def first_write(args, _stack):
+    def first_write(args, _stack, root_fd):
         context = StorageContext.from_parent(args.storage_context)
         assert set(sudo_process.context.protected).issubset(context.protected)
         assert args.root == envelope.root
+        assert os.fstat(root_fd).st_ino == envelope.root.stat().st_ino
         reached.append(context.fingerprint())
         raise BeforeFirstWrite
 
     def sudo(command, **kwargs):
-        assert command[:4] == ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B"]
+        assert command[:6] == ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c"]
+        assert command[7] == str(envelope.paths["recipe"])
         assert kwargs["timeout"] == PHASES["test"].driver_seconds and kwargs["close_fds"]
         assert command[command.index("--caller-storage-sha256") + 1] == sudo_process.context.fingerprint()
         # Mimic sudo env_reset after the original executable's environment was
@@ -676,9 +678,9 @@ def test_documented_caller_binds_original_context_and_actual_parent_admission(
         monkeypatch.setenv("HOME", str(sudo_process.root_home))
         monkeypatch.setenv("SUDO_UID", str(sudo_process.uid))
         monkeypatch.setenv("SUDO_GID", str(os.getgid() or 1000))
-        monkeypatch.setattr(sys, "argv", command[4:])
+        monkeypatch.setattr(sys, "argv", ["-c", *command[7:]])
         with pytest.raises(BeforeFirstWrite):
-            namespace.main()
+            exec(compile(command[6], "<maintained privileged entry>", "exec"), {})
         return subprocess.CompletedProcess(command, 0)
 
     # The outer caller is genuinely non-root; simulate root only inside sudo.
@@ -693,3 +695,155 @@ def test_documented_caller_binds_original_context_and_actual_parent_admission(
     exec(compile(caller, "<maintained original-context caller>", "exec"), {})
     assert len(reached) == 1 and not (envelope.root / "receipts").exists()
     assert not envelope.launched and not envelope.servers
+
+
+@pytest.mark.parametrize("failure", ["missing", "file", "alias", "foreign", "unreadable", "0755", "0777", "1700"])
+def test_actual_parent_refuses_root_custody_before_first_effect(envelope, monkeypatch, failure):
+    root = envelope.root
+    previous = root / "previous-evidence"
+    previous.write_bytes(b"preserve original evidence")
+    preserved = root
+    if failure in ("missing", "file"):
+        preserved = root.with_name("preserved-root")
+        root.rename(preserved)
+        if failure == "file":
+            root.write_bytes(b"not a directory")
+    elif failure == "alias":
+        alias = root.with_name("alias")
+        alias.symlink_to(root, target_is_directory=True)
+        argv = list(sys.argv)
+        argv[argv.index("--root") + 1] = str(alias)
+        monkeypatch.setattr(sys, "argv", argv)
+    elif failure == "foreign":
+        original = StorageContext.capture()
+        caller = original.uid + 10000
+        context = StorageContext(caller, original.homes, original.protected, original.environment_sha256)
+        monkeypatch.setenv("SUDO_UID", str(caller))
+        monkeypatch.setattr(namespace, "sudo_storage_context", lambda *_: context)
+    elif failure[0].isdigit():
+        root.chmod(int(failure, 8))
+    before = preserved.stat()
+    opened = []
+    real_open = os.open
+
+    def opening(path, *args, **kwargs):
+        if path == root and failure == "unreadable":
+            raise PermissionError("finite root-open denial")
+        fd = real_open(path, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "mkdir", lambda *_a, **_kw: pytest.fail("First allocation reached."))
+    monkeypatch.setattr(os, "fchmod", lambda *_: pytest.fail("Supplied root repaired."))
+    with pytest.raises((ValueError, OSError)):
+        namespace.main()
+    for fd in opened:
+        with pytest.raises(OSError) as closed:
+            os.fstat(fd)
+        assert closed.value.errno == errno.EBADF
+    after = preserved.stat()
+    assert (before.st_ino, before.st_uid, before.st_mode) == (after.st_ino, after.st_uid, after.st_mode)
+    assert (preserved / "previous-evidence").read_bytes() == b"preserve original evidence"
+    assert not (preserved / "receipts").exists() and not (preserved / "runs").exists()
+    assert not envelope.launched and not envelope.servers
+
+
+@pytest.mark.parametrize("seam", ["root-open", "after-receipts", "after-output", "before-launch"])
+def test_root_replacement_never_redirects_allocation_or_cleanup(envelope, monkeypatch, seam):
+    root = envelope.root
+    preserved = root.with_name("preserved-root")
+    (root / "previous-evidence").write_bytes(b"original")
+    opened = []
+    real_open = os.open
+
+    def replace():
+        root.rename(preserved)
+        root.mkdir(mode=0o700)
+        (root / "replacement-evidence").write_bytes(b"replacement untouched")
+
+    def opening(path, *args, **kwargs):
+        if path == root and seam == "root-open":
+            replace()
+        fd = real_open(path, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", opening)
+    receipts, output, sentinel = namespace.open_receipts, namespace.allocate_output, namespace.Sentinel
+
+    def receive(args, stack, fd):
+        result = receipts(args, stack, fd)
+        if seam == "after-receipts":
+            replace()
+        return result
+
+    def allocate(args, stack, fd):
+        output(args, stack, fd)
+        if seam == "after-output":
+            replace()
+
+    def listener(family):
+        result = sentinel(family)
+        if seam == "before-launch" and family == socket.AF_INET6:
+            replace()
+        return result
+
+    monkeypatch.setattr(namespace, "open_receipts", receive)
+    monkeypatch.setattr(namespace, "allocate_output", allocate)
+    monkeypatch.setattr(namespace, "Sentinel", listener)
+    with pytest.raises(ValueError, match="scratch"):
+        namespace.main()
+    for fd in opened:
+        with pytest.raises(OSError) as closed:
+            os.fstat(fd)
+        assert closed.value.errno == errno.EBADF
+    assert list(root.iterdir()) == [root / "replacement-evidence"]
+    assert (root / "replacement-evidence").read_bytes() == b"replacement untouched"
+    assert (preserved / "previous-evidence").read_bytes() == b"original"
+    assert not list(preserved.glob("rootfs-*"))
+    assert not envelope.launched and all(server.closed for server in envelope.servers)
+    if seam == "root-open":
+        assert not (preserved / "receipts").exists()
+    else:
+        result = json.loads((preserved / "receipts" / envelope.receipt).read_text())
+        assert result["status"] == "failed" and result["failure"] == "ValueError"
+        assert result["temporary_rootfs_removed"] and not result["cleanup_errors"]
+        assert not list((preserved / "receipts").glob("*.control"))
+        assert not list((preserved / "receipts").glob("*.preflight"))
+    if seam in ("root-open", "after-receipts"):
+        assert not (preserved / "runs").exists()
+
+
+def test_successful_parent_holds_one_caller_root_descriptor_for_all_allocations(envelope, monkeypatch):
+    real_open, real_mkdir = os.open, os.mkdir
+    root_fds, effects = [], []
+    identity = envelope.root.stat()
+
+    def opening(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if path == envelope.root:
+            root_fds.append(fd)
+        return fd
+
+    def mkdir(path, *args, **kwargs):
+        if path in ("receipts", "runs") or str(path).startswith("rootfs-"):
+            fd = kwargs["dir_fd"]
+            assert root_fds == [fd]
+            info = os.fstat(fd)
+            assert (info.st_dev, info.st_ino, info.st_uid, info.st_mode) == (
+                identity.st_dev, identity.st_ino, identity.st_uid, identity.st_mode,
+            )
+            effects.append(str(path).split("-")[0])
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    with pytest.raises(SystemExit) as result:
+        namespace.main()
+    assert result.value.code == 0 and effects == ["receipts", "runs", "rootfs"]
+    with pytest.raises(OSError) as closed:
+        os.fstat(root_fds[0])
+    assert closed.value.errno == errno.EBADF
+    assert read_receipt(envelope)["status"] == "passed"
+    assert_cleanup(envelope)

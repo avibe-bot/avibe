@@ -10,6 +10,7 @@ from pathlib import Path
 import pwd
 import shutil
 import stat
+import subprocess
 import sys
 
 
@@ -23,6 +24,73 @@ XDG_DEFAULTS = {
     "XDG_DATA_HOME": ".local/share", "XDG_STATE_HOME": ".local/state",
 }
 PROOF_PATH = Path("/run/avibe-engine-test-isolation.json")
+
+# A finite bootstrap caller, not an arbitrary Git command runner. Configuration
+# that can load code, redirect objects/worktrees or select transports is refused
+# in the local repository, not inherited from the operator's account.
+GIT_COMMANDS = {"init", "fetch", "checkout", "rev-parse", "archive", "status", "diff", "ls-files", "apply"}
+GIT_LOCAL_KEYS = {
+    "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
+    "core.ignorecase", "core.precomposeunicode", "user.name", "user.email",
+}
+
+
+def safe_git(repository: Path, *arguments: str) -> bytes:
+    """Use the installed Git without ambient config, hooks, filters or helpers.
+
+    Original storage is captured by the caller before this command-local
+    environment is constructed. Never mutate os.environ or an installed config.
+    Local config is listed without includes before any operational command;
+    only ordinary repository bookkeeping/remote declarations are admitted.
+    """
+    if not arguments or arguments[0] not in GIT_COMMANDS:
+        raise ValueError("Unsupported recipe Git operation.")
+    operation = arguments[0]
+    if operation in {"init", "fetch", "checkout", "apply"}:
+        repository = validate_state_root(repository)
+    environment = {
+        "PATH": "/usr/bin:/bin", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_COUNT": "0", "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
+    }
+    executable = Path("/usr/bin/git")
+    info = executable.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise RuntimeError("The installed /usr/bin/git must be trusted.")
+    command = [
+        str(executable), "--no-pager", "-c", "core.hooksPath=/dev/null",
+        "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+        "-c", "core.attributesFile=/dev/null", "-c", "core.excludesFile=/dev/null",
+        "-c", "credential.helper=", "-c", "protocol.allow=never",
+        "-c", "protocol.https.allow=always",
+    ]
+    options = {"env": environment, "cwd": "/", "stdin": subprocess.DEVNULL,
+               "close_fds": True, "timeout": 30}
+    if operation == "init":
+        if len(arguments) != 1 or repository.is_symlink() or (
+                repository.exists() and any(repository.iterdir())):
+            raise ValueError("Git initialization requires a fresh empty destination.")
+        return subprocess.check_output([*command, "init", "--template=", str(repository)], **options)
+    prefix = [*command, "-C", str(repository)]
+    configuration = subprocess.check_output(
+        [*prefix, "config", "--local", "--no-includes", "--null", "--list"], **options,
+    )
+    for entry in configuration.split(b"\0"):
+        if not entry:
+            continue
+        key = entry.split(b"\n", 1)[0].decode("utf-8").lower()
+        bookkeeping = ((key.startswith("remote.") and key.endswith((".url", ".fetch")))
+                       or (key.startswith("branch.") and key.endswith((".remote", ".merge"))))
+        if key not in GIT_LOCAL_KEYS and not bookkeeping:
+            # Do not print config values (or potentially protected include paths).
+            raise ValueError("Recipe Git refuses non-bookkeeping local configuration.")
+    if operation == "diff":
+        arguments = ("diff", "--no-ext-diff", "--no-textconv", *arguments[1:])
+    elif operation == "fetch":
+        arguments = ("fetch", "--no-recurse-submodules", *arguments[1:])
+    return subprocess.check_output([*prefix, *arguments], **options)
 
 
 def _absolute(value: str, name: str) -> Path:
