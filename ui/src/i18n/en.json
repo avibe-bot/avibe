@@ -1687,6 +1687,7 @@
         "advanced": "Advanced settings",
         "back": "Back to sources",
         "close": "Close provider details",
+        "gone": "This provider is no longer available.",
         "modelsHeading": "Models",
         "usageSummary_one": "{{count}} model · used by {{backends}}",
         "usageSummary_other": "{{count}} models · used by {{backends}}",

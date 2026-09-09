@@ -43,6 +43,7 @@ import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import {
   readSurfaceLanding,
   sourceMutationLanding,
+  type PresentSourceMutationCommit,
   type SourceMutationLanding,
   type SourceMutationLandingReads,
   type SourceMutationSettlement,
@@ -938,6 +939,21 @@ export const SettingsModelsPage: React.FC = () => {
   const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
     sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
   }, [applySourceDetailSelection, sourceIntentAuthority]);
+  /**
+   * A committed delete leaves the detail dialog with no entity to render, so the
+   * page closes it and returns the user to the list. It goes through
+   * `selectSource` rather than a panel-owned flag because selection is page
+   * state, and the same commit supersedes any older continuation still holding
+   * an intent to re-open this row.
+   *
+   * `sourceDetail.gone` stays for the case a close cannot cover: the source
+   * disappeared out of band — removed from another surface, or found missing by
+   * an edit or a refetch — with no delete of ours to close the dialog.
+   */
+  const presentSourceMutation = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
+    if (commit.action === 'delete') selectSource(null);
+    await sourceMutationReport.present(commit);
+  }, [selectSource, sourceMutationReport.present]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
@@ -1386,7 +1402,7 @@ export const SettingsModelsPage: React.FC = () => {
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}
                 onReauth={setReauthSource}
-                onMutationCommitted={sourceMutationReport.present}
+                onMutationCommitted={presentSourceMutation}
               />
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
