@@ -232,6 +232,7 @@ def test_fallback_success_does_not_clear_primary_and_eligibility_is_not_recovery
 
 
 def test_one_window_covers_all_fallback_passes_without_replaying_after_output(tmp_path):
+    """MH-RETRY-WINDOW-001: admission shares one clock across failed attempts."""
     async def run():
         service, clock = clock_service(tmp_path, outcomes=[
             _outcome(RawOutcomeKind.NETWORK_ERROR, source_id="src_recovery01")
@@ -281,7 +282,7 @@ def test_startup_passes_temporary_hub_supply_without_spending_another_window(tmp
     (False, True, True), (True, True, True),
 ])
 def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, protocol, streaming, verified, empty):
-    """Actual client/adapter/gateway calls, no upstream network or paid inference."""
+    """MH-RETRY-RECOVERY-001 / D8: real loopback evidence, never timer-based recovery."""
 
     async def run():
         calls = []
@@ -362,6 +363,7 @@ def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, pr
 @pytest.mark.parametrize("protocol", WIRE)
 @pytest.mark.parametrize("ending", ["cancel_owner", "slow_owner"])
 def test_real_gateway_has_one_half_open_owner_and_interruptible_waiters(tmp_path, protocol, ending):
+    """MH-RETRY-CONCURRENCY-001: real HTTP owners and waiters release only their slot."""
     async def run():
         connected, release, owner_closed, waiting = (asyncio.Event() for _ in range(4))
         calls = []

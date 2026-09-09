@@ -258,7 +258,7 @@ async def _post_stream(launch) -> tuple[int, bytes, BaseException | None]:
 
 
 def test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop(tmp_path: Path) -> None:
-    """MH-TAKEOVER-001: fallback serves in order, or settles exhausted after the same route ends."""
+    """MH-TAKEOVER-001 / D9: ordered fallback or closed exhaustion preserves upstream evidence."""
 
     menu_model = fixed_model("claude")
     first = source("src_takeover01", [menu_model])

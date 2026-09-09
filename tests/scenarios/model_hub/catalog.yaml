@@ -10,6 +10,7 @@ capability:
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_retry_advice.py
+    - tests/test_model_hub_retry_policy.py
     - tests/test_model_hub_recovery_evidence.py
     - tests/test_model_hub_progress.py
     - tests/test_model_hub_failure_presentation.py
@@ -83,6 +84,24 @@ status_legend:
     expected_fail: false
     priority: false
 scenarios:
+  - id: MH-RETRY-WINDOW-001
+    name: Every fallback pass shares one admission window without replaying output
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_one_window_covers_all_fallback_passes_without_replaying_after_output
+  - id: MH-RETRY-RECOVERY-001
+    name: Real protocol output or empty completion proves recovery while unknown success does not
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
+  - id: MH-RETRY-CONCURRENCY-001
+    name: Concurrent requests share one half-open slot through cancellation and slow inference
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_has_one_half_open_owner_and_interruptible_waiters
   - id: MH-RETRY-NATIVE-001
     name: OpenCode consumes the Hub terminal without automatically sending continue
     status: covered
@@ -106,13 +125,13 @@ scenarios:
     status: covered
     kind: projection
     layer: unit
-    test: tests/test_model_hub_progress.py::test_only_the_exact_live_session_gets_read_invalidation
+    test: tests/test_model_hub_progress.py::test_http_recovery_reaches_live_turn_state_and_clears_without_chat
   - id: MH-RETRY-COPY-001
     name: Terminal copy says recovery ended instead of promising automatic restoration
     status: covered
     kind: copy
     layer: unit
-    test: tests/test_model_hub_failure_presentation.py::test_terminal_copy_never_promises_automatic_recovery
+    test: tests/test_model_hub_failure_presentation.py::test_gateway_terminal_survives_native_recorder_before_shared_notice
   - id: MH-RETRY-WEB-001
     name: The quiet Web label cannot infer recovery from either deadline
     status: covered
@@ -918,20 +937,16 @@ scenarios:
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D8
     name: Cooldown expiry permits a real attempt and verified output proves recovery
-    status: skip
+    status: covered
     kind: recovery
-    layer: contract
-    reason: deterministic cooldown expiry requires a controllable clock across resolution and recovery
-    owning_layer: unit/contract suite (controllable-time resolution)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
   - id: D9
-    name: Exhausting every hop returns mapping_target_unavailable
-    status: skip
+    name: Exhausting temporary recovery returns one closed terminal with original upstream provenance
+    status: covered
     kind: failover
-    layer: turn-gateway
-    reason: same-turn route exhaustion requires the private credential issued to a live backend turn
-    owning_layer: future live-turn suite (turn gateway)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
   - id: D10
     name: Reasoning intent survives exact-provider fallback without strip telemetry
     status: assert

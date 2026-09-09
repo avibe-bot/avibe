@@ -152,6 +152,7 @@ capabilities:
       - tests/test_model_hub_runtime.py
       - tests/test_model_hub_inference_wait.py
       - tests/test_model_hub_retry_advice.py
+      - tests/test_model_hub_retry_policy.py
       - tests/test_model_hub_recovery_evidence.py
       - tests/test_model_hub_progress.py
       - tests/test_model_hub_failure_presentation.py
