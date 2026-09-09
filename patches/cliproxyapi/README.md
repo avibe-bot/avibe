@@ -38,9 +38,14 @@ there is no macOS engine-build or network-suite fallback.
 Current acceptance boundary: the third reviewed head exposed configured user
 storage missing from pre-write protection. The orchestrator diagnosed the
 repeated isolation class and authorized only a bounded recipe/test/doc correction
-and pure validation. The local correction passes 733 maintained pure consumers,
-pinned Ruff 0.4.9 and document/AST/whitespace gates. **Privileged probes and Go/build/wire execution of this
-new correction remain held pending independent inspection.** The preceding
+and pure validation. Independent inspection of the first 733-consumer correction
+then reproduced a remaining README preparation gap: source/state child aliases
+were not admitted before Git initialization or mkdir. The entry below now checks
+the complete fresh preparation plan before any write. The corrected local recipe
+passes 1,076 maintained pure consumers, pinned Ruff 0.4.9 and
+document/AST/whitespace gates. **Its direct-sudo/proc handoff remains unexecuted;
+privileged probes and Go/build/wire execution remain held pending independent
+inspection.** The preceding
 second-round recipe genuinely passed 361 pure consumers and separate lane and
 independent orchestrator Linux test/build/wire runs. Those full source results
 remain acceptance of their exact earlier recipe, not these changed admission
@@ -65,36 +70,55 @@ macOS deny-read exclusions use the same storage set.
 
 Begin from the invoking user's original environment, not `env -i`, a task HOME,
 or an already-sanitized sudo shell. Set `recipe_source` to this inspected
-maintained directory. Validate the allocated task before copying or preparing
-anything inside it:
+maintained directory. The allocated task must be empty, caller-owned and mode
+0700. Run this entire preparation entry: it admits the complete finite write
+plan using the original context before any mkdir, copy, Git initialization or
+export. It refuses existing contents, including empty children, links and
+prior evidence; preserve them and obtain a separately allocated fresh task.
+Do not run the later steps if this entry fails, or share/mutate its destinations
+with another process while preparing them.
 
 ```sh
-python3 -B - "$recipe_source" "$engine_task" <<'PY'
-import sys
+if ! python3 -B - "$recipe_source" "$engine_task" <<'PY'
+import shutil, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from isolation import validate_temporary_root
-validate_temporary_root(Path(sys.argv[2]))
+from isolation import preparation_directories
+task = Path(sys.argv[2])
+directories = preparation_directories(task)
+for directory in directories:
+    if directory not in (task / "recipe", task / "source"):
+        directory.mkdir(mode=0o700)
+shutil.copytree(sys.argv[1], task / "recipe",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "._*", ".DS_Store"))
+subprocess.run(["git", "init", str(task / "source")], check=True, close_fds=True)
 PY
+then
+  exit 1
+fi
 ```
 
-Do not use a shared checkout. Copy this directory into
-`"$engine_task/recipe"` without AppleDouble files or Python caches. Preserve
-any existing checkout/evidence; use new task children when needed:
+The same plan covers `recipe`, `source`, `state`, `downloads`, `toolchain`,
+`uv-toolchain`, `venv` and `fixtures`, all generated environment/shared Go cache
+children from `environment_directories`, and the setup-only `state/uv-cache`.
+All children start fresh, so download/extraction/venv internals cannot reuse
+preexisting aliases. Never redirect a later setup destination outside this
+plan or reuse the entry to reset an existing task. Do not use a shared checkout.
+Fetching prerequisites remains a separate authorization, not part of admission:
 
 ```sh
-git init "$engine_task/source"
 git -C "$engine_task/source" fetch --depth=1 \
   https://github.com/router-for-me/CLIProxyAPI.git \
   2a6b87aca083a5bf498ac1f68a1b636c500d7aaa
 git -C "$engine_task/source" checkout --detach FETCH_HEAD
-mkdir -p "$engine_task/state/home" "$engine_task/state/tmp"
 ```
 
 Only separately authorized prerequisite preparation may use public networking. `prerequisites.json`
 records exact Linux arm64 Go 1.26.4 and uv 0.9.8 archive URLs and SHA256 values.
-Download into scratch, verify hashes before extraction, and extract Go into
-`"$engine_task/toolchain"`. Do not install system packages or use a moving
+Download only into the admitted `"$engine_task/downloads"` (Go archive
+`go.tar.gz`, uv archive `uv.tar.gz`), verify hashes before extraction, and
+extract Go into `"$engine_task/toolchain"` and uv into
+`"$engine_task/uv-toolchain"`. Do not install system packages or use a moving
 toolchain. Verify the extracted compiler, tools and runtime files against the
 SHA256-verified archive before using Go, not merely its version string:
 
@@ -129,8 +153,9 @@ env -i PATH="$engine_task/toolchain/bin:/usr/bin:/bin" \
 
 Export the complete tracked Avibe fixture. Set `avibe_checkout` to a repository
 containing the declared base; its dirty, staged and untracked files are ignored.
-If exporting outside the guest, transfer the export metadata-free and retain
-its actual guest path as `fixture_root`:
+The exporter allocates an exclusive child of the admitted `fixtures` directory;
+retain that actual path as `fixture_root`. Any preparation on another machine
+requires its own complete original-caller admission, not this task's authority:
 
 ```sh
 fixture_root=$(python3 -B - "$avibe_checkout" "$engine_task" <<'PY'
@@ -140,7 +165,7 @@ recipe = Path(sys.argv[2]) / "recipe"
 sys.path.insert(0, str(recipe))
 from fixture import export_fixture
 root, identity = export_fixture(
-    Path(sys.argv[1]), Path(sys.argv[2]),
+    Path(sys.argv[1]), Path(sys.argv[2]) / "fixtures",
     json.loads((recipe / "inputs.json").read_text()),
 )
 print(root)

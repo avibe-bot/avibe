@@ -199,6 +199,32 @@ def environment_directories(root: Path, cache: Path) -> list[tuple[Path, str]]:
     return directories + [(cache, name) for name in ("cache", "go", "mod")]
 
 
+def preparation_directories(root: Path) -> tuple[Path, ...]:
+    """Admit the entire documented setup plan, without creating anything."""
+    context = storage_context()
+    canonical = validate_temporary_root(root, context=context)
+    if root != canonical:
+        raise ValueError("Preparation requires an absolute canonical task directory.")
+    state = root / "state"
+    directories = [root / name for name in (
+        "recipe", "source", "state", "downloads", "toolchain", "uv-toolchain", "venv", "fixtures",
+    )]
+    directories += [owner / name for owner, name in environment_directories(state, state)]
+    directories.append(state / "uv-cache")
+    # Check actual descendants and their aliases before even the first mkdir,
+    # copy, Git invocation or export. An admitted ancestor is not sufficient.
+    for path in directories:
+        if context.validate(path) != path:
+            raise ValueError("Preparation destinations must not use aliases.")
+    info = root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != context.uid
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("Preparation requires a caller-owned mode-0700 task directory.")
+    if any(root.iterdir()):
+        raise ValueError("Preparation requires an empty task; preserve all existing contents.")
+    return tuple(directories)
+
+
 def isolated_environment(root: Path, *, cache: Path | None = None, go: Path | None = None) -> dict[str, str]:
     context = storage_context()
     root = context.validate(root)

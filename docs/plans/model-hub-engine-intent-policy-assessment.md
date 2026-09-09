@@ -62,8 +62,28 @@ the four fixed product directories, five XDG authorities and existing
 AVIBE_HOME/CODEX_HOME/CLAUDE_CONFIG_DIR overrides. Empty/unset values use standard
 defaults beneath effective HOME; XDG runtime has no invented fallback. Invalid
 relative/parent-traversing paths fail closed without logging their values.
-Lexical/canonical aliases, protected descendants and writable ancestors are
-checked before setup. The narrow privileged temporary-root rule is retained.
+Lexical/canonical aliases, protected descendants and writable ancestors use
+the same admission policy. The narrow privileged temporary-root rule is retained.
+
+Independent inspection of local commit `1844a14fd` confirmed 733 passing pure
+consumers, but also reproduced a missing preparation consumer: the README
+checked only the allocated ancestor before source initialization and state
+mkdir. A preexisting `source` alias into configured XDG config or a `state`
+alias into XDG data reached a real fake-directory write before later admission.
+Both reproductions and all earlier evidence remain intact. This is the same
+pre-write class under the recorded circuit decision, not a fourth GitHub
+findings-bearing head or an engine-policy change.
+
+The corrected README entry now consumes one complete preparation directory
+plan from `isolation.py`, reusing the shared storage validator and generated
+environment planner. Before its first mkdir, copy or Git subprocess it admits
+source, recipe, state/environment/shared cache, downloads, Go/uv extraction,
+venv, exclusive fixture-export parent and setup-only uv cache. It requires an
+empty, caller-owned canonical mode-0700 allocation, rejects all preexisting
+children/aliases/evidence, and exits the setup shell on refusal. Fresh children
+prevent hidden download/extraction/venv descendants from reusing old aliases;
+there is no reset/reseed or permission to change destinations after admission.
+No new executor, storage policy or privileged lifecycle owner is introduced.
 
 The documented ordinary caller binds its original context before sudo. The
 same privileged parent independently checks that digest against its live
@@ -86,11 +106,22 @@ New pure consumers use only fake passwd homes, configured storage and proc
 metadata. They exercise actual setup/export/verifier/wire/process/namespace
 admission, the maintained documented caller with sudo mocked, lost/forged
 context, canonical aliases, shared caches and valid nested private task state.
+The added preparation tests execute the maintained README body, including both
+exact source/state alias reproductions, every planned destination and relevant
+archive/compiler/venv/fixture descendant, configured/default authorities,
+containing paths and preexisting evidence. Negative cases preserve the complete
+fake task trees and reach no mkdir/copy/export/Git or privileged subprocess.
+A legitimate fresh task exercises actual directory creation, metadata-free
+recipe copying and local Git initialization; it performs no fetch, export,
+download, extraction or installation. Shell refusal stops later instructions.
 No real configured values, production contents or guest operations are used.
-The complete maintained pure suite passes 733 tests under the existing
+The complete maintained pure suite now passes 1,076 tests (the prior 733 plus
+343 preparation consumers) under the existing
 deny-network/deny-production-write envelope; pinned Ruff 0.4.9 and
 document/AST/whitespace checks pass. These are source-level consuming tests,
-not a live sudo/namespace attestation or a new-head engine execution.
+not a live sudo/namespace attestation or a new-head engine execution. The
+narrow direct-sudo/proc context handoff remains unexecuted and unchanged by
+this preparation repair; unavailable original context still fails closed.
 The original native Go patch and all frozen source/fixture/toolchain
 declarations remain unchanged. Fresh independent inspection and any separately
 selected kernel/source revalidation are still required for this correction.

@@ -3,6 +3,9 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -443,3 +446,271 @@ def test_ambient_safe_root_claim_does_not_waive_real_storage(tmp_path, original_
     with pytest.raises(ValueError):
         isolation.isolated_environment(protected / "output")
     assert not protected.exists()
+
+
+# Independent expected plan: changing only the planner cannot shrink coverage.
+PREPARATION_PATHS = (
+    "recipe", "source", "state", "downloads", "toolchain", "uv-toolchain", "venv", "fixtures",
+    "state/home", "state/tmp", "state/config", "state/data", "state/cache",
+    "state/go", "state/mod", "state/uv-cache",
+)
+PREPARATION_INTERNALS = (
+    "downloads/go.tar.gz", "downloads/uv.tar.gz", "toolchain/bin/go", "uv-toolchain/uv",
+    "venv/bin/python", "fixtures/avibe-fixture-existing/config", "state/home/.avibe",
+)
+
+
+def preparation_entry():
+    readme = (Path(__file__).parent / "README.md").read_text()
+    block = readme.split("```sh\n", 1)[1].split("\n```", 1)[0]
+    body = block.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    return block, compile(body, "<maintained README preparation entry>", "exec")
+
+
+def setup_snapshot(root):
+    """Record fake task paths without following links into any other tree."""
+    result = {}
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        for path in [Path(directory), *(Path(directory) / name for name in dirs + files)]:
+            info = path.lstat()
+            content = os.readlink(path) if stat.S_ISLNK(info.st_mode) else (
+                path.read_bytes() if stat.S_ISREG(info.st_mode) else None
+            )
+            result[str(path.relative_to(root))] = (info.st_mode, info.st_ino, info.st_mtime_ns, content)
+    return result
+
+
+def run_preparation(task, monkeypatch):
+    _, body = preparation_entry()
+    monkeypatch.setattr(sys, "argv", ["-", str(Path(__file__).parent), str(task)])
+    # Adapt only the temporary-path domain for a macOS pure run. The original
+    # caller context, complete shared storage validator and README body are real.
+    monkeypatch.setattr(isolation, "validate_temporary_root", isolation.validate_state_root)
+    exec(body, {})
+
+
+def assert_preparation_refuses_without_side_effects(task, all_fake_state, monkeypatch):
+    before = setup_snapshot(all_fake_state)
+    with monkeypatch.context() as guard:
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("Preparation reached a write/copy/export/subprocess before complete admission.")
+        guard.setattr(Path, "mkdir", forbidden)
+        guard.setattr(shutil, "copytree", forbidden)
+        guard.setattr(fixture, "export_fixture", forbidden)
+        for name in ("run", "Popen", "check_output"):
+            guard.setattr(subprocess, name, forbidden)
+        with pytest.raises((ValueError, FileNotFoundError)):
+            run_preparation(task, guard)
+    assert setup_snapshot(all_fake_state) == before
+
+
+@pytest.mark.parametrize("destination", (*PREPARATION_PATHS, *PREPARATION_INTERNALS))
+@pytest.mark.parametrize("authority", ["configured", "default"])
+def test_documented_preparation_checks_every_destination_before_first_write(
+        tmp_path, original_storage, monkeypatch, destination, authority):
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    protected = (original_storage.parent / "xdg" if authority == "configured"
+                 else original_storage.home / ".config")
+    protected.mkdir(parents=True)
+    (protected / "sentinel").write_bytes(b"preserved fake configuration")
+    if authority == "configured":
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(protected))
+    target = task / destination
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(protected)
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("destination,variable", [
+    ("source", "XDG_CONFIG_HOME"), ("state", "XDG_DATA_HOME"),
+])
+def test_documented_preparation_closes_both_exact_root_reproductions(
+        tmp_path, original_storage, monkeypatch, destination, variable):
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    protected = original_storage.parent
+    protected.mkdir()
+    (protected / "sentinel").write_bytes(b"fake production data; never real user data")
+    monkeypatch.setenv(variable, str(protected))
+    (task / destination).symlink_to(protected)
+    # The original root diagnosis reached actual Git init or mkdir through
+    # precisely these layouts. The maintained entry now reaches neither.
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+    assert not (protected / ".git").exists()
+    assert not (protected / "home").exists() and not (protected / "tmp").exists()
+
+
+@pytest.mark.parametrize("variable", isolation.STORAGE_ENV)
+@pytest.mark.parametrize("destination", ["root", "source", "state", "state/cache"])
+@pytest.mark.parametrize("shape", ["equal", "descendant", "containing", "configured-alias"])
+def test_documented_preparation_retains_all_original_storage_authorities(
+        tmp_path, original_storage, monkeypatch, variable, destination, shape):
+    protected = original_storage.parent / "storage"
+    protected.mkdir(parents=True)
+    (protected / "sentinel").write_bytes(b"fake protected storage")
+    configured = protected
+    if shape == "configured-alias":
+        configured = tmp_path / "configured-alias"
+        configured.symlink_to(protected)
+    monkeypatch.setenv(variable, str(configured))
+    target = protected
+    if shape == "descendant":
+        target /= ".avibe/never-created" if variable == "HOME" else "never-created"
+    elif shape == "containing":
+        target = protected.parent
+    if destination == "root":
+        task = target
+    else:
+        task = tmp_path / "allocated-task"
+        task.mkdir(mode=0o700)
+        link = task / destination
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("home_override", [False, True])
+@pytest.mark.parametrize("default", (*isolation.PRODUCT_DIRS, *isolation.XDG_DEFAULTS.values()))
+def test_documented_preparation_default_product_and_xdg_locations(
+        tmp_path, original_storage, monkeypatch, home_override, default):
+    home = tmp_path / "effective-home" if home_override else original_storage.home
+    if home_override:
+        monkeypatch.setenv("HOME", str(home))
+    protected = home / default
+    protected.mkdir(parents=True, exist_ok=True)
+    (protected / "setup-sentinel").write_bytes(b"preserved default storage")
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    (task / "source").symlink_to(protected)
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("destination", (*PREPARATION_PATHS, *PREPARATION_INTERNALS))
+@pytest.mark.parametrize("existing", ["directory", "file", "internal-alias", "dangling-alias"])
+def test_documented_preparation_preserves_all_preexisting_destinations(
+        tmp_path, original_storage, monkeypatch, destination, existing):
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    path = task / destination
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if existing == "directory":
+        path.mkdir()
+    elif existing == "file":
+        path.write_bytes(b"earlier evidence")
+    else:
+        target = task / "preserved"
+        if existing == "internal-alias":
+            target.mkdir()
+            (target / "sentinel").write_bytes(b"earlier evidence")
+        path.symlink_to(target)
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("variable", isolation.STORAGE_ENV)
+@pytest.mark.parametrize("existing", [False, True])
+def test_documented_preparation_never_ignores_protected_storage_inside_proposed_task(
+        tmp_path, original_storage, monkeypatch, variable, existing):
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    protected = task / "downloads/live-user-storage"
+    if existing:
+        protected.mkdir(parents=True)
+        (protected / "sentinel").write_bytes(b"fake user storage is not task output")
+    monkeypatch.setenv(variable, str(protected))
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("variable", isolation.STORAGE_ENV)
+@pytest.mark.parametrize("invalid", ["relative/storage", "/tmp/../storage"])
+def test_documented_preparation_invalid_context_never_reaches_setup(
+        tmp_path, original_storage, monkeypatch, variable, invalid):
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    monkeypatch.setenv(variable, invalid)
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("failure", ["mode", "owner", "root-alias", "missing", "unknown-evidence"])
+def test_documented_preparation_requires_exclusive_canonical_allocation(
+        tmp_path, original_storage, monkeypatch, failure):
+    task = tmp_path / "allocated-task"
+    if failure != "missing":
+        task.mkdir(mode=0o700)
+    if failure == "mode":
+        task.chmod(0o755)
+    elif failure == "owner":
+        real_lstat = Path.lstat
+
+        def wrong_owner(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if path == task:
+                values = list(info)
+                values[4] += 1
+                return os.stat_result(values)
+            return info
+        monkeypatch.setattr(Path, "lstat", wrong_owner)
+    elif failure == "root-alias":
+        alias = tmp_path / "root-alias"
+        alias.symlink_to(task)
+        task = alias
+    elif failure == "unknown-evidence":
+        (task / "unlisted-earlier-result").write_bytes(b"preserve even unrelated evidence")
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+def test_documented_preparation_fresh_task_runs_actual_copy_git_and_directory_consumers(
+        tmp_path, original_storage, monkeypatch):
+    task = tmp_path / "allocated-task"
+    task.mkdir(mode=0o700)
+    events = []
+    planner = isolation.preparation_directories
+    mkdir, copytree, run = Path.mkdir, shutil.copytree, subprocess.run
+
+    def plan(root):
+        result = planner(root)
+        assert tuple(str(path.relative_to(task)) for path in result) == PREPARATION_PATHS
+        assert list(task.iterdir()) == []
+        events.append("complete-admission")
+        return result
+
+    def make(path, *args, **kwargs):
+        events.append("mkdir")
+        return mkdir(path, *args, **kwargs)
+
+    def copy(*args, **kwargs):
+        events.append("copy")
+        return copytree(*args, **kwargs)
+
+    def execute(command, **kwargs):
+        assert command == ["git", "init", str(task / "source")]
+        events.append("git-init")
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(isolation, "preparation_directories", plan)
+    monkeypatch.setattr(Path, "mkdir", make)
+    monkeypatch.setattr(shutil, "copytree", copy)
+    monkeypatch.setattr(subprocess, "run", execute)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("HOME", str(original_storage.home))
+    run_preparation(task, monkeypatch)
+    assert events[0] == "complete-admission"
+    assert set(events) == {"complete-admission", "mkdir", "copy", "git-init"}
+    assert (task / "source/.git").is_dir()
+    assert all((task / name).is_dir() for name in PREPARATION_PATHS)
+    assert not list((task / "recipe").rglob("*.pyc"))
+    assert (task / "recipe/isolation.py").read_bytes() == Path(isolation.__file__).read_bytes()
+    assert all(not list((task / name).iterdir()) for name in (
+        "downloads", "toolchain", "uv-toolchain", "venv", "fixtures", "state/uv-cache",
+    ))  # No downloads, extraction, dependency installation or fixture export ran.
+    assert_preparation_refuses_without_side_effects(task, tmp_path, monkeypatch)
+
+
+def test_documented_preparation_shell_stops_before_any_later_instruction_on_refusal():
+    block, _ = preparation_entry()
+    result = subprocess.run(
+        ["/bin/sh", "-c", "python3() { return 41; }\n" + block + "\nexit 99\n"],
+        stdin=subprocess.DEVNULL, capture_output=True, close_fds=True, timeout=5,
+    )
+    assert result.returncode == 1
