@@ -28,6 +28,23 @@
 // `_other` renders the raw key the moment a real call passes 2, and a call
 // passing no count renders the raw key against a family that has no plain key.
 //
+// `count` is one of the options the call site hands over, and the same reading
+// answers the other one that changes what "has copy" means. `returnObjects` says
+// the caller consumes a LIST — `MemorySettingsPanel` maps over its result — so a
+// value turned into an object or a plain string is renderable by every other
+// measure and still throws on `.map`. Both are read off the call rather than
+// listed as keys here, so a second site asking for a list is covered the day it
+// is written.
+//
+// That axis is closed, not merely sampled: the app passes exactly three i18next
+// options at a `t()` call. `count` (90 sites) and `returnObjects` (1 site) are
+// modelled above. `defaultValue` appears at 42 sites and EVERY one names a
+// dynamic key — zero literal keys sit behind one — so it cannot hide a literal
+// this guard would otherwise demand copy for; the two are disjoint by
+// construction rather than by policy. There is no `context` anywhere in `src/`.
+// A fourth option would arrive with its own call sites and its own meaning of
+// "has copy", and belongs here the same way these do.
+//
 // Reading the tree is also what lets the sweep follow the app's second way of
 // naming a key: an `i18nKey`, which `<Trans>` takes as a prop when the copy wraps
 // a link, and which a component's own table carries to hand to `t()` later.
@@ -97,10 +114,14 @@
 // means a value-shaped hole cannot be open in one property and closed in another.
 //
 // Its boundary is exactly: a nonblank string that is not the key itself, or a
-// nonempty collection whose every entry is renderable. That is a claim about
-// copy being THERE. Whether the copy is RIGHT — accurate, idiomatic, actually
-// translated rather than English pasted into `zh.json` — no scanner decides, and
-// this one does not pretend to.
+// nonempty collection whose every entry is renderable, plus a list where the
+// call asked for one. That is a claim about copy being THERE. Whether the copy
+// is RIGHT — accurate, idiomatic, actually translated rather than English pasted
+// into `zh.json` — no scanner decides, and this one does not pretend to. Nor
+// does it read further than the call: the guard reads the call site's OPTIONS,
+// it does not guess the consumer's TypeScript assertion. `as string[]` on a
+// `t()` result is a claim the compiler accepts and nobody checks; that is a
+// product-code question, tracked in #1967, not something this file can see.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,21 +136,23 @@ import zh from './zh.json';
 const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MODEL_HUB = join('components', 'settings', 'models');
 
-/** A call site: the key it names, and whether it hands i18next a `count`. */
-type Reference = { key: string; counted: boolean };
+/** A call site: the key it names, and the options that change what copy it needs. */
+type Reference = { key: string; counted: boolean; listed: boolean };
 
 /** How a reference reads in a failure report: the key, and how it was called. */
-const label = (reference: Reference): string =>
-  (reference.counted ? `${reference.key} (count)` : reference.key);
+const label = (reference: Reference): string => {
+  const called = [reference.counted ? 'count' : '', reference.listed ? 'returnObjects' : ''].filter(Boolean);
+  return called.length > 0 ? `${reference.key} (${called.join(', ')})` : reference.key;
+};
 
 /** The written name of an object-literal property or a JSX attribute. */
 const nameOf = (node: ts.Node | undefined): string | undefined =>
   (node !== undefined && (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) ? node.text : undefined);
 
-const passesCount = (options: ts.Expression | undefined): boolean =>
+const passesOption = (options: ts.Expression | undefined, name: string): boolean =>
   options !== undefined
   && ts.isObjectLiteralExpression(options)
-  && options.properties.some((property) => nameOf(property.name) === 'count');
+  && options.properties.some((property) => nameOf(property.name) === name);
 
 /** The operators that pick one of their operands, so both can name a key. */
 const CHOICE_OPERATORS = new Set<ts.SyntaxKind>([
@@ -186,8 +209,9 @@ const translationCall = (node: ts.Node): Reference[] => {
     return [];
   }
   const [key, options] = node.arguments;
-  const counted = passesCount(options);
-  return staticKeys(key).map((found) => ({ key: found, counted }));
+  const counted = passesOption(options, 'count');
+  const listed = passesOption(options, 'returnObjects');
+  return staticKeys(key).map((found) => ({ key: found, counted, listed }));
 };
 
 /**
@@ -209,10 +233,10 @@ const i18nKeyReference = (node: ts.Node): Reference[] => {
     const counted = ts.isJsxAttributes(node.parent)
       && node.parent.properties.some((property) => ts.isJsxAttribute(property) && nameOf(property.name) === 'count');
     const keys = value !== undefined && ts.isJsxExpression(value) ? staticKeys(value.expression) : staticKeys(value);
-    return keys.map((found) => ({ key: found, counted }));
+    return keys.map((found) => ({ key: found, counted, listed: false }));
   }
   if (ts.isPropertyAssignment(node) && nameOf(node.name) === 'i18nKey') {
-    return staticKeys(node.initializer).map((found) => ({ key: found, counted: false }));
+    return staticKeys(node.initializer).map((found) => ({ key: found, counted: false, listed: false }));
   }
   return [];
 };
@@ -560,11 +584,22 @@ export const parityGaps = (
   });
 };
 
-/** The symptom this guard exists for, stated exactly: no copy renders as the key. */
+/**
+ * The symptom this guard exists for, stated exactly: nothing the call site can
+ * render comes back.
+ *
+ * A call reading `returnObjects` needs a LIST, not merely something renderable.
+ * `MemorySettingsPanel` maps its result, so a value turned into an object or a
+ * plain string is renderable by every other measure and still throws on `.map`.
+ * The requirement is read off the call, exactly as `count` is, so a second site
+ * asking for a list is covered without naming its keys here.
+ */
 const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean =>
-  probes(lng, reference).some(
-    (options) => !isRenderable(instance.t(reference.key, { ...options, returnObjects: true }), reference.key),
-  );
+  probes(lng, reference).some((options) => {
+    const value = instance.t(reference.key, { ...options, returnObjects: true });
+    if (!isRenderable(value, reference.key)) return true;
+    return reference.listed && !Array.isArray(value);
+  });
 
 describe('app i18n key coverage', () => {
   const referenced = referencedCallSites();
@@ -626,37 +661,37 @@ describe('app i18n key coverage', () => {
       void t(\`fixture.\${dynamic}\`);
     `;
     expect(collectReferences(fixture)).toEqual([
-      { key: 'fixture.a', counted: false },
-      { key: 'fixture.alongside', counted: true },
-      { key: 'fixture.andThen', counted: false },
-      { key: 'fixture.asserted', counted: false },
-      { key: 'fixture.b', counted: false },
-      { key: 'fixture.bang', counted: false },
-      { key: 'fixture.braced', counted: false },
-      { key: 'fixture.c', counted: false },
-      { key: 'fixture.double', counted: false },
-      { key: 'fixture.fallback', counted: false },
-      { key: 'fixture.inner', counted: true },
-      { key: 'fixture.interpolated', counted: false },
-      { key: 'fixture.knownBranch', counted: false },
-      { key: 'fixture.literal', counted: false },
-      { key: 'fixture.no', counted: false },
-      { key: 'fixture.oneWay', counted: true },
-      { key: 'fixture.orElse', counted: false },
-      { key: 'fixture.otherWay', counted: true },
-      { key: 'fixture.outer', counted: false },
-      { key: 'fixture.paren', counted: false },
-      { key: 'fixture.shorthand', counted: true },
-      { key: 'fixture.spread', counted: false },
-      { key: 'fixture.table', counted: false },
-      { key: 'fixture.tableNo', counted: false },
-      { key: 'fixture.tableYes', counted: false },
-      { key: 'fixture.trans', counted: false },
-      { key: 'fixture.transCount', counted: true },
-      { key: 'fixture.transNo', counted: false },
-      { key: 'fixture.transYes', counted: false },
-      { key: 'fixture.wrapped', counted: true },
-      { key: 'fixture.yes', counted: false },
+      { key: 'fixture.a', counted: false, listed: false },
+      { key: 'fixture.alongside', counted: true, listed: false },
+      { key: 'fixture.andThen', counted: false, listed: false },
+      { key: 'fixture.asserted', counted: false, listed: false },
+      { key: 'fixture.b', counted: false, listed: false },
+      { key: 'fixture.bang', counted: false, listed: false },
+      { key: 'fixture.braced', counted: false, listed: false },
+      { key: 'fixture.c', counted: false, listed: false },
+      { key: 'fixture.double', counted: false, listed: false },
+      { key: 'fixture.fallback', counted: false, listed: false },
+      { key: 'fixture.inner', counted: true, listed: false },
+      { key: 'fixture.interpolated', counted: false, listed: false },
+      { key: 'fixture.knownBranch', counted: false, listed: false },
+      { key: 'fixture.literal', counted: false, listed: false },
+      { key: 'fixture.no', counted: false, listed: false },
+      { key: 'fixture.oneWay', counted: true, listed: false },
+      { key: 'fixture.orElse', counted: false, listed: false },
+      { key: 'fixture.otherWay', counted: true, listed: false },
+      { key: 'fixture.outer', counted: false, listed: false },
+      { key: 'fixture.paren', counted: false, listed: false },
+      { key: 'fixture.shorthand', counted: true, listed: false },
+      { key: 'fixture.spread', counted: false, listed: false },
+      { key: 'fixture.table', counted: false, listed: false },
+      { key: 'fixture.tableNo', counted: false, listed: false },
+      { key: 'fixture.tableYes', counted: false, listed: false },
+      { key: 'fixture.trans', counted: false, listed: false },
+      { key: 'fixture.transCount', counted: true, listed: false },
+      { key: 'fixture.transNo', counted: false, listed: false },
+      { key: 'fixture.transYes', counted: false, listed: false },
+      { key: 'fixture.wrapped', counted: true, listed: false },
+      { key: 'fixture.yes', counted: false, listed: false },
     ]);
   });
 
@@ -670,17 +705,17 @@ describe('app i18n key coverage', () => {
     expect(files.some((file) => file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     expect(files.some((file) => !file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     // The raw key that opened the lane, on the source remove flow.
-    expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false });
+    expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false, listed: false });
     // The `<Trans>` prop carrying the Avibe Cloud link.
-    expect(referenced).toContainEqual({ key: 'remoteAccess.flowStep1', counted: false });
+    expect(referenced).toContainEqual({ key: 'remoteAccess.flowStep1', counted: false, listed: false });
     // Both branches of the permissions dialog title, and the inner branch of its
     // nested conflict ternary.
-    expect(referenced).toContainEqual({ key: 'permissions.access.addTitle', counted: false });
-    expect(referenced).toContainEqual({ key: 'permissions.access.editTitle', counted: false });
-    expect(referenced).toContainEqual({ key: 'permissions.states.pairingChangedBody', counted: false });
+    expect(referenced).toContainEqual({ key: 'permissions.access.addTitle', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'permissions.access.editTitle', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'permissions.states.pairingChangedBody', counted: false, listed: false });
     // The `??` fallbacks: the settings breadcrumb and the OAuth success toast.
-    expect(referenced).toContainEqual({ key: 'nav.settings', counted: false });
-    expect(referenced).toContainEqual({ key: 'settings.models.oauth.status.success', counted: false });
+    expect(referenced).toContainEqual({ key: 'nav.settings', counted: false, listed: false });
+    expect(referenced).toContainEqual({ key: 'settings.models.oauth.status.success', counted: false, listed: false });
     // A counted site, which needs copy no bare probe asks for.
     expect(referenced.some((reference) => reference.counted)).toBe(true);
   });
@@ -706,6 +741,43 @@ describe('app i18n key coverage', () => {
     expect(isRenderable({}, 'k')).toBe(false);
     expect(isRenderable(undefined, 'k')).toBe(false);
     expect(isRenderable(42, 'k')).toBe(false);
+  });
+
+  it('requires a list where the call site reads returnObjects, not merely copy', () => {
+    // The options axis, stated as a fixture. `count` decides WHICH copy a call can
+    // reach; `returnObjects` decides what SHAPE it can consume. Both are read off
+    // the call, so neither is a list of keys here and a new call site inherits.
+    const source = `
+      const lines = t(custom ? 'fixture.listA' : 'fixture.listB', { returnObjects: true });
+      const plain = t('fixture.plain');
+    `;
+    const references = collectReferences(source);
+    expect(references).toEqual([
+      { key: 'fixture.listA', counted: false, listed: true },
+      { key: 'fixture.listB', counted: false, listed: true },
+      { key: 'fixture.plain', counted: false, listed: false },
+    ]);
+
+    const listed = { key: 'fixture.listA', counted: false, listed: true };
+    const check = (value: unknown) =>
+      missingCopy(localeInstance('en', { fixture: { listA: value } }), 'en', listed);
+
+    expect(check(['one', 'two'])).toBe(false);
+    // The two shapes that read as copy and still throw on `.map`, which is what
+    // `MemorySettingsPanel` does with the result. Renderable is not enough here.
+    expect(check({ 0: 'one', 1: 'two' })).toBe(true);
+    expect(check('one, two')).toBe(true);
+    // And a plain call is unaffected: a string is all it ever needed.
+    expect(missingCopy(localeInstance('en', { fixture: { plain: 'Plain' } }), 'en', {
+      key: 'fixture.plain', counted: false, listed: false,
+    })).toBe(false);
+
+    // The whole options axis, measured on this head rather than assumed: the app
+    // passes exactly three i18next options at a `t()` call. `count` and
+    // `returnObjects` are modelled above. `defaultValue` appears at 42 call sites
+    // and EVERY ONE names a dynamic key — zero literal keys sit behind one — so it
+    // cannot be hiding a literal this guard would otherwise demand copy for. There
+    // is no `context` anywhere in `src/`.
   });
 
   it('collects dotted literals wherever they sit, with no position enumerated', () => {
