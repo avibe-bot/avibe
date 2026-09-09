@@ -119,14 +119,15 @@ class FrozenEngine:
         from config.atomic_io import write_atomic
 
         assert command[0] == str(self.binary) and command[1] == "-config"
-        config_path = Path(command[2]).resolve(strict=True)
+        config_path = validate_state_root(Path(command[2])).resolve(strict=True)
         assert config_path.is_relative_to(self.store.root)
         config = yaml.safe_load(config_path.read_text())
         supplement_empty_profile(config)
+        environment = isolated_environment(self.state)
         write_atomic(config_path, yaml.safe_dump(config, sort_keys=False))
         # Preserve the product's cwd/stdin/umask/process-group ownership. Only
         # task-local environment, output and local-catalog selection differ.
-        kwargs["env"] = {**kwargs["env"], **isolated_environment(self.state)}
+        kwargs["env"] = {**kwargs["env"], **environment}
         kwargs["stdout"], kwargs["stderr"] = self.log, subprocess.STDOUT
         failure = self.fail_next
         self.fail_next = False

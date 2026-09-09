@@ -17,10 +17,12 @@ import pytest
 
 import namespace
 from budgets import PHASES
+from isolation import STORAGE_ENV, StorageContext, validate_state_root
 
 
 @pytest.fixture
 def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    storage = StorageContext.capture()
     root = tmp_path / "allocated-task"
     root.mkdir()
     paths = {}
@@ -36,15 +38,19 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         candidate_calls=0, launched=False, candidate_started=False,
         probe_result={"isolation_probe": "pass", "original_preflight": True},
         probe_exit=0, probe_bytes=None, closed_channel=False, receipt="envelope.json",
+        storage_reader=namespace.sudo_storage_context,
     )
     monkeypatch.setattr(sys, "platform", "linux")
     # The macOS pure runner's actual tmp_path is not a Linux /tmp path. Test
     # the real domain validator separately; only this receipt fixture adapts it.
-    monkeypatch.setattr(namespace, "validate_temporary_root", lambda path, **_kw: path.resolve())
+    monkeypatch.setattr(namespace, "validate_temporary_root", lambda path, **kwargs: validate_state_root(path, **kwargs))
     monkeypatch.setattr(namespace, "__file__", str(paths["recipe"] / "namespace.py"))
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setenv("SUDO_UID", str(os.getuid() or 1000))
     monkeypatch.setenv("SUDO_GID", str(os.getgid() or 1000))
+    # Caller provenance has dedicated consuming tests with fake proc metadata.
+    # Receipt/lifecycle cases receive the already-admitted immutable context.
+    monkeypatch.setattr(namespace, "sudo_storage_context", lambda uid, expected: storage)
     # No sudo, mount, actual process, socket, privilege or ownership change.
     real_fstat = os.fstat
 
@@ -119,7 +125,8 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     argv = ["namespace.py", "--root", str(root)]
     for name, path in paths.items():
         argv += ["--" + name.replace("_", "-"), str(path)]
-    argv += ["--phase", "test", "--network", "loopback", "--receipt", context.receipt, "--", "candidate-test"]
+    argv += ["--phase", "test", "--network", "loopback", "--receipt", context.receipt,
+             "--caller-storage-sha256", storage.fingerprint(), "--", "candidate-test"]
     monkeypatch.setattr(sys, "argv", argv)
     return context
 
@@ -452,6 +459,7 @@ def test_actual_private_setup_keeps_prior_build_readonly_and_only_current_output
         **paths, root=root, network="loopback", phase="wire", receipt="test-wire.json",
         selected_build={"output": str(paths["build"])}, uid=501, gid=1000, proof_fd=7,
         sentinel_ports=[17000, 17001], command=["never-executed"],
+        storage_context=StorageContext.capture(uid=501).record(),
     )
     monkeypatch.setattr(namespace, "namespace_ids", lambda: inner)
     monkeypatch.setattr(namespace, "run", lambda *command: calls.append(command))
@@ -484,3 +492,204 @@ def test_actual_private_setup_keeps_prior_build_readonly_and_only_current_output
     for name in ("state", "output"):
         target = str(paths["rootfs"] / str(paths[name]).lstrip("/"))
         assert ("/usr/bin/mount", "-o", "remount,bind,nosuid", target) in calls
+
+
+@pytest.mark.parametrize("variable", STORAGE_ENV)
+@pytest.mark.parametrize("role", ["root", "state", "output", "generated-cache"])
+def test_namespace_configured_storage_refuses_before_first_parent_write(envelope, monkeypatch, variable, role):
+    boundary = {
+        "root": envelope.root, "state": envelope.paths["state"],
+        "output": envelope.root / "runs" / envelope.receipt,
+        "generated-cache": envelope.paths["state"] / "cache",
+    }[role]
+    context = StorageContext.capture(environment={variable: str(boundary)})
+    monkeypatch.setattr(namespace, "sudo_storage_context", lambda *_: context)
+    monkeypatch.setattr(namespace, "open_receipts", lambda *_: pytest.fail("First parent write reached."))
+    with pytest.raises(ValueError):
+        namespace.main()
+    assert not envelope.launched and not envelope.servers
+    assert not (envelope.root / "receipts").exists()
+    assert not (envelope.root / "runs").exists()
+
+
+@pytest.fixture
+def sudo_process(tmp_path, monkeypatch):
+    """Real bounded proc-file reader, but every proc/identity surface is fake."""
+    import isolation
+
+    caller_home, root_home = tmp_path / "caller-home", tmp_path / "root-home"
+    caller_home.mkdir()
+    root_home.mkdir()
+    uid = os.getuid()
+    monkeypatch.setattr(isolation.pwd, "getpwuid", lambda number: SimpleNamespace(
+        pw_dir=str(caller_home if number == uid else root_home),
+    ))
+    selected = {name: str(tmp_path / ("original-" + name)) for name in STORAGE_ENV}
+    for name, value in selected.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    monkeypatch.delenv("SUDO_GID", raising=False)
+    context = StorageContext.capture()
+    proc = tmp_path / "fake-proc"
+    proc.mkdir()
+    executable = tmp_path / "fake-sudo"
+    executable.write_bytes(b"never executed")
+    (proc / "exe").symlink_to(executable)
+    values = ["S", *(["0"] * 18), "123456"]
+    (proc / "stat").write_text("765432 (sudo) " + " ".join(values))
+    raw = b"\0".join(name.encode() + b"=" + value.encode() for name, value in selected.items()) + b"\0"
+    (proc / "environ").write_bytes(raw)
+    real_open, real_stat = os.open, os.stat
+    sudo_info = list(executable.stat())
+    sudo_info[4] = 0
+
+    def open_proc(path, flags, *args, **kwargs):
+        return real_open(proc if path == "/proc/765432" else path, flags, *args, **kwargs)
+
+    def stat_sudo(path, *args, **kwargs):
+        return os.stat_result(sudo_info) if path == "/usr/bin/sudo" else real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "getppid", lambda: 765432)
+    monkeypatch.setattr(os, "open", open_proc)
+    monkeypatch.setattr(os, "stat", stat_sudo)
+    return SimpleNamespace(uid=uid, proc=proc, context=context, selected=selected, raw=raw,
+                           sudo_info=sudo_info, root_home=root_home)
+
+
+def test_parent_uses_original_sudo_environment_not_its_own_sanitized_home(sudo_process, monkeypatch):
+    original = sudo_process
+    for name in STORAGE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(original.root_home))
+    context = namespace.sudo_storage_context(original.uid, original.context.fingerprint())
+    assert context.uid == original.uid
+    for name, path in original.selected.items():
+        target = Path(path) / (".avibe" if name == "HOME" else "task")
+        with pytest.raises(ValueError):
+            context.validate(target)
+    with pytest.raises(ValueError):
+        context.validate(original.root_home / ".codex")
+
+
+@pytest.mark.parametrize("failure", [
+    "missing-environment", "sanitized-environment", "forged-digest", "invalid-digest",
+    "different-executable", "writable-executable", "oversized-environment",
+    "changed-parent", "duplicate-storage-key", "invalid-encoding",
+])
+def test_sudo_context_loss_or_forgery_fails_closed(sudo_process, monkeypatch, failure):
+    original = sudo_process
+    expected = original.context.fingerprint()
+    if failure == "missing-environment":
+        (original.proc / "environ").unlink()
+    elif failure == "sanitized-environment":
+        (original.proc / "environ").write_bytes(b"HOME=/root\0")
+    elif failure == "forged-digest":
+        expected = "0" * 64
+    elif failure == "invalid-digest":
+        expected = '{"protected":[]}'
+    elif failure == "different-executable":
+        original.sudo_info[1] += 1
+    elif failure == "writable-executable":
+        original.sudo_info[0] |= 0o002
+    elif failure == "oversized-environment":
+        (original.proc / "environ").write_bytes(b"x" * (1024 * 1024 + 1))
+    elif failure == "changed-parent":
+        parents = iter((765432, 765433))
+        monkeypatch.setattr(os, "getppid", lambda: next(parents))
+    elif failure == "duplicate-storage-key":
+        (original.proc / "environ").write_bytes(original.raw + b"HOME=/different\0")
+    else:
+        (original.proc / "environ").write_bytes(b"HOME=/invalid-\xff\0")
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        namespace.sudo_storage_context(original.uid, expected)
+
+
+def test_changed_sudo_environment_during_read_fails(sudo_process, monkeypatch):
+    read = namespace._proc_field
+    reads = 0
+
+    def changing(fd, name, limit):
+        nonlocal reads
+        value = read(fd, name, limit)
+        if name == "environ":
+            reads += 1
+            if reads == 2:
+                return b"HOME=/changed\0"
+        return value
+
+    monkeypatch.setattr(namespace, "_proc_field", changing)
+    with pytest.raises(RuntimeError, match="lost or changed"):
+        namespace.sudo_storage_context(sudo_process.uid, sudo_process.context.fingerprint())
+
+
+@pytest.mark.parametrize("mutation", ["missing-digest", "claimed-root-map", "allow-flag"])
+def test_public_cli_has_no_protection_bypass(envelope, monkeypatch, mutation):
+    argv = list(sys.argv)
+    if mutation == "missing-digest":
+        index = argv.index("--caller-storage-sha256")
+        del argv[index:index + 2]
+    else:
+        index = argv.index("--")
+        argv[index:index] = (["--storage-context", '{"protected":[]}'] if mutation == "claimed-root-map"
+                             else ["--allow-task-root", str(envelope.root)])
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as refused:
+        namespace.main()
+    assert refused.value.code == 2
+    assert not envelope.launched and not (envelope.root / "receipts").exists()
+
+
+def test_documented_caller_binds_original_context_and_actual_parent_admission(
+        envelope, sudo_process, monkeypatch):
+    # Execute the maintained caller itself. Only sudo/process/privilege metadata
+    # are simulated; the parent's storage and path admission remain real.
+    readme = (Path(__file__).parent / "README.md").read_text()
+    caller = readme.split("run_phase() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+    monkeypatch.setattr(namespace, "sudo_storage_context", envelope.storage_reader)
+    monkeypatch.setattr(sys, "argv", [
+        "-", str(envelope.root), str(envelope.paths["fixture"]), "test", "loopback", envelope.receipt, "",
+    ])
+    # The README uses this documented archive layout.
+    (envelope.root / "downloads").mkdir()
+    (envelope.root / "downloads/go.tar.gz").write_bytes(b"not executed")
+    (envelope.root / "venv").mkdir()
+    reached = []
+
+    class BeforeFirstWrite(Exception):
+        pass
+
+    def first_write(args, _stack):
+        context = StorageContext.from_parent(args.storage_context)
+        assert set(sudo_process.context.protected).issubset(context.protected)
+        assert args.root == envelope.root
+        reached.append(context.fingerprint())
+        raise BeforeFirstWrite
+
+    def sudo(command, **kwargs):
+        assert command[:4] == ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B"]
+        assert kwargs["timeout"] == PHASES["test"].driver_seconds and kwargs["close_fds"]
+        assert command[command.index("--caller-storage-sha256") + 1] == sudo_process.context.fingerprint()
+        # Mimic sudo env_reset after the original executable's environment was
+        # captured in fake proc. No actual sudo or subordinate process runs.
+        for name in STORAGE_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("HOME", str(sudo_process.root_home))
+        monkeypatch.setenv("SUDO_UID", str(sudo_process.uid))
+        monkeypatch.setenv("SUDO_GID", str(os.getgid() or 1000))
+        monkeypatch.setattr(sys, "argv", command[4:])
+        with pytest.raises(BeforeFirstWrite):
+            namespace.main()
+        return subprocess.CompletedProcess(command, 0)
+
+    # The outer caller is genuinely non-root; simulate root only inside sudo.
+    monkeypatch.setattr(os, "geteuid", lambda: sudo_process.uid)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    def call_sudo(command, **kwargs):
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        return sudo(command, **kwargs)
+
+    monkeypatch.setattr(namespace, "open_receipts", first_write)
+    monkeypatch.setattr(subprocess, "run", call_sudo)
+    exec(compile(caller, "<maintained original-context caller>", "exec"), {})
+    assert len(reached) == 1 and not (envelope.root / "receipts").exists()
+    assert not envelope.launched and not envelope.servers

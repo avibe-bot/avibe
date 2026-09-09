@@ -3,47 +3,155 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import pwd
 import shutil
+import stat
 import sys
 
 
-def validate_state_root(root: Path, *, owner_uid: int | None = None) -> Path:
+STORAGE_ENV = (
+    "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "AVIBE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+)
+PRODUCT_DIRS = (".avibe", ".vibe_remote", ".codex", ".claude")
+XDG_DEFAULTS = {
+    "XDG_CONFIG_HOME": ".config", "XDG_CACHE_HOME": ".cache",
+    "XDG_DATA_HOME": ".local/share", "XDG_STATE_HOME": ".local/state",
+}
+PROOF_PATH = Path("/run/avibe-engine-test-isolation.json")
+
+
+def _absolute(value: str, name: str) -> Path:
+    # Never include configured values in exceptions or diagnostic output.
+    if (not isinstance(value, str) or not value or len(value) > 4096
+            or "\0" in value or not Path(value).is_absolute() or ".." in Path(value).parts):
+        raise ValueError(f"{name} must be an absolute storage path without parent traversal.")
+    return Path(value)
+
+
+def _aliases(paths) -> tuple[Path, ...]:
+    try:
+        return tuple(sorted({alias for path in paths for alias in (path, path.resolve())}))
+    except (OSError, RuntimeError):
+        raise ValueError("Configured storage aliases cannot be resolved safely.") from None
+
+
+@dataclass(frozen=True, repr=False)
+class StorageContext:
+    """Original user locations, never inferred from a generated task environment."""
+
+    uid: int
+    homes: tuple[Path, ...]
+    protected: tuple[Path, ...]
+    environment_sha256: str
+
+    @classmethod
+    def capture(cls, *, uid: int | None = None, environment=None):
+        uid = os.getuid() if uid is None else uid
+        environment = os.environ if environment is None else environment
+        selected = {name: environment.get(name) for name in STORAGE_ENV}
+        # Empty/unset values use defaults; runtime has no default. Relative
+        # and malformed configured values fail closed, including overridden HOME.
+        configured = {name: _absolute(value, name) for name, value in selected.items() if value}
+        passwd_home = _absolute(pwd.getpwuid(uid).pw_dir, "passwd home")
+        effective_home = configured.get("HOME", passwd_home)
+        homes = _aliases((passwd_home, effective_home))
+        protected = [home / name for home in homes for name in PRODUCT_DIRS]
+        protected += [configured.get(name, effective_home / default) for name, default in XDG_DEFAULTS.items()]
+        protected += [configured[name] for name in (
+            "XDG_RUNTIME_DIR", "AVIBE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+        ) if name in configured]
+        environment_sha = hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
+        return cls(uid, homes, _aliases(protected), environment_sha)
+
+    def record(self) -> dict:
+        """Private parent control/proof only: do not print protected locations."""
+        return {"version": 1, "uid": self.uid, "homes": list(map(str, self.homes)),
+                "protected": list(map(str, self.protected)),
+                "environment_sha256": self.environment_sha256}
+
+    @classmethod
+    def from_parent(cls, record: dict):
+        if (not isinstance(record, dict) or set(record) != {
+                "version", "uid", "homes", "protected", "environment_sha256",
+            } or record["version"] != 1 or type(record["uid"]) is not int
+                or not isinstance(record["homes"], list) or not record["homes"]
+                or not isinstance(record["protected"], list) or not record["protected"]
+                or len(record["homes"]) > 16 or len(record["protected"]) > 128
+                or not isinstance(record["environment_sha256"], str)
+                or len(record["environment_sha256"]) != 64):
+            raise RuntimeError("Invalid parent storage context.")
+        # These paths were canonicalized outside the chroot. Resolving them
+        # again here would lose aliases hidden by the private mount namespace.
+        return cls(record["uid"], tuple(_absolute(value, "parent home") for value in record["homes"]),
+                   tuple(_absolute(value, "parent storage") for value in record["protected"]),
+                   record["environment_sha256"])
+
+    def fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps(self.record(), sort_keys=True).encode()).hexdigest()
+
+    def with_root_identity(self):
+        root = self.capture(uid=0, environment={})
+        return StorageContext(self.uid, tuple(sorted(set(self.homes + root.homes))),
+                              tuple(sorted(set(self.protected + root.protected))), self.environment_sha256)
+
+    def validate(self, root: Path) -> Path:
+        lexical = root.absolute()
+        canonical = root.resolve()
+        broad = {Path(name).resolve() for name in ("/", "/tmp", "/var/tmp", "/var/folders", "/home", "/Users", "/root")}
+        for target in (lexical, canonical):
+            if target in broad or any(target == home or home.is_relative_to(target) for home in self.homes):
+                raise ValueError("The evidence root must be a dedicated, narrow task directory.")
+            if any(target == boundary or target.is_relative_to(boundary) or boundary.is_relative_to(target)
+                   for boundary in self.protected):
+                raise ValueError("Task writes must not target protected user state.")
+        return canonical
+
+
+def storage_context() -> StorageContext:
+    """Only actual private namespace proof may replace ambient user identity."""
+    if sys.platform == "linux" and PROOF_PATH.exists():
+        proof = _namespace_proof()
+        return StorageContext.from_parent(proof["storage_context"])
+    if os.geteuid() == 0 or "SUDO_UID" in os.environ:
+        raise RuntimeError("Original caller storage context is required before sudo sanitization.")
+    return StorageContext.capture()
+
+
+def validate_state_root(root: Path, *, owner_uid: int | None = None, context: StorageContext | None = None) -> Path:
     """Validate every public write root before setup, including canonical aliases."""
-    root = root.resolve()
-    broad = {Path(name).resolve() for name in ("/", "/tmp", "/var/tmp", "/var/folders", "/home", "/Users", "/root")}
-    if root in broad:
-        raise ValueError("The evidence root must be a dedicated, narrow task directory.")
-    for uid in {os.getuid(), owner_uid if owner_uid is not None else os.getuid()}:
-        user_home = Path(pwd.getpwuid(uid).pw_dir).resolve()
-        if root == user_home or user_home.is_relative_to(root):
-            raise ValueError("The evidence root must be a dedicated, narrow task directory.")
-        for name in (".avibe", ".vibe_remote", ".codex", ".claude"):
-            protected = user_home / name
-            # Include the invoking owner when this is the privileged parent.
-            # Check lexical protection as well as compatibility symlinks.
-            for boundary in (protected, protected.resolve()):
-                if root == boundary or root.is_relative_to(boundary) or boundary.is_relative_to(root):
-                    raise ValueError("Task writes must not target protected user state.")
-    return root
+    context = storage_context() if context is None else context
+    if owner_uid is not None and context.uid != owner_uid:
+        raise RuntimeError("Storage context does not belong to the invoking owner.")
+    return context.validate(root)
 
 
-def validate_temporary_root(root: Path, *, owner_uid: int | None = None) -> Path:
+def validate_temporary_root(root: Path, *, owner_uid: int | None = None, context: StorageContext | None = None) -> Path:
     """The privileged recipe admits only narrow canonical temporary children."""
-    root = validate_state_root(root, owner_uid=owner_uid)
+    root = validate_state_root(root, owner_uid=owner_uid, context=context)
     if not any(root != base and root.is_relative_to(base) for base in (Path("/tmp"), Path("/var/tmp"))):
         raise ValueError("Privileged scratch must be a canonical child of /tmp or /var/tmp.")
     return root
 
 
-def namespace_receipt() -> dict:
-    """Fail closed unless the root-created private envelope matches this process."""
-    path = Path("/run/avibe-engine-test-isolation.json")
-    if sys.platform != "linux" or not path.is_file() or path.stat().st_uid != 0:
+def _namespace_proof() -> dict:
+    """Private proof reader; no ambient marker or caller dictionary grants trust."""
+    if sys.platform != "linux":
         raise RuntimeError("Network suites require namespace.py's private Linux envelope.")
-    proof = json.loads(path.read_text())
+    fd = os.open(PROOF_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                or info.st_mode & 0o022):
+            raise RuntimeError("Network suites require namespace.py's private Linux envelope.")
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise RuntimeError("Oversized namespace proof.")
+    proof = json.loads(raw)
     required = {"mnt", "net", "pid"}
     if set(proof["namespaces"]) != required or set(proof["outer_namespaces"]) != required:
         raise RuntimeError("All three namespace identities are required.")
@@ -53,8 +161,25 @@ def namespace_receipt() -> dict:
     status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
     if any(int(status[name].strip(), 16) for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")):
         raise RuntimeError("Candidate process still has Linux capabilities.")
-    if status["NoNewPrivs"].strip() != "1" or os.getuid() == 0:
+    if (status["NoNewPrivs"].strip() != "1" or os.getuid() == 0
+            or os.getuid() != os.geteuid() or os.getuid() != proof["uid"] or os.getgid() != proof["gid"]):
         raise RuntimeError("Candidate process has not dropped privilege.")
+    context = StorageContext.from_parent(proof["storage_context"])
+    if context.uid != proof["uid"] or context.fingerprint() != proof["storage_sha256"]:
+        raise RuntimeError("Parent storage context identity does not match.")
+    root = _absolute(proof["root"], "parent task root")
+    output = _absolute(proof["output"], "parent output")
+    state = _absolute(proof["state"], "parent cache")
+    receipt = proof["receipt"]
+    if (not isinstance(receipt, str) or Path(receipt).name != receipt or receipt in ("", ".", "..")
+            or output != root / "runs" / receipt or state == root or not state.is_relative_to(root)
+            or state == output or state.is_relative_to(output) or output.is_relative_to(state)
+            or output.is_symlink() or output.stat().st_uid != proof["uid"]
+            or stat.S_IMODE(output.stat().st_mode) != 0o750):
+        raise RuntimeError("Private task ownership does not match the exclusive invocation.")
+    for target in (root, output, state):
+        if context.validate(target) != target:
+            raise RuntimeError("Private task roots must match parent canonical identities.")
     proof["process_status"] = {
         name: status[name].strip()
         for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")
@@ -63,14 +188,25 @@ def namespace_receipt() -> dict:
     return proof
 
 
-def isolated_environment(root: Path, *, cache: Path | None = None, go: Path | None = None) -> dict[str, str]:
-    root = validate_state_root(root)
-    cache = validate_state_root(cache) if cache is not None else root
+def namespace_receipt() -> dict:
+    """Public evidence excludes original user paths; retain only their digest."""
+    proof = _namespace_proof()
+    return {name: value for name, value in proof.items() if name != "storage_context"}
+
+
+def environment_directories(root: Path, cache: Path) -> list[tuple[Path, str]]:
     directories = [(root, name) for name in ("home", "tmp", "config", "data")]
-    directories += [(cache, name) for name in ("cache", "go", "mod")]
+    return directories + [(cache, name) for name in ("cache", "go", "mod")]
+
+
+def isolated_environment(root: Path, *, cache: Path | None = None, go: Path | None = None) -> dict[str, str]:
+    context = storage_context()
+    root = context.validate(root)
+    cache = context.validate(cache) if cache is not None else root
+    directories = environment_directories(root, cache)
     # Validate all aliases before the FIRST write, not while creating folders.
     for owner, name in directories:
-        target = validate_state_root(owner / name)
+        target = context.validate(owner / name)
         if not target.is_relative_to(owner):
             raise ValueError("Environment directory escapes its task root.")
     root.mkdir(parents=True, exist_ok=True)
@@ -104,7 +240,8 @@ def isolated_environment(root: Path, *, cache: Path | None = None, go: Path | No
 
 def sandbox_prefix(root: Path) -> list[str]:
     """Deny all network egress for macOS pure-source diagnostics."""
-    root = validate_state_root(root)
+    context = storage_context()
+    root = context.validate(root)
     if sys.platform == "linux":
         proof = namespace_receipt()
         if Path(proof["state"]) != root.resolve():
@@ -112,7 +249,6 @@ def sandbox_prefix(root: Path) -> list[str]:
         return []
     if sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file():
         raise RuntimeError("This recipe requires macOS sandbox-exec; no unsandboxed fallback.")
-    user_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
     def quote(value: Path) -> str:
         return json.dumps(str(value))
     policy = (
@@ -121,6 +257,6 @@ def sandbox_prefix(root: Path) -> list[str]:
         f'(allow file-write* (subpath {quote(root)})) '
         '(allow file-write* (subpath "/dev")) '
     )
-    for name in (".avibe", ".vibe_remote", ".codex", ".claude"):
-        policy += f'(deny file-read* (subpath {quote(user_home / name)})) '
+    for boundary in context.protected:
+        policy += f'(deny file-read* (subpath {quote(boundary)})) '
     return ["/usr/bin/sandbox-exec", "-p", policy]

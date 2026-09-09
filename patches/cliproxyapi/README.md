@@ -35,15 +35,16 @@ all egress and is only for pure-source diagnostics. Executing the pinned
 Linux arm64 Go toolchain, including compilation, requires the Linux envelope;
 there is no macOS engine-build or network-suite fallback.
 
-Current acceptance boundary: the second reviewed head exposed incomplete
-toolchain verification, per-invocation output ownership, pre-write validation,
-private-entry enforcement and deadline propagation. The orchestrator diagnosed
-the repeated classes and approved one bounded recipe-only correction.
-The revised recipe passes 361 deny-network pure consumers, pinned Ruff 0.4.9
-and source/document syntax gates. **Its privileged probes and Go/build/wire execution remain held until fresh
-independent inspection**. Earlier Linux lane and independent orchestrator
-runs genuinely passed all three Go commands and the complete corrected
-380-case wire/lifecycle matrix, but do not accept these newly repaired paths.
+Current acceptance boundary: the third reviewed head exposed configured user
+storage missing from pre-write protection. The orchestrator diagnosed the
+repeated isolation class and authorized only a bounded recipe/test/doc correction
+and pure validation. The local correction passes 733 maintained pure consumers,
+pinned Ruff 0.4.9 and document/AST/whitespace gates. **Privileged probes and Go/build/wire execution of this
+new correction remain held pending independent inspection.** The preceding
+second-round recipe genuinely passed 361 pure consumers and separate lane and
+independent orchestrator Linux test/build/wire runs. Those full source results
+remain acceptance of their exact earlier recipe, not these changed admission
+and caller-context paths. The Go patch and frozen inputs have not changed.
 The earlier watcher-only failure and all historical artifacts remain preserved.
 The still-earlier macOS wildcard-loopback runs are not isolation acceptance.
 No source tests or Avibe PR merge ship an engine repair.
@@ -51,10 +52,32 @@ No source tests or Avibe PR merge ship an engine repair.
 Set `engine_task` to an explicitly allocated, canonical, dedicated child of
 `/tmp` or `/var/tmp`, never either broad root. The privileged CLI rejects home
 layouts and aliases into `/home`, `/root` or `/Users` before setup.
-All writable-root consumers also reject protected `.avibe`, `.vibe_remote`,
-`.codex` and `.claude` data, home/broad ancestors and aliases before any mkdir
-or export, including a root containing a protected symlink's target. The
-privileged parent protects the invoking sudo user's home too.
+All writable-root consumers share one original-user storage model: passwd and
+effective HOME, fixed `.avibe`, `.vibe_remote`, `.codex`, `.claude` children,
+XDG config/cache/data/state/runtime, and AVIBE_HOME/CODEX_HOME/CLAUDE_CONFIG_DIR.
+Unset or empty overrides use defaults; XDG defaults are `.config`, `.cache`,
+`.local/share` and `.local/state` beneath effective HOME, with no runtime
+fallback. Relative, parent-traversing or malformed configured paths fail closed
+without printing their values. Home/broad roots and their ancestors remain
+forbidden; storage roots reject equality, ancestors, descendants and lexical
+or canonical aliases, including writable ancestors containing protected targets.
+macOS deny-read exclusions use the same storage set.
+
+Begin from the invoking user's original environment, not `env -i`, a task HOME,
+or an already-sanitized sudo shell. Set `recipe_source` to this inspected
+maintained directory. Validate the allocated task before copying or preparing
+anything inside it:
+
+```sh
+python3 -B - "$recipe_source" "$engine_task" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from isolation import validate_temporary_root
+validate_temporary_root(Path(sys.argv[2]))
+PY
+```
+
 Do not use a shared checkout. Copy this directory into
 `"$engine_task/recipe"` without AppleDouble files or Python caches. Preserve
 any existing checkout/evidence; use new task children when needed:
@@ -158,13 +181,21 @@ Use new receipt names every time; collisions fail
 closed and preserve prior evidence. Example:
 
 ```sh
-sudo -n /usr/bin/python3 -B "$engine_task/recipe/namespace.py" \
+caller_storage_sha256=$(python3 -B - "$engine_task/recipe" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from isolation import storage_context
+print(storage_context().fingerprint())
+PY
+)
+/usr/bin/sudo -n /usr/bin/python3 -B "$engine_task/recipe/namespace.py" \
   --root "$engine_task" --source "$engine_task/source" \
   --fixture "$fixture_root" --state "$engine_task/state" \
   --recipe "$engine_task/recipe" --toolchain "$engine_task/toolchain" \
   --python-env "$engine_task/venv" \
   --go-archive "$engine_task/downloads/go.tar.gz" --phase probe --network none \
-  --receipt probe-none-unique.json -- /bin/true
+  --receipt probe-none-unique.json --caller-storage-sha256 "$caller_storage_sha256" \
+  -- /bin/true
 ```
 
 After independent probe acceptance, the following narrow helper runs the
@@ -184,14 +215,18 @@ phase, network, receipt, build = sys.argv[3:]
 recipe = task / "recipe"
 sys.path.insert(0, str(recipe))
 from budgets import PHASES
-command = ["sudo", "-n", "/usr/bin/python3", "-B", str(recipe / "namespace.py")]
+from isolation import storage_context
+storage = storage_context()
+storage.validate(task)
+command = ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-B", str(recipe / "namespace.py")]
 paths = {"root": task, "source": task / "source", "fixture": fixture,
          "state": task / "state", "recipe": recipe, "toolchain": task / "toolchain",
          "python-env": task / "venv", "go-archive": task / "downloads/go.tar.gz"}
 for name, path in paths.items():
     command += ["--" + name, str(path)]
 selection = ["--build", build] if build else []
-command += ["--phase", phase, "--network", network, "--receipt", receipt, *selection, "--",
+command += ["--phase", phase, "--network", network, "--receipt", receipt,
+            "--caller-storage-sha256", storage.fingerprint(), *selection, "--",
             str(task / "venv/bin/python"), "-B", str(recipe / "verify.py"), phase,
             "--source", str(task / "source"), "--state", str(task / "state"),
             "--fixture", str(fixture), *selection]
@@ -210,6 +245,27 @@ Build/wire have one 600-second command and limits 780/900/930 seconds.
 The parent also checks that the phase uses its required network mode before
 setup. A timeout or early failure retains evidence and never starts a later
 phase automatically.
+
+The public parent requires the original caller's storage digest and independently
+reconstructs it from its live `/usr/bin/sudo` parent's Linux proc exec-time
+environment and the invoking UID's passwd identity. Only selected storage
+variables are retained; no raw environment or protected paths are printed.
+The proc reads are bounded, anchored and checked for process continuity.
+Root's sanitized HOME is never substituted for the user's original context.
+A missing/mismatched digest, non-sudo parent, unavailable/scrubbed environment
+or changed process fails before any receipt, run, listener, subprocess or mount.
+This deliberately supports the documented direct sudo invocation; another sudo
+process layout is not an excuse for a fallback. Deliberately discarded variables
+cannot be recovered: rerunning from a sanitized shell is not supported.
+
+Root adds its own passwd-home protection, then carries the stable context only
+through the existing unnamed parent control and root-owned private proof.
+Child consumers reuse it only after verifying all three namespaces, dropped
+privilege, context digest and exclusive invocation/output identity. Generated
+task HOME/XDG/cache does not redefine production. No public skip/allow flag,
+environment marker or caller-supplied safe-root dictionary grants an exception.
+Public preflight/terminal evidence contains only the storage-context digest;
+the private root-owned proof retains the original locations.
 
 The private network has only its own loopback: dynamic Go `httptest`, engine
 and replacement mock listeners share it, while guest/host listeners and

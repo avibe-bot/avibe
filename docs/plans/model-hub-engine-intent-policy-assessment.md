@@ -1,18 +1,20 @@
 # Model Hub engine reasoning-intent assessment
 
-Status (2026-09-09): maintained inactive source/test candidate independently
-source-accepted on Linux arm64. The second-round recipe passes 361 deny-network
-pure consumers, pinned Ruff 0.4.9 and source/document syntax checks. Following
-independent source inspection and harmless kernel probes, the lane and then
-the orchestrator each ran one complete sequential test/build/wire invocation
-of the unchanged recipe. All three Go commands, diagnostic build, full wire
-matrix and original isolation/cleanup evidence passed in both runs.
-The current identities and trust limits are recorded below; historical macOS,
-watcher-only failure and earlier-recipe receipts remain historical.
-Exact-head Codex/CI/thread gates and final assessment inspection are still
-required. Shipping additionally requires separate source-provenance and
-publication authority. No Avibe runtime code, config, manifest, guard, or
-workflow changed; the currently pinned/installed engine behavior is unchanged.
+Status (2026-09-09): inactive source/test candidate with a local configured-
+storage correction under independent inspection. Codex's third findings-bearing
+head exposed original user-directory overrides missing from pre-write protection.
+The orchestrator independently reproduced the defect in fake task directories
+and released only recipe/test/doc correction and pure validation. Guest,
+kernel, Go/build/wire execution, push and review mutation remain held for this
+correction. The preceding second-round recipe genuinely passed 361 pure tests
+and separate complete lane/orchestrator Linux arm64 test/build/wire runs.
+Those exact historical recipe and diagnostic identities remain recorded below;
+they are not execution evidence for the changed admission/propagation bytes.
+Historical macOS, watcher-only failure and earlier receipts are preserved.
+Fresh source acceptance and exact-head Codex/CI/thread gates remain required.
+Shipping additionally needs separate provenance/publication authority. No Avibe
+runtime code, config, manifest, guard or workflow changed; the installed engine
+behavior is unchanged.
 
 Owner: lane D, Session `sesm5hv4yk5c8`;
 orchestrator: Session `sesvmgbdub2gp`.
@@ -45,7 +47,55 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
-## Second reviewed-head recipe correction
+## Third reviewed-head configured-storage correction — local only
+
+The complete independent review inventory contains three findings-bearing
+heads, eight resolved historical threads and one current unresolved finding,
+`3965522776`, on reviewed head `79a47b8217463e49e06a80368718ed83068e6dcd`.
+The repeated class is incomplete protection before setup writes, not a new
+engine-intent defect. The same orchestrator recorded a bounded scope decision
+before further changes. Successful CI and prior source runs do not waive it.
+
+One original-user storage model now serves every existing public write-root
+consumer and the macOS deny-read policy. It includes passwd/effective HOME,
+the four fixed product directories, five XDG authorities and existing
+AVIBE_HOME/CODEX_HOME/CLAUDE_CONFIG_DIR overrides. Empty/unset values use standard
+defaults beneath effective HOME; XDG runtime has no invented fallback. Invalid
+relative/parent-traversing paths fail closed without logging their values.
+Lexical/canonical aliases, protected descendants and writable ancestors are
+checked before setup. The narrow privileged temporary-root rule is retained.
+
+The documented ordinary caller binds its original context before sudo. The
+same privileged parent independently checks that digest against its live
+`/usr/bin/sudo` parent's bounded Linux proc exec-time environment, using the
+invoking passwd identity rather than root's sanitized HOME. Unavailable,
+scrubbed, changed or non-sudo context fails closed. This is a deliberately
+narrow direct-sudo caller contract, not support for arbitrary privilege
+wrappers or reconstruction of already-discarded variables.
+
+The admitted context travels through the existing unnamed parent control and
+root-owned private namespace proof. Only verified private namespace, privilege,
+context and exclusive invocation/output identities permit child consumers to
+reuse it instead of misclassifying generated task HOME/XDG/cache as production.
+There is no public safe-root dictionary, skip/allow flag or ambient marker.
+Public preflight/terminal evidence exposes the context digest, not original
+storage paths. Existing lifecycle, deadlines, terminal custody, readonly
+selected build and output semantics are unchanged.
+
+New pure consumers use only fake passwd homes, configured storage and proc
+metadata. They exercise actual setup/export/verifier/wire/process/namespace
+admission, the maintained documented caller with sudo mocked, lost/forged
+context, canonical aliases, shared caches and valid nested private task state.
+No real configured values, production contents or guest operations are used.
+The complete maintained pure suite passes 733 tests under the existing
+deny-network/deny-production-write envelope; pinned Ruff 0.4.9 and
+document/AST/whitespace checks pass. These are source-level consuming tests,
+not a live sudo/namespace attestation or a new-head engine execution.
+The original native Go patch and all frozen source/fixture/toolchain
+declarations remain unchanged. Fresh independent inspection and any separately
+selected kernel/source revalidation are still required for this correction.
+
+## Historical second reviewed-head recipe correction
 
 The same orchestrator independently diagnosed the full history before
 authorizing repair: two findings-bearing heads, with repeated
@@ -76,11 +126,11 @@ Pure consumers cover the original entry points, substituted compiler and
 runtime/tool files, canonical path aliases, repeat test/build/wire runs,
 output collisions, partial failures, stale build selection and fake-clock
 deadline propagation. Kernel probes, complete source execution and independent
-rerun of these revised bytes have now passed independently; acceptance is
-bound to the unchanged complete recipe below, not inherited from the
-successful historical runs. Publication remains separately blocked.
+rerun passed for the exact second-round recipe below. The configured-storage
+correction was not present in those runs and does not inherit their execution
+acceptance. Publication remains separately blocked.
 
-## Current second-round Linux source acceptance
+## Historical second-round Linux source acceptance
 
 On 2026-09-09 the lane completed `fullphase-sequence-2m05b_t9`. After reading
 all original evidence independently, the orchestrator ran the same inspected
@@ -92,7 +142,7 @@ and phase log, the complete 456-line/58,205-byte engine log, full before/after
 inputs, hashed output inventories, selected build and lifecycle evidence.
 Exit codes or summary counts alone were not the acceptance criterion.
 
-| Current accepted input | Identity |
+| Accepted second-round input, before configured-storage correction | Identity |
 | --- | --- |
 | Maintained commit at execution | `7ac2386d1bc9c413ff02a4fe70778efa3d465d47` |
 | Complete 21-file recipe Git tree | `5b6d733fa51d14489bc8889be4bab9bad248a643` |
@@ -186,7 +236,8 @@ test files and dependency locks remain unchanged. Finalization integrates only
 landed master and updates this assessment; it does not repoint the frozen
 fixture. The landed presentation row `MH-SRC-DELETE-002` is checked by the
 pure catalog consumer, with no peer UI edits or new scenario allocation.
-Fresh exact-head CI and Codex review remain mandatory.
+That finalization was subsequently reviewed with the configured-storage finding
+above. Fresh exact-head CI and a clean Codex review remain mandatory.
 
 ## Completed source-only implementation
 
@@ -262,8 +313,8 @@ explicit boundary policy, not a changed registration claim.
 
 ### Historical macOS and earlier-recipe evidence
 
-This section preserves superseded validation stages; current second-round
-Linux acceptance is recorded separately above.
+This section preserves superseded validation stages; the exact second-round
+Linux recipe acceptance is recorded separately above.
 The initial results came from the earlier macOS wildcard-loopback envelope.
 They are source behavior observations, not sufficient evidence of test-owned
 listener isolation or the newly enforced fixture receipt closure. The Linux
@@ -329,9 +380,10 @@ preservation/routing, not that a real provider accepts a future effort value.
 ## Historical macOS diagnostic inputs and evidence limits
 
 The Darwin binary hashes in this table belong only to the initial macOS
-diagnosis and candidate. They are not the current Linux build identities.
+diagnosis and candidate. They are not Linux build identities.
 The frozen engine base, patch, fixture and catalog declarations remain inputs
-to the separately recorded current acceptance.
+to the separately recorded second-round acceptance. Neither table attests
+execution of the newer configured-storage correction.
 
 | Input | Identity |
 | --- | --- |

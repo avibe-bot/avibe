@@ -22,7 +22,7 @@ import tempfile
 import threading
 
 from budgets import PHASES
-from isolation import validate_state_root, validate_temporary_root
+from isolation import STORAGE_ENV, StorageContext, environment_directories, validate_state_root, validate_temporary_root
 
 
 # No public re-entry option. Only the parent constructs this fixed invocation,
@@ -32,6 +32,63 @@ CHILD_TRAMPOLINE = (
     "import sys; sys.path.insert(0, sys.argv[1]); "
     "import namespace; namespace.child_from_control(int(sys.argv[2]))"
 )
+
+
+def _proc_field(directory: int, name: str, limit: int) -> bytes:
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise RuntimeError("Original sudo process metadata is unavailable.")
+        value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise RuntimeError("Original sudo process metadata exceeds its bound.")
+    return value
+
+
+def sudo_storage_context(uid: int, expected: str) -> StorageContext:
+    """Bind pre-sudo caller identity to the live sudo process, never root's HOME.
+
+    Linux proc environ exposes the process's exec-time environment. If sudo
+    scrubs it, execs away, or otherwise makes it unavailable, the caller's
+    independently captured digest will not match and setup fails closed.
+    No caller-authored list of allegedly safe roots is accepted.
+    """
+    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+        raise ValueError("An exact original-caller storage digest is required.")
+    parent = os.getppid()
+    fd = os.open(f"/proc/{parent}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        sudo = os.stat("/usr/bin/sudo", follow_symlinks=False)
+        executable = os.stat("exe", dir_fd=fd)
+        if (not stat.S_ISREG(sudo.st_mode) or sudo.st_uid != 0 or sudo.st_mode & 0o022
+                or (executable.st_dev, executable.st_ino) != (sudo.st_dev, sudo.st_ino)):
+            raise RuntimeError("Original context requires the live /usr/bin/sudo parent.")
+        before = _proc_field(fd, "stat", 8192).rsplit(b")", 1)[1].split()[19]
+        raw = _proc_field(fd, "environ", 1024 * 1024)
+        selected = {}
+        names = {name.encode(): name for name in STORAGE_ENV}
+        for entry in raw.split(b"\0"):
+            name, separator, value = entry.partition(b"=")
+            if separator and name in names:
+                key = names[name]
+                if key in selected:
+                    raise RuntimeError("Ambiguous original storage environment.")
+                try:
+                    selected[key] = value.decode("utf-8")
+                except UnicodeError:
+                    raise ValueError("Invalid original storage path encoding.") from None
+        context = StorageContext.capture(uid=uid, environment=selected)
+        after = _proc_field(fd, "stat", 8192).rsplit(b")", 1)[1].split()[19]
+        if (os.getppid() != parent or before != after
+                or _proc_field(fd, "environ", 1024 * 1024) != raw
+                or context.fingerprint() != expected):
+            raise RuntimeError("Original caller storage context was lost or changed before sudo.")
+    finally:
+        os.close(fd)
+    # Root's own passwd-home protection is additive, never a replacement for
+    # the invoking user's effective HOME and configured storage authorities.
+    return context.with_root_identity()
 
 
 def namespace_ids() -> dict[str, str]:
@@ -217,6 +274,11 @@ def inside(args: argparse.Namespace, outer: dict) -> None:
     if (set(outer) != required or set(actual) != required
             or any(not isinstance(outer[name], str) or actual[name] == outer[name] for name in required)):
         raise RuntimeError("Refusing mount/network setup outside new mount, network and PID namespaces.")
+    context = StorageContext.from_parent(args.storage_context)
+    if context.uid != args.uid:
+        raise RuntimeError("Private handoff lost its invoking storage owner.")
+    for target in (args.root, args.state, args.output):
+        context.validate(target)
     # MUST be first: never propagate a bind or mount operation into the guest.
     run("/usr/bin/mount", "--make-rprivate", "/")
     interfaces = json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "link"]))
@@ -274,6 +336,8 @@ def inside(args: argparse.Namespace, outer: dict) -> None:
         "budget": PHASES[args.phase].receipt(), "selected_build": args.selected_build,
         "toolchain": str(args.toolchain), "go_archive": str(args.go_archive),
         "python_env": str(args.python_env),
+        "root": str(args.root), "storage_context": context.record(),
+        "storage_sha256": context.fingerprint(),
     }
     (rootfs / "run/avibe-engine-test-isolation.json").write_text(json.dumps(marker))
     run("/usr/bin/mount", "-o", "remount,ro,nosuid,nodev", str(rootfs))
@@ -306,6 +370,8 @@ def main() -> None:
     parser.add_argument("--build", type=Path, help="Explicit prior build output; required only for wire.")
     parser.add_argument("--network", required=True, choices=("none", "loopback"))
     parser.add_argument("--receipt", required=True)
+    parser.add_argument("--caller-storage-sha256", required=True,
+                        help="Storage identity captured by the original non-root caller before sudo.")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if sys.platform != "linux" or os.geteuid() != 0:
@@ -313,21 +379,31 @@ def main() -> None:
     args.uid, args.gid = int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"])
     if args.uid <= 0 or args.gid <= 0:
         raise ValueError("The invoking task owner must be non-root.")
-    args.root = validate_temporary_root(args.root, owner_uid=args.uid).resolve(strict=True)
+    context = sudo_storage_context(args.uid, args.caller_storage_sha256)
+    args.storage_context = context.record()
+    args.root = validate_temporary_root(args.root, owner_uid=args.uid, context=context).resolve(strict=True)
     for name in ("source", "fixture", "state", "recipe", "toolchain", "python_env", "go_archive"):
-        path = getattr(args, name).resolve(strict=True)
+        path = context.validate(getattr(args, name)).resolve(strict=True)
         if path == args.root or not path.is_relative_to(args.root):
             raise ValueError(f"{name} must be a dedicated child of the allocated scratch.")
         setattr(args, name, path)
     if args.recipe != Path(__file__).resolve().parent:
         raise ValueError("Recipe mount must be the directory of this inspected launcher.")
-    validate_state_root(args.state, owner_uid=args.uid)
+    validate_state_root(args.state, owner_uid=args.uid, context=context)
     paths = [args.source, args.fixture, args.state, args.recipe, args.toolchain, args.python_env, args.go_archive]
     if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for i, a in enumerate(paths) for b in paths[i + 1:]):
         raise ValueError("Source, fixture, state, recipe, toolchain and Python directories must be disjoint.")
     if Path(args.receipt).name != args.receipt or args.receipt in ("", ".", ".."):
         raise ValueError("Receipt must be one new file name in the parent's receipts directory.")
     args.output = args.root / "runs" / args.receipt
+    # Check the full public setup and generated environment plan before the
+    # first receipt/output allocation, sentinel, subprocess or mount.
+    for target in (args.root / "receipts", args.root / "runs", args.output):
+        context.validate(target)
+    for owner, name in environment_directories(args.output, args.state):
+        target = context.validate(owner / name)
+        if not target.is_relative_to(owner):
+            raise ValueError("Environment directory escapes its task root.")
     for path in paths:
         for reserved in (args.root / "receipts", args.root / "runs"):
             if path == reserved or path.is_relative_to(reserved) or reserved.is_relative_to(path):
@@ -402,6 +478,7 @@ def main() -> None:
             "entry_custody": "fixed-trampoline-unnamed-parent-control",
             "phase": args.phase, "budget": PHASES[args.phase].receipt(),
             "output": str(args.output), "selected_build": getattr(args, "selected_build", None),
+            "storage_sha256": context.fingerprint(),
         }
         probe.seek(0)
         raw = probe.read(65537)

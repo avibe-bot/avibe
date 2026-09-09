@@ -109,6 +109,7 @@ def main() -> None:
     source = validate_state_root(args.source).resolve(strict=True)
     if source == state or state.is_relative_to(source):
         raise ValueError("Evidence/cache state must be outside the source checkout.")
+    proof = namespace_receipt() if args.phase != "apply" else None
     verify_inputs(source)
     if args.phase == "apply":
         status = subprocess.check_output(
@@ -127,7 +128,6 @@ def main() -> None:
         check=True,
     )
     verify_candidate(source)
-    proof = namespace_receipt()
     budget = PHASES[args.phase]
     expected_network = "none" if args.phase == "build" else "loopback"
     if (proof["phase"] != args.phase or proof["budget"] != budget.receipt()
