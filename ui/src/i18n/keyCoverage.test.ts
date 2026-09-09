@@ -48,7 +48,7 @@
 // `t()` only that way, through eighteen differently-named props. Adding those
 // names here would be the same enumeration a fourth time.
 //
-// So this file states TWO properties, and the second needs no positions at all.
+// So this file states THREE properties, and only the first needs positions.
 //
 //   EXISTENCE — every key named literally at a `t()` or an `i18nKey` position has
 //   copy in both locales. Position-bound of necessity: to demand that a key
@@ -67,9 +67,26 @@
 //
 // What PARITY cannot do is find a key missing from BOTH locales: a literal absent
 // from both is indistinguishable from a Monaco theme token, an event-channel
-// name, or a storage key, and 62 of those sit in `src/` today. That case is
-// exactly what EXISTENCE covers, which is why both properties are here and
-// neither replaces the other.
+// name, or a storage key, and 61 of those sit in `src/` today. EXISTENCE covers
+// that case only where it can see a position, which a carrier-only key does not
+// have — delete `telegramConfig.proxyUrl` from both bundles and neither property
+// notices, while `ProxyUrlField` renders the raw key.
+//
+//   RESIDUE — the literals that resolve in NEITHER locale are pinned, by exact
+//   set equality, to the classified list below. Not a count: a count lets one
+//   literal leave as another enters. A key deleted from both bundles joins that
+//   set, the set stops matching, and the suite fails.
+//
+// The pin is an enumeration, which is what the three rounds above kept getting
+// wrong — but it enumerates the RESIDUE, not the positions, and that inverts the
+// failure direction. A position this file has not heard of silently falls out of
+// coverage; a literal this list has not heard of fails loudly and has to be
+// classified. Same shape as `scripts/lint-baseline.mjs`, which pins this repo's
+// known lint violations for the same reason.
+//
+// So the cost of the pin is a line whenever a genuinely new non-key dotted
+// literal appears, and the thing it buys is that no key can leave the bundles
+// unnoticed, whatever position it was written in.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -349,6 +366,120 @@ const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
 const resolvesIn = (instance: I18n, lng: string, key: string): boolean =>
   instance.exists(key) || representativeCounts(lng).some((count) => instance.exists(key, { count }));
 
+/**
+ * Every dotted literal in `src/` that resolves in NEITHER locale, pinned exactly.
+ *
+ * These read like keys and are not keys. Each one is classified, because the
+ * whole value of the pin is that an unclassified literal cannot sit here quietly:
+ * adding a line is a deliberate claim that the string is not copy, and deleting
+ * copy that something still references shows up as an unexplained new entry.
+ *
+ * There are no plural stems in this list. Families fold into PARITY through
+ * `resolvesIn`, so a stem whose family exists resolves and never reaches here.
+ */
+const NON_KEY_LITERALS = [
+  // Monaco theme tokens and editor actions. Read by the editor, never by i18next.
+  'editor.action.selectAll',
+  'editor.background',
+  'editor.lineHighlightBackground',
+  'editor.selectionBackground',
+  'editorGutter.background',
+  'editorIndentGuide.background1',
+  'editorLineNumber.activeForeground',
+  'editorLineNumber.foreground',
+  'editorWidget.background',
+  'minimap.background',
+
+  // Event-channel names. `ApiContext.tsx` publishes and subscribes by these.
+  'authorization.changed',
+  'inbox.session.updated',
+  'inbox.unread.changed',
+  'message.new',
+  'message.updated',
+  'projects.changed',
+  'queue.updated',
+  'remote.authorization',
+  'remote_access.quality.changed',
+  'runs.updated',
+  'session.activity',
+  'session.status',
+  'turn.end',
+  'turn.start',
+  'vaults.updated',
+  'workbench.events.bridge.status',
+  // Event-channel names on the vault sandbox bridge and the permissions surface.
+  'confirm.surface',
+  'instance.permissions.mutate',
+  'ui.hide',
+  'ui.show',
+  'vault.state',
+
+  // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
+  // so the server's own message shows when the client has no copy for the code.
+  'modelHub.errors.backend_model_catalog_invalid',
+  'modelHub.errors.backend_model_conflict',
+  'modelHub.errors.backend_model_duplicate',
+  'modelHub.errors.backend_model_id_invalid',
+  'modelHub.errors.backend_model_id_prefix',
+  'modelHub.errors.backend_model_in_route',
+  'modelHub.errors.backend_model_locked',
+  'modelHub.errors.candidate_suppliers_changed',
+  'modelHub.errors.engine_down',
+  'modelHub.errors.models_dev_unavailable',
+  'modelHub.errors.native_login_in_progress',
+  'modelHub.errors.native_subscription_exists',
+
+  // Storage keys. Namespaced on purpose, which is also why they read like keys.
+  'avibe.agents.tab.v1',
+  'avibe.editor.fontSize.v1',
+  'avibe.editor.recents.v1',
+  'avibe.terminal.fontSize.v1',
+  'avibe.terminal.sessionId',
+  'avibe.vault.crypto',
+  'avibe.workbench.windows.v1',
+  'vibe.webPush.deviceId',
+  'vibe.webPush.endpoints',
+
+  // Config field paths, addressed against the V2 config rather than a bundle.
+  'agents.opencode.active_turn_timeout_seconds',
+  'agents.opencode.error_retry_limit',
+  'platforms.enabled',
+
+  // Not keys in any sense: a package name, a host, a filename, a sample domain.
+  'Thumbs.db',
+  'opencode.ai',
+  'qrcode.react',
+  'relay.example',
+
+  // Dead literals, removal tracked. `CreateViaChatDialog.tsx` builds these and
+  // feeds them through a `defaultValue` chain into `harness.createDialog.*`,
+  // which does exist in both locales, so the rendered copy is correct. The
+  // comment there claims they are kept for a translation linter, which is not
+  // true of this guard. Deleting product code is out of scope for this PR.
+  'workbench.createDialog.kindTask',
+  'workbench.createDialog.kindWatch',
+];
+
+/** Every dotted literal the app carries, wherever it sits, sorted. */
+const appDottedLiterals = (): string[] => {
+  const literals = new Set<string>();
+  for (const file of sourceFiles(APP_SOURCE)) {
+    for (const found of collectDottedLiterals(readFileSync(file, 'utf8'), file)) literals.add(found);
+  }
+  return [...literals].sort((a, b) => a.localeCompare(b));
+};
+
+/** The literals no locale resolves, sorted for comparison against the pin. */
+export const residueOf = (
+  literals: string[],
+  bundles: { lng: string; bundle: unknown }[],
+): string[] => {
+  const locales = bundles.map(({ lng, bundle }) => ({ lng, instance: localeInstance(lng, bundle) }));
+  return literals
+    .filter((key) => !locales.some(({ lng, instance }) => resolvesIn(instance, lng, key)))
+    .sort((a, b) => a.localeCompare(b));
+};
+
 /** A literal one locale resolves and another does not: a key someone lost. */
 type ParityGap = { key: string; present: string[]; absent: string[] };
 
@@ -586,7 +717,7 @@ describe('app i18n key coverage', () => {
     // PARITY's boundaries, pinned on bundles this test owns, so a scanner
     // regression fails here rather than in production. The classes are the ones
     // measured in `src/`: a key one locale dropped, a plural family one locale
-    // dropped, and the 62 literals that are not keys at all.
+    // dropped, and the 61 literals that are not keys at all.
     const gaps = parityGaps(
       [
         'card.title',
@@ -627,16 +758,41 @@ describe('app i18n key coverage', () => {
     ]);
     // `card.count` resolves in both — zh selects only `other`, and asking for the
     // category zh cannot reach would make every plural family a false gap.
-    // The rest resolve in neither locale, so they are not keys and say nothing:
+    // The rest resolve in neither locale, so PARITY says nothing about them:
     // a Monaco theme token, an event-channel name, a config field path, a storage
-    // key. None of them needed an allowlist to be quiet.
+    // key. Staying quiet is what makes them RESIDUE's problem, below.
+  });
+
+  it('fails the pin when a carrier-only key is deleted from every locale', () => {
+    // The mutation that produced the pin, kept as a fixture. `labelKey` is a
+    // carrier: no `t()` or `i18nKey` position names this key, so EXISTENCE
+    // cannot see it, and once both locales drop it PARITY cannot either.
+    const source = `
+      const Field = () => <ProxyUrlField labelKey="telegramConfig.proxyUrl" />;
+    `;
+    const literals = collectDottedLiterals(source);
+    const bundles = [
+      { lng: 'en', bundle: { telegramConfig: { botToken: 'Bot token' } } },
+      { lng: 'zh', bundle: { telegramConfig: { botToken: '机器人令牌' } } },
+    ];
+
+    // Both locales lost it, so it reads as residue rather than as a parity gap.
+    expect(parityGaps(literals, bundles)).toEqual([]);
+    expect(residueOf(literals, bundles)).toEqual(['telegramConfig.proxyUrl']);
+
+    // Which is the whole point: it is not in the pinned list, so the pin fails.
+    expect(NON_KEY_LITERALS).not.toContain('telegramConfig.proxyUrl');
+  });
+
+  it('pins the literals that are not keys, so no key can leave both locales unseen', () => {
+    // Exact set equality, not a count: a count lets one literal leave as another
+    // enters. Sorted on both sides so the list above can stay grouped by class.
+    expect(residueOf(appDottedLiterals(), BUNDLES)).toEqual(
+      [...NON_KEY_LITERALS].sort((a, b) => a.localeCompare(b)),
+    );
   });
 
   it('keeps every dotted literal in the app resolving in both locales or neither', () => {
-    const literals = new Set<string>();
-    for (const file of sourceFiles(APP_SOURCE)) {
-      for (const found of collectDottedLiterals(readFileSync(file, 'utf8'), file)) literals.add(found);
-    }
-    expect(parityGaps([...literals].sort((a, b) => a.localeCompare(b)), BUNDLES)).toEqual([]);
+    expect(parityGaps(appDottedLiterals(), BUNDLES)).toEqual([]);
   });
 });
