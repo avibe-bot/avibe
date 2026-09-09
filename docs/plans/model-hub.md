@@ -1047,9 +1047,10 @@ sources are *all* in persisted cooldown, live connection backoff, or half-open
 ownership has nothing runnable,
 but nothing is owed either —
 automatic recovery can proceed without user action. Collapsing that into `interrupted` would tell the user to
-go fix a problem that resolves before they finish reading the sentence, which is
-exactly what the self-healing tier is supposed to prevent. The Turn-outcome copy matrix
-renders its recovery time rather than a fault; `current` is null in both states, so
+repair a Source that may only need time. This does not promise that it will
+recover or that a terminal request remains live. The Turn-outcome copy matrix
+states when automatic recovery has ended; live progress and Source eligibility
+are separate read projections. `current` is null in both states, so
 neither ever renders a stale 使用中.
 
 **Two grains, one taxonomy.** `supply_status` above is the **agent** rollup, and it
