@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Mapping
 
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
@@ -31,6 +31,13 @@ class EffectiveModelRoute:
 
 
 @dataclass(frozen=True)
+class SourceRecoveryAnnotation:
+    reason: str
+    retry_at: str | None = None
+    in_flight: bool = False
+
+
+@dataclass(frozen=True)
 class ExactHopInspection:
     """Canonical identity and live eligibility for one effective Route hop."""
 
@@ -46,6 +53,17 @@ class ExactHopInspection:
     structural_blocker: bool
     reason: str | None
     retry_at: str | None
+    backoff: bool = False
+    recovery: Literal["eligible", "in_flight"] | None = None
+
+    @property
+    def temporary_blocker(self) -> bool:
+        return (
+            self.source is not None and self.supply_eligible
+            and not self.structural_blocker
+            and self.source.state.status not in {"needs_action", "error"}
+            and (self.backoff or self.source.state.status == "cooldown" or self.recovery == "in_flight")
+        )
 
     @property
     def identity(self) -> tuple[BackendName, str, str | None, str | None]:
@@ -283,6 +301,7 @@ def inspect_exact_hop(
     now: datetime | None = None,
     unavailable_source_ids: frozenset[str] = frozenset(),
     supply_channel: Literal["hub"] | None = None,
+    live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
 ) -> ExactHopInspection:
     """Inspect one exact hop without matching, substituting, or reordering it."""
 
@@ -345,6 +364,30 @@ def inspect_exact_hop(
         structural_blocker = True
     elif source.state.status in {"needs_action", "error"}:
         reason = source.state.detail_key
+    annotation = (live_recovery or {}).get(source.id)
+    backoff = (
+        annotation is not None and annotation.reason == "network"
+        and annotation.retry_at is not None
+        and source.state.status in {"active", "standby"}
+        and configuration_eligible and model_supported
+    )
+    recovery = None
+    retry_at = source.state.retry_at if source.state.status == "cooldown" else None
+    if annotation is not None and supply_eligible and source.state.status not in {"needs_action", "error"}:
+        if not structural_blocker:
+            if annotation.retry_at is not None:
+                runnable = False
+                if source.state.status == "cooldown":
+                    retry_at = annotation.retry_at
+            else:
+                recovery = "in_flight" if annotation.in_flight else "eligible"
+                runnable = not annotation.in_flight
+                retry_at = None
+        if backoff:
+            retry_at = annotation.retry_at
+            runnable = False
+            if not structural_blocker:
+                reason = "models.source.backoff.connection_failed"
     return ExactHopInspection(
         backend=backend,
         menu_model=menu_model,
@@ -357,11 +400,9 @@ def inspect_exact_hop(
         runnable=runnable,
         structural_blocker=structural_blocker,
         reason=reason,
-        retry_at=(
-            source.state.retry_at
-            if source.state.status == "cooldown"
-            else None
-        ),
+        retry_at=retry_at,
+        backoff=backoff,
+        recovery=recovery,
     )
 
 
@@ -376,11 +417,7 @@ def _supply_status(
     if any(inspection.runnable for inspection in inspections):
         return "ok" if all(inspection.runnable for inspection in inspections) else "degraded"
     if all(
-        inspection.source is not None
-        and inspection.source.id not in unavailable_source_ids
-        and inspection.supply_eligible
-        and inspection.source.state.status == "cooldown"
-        and not source_retry_ready(inspection.source, now)
+        inspection.temporary_blocker
         for inspection in inspections
     ):
         return "waiting"
@@ -395,6 +432,7 @@ def resolve_model_hub_turn(
     now: datetime | None = None,
     unavailable_source_ids: frozenset[str] = frozenset(),
     supply_channel: Literal["hub"] | None = None,
+    live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
 ) -> ModelHubTurnResolution:
     """Annotate the effective route without changing its membership or tier."""
 
@@ -431,6 +469,7 @@ def resolve_model_hub_turn(
             now=now,
             unavailable_source_ids=unavailable_source_ids,
             supply_channel=supply_channel,
+            live_recovery=live_recovery,
         )
         for hop in route.hops
     )
@@ -443,6 +482,7 @@ def resolve_model_hub_turn(
             now=now,
             unavailable_source_ids=unavailable_source_ids,
             supply_channel=supply_channel,
+            live_recovery=live_recovery,
         ).reason
         if not route.hops
         else None
@@ -526,7 +566,12 @@ def resolve_model_hub_turn(
         route_reason=route_reason,
         recoverable_source_ids=recoverable,
         supply_status=_supply_status(
-            inspected_hops,
+            tuple(
+                hop for hop in inspected_hops
+                if supply_channel is None or hop.source is None
+                or hop.source.supply_channel == supply_channel
+                or hop.structural_blocker or hop.source.state.status in {"needs_action", "error"}
+            ),
             now=now,
             unavailable_source_ids=unavailable_source_ids,
         ),

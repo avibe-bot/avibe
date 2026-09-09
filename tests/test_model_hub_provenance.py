@@ -8,14 +8,114 @@ import pytest
 
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES, classify_outcome
-from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry, produce_turn_outcome
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from core.handlers.model_hub.service import ModelHubError
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED
 from tests.test_model_hub_resolution import _service
 from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config, _sparse_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import model_hub_client, ui_server
+
+
+def _live_registry(tmp_path, callback=None):
+    registry = TurnCorrelationRegistry(
+        BoundedProvenanceStore(tmp_path / "records.json"), on_recovery_changed=callback,
+    )
+    token = registry.credentials("codex", "fixture", "turn-live")
+    registry.begin_gateway_request(backend="codex", token=token, requested_model_id="shared-model")
+    return registry
+
+
+@pytest.mark.parametrize("guard", [
+    "valid", "wrong_backend", "missing", "pending", "ambiguous", "poisoned",
+    "closed", "stopped", "served", "canceled", "settled",
+])
+def test_live_terminal_projection_requires_exact_unfrozen_owner(tmp_path, guard):
+    registry = _live_registry(tmp_path)
+    projection = produce_turn_outcome("turn.engine_down")
+    registry.record_turn_outcome("turn-live", projection)
+    if guard == "pending":
+        registry.begin_attempt(
+            "turn-live", source_id="src_primary01", resolved_model_id="shared-model",
+            channel="hub", via_mapping=False,
+        )
+    elif guard == "ambiguous":
+        registry._traces["turn-live"].ambiguous = True
+    elif guard == "poisoned":
+        registry._scopes[("codex", "fixture")].untracked_use = True
+    elif guard in {"closed", "stopped"}:
+        registry.close_turn_admission(
+            "turn-live", settled_by=SETTLED_BY_STOPPED if guard == "stopped" else SETTLED_BY_TERMINAL_RESULT,
+        )
+    elif guard in {"served", "canceled"}:
+        registry.record_turn_outcome("turn-live", produce_turn_outcome(f"turn.{guard}"))
+    elif guard == "settled":
+        registry.settle("turn-live", settled_by=SETTLED_BY_TERMINAL_RESULT)
+    assert registry.terminal_projection(
+        "missing" if guard == "missing" else "turn-live",
+        backend="claude" if guard == "wrong_backend" else "codex",
+    ) == (projection if guard in {"valid", "closed"} else None)
+
+
+def test_recovery_callbacks_are_material_post_lock_and_snapshots_are_copies(tmp_path):
+    calls = []
+    registry = _live_registry(tmp_path)
+
+    def changed(turn_id):
+        assert not registry._lock._is_owned()
+        calls.append(registry.recovery_snapshot(turn_id))
+
+    registry.on_recovery_changed = changed
+    snapshot = {
+        "phase": "waiting", "attempt_count": 1, "source_id": "src_primary01",
+        "reason": "network", "started_at": "2026-09-09T00:00:00+00:00",
+        "next_eligible_at": None, "window_end": "2026-09-09T00:02:00+00:00",
+    }
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=snapshot)
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=dict(snapshot))
+    registry.update_recovery("turn-live", backend="claude", request_id="wrong", snapshot=snapshot)
+    assert len(calls) == 1
+    external = registry.recovery_snapshot("turn-live")
+    external[0]["phase"] = "corrupted"
+    assert registry.recovery_snapshot("turn-live")[0]["phase"] == "waiting"
+    registry.update_recovery("turn-live", backend="codex", request_id="two", snapshot=snapshot)
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=None)
+    assert [item["request_id"] for item in registry.recovery_snapshot("turn-live")] == ["two"]
+    registry.update_recovery("turn-live", backend="codex", request_id="two", snapshot=None)
+    registry.update_recovery("turn-live", backend="codex", request_id="two", snapshot=None)
+    assert len(calls) == 4 and calls[-1] == []
+    assert not registry.store.path.exists()
+
+
+def test_native_hub_failure_keeps_the_gateway_terminal_projection_readable(tmp_path):
+    registry = _live_registry(tmp_path)
+    projection = produce_turn_outcome("turn.engine_down")
+    registry.record_turn_outcome("turn-live", projection)
+    registry.fail_hub_attempt("turn-live")
+    assert registry.terminal_projection("turn-live", backend="codex") == projection
+    assert not registry._traces["turn-live"].outcome_frozen
+    registry.close_turn_admission("turn-live", settled_by=SETTLED_BY_STOPPED)
+    registry.fail_hub_attempt("turn-live")
+    assert registry.terminal_projection("turn-live", backend="codex") is None
+
+
+@pytest.mark.parametrize("guard", ["ambiguous", "poisoned", "closed", "stopped", "settled"])
+def test_live_recovery_snapshots_never_revive_invalid_or_terminal_owners(tmp_path, guard):
+    registry = _live_registry(tmp_path)
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot={"phase": "waiting"})
+    if guard == "ambiguous":
+        registry._traces["turn-live"].ambiguous = True
+    elif guard == "poisoned":
+        registry._scopes[("codex", "fixture")].untracked_use = True
+    elif guard == "settled":
+        registry.settle("turn-live", settled_by=SETTLED_BY_TERMINAL_RESULT)
+    else:
+        registry.close_turn_admission(
+            "turn-live", settled_by=SETTLED_BY_STOPPED if guard == "stopped" else SETTLED_BY_TERMINAL_RESULT,
+        )
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot={"phase": "attempting"})
+    assert registry.recovery_snapshot("turn-live") == []
 
 
 def _record(turn_id, *, backend="claude", model=MODEL, outcome="failed_terminal"):

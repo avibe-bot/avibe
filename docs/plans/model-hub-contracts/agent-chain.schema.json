@@ -71,6 +71,10 @@
             "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory connection throttle before the first user-visible model-output byte and is never persisted on Source or configuration. It is projected only over an otherwise healthy hop whose exact Source/model pair is eligible and not explicitly retired; API-key inventory absence is not a blocker; subscriptions retain existing model membership admission; every durable Source/capability blocker suppresses it."
           },
           "runnable": { "type": "boolean" },
+          "recovery": {
+            "enum": ["eligible", "in_flight"],
+            "description": "Optional live recovery annotation. Eligibility expiry is not verified recovery; in_flight means another real request owns half-open admission. Neither value is persisted in Source state."
+          },
           "reason": {
             "anyOf": [
               { "const": "native_cli_unavailable" },
@@ -96,6 +100,10 @@
           }
         },
         "allOf": [
+          {
+            "if": { "properties": { "recovery": { "const": "in_flight" } }, "required": ["recovery"] },
+            "then": { "properties": { "runnable": { "const": false } } }
+          },
           {
             "if": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] },
             "then": { "properties": { "runnable": { "const": false }, "retry_at": { "type": "null" } } }
@@ -169,10 +177,13 @@
             "minItems": 1,
             "items": {
               "properties": {
-                "health": { "enum": ["cooldown", "backoff"] },
                 "runnable": { "const": false },
                 "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
               },
+              "anyOf": [
+                { "properties": { "health": { "enum": ["cooldown", "backoff"] } }, "required": ["health"] },
+                { "properties": { "health": { "const": "healthy" }, "recovery": { "const": "in_flight" } }, "required": ["health", "recovery"] }
+              ],
               "required": ["health", "runnable", "reason"]
             }
           }
@@ -186,10 +197,13 @@
             "minItems": 1,
             "items": {
               "properties": {
-                "health": { "enum": ["cooldown", "backoff"] },
                 "runnable": { "const": false },
                 "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
               },
+              "anyOf": [
+                { "properties": { "health": { "enum": ["cooldown", "backoff"] } }, "required": ["health"] },
+                { "properties": { "health": { "const": "healthy" }, "recovery": { "const": "in_flight" } }, "required": ["health", "recovery"] }
+              ],
               "required": ["health", "runnable", "reason"]
             }
           }

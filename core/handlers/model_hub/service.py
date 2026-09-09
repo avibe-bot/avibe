@@ -119,6 +119,7 @@ from .stream_wire import ProtocolSSEState
 from .resolver import (
     BackendName,
     ModelHubTurnResolution,
+    SourceRecoveryAnnotation,
     allowed_origins,
     effective_model_route,
     inspect_exact_hop,
@@ -132,6 +133,7 @@ from .resolver import (
     source_runnable,
 )
 from .revocations import CredentialRevocationJournal
+from .retry import RECOVERY_EXHAUSTED_CODE, RecoveryPolicy, RecoveryRequest, RETRY_DELAYS, source_identity
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
 CONTRACT_VERSION = 10
@@ -407,6 +409,10 @@ class UnavailableEngineAdapter:
 
 class _InvocationPlanChanged(Exception):
     """No transport was admitted; recompute the remaining effective route."""
+
+
+class _RecoveryWindowClosed(Exception):
+    """The request may finish its admitted inference, but cannot start another."""
 
 
 @dataclass(frozen=True)
@@ -779,6 +785,7 @@ class ModelHubService:
             Callable[[BackendName], Awaitable[None]]
         ] = None,
         now: Callable[[], datetime] = _utc_now,
+        recovery: RecoveryPolicy | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -810,6 +817,7 @@ class ModelHubService:
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
         self.now = now
+        self.recovery = recovery or RecoveryPolicy(now=lambda: self.now())
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
         )
@@ -820,6 +828,7 @@ class ModelHubService:
         self._source_create_nonces: set[str] = set()
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
+        self._source_attempt_identities: dict[str, tuple] = {}
         self._engine_synced = False
         self._engine_preparation_failed = False
         self._runtime_install_reconcile_lock = asyncio.Lock()
@@ -978,6 +987,8 @@ class ModelHubService:
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
         canonical = ModelHubConfig.from_payload(config.to_payload())
         self.store.save(canonical)
+        self.recovery.reconcile(canonical)
+        self.recovery.notify()
         return canonical
 
     def _save_projection_neutral(
@@ -1012,7 +1023,29 @@ class ModelHubService:
         self._latest_source_attempt_generation[source_id] = (
             self._next_settlement_generation
         )
+        source = next((item for item in self.store.load().sources if item.id == source_id), None)
+        if source is not None:
+            self._source_attempt_identities[source_id] = source_identity(source)
         return self._next_settlement_generation
+
+    def _settlement_current(self, source: ModelHubSourceConfig, generation: int | None) -> bool:
+        return (
+            generation is not None
+            and generation >= self._latest_source_attempt_generation.get(source.id, generation)
+            and self._source_attempt_identities.get(source.id, source_identity(source)) == source_identity(source)
+        )
+
+    def recovery_annotations(self, config: ModelHubConfig) -> dict[str, SourceRecoveryAnnotation]:
+        """Read live health once; preview/guard drafts cannot mutate its owner."""
+
+        current = self.store.load()
+        annotations = self.recovery.annotations(current)
+        identities = {source.id: source_identity(source) for source in current.sources}
+        return {
+            source.id: annotations[source.id]
+            for source in config.sources
+            if source.id in annotations and identities.get(source.id) == source_identity(source)
+        }
 
     def _ensure_config_writable(self) -> None:
         ensure_writable = getattr(self.store, "ensure_writable", None)
@@ -3249,6 +3282,7 @@ class ModelHubService:
                     model_id,
                     now=self.now(),
                     unavailable_source_ids=unavailable_source_ids,
+                    live_recovery=self.recovery_annotations(config),
                 )
                 if resolution.candidates:
                     continue
@@ -3824,6 +3858,7 @@ class ModelHubService:
             requested_model,
             now=now,
             unavailable_source_ids=unavailable_source_ids,
+            live_recovery=self.recovery_annotations(config),
         )
         menu_model_ids = [model.id for model in agent.models]
         model_supply = [
@@ -3836,6 +3871,7 @@ class ModelHubService:
             for model_id in menu_model_ids
             for model_resolution in (resolve_model_hub_turn(
                 config, backend, model_id, now=now, unavailable_source_ids=unavailable_source_ids,
+                live_recovery=self.recovery_annotations(config),
             ),)
         ]
         selected_model_id = (
@@ -3889,6 +3925,7 @@ class ModelHubService:
                     requested,
                     now=now,
                     unavailable_source_ids=unavailable_source_ids,
+                    live_recovery=self.recovery_annotations(config),
                 )
                 named_agents.append(
                     {
@@ -4990,6 +5027,7 @@ class ModelHubService:
             model_id,
             now=observed_at,
             unavailable_source_ids=unavailable,
+            live_recovery=self.recovery_annotations(config),
         )
         chain: list[dict] = []
         for inspection in resolution.inspected_hops:
@@ -5009,8 +5047,9 @@ class ModelHubService:
                 continue
             status = source.state.status
             health = (
-                "healthy"
-                if status in {"active", "standby"}
+                "backoff" if inspection.backoff
+                else "healthy"
+                if status in {"active", "standby"} or inspection.recovery is not None
                 else status
             )
             chain.append(
@@ -5022,6 +5061,7 @@ class ModelHubService:
                     "runnable": inspection.runnable,
                     "reason": inspection.reason,
                     "retry_at": inspection.retry_at,
+                    **({"recovery": inspection.recovery} if inspection.recovery is not None else {}),
                 }
             )
         current = next(
@@ -5040,7 +5080,11 @@ class ModelHubService:
             "route_origin": resolution.route_origin,
             "chain": chain,
             "current": current,
-            "supply_state": self._chain_supply_state(chain),
+            "supply_state": (
+                "ok" if resolution.candidate_hops
+                else "waiting" if resolution.supply_status == "waiting"
+                else "interrupted"
+            ),
         }
 
     def agent_chain(self, backend: str, model_id: object) -> dict:
@@ -5261,9 +5305,9 @@ class ModelHubService:
         if decision.action == "surface":
             return "models.source.error.unclassified", None
         if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
-            return "models.source.cooldown.network", "network"
+            return "models.source.backoff.connection_failed", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
-            return "models.source.cooldown.timeout", "network"
+            return "models.source.backoff.connection_failed", "network"
         if decision.reason in {
             "credential_expired",
             "credential_revoked",
@@ -5402,26 +5446,12 @@ class ModelHubService:
         started_at = time.monotonic()
         settlement_generation = None
 
-        def admitted() -> None:
+        def admitted(generation: int) -> None:
             nonlocal settlement_generation
-            settlement_generation = self._reserve_settlement_generation(source.id)
+            settlement_generation = generation
 
-        handle = await self._invoke_admitted(
-            source=source,
-            model_id=resolved_model,
-            requested_model_id=chain_payload["model_id"],
-            request=self._probe_request(source, resolved_model, backend),
-            stream=False,
-            backend=cast(BackendName, backend),
-            excluded_source_ids=set(),
-            on_admitted=admitted,
-        )
-        if handle.stream is not None:
-            async for _chunk in handle.stream:
-                pass
-        outcome = await self._engine_call(handle.outcome())
-        decision = await self._classify_source_outcome(source, outcome)
-        if decision.action == "refresh":
+        handle: InvokeHandle | None = None
+        try:
             handle = await self._invoke_admitted(
                 source=source,
                 model_id=resolved_model,
@@ -5430,48 +5460,75 @@ class ModelHubService:
                 stream=False,
                 backend=cast(BackendName, backend),
                 excluded_source_ids=set(),
-                exact_retry=True,
                 on_admitted=admitted,
             )
             if handle.stream is not None:
                 async for _chunk in handle.stream:
                     pass
             outcome = await self._engine_call(handle.outcome())
-            decision = classify_outcome(outcome, refresh_attempted=True)
-        elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
-        reachable = decision.action == "return"
-        if reachable:
-            await self._verify_successful_source(
-                source.id, source.credential_ref, verification_pending, outcome,
-            )
-        error_key: Optional[str] = None
-        latency_ms: Optional[int] = elapsed_ms
-        if not reachable:
-            error_key, event_reason = self._probe_failure(outcome, decision)
-            if error_key in {
-                "models.source.cooldown.network",
-                "models.source.cooldown.timeout",
-            }:
-                latency_ms = None
-            if event_reason is not None:
-                await self._settle_fallback_source(
-                    source,
-                    decision,
+            decision = await self._classify_source_outcome(source, outcome)
+            if decision.action == "refresh":
+                await handle.close_stream()
+                self.recovery.release(source.id, settlement_generation)
+                handle = await self._invoke_admitted(
+                    source=source,
+                    model_id=resolved_model,
+                    requested_model_id=chain_payload["model_id"],
+                    request=self._probe_request(source, resolved_model, backend),
+                    stream=False,
                     backend=cast(BackendName, backend),
-                    model_id=chain_payload["model_id"],
-                    detail_key=error_key,
-                    settlement_generation=settlement_generation,
+                    excluded_source_ids=set(),
+                    exact_retry=True,
+                    on_admitted=admitted,
                 )
-        return {
-            "contract_version": PROBE_RESULT_CONTRACT_VERSION,
-            "backend": backend,
-            "channel": "hub",
-            "reachable": reachable,
-            "source_id": source.id,
-            "model_id": resolved_model,
-            "latency_ms": latency_ms,
-            "error": error_key,
-        }
+                if handle.stream is not None:
+                    async for _chunk in handle.stream:
+                        pass
+                outcome = await self._engine_call(handle.outcome())
+                decision = classify_outcome(outcome, refresh_attempted=True)
+            elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
+            reachable = decision.action == "return"
+            if reachable:
+                if self._verified_recovery_outcome(outcome):
+                    await self._record_recovery_success(
+                        source.id, settlement_generation,
+                        backend=cast(BackendName, backend), model_id=chain_payload["model_id"],
+                    )
+                await self._verify_successful_source(
+                    source.id, source.credential_ref, verification_pending, outcome,
+                )
+            error_key: Optional[str] = None
+            latency_ms: Optional[int] = elapsed_ms
+            if not reachable:
+                error_key, event_reason = self._probe_failure(outcome, decision)
+                if error_key == "models.source.backoff.connection_failed":
+                    latency_ms = None
+                if event_reason is not None:
+                    await self._settle_fallback_source(
+                        source,
+                        decision,
+                        backend=cast(BackendName, backend),
+                        model_id=chain_payload["model_id"],
+                        detail_key=error_key,
+                        settlement_generation=settlement_generation,
+                        outcome=outcome,
+                    )
+            return {
+                "contract_version": PROBE_RESULT_CONTRACT_VERSION,
+                "backend": backend,
+                "channel": "hub",
+                "reachable": reachable,
+                "source_id": source.id,
+                "model_id": resolved_model,
+                "latency_ms": latency_ms,
+                "error": error_key,
+            }
+        finally:
+            try:
+                if handle is not None:
+                    await await_owned_task(asyncio.create_task(handle.close_stream()))
+            finally:
+                self.recovery.release(source.id, settlement_generation)
 
     @staticmethod
     def note_turn_mode(
@@ -6124,38 +6181,39 @@ class ModelHubService:
         self,
         resolution: ModelHubTurnResolution,
     ) -> None:
-        if not resolution.recoverable_source_ids:
-            return
+        # Compatibility for existing callers: elapsed timers only admit a try.
+        self.recovery.annotations(self.store.load())
+
+    async def _record_recovery_success(
+        self, source_id: str, generation: int | None, *, backend: BackendName, model_id: str,
+    ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
-            previous = self._clone_config(config)
-            config_changed = False
-            recovered_sources: list[ModelHubSourceConfig] = []
-            for source_id in resolution.recoverable_source_ids:
-                source = next(
-                    (item for item in config.sources if item.id == source_id),
-                    None,
+            source = next((item for item in config.sources if item.id == source_id), None)
+            if (
+                source is None or not self._settlement_current(source, generation)
+                or source.state.status in {"needs_action", "error"}
+            ):
+                return
+            recovered = self.recovery.succeeded(source)
+            if source.state.status == "cooldown":
+                previous = self._clone_config(config)
+                source.state = ModelHubSourceStateConfig(
+                    status="active" if source.supply_channel == "native_cli" else "standby",
                 )
-                if source is None or source.state.status != "cooldown":
-                    continue
-                recovered_source = source_after_cooldown_recovery(source, self.now())
-                if recovered_source is source:
-                    continue
-                source.state = recovered_source.state
-                config_changed = True
-                recovered_sources.append(source)
-            if config_changed:
-                if self._save_runtime_config(previous, config):
-                    for source in recovered_sources:
-                        self._record_event(
-                            agent=cast(EventAgent, resolution.backend),
-                            kind="recover",
-                            model_id=resolution.requested_model,
-                            reason="recovery",
-                            to_source=source.id,
-                            to_label=source.display_name,
-                            now=self.now(),
-                        )
+                self._save_runtime_config(previous, config)
+            if recovered:
+                self._record_event(
+                    agent=cast(EventAgent, backend), kind="recover", model_id=model_id,
+                    reason="recovery", to_source=source.id, to_label=source.display_name, now=self.now(),
+                )
+
+    @staticmethod
+    def _verified_recovery_outcome(outcome: RawCallOutcome) -> bool:
+        # Buffered compatibility admission also sets stream_started on unknown
+        # HTTP 200 bodies. Only the protocol evidence bit proves success here;
+        # actual streaming output is read separately from the handle observer.
+        return outcome.kind is RawOutcomeKind.SUCCESS and outcome.recovery_verified
 
     def _write_cooldown_locked(
         self,
@@ -6167,8 +6225,9 @@ class ModelHubService:
         model_id: str,
         detail_key: Optional[str] = None,
         emit_event: bool = True,
+        retry_at: datetime | None = None,
     ) -> bool:
-        retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
+        retry_at = retry_at or self.now() + timedelta(seconds=decision.cooldown_seconds)
         if (
             source.state.status == "cooldown"
             and source.state.retry_at is not None
@@ -6205,6 +6264,7 @@ class ModelHubService:
         emit_event: bool = True,
         detail_key: Optional[str] = None,
         settlement_generation: Optional[int] = None,
+        outcome: RawCallOutcome | None = None,
     ) -> tuple[EventReason, bool]:
         """Persist one fallback-class Source result before the turn settles."""
 
@@ -6212,7 +6272,7 @@ class ModelHubService:
             raise AssertionError("fallback-class outcome must retain its Source reason")
         event_reason = cast(EventReason, decision.reason)
         settlement_rule = source_settlement_rule(event_reason)
-        if not settlement_rule.may_write_health:
+        if decision.reason == "network" and outcome is not None and outcome.stream_started:
             return event_reason, False
         # Generations are minted at attempt start and nowhere else. A settlement
         # that carries none cannot prove it is not superseded, so it does not
@@ -6223,20 +6283,33 @@ class ModelHubService:
             return event_reason, False
         generation = settlement_generation
         async with self._mutation_lock:
+            self.recovery.release(source.id, generation)
             config = self.store.load()
             try:
                 current = self._source(config, source.id)
             except ModelHubError:
                 return event_reason, False
-            latest_generation = self._latest_source_attempt_generation.get(
-                current.id,
-                generation,
-            )
-            if generation < latest_generation:
+            if not self._settlement_current(current, generation):
                 return event_reason, False
             if not source_settlement_allowed(current.state.status, event_reason):
                 return event_reason, False
             if settlement_rule.status == "cooldown":
+                retry_at, changed = self.recovery.failed(
+                    current, event_reason,
+                    generation=generation,
+                    retry_after=outcome.retry_after if outcome is not None else None,
+                    response_received_at=outcome.response_received_at if outcome is not None else None,
+                )
+                if not changed:
+                    return event_reason, False
+                if not settlement_rule.may_write_health:
+                    if emit_event:
+                        self._record_event(
+                            agent=cast(EventAgent, backend), kind="cooldown", model_id=model_id,
+                            reason=event_reason, from_source=current.id,
+                            from_label=current.display_name, now=self.now(),
+                        )
+                    return event_reason, False
                 persisted = self._write_cooldown_locked(
                     config,
                     current,
@@ -6245,6 +6318,7 @@ class ModelHubService:
                     model_id=model_id,
                     detail_key=detail_key,
                     emit_event=emit_event,
+                    retry_at=retry_at,
                 )
             else:
                 blocker_detail_key = detail_key or {
@@ -6263,6 +6337,7 @@ class ModelHubService:
                     reason=event_reason,
                     emit_event=emit_event,
                 )
+            self.recovery.release(source.id, generation)
         return event_reason, persisted
 
     def _inspect_terminal_chain(
@@ -6283,6 +6358,7 @@ class ModelHubService:
                 config,
                 backend,
             ),
+            live_recovery=self.recovery_annotations(config),
         )
         return config, resolution
 
@@ -6388,7 +6464,10 @@ class ModelHubService:
         """Retire pending verification only for the current credential's call."""
         if outcome.kind is not RawOutcomeKind.SUCCESS or verification_pending is None:
             return
+        retired_identity: tuple[tuple, tuple] | None = None
+
         def clear_current(config: ModelHubConfig) -> bool:
+            nonlocal retired_identity
             current = next((item for item in config.sources if item.id == source_id), None)
             if (
                 current is None
@@ -6396,12 +6475,19 @@ class ModelHubService:
                 or current.verification_pending != verification_pending
             ):
                 return False
+            previous_identity = source_identity(current)
             current.verification_pending = None
+            retired_identity = (previous_identity, source_identity(current))
             return True
 
         try:
             async with self._mutation_lock:
                 self.store.mutate(clear_current)
+                if retired_identity is not None:
+                    previous_identity, current_identity = retired_identity
+                    self.recovery.verification_retired(source_id, previous_identity, current_identity)
+                    if self._source_attempt_identities.get(source_id) == previous_identity:
+                        self._source_attempt_identities[source_id] = current_identity
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -6421,6 +6507,27 @@ class ModelHubService:
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
+        try:
+            return await self._settle_handle_outcome(
+                resolved, outcome, termination_origin=termination_origin, record_attempt=record_attempt,
+            )
+        finally:
+            if resolved is not None:
+                self.recovery.release(resolved.source_id, resolved.settlement_generation)
+
+    async def _settle_handle_outcome(
+        self,
+        resolved: ResolvedInvocation | None,
+        outcome: RawCallOutcome | None,
+        *,
+        termination_origin: HandleTerminationOrigin,
+        record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
+    ) -> HandleSettlement:
+        if resolved is not None and resolved.handle is not None:
+            await self._observe_handle_recovery(
+                resolved.source_id, resolved.settlement_generation, resolved.handle,
+                backend=resolved.backend, model_id=resolved.requested_model_id,
+            )
         if termination_origin == "downstream_cancel" and outcome is None:
             return HandleSettlement(
                 outcome=outcome,
@@ -6443,6 +6550,11 @@ class ModelHubService:
         )
         record_attempt(outcome, decision)
         if decision.action == "return":
+            if self._verified_recovery_outcome(outcome):
+                await self._record_recovery_success(
+                    resolved.source_id, resolved.settlement_generation,
+                    backend=resolved.backend, model_id=resolved.requested_model_id,
+                )
             await self._verify_successful_source(
                 resolved.source_id, resolved.credential_ref, resolved.verification_pending, outcome,
             )
@@ -6475,6 +6587,7 @@ class ModelHubService:
                     backend=resolved.backend,
                     model_id=resolved.requested_model_id,
                     settlement_generation=resolved.settlement_generation,
+                    outcome=outcome,
                 )
         return HandleSettlement(
             outcome=outcome,
@@ -6533,6 +6646,7 @@ class ModelHubService:
             now=self.now(),
             unavailable_source_ids=self._unavailable_native_sources(config, backend),
             supply_channel=supply_channel,
+            live_recovery=self.recovery_annotations(config),
         )
         if resolution.channel == "direct":
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -6550,11 +6664,13 @@ class ModelHubService:
         excluded_source_ids: set[str],
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
-        on_admitted: Callable[[], None] | None = None,
+        on_admitted: Callable[[int], None] | None = None,
+        recovery_request: RecoveryRequest | None = None,
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
             held = True
+            generation: int | None = None
 
             def release_exclusion() -> None:
                 nonlocal held
@@ -6565,7 +6681,7 @@ class ModelHubService:
             def admitted() -> None:
                 release_exclusion()
                 if on_admitted is not None:
-                    on_admitted()
+                    on_admitted(generation)
 
             try:
                 config = self.store.load()
@@ -6588,11 +6704,19 @@ class ModelHubService:
                 ):
                     raise _InvocationPlanChanged
                 if self._engine_synced:
+                    if recovery_request is not None and recovery_request.expired:
+                        raise _RecoveryWindowClosed
+                    generation = self._reserve_settlement_generation(source.id)
+                    if not self.recovery.claim(source, generation):
+                        raise _InvocationPlanChanged
                     # Lock order matches config sync. The adapter hands exclusion
                     # back only after owning the transport that sync must drain.
                     return await self._engine_call(self.adapter.invoke(
                         source.id, model_id, request, stream, backend, on_admitted=admitted,
                     ))
+            except BaseException:
+                self.recovery.release(source.id, generation)
+                raise
             finally:
                 release_exclusion()
             # A canceled configuration transaction left reconciliation pending.
@@ -6611,9 +6735,17 @@ class ModelHubService:
         excluded_source_ids: set[str],
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
-        on_admitted: Callable[[], None] | None = None,
+        on_admitted: Callable[[int], None] | None = None,
+        recovery_request: RecoveryRequest | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
         acquired_handle: InvokeHandle | None = None
+        generation: int | None = None
+
+        def admitted(value: int) -> None:
+            nonlocal generation
+            generation = value
+            if on_admitted is not None:
+                on_admitted(value)
 
         async def meter_observed(
             observed: ProtocolSSEState | None,
@@ -6648,7 +6780,8 @@ class ModelHubService:
                     excluded_source_ids=excluded_source_ids,
                     supply_channel=supply_channel,
                     exact_retry=exact_retry,
-                    on_admitted=on_admitted,
+                    on_admitted=admitted,
+                    recovery_request=recovery_request,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -6675,6 +6808,7 @@ class ModelHubService:
             try:
                 handle, outcome = await await_owned_task(attempt_task)
             except BaseException:
+                self.recovery.release(source.id, generation)
                 raise caught
 
         if cancelled is not None and handle.stream is not None:
@@ -6689,6 +6823,7 @@ class ModelHubService:
             try:
                 outcome = await await_owned_task(cleanup_task)
             except BaseException:
+                self.recovery.release(source.id, generation)
                 raise cancelled
 
         return handle, outcome, cancelled
@@ -6729,7 +6864,13 @@ class ModelHubService:
                 backend=backend,
                 model_id=requested_model_id,
                 settlement_generation=settlement_generation,
+                outcome=outcome,
             )
+        elif decision.action == "return" and self._verified_recovery_outcome(outcome):
+            await self._record_recovery_success(
+                source.id, settlement_generation, backend=backend, model_id=requested_model_id,
+            )
+        self.recovery.release(source.id, settlement_generation)
 
     async def _meter_call(
         self,
@@ -6839,6 +6980,7 @@ class ModelHubService:
         stream: bool = False,
         supply_channel: Literal["hub"] | None = None,
         attempt_observer: Optional[AttemptObserver] = None,
+        recovery_request: RecoveryRequest | None = None,
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
@@ -6856,13 +6998,6 @@ class ModelHubService:
             resolution = self._invocation_resolution(
                 config, cast(BackendName, backend), model_id, supply_channel,
             )
-        if resolution.recoverable_source_ids:
-            await self._recover_resolution_sources(resolution)
-            async with self._mutation_lock:
-                config = self.store.load()
-                resolution = self._invocation_resolution(
-                    config, cast(BackendName, backend), model_id, supply_channel,
-                )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
         if not candidate_hops:
@@ -6891,6 +7026,8 @@ class ModelHubService:
         failed_reason: Optional[EventReason] = None
         globally_blocked_source_ids: set[str] = set()
         while True:
+            if recovery_request is not None and recovery_request.expired:
+                break
             async with self._mutation_lock:
                 config = self.store.load()
                 resolution = self._invocation_resolution(
@@ -6929,9 +7066,13 @@ class ModelHubService:
             engine_prepared = True
             settlement_generation = None
 
-            def admitted() -> None:
+            def admitted(generation: int) -> None:
                 nonlocal settlement_generation
-                settlement_generation = self._reserve_settlement_generation(source.id)
+                settlement_generation = generation
+                if recovery_request is not None:
+                    recovery_request.attempt_count += 1
+                    recovery_request.source_id = source.id
+                    recovery_request.publish("attempting")
                 if attempt_observer is not None:
                     attempt_observer(
                         source.id,
@@ -6955,11 +7096,15 @@ class ModelHubService:
                     excluded_source_ids=globally_blocked_source_ids,
                     supply_channel=supply_channel,
                     on_admitted=admitted,
+                    recovery_request=recovery_request,
                 )
             except _InvocationPlanChanged:
                 continue
+            except _RecoveryWindowClosed:
+                break
             if outcome is None:
                 if cancelled is not None:
+                    self.recovery.release(source.id, settlement_generation)
                     raise cancelled
                 self._emit_switch(
                     agent=event_agent,
@@ -6994,6 +7139,7 @@ class ModelHubService:
                 )
                 raise cancelled
             if decision.action == "refresh":
+                self.recovery.release(source.id, settlement_generation)
                 # The engine refreshes its credential internally; L2 retries the
                 # exact same source once and never falls through on a second 401.
                 try:
@@ -7008,13 +7154,17 @@ class ModelHubService:
                         supply_channel=supply_channel,
                         exact_retry=True,
                         on_admitted=admitted,
+                        recovery_request=recovery_request,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
                         attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), ())
                     continue
+                except _RecoveryWindowClosed:
+                    break
                 if outcome is None:
                     if cancelled is not None:
+                        self.recovery.release(source.id, settlement_generation)
                         raise cancelled
                     self._emit_switch(
                         agent=event_agent,
@@ -7060,9 +7210,14 @@ class ModelHubService:
                     (),
                 )
             if decision.action == "return":
+                if self._verified_recovery_outcome(outcome):
+                    await self._record_recovery_success(
+                        source.id, settlement_generation, backend=cast(BackendName, backend), model_id=model_id,
+                    )
                 await self._verify_successful_source(
                     source.id, source.credential_ref, verification_pending, outcome,
                 )
+                self.recovery.release(source.id, settlement_generation)
                 self._emit_switch(
                     agent=event_agent,
                     model_id=model_id,
@@ -7083,6 +7238,7 @@ class ModelHubService:
                     verification_pending=verification_pending,
                 )
             if decision.action == "surface":
+                self.recovery.release(source.id, settlement_generation)
                 source_transition_persisted: bool | None = None
                 if outcome.stream_started and decision.reason is not None:
                     source_transition_persisted = False
@@ -7092,6 +7248,7 @@ class ModelHubService:
                         backend=cast(BackendName, backend),
                         model_id=model_id,
                         settlement_generation=settlement_generation,
+                        outcome=outcome,
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
@@ -7111,12 +7268,16 @@ class ModelHubService:
                     ),
                 )
             if decision.action == "fallback":
+                if recovery_request is not None and decision.reason in RETRY_DELAYS:
+                    recovery_request.start()
+                    recovery_request.reason = decision.reason
                 event_reason, _persisted = await self._settle_fallback_source(
                     source,
                     decision,
                     backend=cast(BackendName, backend),
                     model_id=model_id,
                     settlement_generation=settlement_generation,
+                    outcome=outcome,
                 )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
@@ -7144,6 +7305,83 @@ class ModelHubService:
             supply_state=final_facts.supply_state,
             blockers=exact_hop_blockers(final_resolution),
             turn_outcome=turn_outcome,
+        )
+
+    async def _observe_handle_recovery(
+        self, source_id: str, generation: int | None, handle: InvokeHandle,
+        *, backend: BackendName, model_id: str,
+    ) -> None:
+        observed = handle.observed
+        proved = observed is not None and observed.model_output_started
+        if proved:
+            await self._record_recovery_success(
+                source_id, generation, backend=backend, model_id=model_id,
+            )
+
+    async def resolve_with_recovery(
+        self, *, recovery_observer: Callable[[dict | None], None] | None = None, **kwargs,
+    ) -> ResolvedInvocation:
+        """One pending model request, including all fallback passes and waits."""
+
+        if self.recovery.window_seconds == 0:
+            # Explicit opt-out for single-walk probes and characterization tests.
+            return await self.resolve(**kwargs)
+        pending = RecoveryRequest(self.recovery, observer=recovery_observer)
+        try:
+            while True:
+                try:
+                    return await self.resolve(**kwargs, recovery_request=pending)
+                except ModelHubError as exc:
+                    projection = exc.turn_outcome
+                    if (
+                        projection is None or projection.outcome not in {"no_candidate", "exhausted"}
+                        or projection.supply_facts is None
+                        or projection.supply_facts.supply_state != "waiting"
+                    ):
+                        raise
+                    pending.start()
+                    if pending.expired:
+                        raise self._recovery_exhausted(exc) from exc
+                    config = self.store.load()
+                    resolution = self._invocation_resolution(
+                        config, kwargs["backend"], kwargs["model_id"], kwargs.get("supply_channel"),
+                    )
+                    if resolution.candidate_hops:
+                        continue
+                    if resolution.supply_status != "waiting":
+                        raise
+                    annotations = self.recovery.annotations(config)
+                    waits = [
+                        (
+                            max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds()),
+                            hop,
+                        )
+                        for hop in resolution.inspected_hops
+                        if hop.temporary_blocker and hop.recovery != "in_flight" and hop.retry_at
+                    ]
+                    selected = min(waits, key=lambda item: item[0]) if waits else None
+                    delay = selected[0] if selected is not None else pending.remaining
+                    if delay >= pending.remaining:
+                        # Another admitted owner can still wake this request early.
+                        if not any(hop.recovery == "in_flight" for hop in resolution.inspected_hops):
+                            raise self._recovery_exhausted(exc) from exc
+                        delay = pending.remaining
+                    hop = selected[1] if selected is not None else resolution.inspected_hops[0]
+                    pending.source_id = hop.source_id
+                    annotation = annotations.get(hop.source_id)
+                    pending.reason = annotation.reason if annotation else pending.reason
+                    changed = self.recovery.changed
+                    pending.publish("waiting", next_eligible_at=hop.retry_at)
+                    await self.recovery.wait(delay, changed)
+        finally:
+            pending.clear()
+
+    @staticmethod
+    def _recovery_exhausted(error: ModelHubError) -> ModelHubError:
+        return ModelHubError(
+            RECOVERY_EXHAUSTED_CODE, status=error.status,
+            supply_state=error.supply_state, blockers=error.blockers,
+            turn_outcome=error.turn_outcome,
         )
 
 
