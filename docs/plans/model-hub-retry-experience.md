@@ -403,6 +403,14 @@ delegation:
   The Hub resolves delay-seconds and HTTP dates against that instant, not the
   later error-body read or settlement time. Missing evidence falls back to
   the Hub's captured classification time.
+- `RawCallOutcome.recovery_verified: bool = False`: recovery-only evidence,
+  supplied by recognized model output or a recognized successful protocol
+  terminal/body. It does not tighten the existing permissive response-admission
+  policy. A generic HTTP 200, unrecognized JSON, or malformed body may still be
+  passed through under that policy but cannot produce a recovery claim.
+  `ProtocolObservation` carries the same additive boolean from the existing
+  protocol projector to the adapter. The adapter lane owns this evidence
+  projection and its mirror/tests; core only consumes it.
 - The core lane owns the single in-memory retry coordinator, resolver live
   annotations, Source settlement, gateway retry loop, runtime-router admission,
   their canonical contracts, and tests. Recovery waits are cancelable and a
@@ -413,6 +421,28 @@ delegation:
 - Native retry settings, Turn correlation, progress, and terminal presentation
   are integrated only after the native-boundary audit. No lane may deduplicate
   distinct model requests using prompt text or implement a second retry owner.
+
+Live presentation consumes the core lane's public registry methods:
+
+- `terminal_projection(turn_id: str, *, backend: str)` returns an exact,
+  unambiguous, non-frozen terminal failure projection with no pending peer
+  request, or `None`. Shared failure presentation uses it instead of parsing
+  native error wrappers. History replay never queries live state.
+- `recovery_snapshot(turn_id: str) -> list[dict]` returns only live unambiguous
+  request progress: `request_id: str`, `phase: waiting | attempting`,
+  `attempt_count: int`, `started_at: str`, `window_end: str`,
+  `source_id: str | None`, `reason: str | None`,
+  `next_eligible_at: str | None`. Timestamps are aware UTC ISO strings.
+- The registry's optional `on_recovery_changed: Callable[[str], None]`
+  callback reports material changes after releasing its lock. The controller
+  maps the exact live Turn to its Session and publishes the existing
+  `session.activity` invalidation with `event=model_recovery`. The existing
+  `turn-state` response adds optional `model_recovery` with that snapshot.
+- Web reuses the existing working/Activity label after a five-second debounce,
+  with no new notification or view-owned retry. IM concise status rendering
+  reads the same snapshot on its existing heartbeat and edits its existing
+  bubble; platforms or preferences without progress retain existing behavior
+  instead of receiving a new unsolicited waiting notice.
 
 No subtask may modify another lane's files or open/merge a PR independently.
 All work is integrated into one implementation PR and validated at its exact
