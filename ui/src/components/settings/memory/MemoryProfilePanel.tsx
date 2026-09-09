@@ -169,6 +169,24 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
     void reload();
   }, [reload]);
 
+  // `data` is a fresh object on every successful load, even when its contents are
+  // unchanged. Entry keys below are content-derived (kind/date/index), so an
+  // unchanged reload would otherwise reuse the same mounted entries and keep
+  // their disclosure state open. Bumping this on every reload that *replaces*
+  // an already-loaded profile forces a full remount, matching the
+  // initially-closed contract — but only from the second load onward, so the
+  // very first successful paint (no previous profile to replace) stays a
+  // single render. Adjusted during render (React's sanctioned "derived state"
+  // idiom), not in an effect, so there is no extra committed render in between.
+  const [previousData, setPreviousData] = useState<MemoryItemsOk | null>(null);
+  const [profileGeneration, setProfileGeneration] = useState(0);
+  if (data && previousData && previousData !== data) {
+    setPreviousData(data);
+    setProfileGeneration((prev) => prev + 1);
+  } else if (data !== previousData) {
+    setPreviousData(data);
+  }
+
   if (!enabled) {
     return <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">{t('memory.profile.disabledHint')}</div>;
   }
@@ -210,7 +228,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         <div className="flex flex-col gap-2">
           {items.map((item, index) => (
             <MemoryProfileItemBlock
-              key={`${item.kind}:${item.date ?? ''}:${index}`}
+              key={`${profileGeneration}:${item.kind}:${item.date ?? ''}:${index}`}
               item={item}
               t={t}
             />

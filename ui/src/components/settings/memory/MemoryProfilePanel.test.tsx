@@ -282,6 +282,26 @@ describe('MemoryProfilePanel structured text', () => {
     expect(screen.getByText('Available user profile')).toBeTruthy();
   });
 
+  it('resets a refreshed entry to closed even when the reloaded profile is byte-identical', async () => {
+    const profileItems = [{ kind: 'profile' as const, text: '', date: null, profile: PROFILE }];
+    // Two structurally distinct arrays with identical content: a real refetch
+    // never hands back the same object identity, and content-derived entry
+    // keys alone must not let React reuse the previous (opened) instance.
+    getMemoryProfile.mockResolvedValue({ status: 'ok', items: [...profileItems], warnings: [] });
+
+    render(<MemoryProfilePanel enabled />);
+    const trigger = await screen.findByRole('button', { name: 'communication' });
+    await userEvent.click(trigger);
+    expect(screen.getByText('Prefers written updates.')).toBeTruthy();
+
+    getMemoryProfile.mockResolvedValue({ status: 'ok', items: [...profileItems], warnings: [] });
+    await userEvent.click(screen.getByRole('button', { name: 'memory.profile.refresh' }));
+
+    const refreshedTrigger = await screen.findByRole('button', { name: 'communication' });
+    expect(refreshedTrigger.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('Prefers written updates.')).toBeNull();
+  });
+
   it('does not call a partially unread empty profile ungenerated', async () => {
     getMemoryProfile.mockResolvedValue({
       status: 'ok',
