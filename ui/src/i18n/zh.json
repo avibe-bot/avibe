@@ -4896,6 +4896,7 @@
       "implicitTraits": "推断特征",
       "basis": "推断依据",
       "evidence": "相关证据",
+      "entryFallback": "画像条目 {{number}}",
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {
