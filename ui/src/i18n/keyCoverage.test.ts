@@ -35,10 +35,41 @@
 // Neither site reliably hands over a bare literal, though, so what is taken from
 // one is the SET of values it can be statically KNOWN to name: both branches of a
 // ternary, either side of a `??` fallback, through any number of wrappers that
-// preserve the value. That is the whole boundary — total over statically-known
-// values, with every dynamic leaf staying invisible by design. Recognising shapes
-// one at a time instead is what left `remoteAccess.flowStep1` and the 94 keys
-// named through a conditional or a fallback deletable while this guard was green.
+// preserve the value, with every dynamic leaf staying invisible by design.
+// Recognising shapes one at a time instead is what left `remoteAccess.flowStep1`
+// and the 94 keys named through a conditional or a fallback deletable while this
+// guard was green.
+//
+// That is total over statically-known EXPRESSIONS, and it is only half of what
+// this file needs, because it says nothing about the POSITIONS a key is written
+// in. Calling the class closed on the expression axis alone is what let the next
+// round land: `steps/TelegramConfig.tsx` hands `shared/ProxyUrlField` a literal
+// `labelKey`, `lib/agentGraph.ts` keeps a whole table of them, and 75 keys reach
+// `t()` only that way, through eighteen differently-named props. Adding those
+// names here would be the same enumeration a fourth time.
+//
+// So this file states TWO properties, and the second needs no positions at all.
+//
+//   EXISTENCE — every key named literally at a `t()` or an `i18nKey` position has
+//   copy in both locales. Position-bound of necessity: to demand that a key
+//   exist, something has to know it is a key.
+//
+//   PARITY — every dotted string literal anywhere in `src/` that resolves in
+//   EITHER locale resolves in BOTH. No positions, no prop names, no dataflow: a
+//   literal becomes a candidate because of how it READS, and the bundles decide
+//   whether it is a key. `labelKey="telegramConfig.proxyUrl"` is covered not
+//   because this file learned the name `labelKey` but because that string is in
+//   the bundles — so a prop, a data table, or a carrier nobody has invented yet
+//   is covered without editing this file. "Resolves" is i18next's own answer for
+//   that locale, bare or against any plural category the locale selects, so a
+//   family kept in one locale and dropped from the other is a gap here rather
+//   than a stem that quietly falls out.
+//
+// What PARITY cannot do is find a key missing from BOTH locales: a literal absent
+// from both is indistinguishable from a Monaco theme token, an event-channel
+// name, or a storage key, and 62 of those sit in `src/` today. That case is
+// exactly what EXISTENCE covers, which is why both properties are here and
+// neither replaces the other.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,6 +229,44 @@ export const collectReferences = (source: string, fileName = 'fixture.tsx'): Ref
   return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
 };
 
+/** A string that READS like a key: dotted segments, nothing else assumed. */
+const DOTTED = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
+
+/**
+ * Every dotted string literal a source file writes, wherever it sits — the
+ * PARITY property's whole input, and the reason that property needs no positions.
+ *
+ * This asks nothing about how the literal is used. It is not an argument to
+ * anything, not an attribute of anything; it is a string in the file that reads
+ * like a key. So a literal handed over as `labelKey`, parked in a lookup table,
+ * held in a `const`, or written into a carrier that does not exist yet is picked
+ * up identically, and no name has to be enumerated for any of them.
+ *
+ * A literal that is not a key comes along too — a Monaco theme token, an
+ * event-channel name, a storage key. That is deliberate: the bundles decide.
+ * Absent from both locales, it is not a key and PARITY has nothing to say about
+ * it; present in one, it is a key one locale lost.
+ *
+ * Read from the syntax tree rather than the bytes, so a dotted string inside a
+ * comment or a longer sentence is not mistaken for a literal the app writes.
+ */
+export const collectDottedLiterals = (source: string, fileName = 'fixture.tsx'): string[] => {
+  const file = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const found = new Set<string>();
+  const visit = (node: ts.Node) => {
+    if (ts.isStringLiteralLike(node) && DOTTED.test(node.text)) found.add(node.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return [...found].sort((a, b) => a.localeCompare(b));
+};
+
 const sourceFiles = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
@@ -216,13 +285,19 @@ const referencedCallSites = (): Reference[] => {
   return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
 };
 
+/** The app's locales, and the bundle each one resolves against. */
+const BUNDLES: { lng: string; bundle: unknown }[] = [
+  { lng: 'en', bundle: en },
+  { lng: 'zh', bundle: zh },
+];
+
 /** One locale, resolved with no fallback: a zh gap must not be filled by en. */
-const localeInstance = (lng: 'en' | 'zh'): I18n => {
+const localeInstance = (lng: string, bundle: unknown): I18n => {
   const instance = createInstance();
   void instance.init({
     lng,
     fallbackLng: false,
-    resources: { [lng]: { translation: lng === 'en' ? en : zh } },
+    resources: { [lng]: { translation: bundle as Record<string, unknown> } },
   });
   return instance;
 };
@@ -236,7 +311,16 @@ const localeInstance = (lng: 'en' | 'zh'): I18n => {
  * no count in range selects would drop out of the requirement silently, so it
  * throws instead.
  */
+const countsByLocale = new Map<string, number[]>();
 const representativeCounts = (lng: string): number[] => {
+  const memoised = countsByLocale.get(lng);
+  if (memoised !== undefined) return memoised;
+  const computed = computeRepresentativeCounts(lng);
+  countsByLocale.set(lng, computed);
+  return computed;
+};
+
+const computeRepresentativeCounts = (lng: string): number[] => {
   const rules = new Intl.PluralRules(lng);
   const categories = rules.resolvedOptions().pluralCategories;
   const reached = new Map<string, number>();
@@ -253,12 +337,71 @@ const representativeCounts = (lng: string): number[] => {
 const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
   (reference.counted ? representativeCounts(lng).map((count) => ({ count })) : [{}]);
 
+/**
+ * Whether a locale resolves a literal at all — i18next's own answer, bare or
+ * against any plural category the locale selects.
+ *
+ * The plural half matters: a family with no plain key (`usageSummary_one` and
+ * `_other`, no `usageSummary`) does not exist bare, so asking only that way
+ * would drop every family out of PARITY and miss the locale that kept the family
+ * while the other lost it.
+ */
+const resolvesIn = (instance: I18n, lng: string, key: string): boolean =>
+  instance.exists(key) || representativeCounts(lng).some((count) => instance.exists(key, { count }));
+
+/** A literal one locale resolves and another does not: a key someone lost. */
+type ParityGap = { key: string; present: string[]; absent: string[] };
+
+/**
+ * PARITY over whatever literals it is handed, against whatever bundles it is
+ * handed — so the fixture below can pin its boundaries on locales it controls.
+ *
+ * A literal no locale resolves is not a key and yields nothing. One every locale
+ * resolves is fine. Anything in between is the gap this reports.
+ */
+export const parityGaps = (
+  literals: string[],
+  bundles: { lng: string; bundle: unknown }[],
+): ParityGap[] => {
+  const locales = bundles.map(({ lng, bundle }) => ({ lng, instance: localeInstance(lng, bundle) }));
+  return literals.flatMap((key) => {
+    const present = locales.filter(({ lng, instance }) => resolvesIn(instance, lng, key)).map(({ lng }) => lng);
+    if (present.length === 0 || present.length === locales.length) return [];
+    return [{ key, present, absent: locales.map(({ lng }) => lng).filter((lng) => !present.includes(lng)) }];
+  });
+};
+
+/**
+ * Whether a bundle VALUE carries something to render — the whole of what
+ * EXISTENCE asks, and asked of the value rather than of a `t()` projection.
+ *
+ * Going through the projection is what made this wrong twice over. It needed the
+ * call's position to find the key, and it needed the call's OPTIONS to see the
+ * value: `memory/MemorySettingsPanel.tsx` reads two keys with `returnObjects`
+ * and maps them as arrays, and a probe without that option gets i18next's
+ * "returned an object instead of string" diagnostic — a nonempty string, which
+ * passed, while the surface rendered no rows. Asking the value directly needs
+ * neither, so no call shape has to be replicated here.
+ *
+ * A collection has to be nonempty AND have something renderable in every slot,
+ * because a locale that keeps the array and empties an entry renders a blank row
+ * rather than a raw key, and a blank row is still missing copy.
+ */
+const isRenderable = (value: unknown, key: string): boolean => {
+  if (typeof value === 'string') return value !== '' && value !== key;
+  if (Array.isArray(value)) return value.length > 0 && value.every((entry) => isRenderable(entry, key));
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.values(value);
+    return entries.length > 0 && entries.every((entry) => isRenderable(entry, key));
+  }
+  return false;
+};
+
 /** The symptom this guard exists for, stated exactly: no copy renders as the key. */
 const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean =>
-  probes(lng, reference).some((options) => {
-    const rendered: unknown = instance.t(reference.key, options);
-    return typeof rendered !== 'string' || rendered === '' || rendered === reference.key;
-  });
+  probes(lng, reference).some(
+    (options) => !isRenderable(instance.t(reference.key, { ...options, returnObjects: true }), reference.key),
+  );
 
 describe('app i18n key coverage', () => {
   const referenced = referencedCallSites();
@@ -379,8 +522,121 @@ describe('app i18n key coverage', () => {
     expect(referenced.some((reference) => reference.counted)).toBe(true);
   });
 
-  it.each(['en', 'zh'] as const)('translates every referenced call site in %s', (lng) => {
-    const instance = localeInstance(lng);
+  it.each(BUNDLES)('translates every referenced call site in $lng', ({ lng, bundle }) => {
+    const instance = localeInstance(lng, bundle);
     expect(referenced.filter((reference) => missingCopy(instance, lng, reference)).map(label)).toEqual([]);
+  });
+
+  it('reports a bundle value as copy only when the value itself renders', () => {
+    // EXISTENCE asks the VALUE, not a `t()` projection, so this pins what a value
+    // has to carry. The array cases are the ones that were passing wrongly: the
+    // probe used to re-call `t()` without the caller's `returnObjects`, take
+    // i18next's object-instead-of-string diagnostic as copy, and stay green while
+    // the surface rendered nothing.
+    expect(isRenderable('Disclosure', 'k')).toBe(true);
+    expect(isRenderable('', 'k')).toBe(false);
+    expect(isRenderable('k', 'k')).toBe(false); // i18next echoes the key when it has none
+    expect(isRenderable(['one', 'two'], 'k')).toBe(true);
+    expect(isRenderable([], 'k')).toBe(false); // the disclosure list, emptied
+    expect(isRenderable(['one', ''], 'k')).toBe(false); // a blank row is missing copy too
+    expect(isRenderable({ a: 'one' }, 'k')).toBe(true);
+    expect(isRenderable({}, 'k')).toBe(false);
+    expect(isRenderable(undefined, 'k')).toBe(false);
+    expect(isRenderable(42, 'k')).toBe(false);
+  });
+
+  it('collects dotted literals wherever they sit, with no position enumerated', () => {
+    // PARITY's input, and the reason it needs no positions: every one of these is
+    // collected by the same rule, and none of the carriers is named anywhere in
+    // this file. The key-prop forms are the ones that were escaping — a literal
+    // `labelKey` on a component that later calls `t(labelKey)`, and the data
+    // tables in `lib/agentGraph.ts` and `SettingsLayout.tsx` that hold keys as
+    // values. A carrier invented later is picked up without editing this file.
+    const fixture = `
+      const called = t('fixture.called');
+      const attr = <ProxyUrlField labelKey="fixture.attrLabel" hintKey="fixture.attrHint" />;
+      const braced = <Panel titleKey={'fixture.braced'} />;
+      const table = [{ labelKey: 'fixture.tableLabel', bodyKey: 'fixture.tableBody' }];
+      const held = 'fixture.held';
+      const invented = <Thing someKeyNobodyEnumerated="fixture.invented" />;
+      const nested = { deep: { deeper: ['fixture.inArray'] } };
+      const notAKey = 'editor.background';
+      const alsoNot = 'avibe.editor.fontSize.v1';
+      // fixture.inAComment must not be collected
+      const sentence = 'Read the fixture.docs page for more';
+      const single = 'undotted';
+      const templated = \`fixture.\${dynamic}\`;
+    `;
+    expect(collectDottedLiterals(fixture)).toEqual([
+      'avibe.editor.fontSize.v1',
+      'editor.background',
+      'fixture.attrHint',
+      'fixture.attrLabel',
+      'fixture.braced',
+      'fixture.called',
+      'fixture.held',
+      'fixture.inArray',
+      'fixture.invented',
+      'fixture.tableBody',
+      'fixture.tableLabel',
+    ]);
+  });
+
+  it('reports a literal one locale lost, and stays silent on what is not a key', () => {
+    // PARITY's boundaries, pinned on bundles this test owns, so a scanner
+    // regression fails here rather than in production. The classes are the ones
+    // measured in `src/`: a key one locale dropped, a plural family one locale
+    // dropped, and the 62 literals that are not keys at all.
+    const gaps = parityGaps(
+      [
+        'card.title',
+        'card.subtitle',
+        'card.count',
+        'card.total',
+        'editor.background',
+        'projects.changed',
+        'agents.opencode.error_retry_limit',
+        'avibe.editor.fontSize.v1',
+      ],
+      [
+        {
+          lng: 'en',
+          bundle: {
+            card: {
+              title: 'Title',
+              subtitle: 'Subtitle',
+              count_one: 'one model',
+              count_other: '{{count}} models',
+              total_one: 'one total',
+              total_other: '{{count}} total',
+            },
+          },
+        },
+        {
+          lng: 'zh',
+          // `subtitle` dropped outright; `total` dropped as a whole family.
+          bundle: { card: { title: '标题', count_other: '{{count}} 个模型' } },
+        },
+      ],
+    );
+    expect(gaps).toEqual([
+      { key: 'card.subtitle', present: ['en'], absent: ['zh'] },
+      // A family kept in en and dropped in zh is a gap, not a stem that falls out:
+      // neither locale resolves `card.total` bare, so only the plural probe sees it.
+      { key: 'card.total', present: ['en'], absent: ['zh'] },
+    ]);
+    // `card.count` resolves in both — zh selects only `other`, and asking for the
+    // category zh cannot reach would make every plural family a false gap.
+    // The rest resolve in neither locale, so they are not keys and say nothing:
+    // a Monaco theme token, an event-channel name, a config field path, a storage
+    // key. None of them needed an allowlist to be quiet.
+  });
+
+  it('keeps every dotted literal in the app resolving in both locales or neither', () => {
+    const literals = new Set<string>();
+    for (const file of sourceFiles(APP_SOURCE)) {
+      for (const found of collectDottedLiterals(readFileSync(file, 'utf8'), file)) literals.add(found);
+    }
+    expect(parityGaps([...literals].sort((a, b) => a.localeCompare(b)), BUNDLES)).toEqual([]);
   });
 });
