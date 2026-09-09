@@ -60,8 +60,8 @@
 //   whether it is a key. `labelKey="telegramConfig.proxyUrl"` is covered not
 //   because this file learned the name `labelKey` but because that string is in
 //   the bundles — so a prop, a data table, or a carrier nobody has invented yet
-//   is covered without editing this file. "Resolves" is i18next's own answer for
-//   that locale, bare or against any plural category the locale selects, so a
+//   is covered without editing this file. "Resolves" means the locale RENDERS
+//   copy for it, bare or against any plural category the locale selects, so a
 //   family kept in one locale and dropped from the other is a gap here rather
 //   than a stem that quietly falls out.
 //
@@ -87,6 +87,20 @@
 // So the cost of the pin is a line whenever a genuinely new non-key dotted
 // literal appears, and the thing it buys is that no key can leave the bundles
 // unnoticed, whatever position it was written in.
+//
+// All three ask ONE question of a value — `isRenderable` — and that is the last
+// thing worth saying here. Asking whether a key EXISTS instead is a weaker
+// question that looks identical until a value goes empty, and it cost two rounds
+// of one root cause: a `returnObjects` array emptied in one locale passed, then a
+// key blanked to `''` in BOTH locales passed as well, resolving everywhere and so
+// never reaching RESIDUE while the surface rendered a blank label. One predicate
+// means a value-shaped hole cannot be open in one property and closed in another.
+//
+// Its boundary is exactly: a nonblank string that is not the key itself, or a
+// nonempty collection whose every entry is renderable. That is a claim about
+// copy being THERE. Whether the copy is RIGHT — accurate, idiomatic, actually
+// translated rather than English pasted into `zh.json` — no scanner decides, and
+// this one does not pretend to.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -355,16 +369,60 @@ const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
   (reference.counted ? representativeCounts(lng).map((count) => ({ count })) : [{}]);
 
 /**
- * Whether a locale resolves a literal at all — i18next's own answer, bare or
+ * Whether a bundle VALUE carries something to render. This is the file's only
+ * notion of a key being there, and every property below is stated through it.
+ *
+ * Asking the value rather than a `t()` projection is what makes it position-free
+ * and option-free. The projection needed the call's position to find the key AND
+ * the call's options to see the value: `memory/MemorySettingsPanel.tsx` reads two
+ * keys with `returnObjects` and maps them as arrays, and a probe without that
+ * option gets i18next's "returned an object instead of string" diagnostic — a
+ * nonempty string, which passed, while the surface rendered no rows.
+ *
+ * A collection has to be nonempty AND renderable in every slot, because a locale
+ * that keeps the array and empties an entry renders a blank row rather than a raw
+ * key, and a blank row is still missing copy.
+ *
+ * The boundary is exactly this and no wider: a value is renderable when it is a
+ * nonblank string that is not the key itself, or a nonempty collection whose
+ * every entry is renderable. Whitespace-only counts as blank, because a value
+ * that renders as nothing is empty of copy whichever character made it so.
+ * Whether the copy is CORRECT — right register, right meaning, right locale —
+ * is not decidable here and stays human territory.
+ */
+const isRenderable = (value: unknown, key: string): boolean => {
+  if (typeof value === 'string') return value.trim() !== '' && value !== key;
+  if (Array.isArray(value)) return value.length > 0 && value.every((entry) => isRenderable(entry, key));
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.values(value);
+    return entries.length > 0 && entries.every((entry) => isRenderable(entry, key));
+  }
+  return false;
+};
+
+/**
+ * Whether a locale resolves a literal — meaning it renders copy for it, bare or
  * against any plural category the locale selects.
  *
+ * Renders, not merely exists. `instance.exists()` was the earlier answer and it
+ * is presence only, which cost two review rounds of the same root cause: an
+ * emptied `returnObjects` array passed, and then a key blanked to `''` in BOTH
+ * locales passed as well, resolving everywhere and so never reaching RESIDUE
+ * while `ProxyUrlField` rendered a blank label. Both are the same mistake, asking
+ * whether a key is there instead of whether copy is. So there is one predicate
+ * and "resolves" means one thing file-wide: EXISTENCE, PARITY and RESIDUE all
+ * inherit it, and no value-shaped hole can be open in one and closed in another.
+ *
  * The plural half matters: a family with no plain key (`usageSummary_one` and
- * `_other`, no `usageSummary`) does not exist bare, so asking only that way
+ * `_other`, no `usageSummary`) renders nothing bare, so asking only that way
  * would drop every family out of PARITY and miss the locale that kept the family
  * while the other lost it.
  */
 const resolvesIn = (instance: I18n, lng: string, key: string): boolean =>
-  instance.exists(key) || representativeCounts(lng).some((count) => instance.exists(key, { count }));
+  isRenderable(instance.t(key, { returnObjects: true }), key) ||
+  representativeCounts(lng).some((count) =>
+    isRenderable(instance.t(key, { count, returnObjects: true }), key),
+  );
 
 /**
  * Every dotted literal in `src/` that resolves in NEITHER locale, pinned exactly.
@@ -500,32 +558,6 @@ export const parityGaps = (
     if (present.length === 0 || present.length === locales.length) return [];
     return [{ key, present, absent: locales.map(({ lng }) => lng).filter((lng) => !present.includes(lng)) }];
   });
-};
-
-/**
- * Whether a bundle VALUE carries something to render — the whole of what
- * EXISTENCE asks, and asked of the value rather than of a `t()` projection.
- *
- * Going through the projection is what made this wrong twice over. It needed the
- * call's position to find the key, and it needed the call's OPTIONS to see the
- * value: `memory/MemorySettingsPanel.tsx` reads two keys with `returnObjects`
- * and maps them as arrays, and a probe without that option gets i18next's
- * "returned an object instead of string" diagnostic — a nonempty string, which
- * passed, while the surface rendered no rows. Asking the value directly needs
- * neither, so no call shape has to be replicated here.
- *
- * A collection has to be nonempty AND have something renderable in every slot,
- * because a locale that keeps the array and empties an entry renders a blank row
- * rather than a raw key, and a blank row is still missing copy.
- */
-const isRenderable = (value: unknown, key: string): boolean => {
-  if (typeof value === 'string') return value !== '' && value !== key;
-  if (Array.isArray(value)) return value.length > 0 && value.every((entry) => isRenderable(entry, key));
-  if (typeof value === 'object' && value !== null) {
-    const entries = Object.values(value);
-    return entries.length > 0 && entries.every((entry) => isRenderable(entry, key));
-  }
-  return false;
 };
 
 /** The symptom this guard exists for, stated exactly: no copy renders as the key. */
@@ -782,6 +814,41 @@ describe('app i18n key coverage', () => {
 
     // Which is the whole point: it is not in the pinned list, so the pin fails.
     expect(NON_KEY_LITERALS).not.toContain('telegramConfig.proxyUrl');
+  });
+
+  it('treats a blanked value as missing copy, in one locale or in every locale', () => {
+    // A key can be emptied as well as deleted, and an empty value renders a blank
+    // label rather than a raw key, which is the quieter of the two failures. The
+    // earlier `exists()` predicate said yes to both bundles here and the suite
+    // stayed green; asking the VALUE moves each case to the property that owns it.
+    const source = `
+      const Field = () => <ProxyUrlField labelKey="telegramConfig.proxyUrl" />;
+    `;
+    const literals = collectDottedLiterals(source);
+    const copy = (proxyUrl: string, botToken: string) => ({ telegramConfig: { proxyUrl, botToken } });
+
+    // Blanked in one locale: the other still renders it, so it is a parity gap.
+    const oneBlank = [
+      { lng: 'en', bundle: copy('Proxy URL', 'Bot token') },
+      { lng: 'zh', bundle: copy('', '机器人令牌') },
+    ];
+    expect(parityGaps(literals, oneBlank)).toEqual([
+      { key: 'telegramConfig.proxyUrl', present: ['en'], absent: ['zh'] },
+    ]);
+    expect(residueOf(literals, oneBlank)).toEqual([]);
+
+    // Blanked in every locale: nothing renders it, so it falls to the pin —
+    // the same landing as deleting it outright, because it is the same loss.
+    const allBlank = [
+      { lng: 'en', bundle: copy('', 'Bot token') },
+      { lng: 'zh', bundle: copy('   ', '机器人令牌') },
+    ];
+    expect(parityGaps(literals, allBlank)).toEqual([]);
+    expect(residueOf(literals, allBlank)).toEqual(['telegramConfig.proxyUrl']);
+    expect(NON_KEY_LITERALS).not.toContain('telegramConfig.proxyUrl');
+
+    // Whitespace is blank: `zh` above holds three spaces, and a value that
+    // renders as nothing is empty of copy whichever character made it so.
   });
 
   it('pins the literals that are not keys, so no key can leave both locales unseen', () => {
