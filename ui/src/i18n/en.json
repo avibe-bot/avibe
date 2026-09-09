@@ -4896,6 +4896,7 @@
       "implicitTraits": "Inferred traits",
       "basis": "Basis",
       "evidence": "Evidence",
+      "entryFallback": "Profile entry {{number}}",
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
