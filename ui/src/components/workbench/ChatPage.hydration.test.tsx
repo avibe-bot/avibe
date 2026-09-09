@@ -4,9 +4,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { TurnActivityGroupWire } from '../../lib/agentActivity';
+import type { ModelRecoveryState, SessionRuntimeState } from '../../context/ApiContext';
+import type { ComposerProps } from './Composer';
 
 const mocks = vi.hoisted(() => ({
   api: {
+    cancelSession: vi.fn(),
     connectWorkbenchEvents: vi.fn(),
     getCachedSessionDraft: vi.fn(),
     getSession: vi.fn(),
@@ -22,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     onSessionArchived: vi.fn(),
   },
   events: null as null | {
+    onSessionActivity: (data: { session_id: string; event: string }) => void;
     onConnected: () => void;
     onAuthorizationChanged: (data: {
       resource_kinds?: string[];
@@ -31,6 +35,7 @@ const mocks = vi.hoisted(() => ({
     onTurnStart: (data: { session_id: string }) => void;
     onTurnEnd: (data: { session_id: string }) => void;
   },
+  composer: null as ComposerProps | null,
   authorizationCapabilities: {
     can_chat: true,
     can_manage_instance: false,
@@ -109,7 +114,10 @@ vi.mock('./useShowPageAnnotation', () => ({
 }));
 
 vi.mock('./Composer', () => ({
-  Composer: () => null,
+  Composer: (props: ComposerProps) => {
+    mocks.composer = props;
+    return null;
+  },
 }));
 
 import { ChatPage } from './ChatPage';
@@ -130,7 +138,8 @@ const deferred = <T,>(): Deferred<T> => {
   return { promise, resolve, reject };
 };
 
-const idleTurnState = {
+const idleTurnState: SessionRuntimeState = {
+  in_flight: false,
   foreground: 'idle',
   native_turn_started: false,
   pending_input_count: 0,
@@ -145,7 +154,7 @@ const bootstrapPayload = (sessionId: string) => ({
   agents: [],
   default_agent_name: null,
   config: { ui: {} },
-  messages: [],
+  messages: [] as ReturnType<typeof projectedMessage>[],
   next_before_id: null,
   turn_state: idleTurnState,
   queued: [],
@@ -204,6 +213,7 @@ describe('ChatPage transcript hydration', () => {
     sessionRow = deferred();
     bootstrap = deferred();
     mocks.events = null;
+    mocks.composer = null;
     vi.clearAllMocks();
     Object.assign(mocks.authorizationCapabilities, {
       can_chat: true,
@@ -217,6 +227,7 @@ describe('ChatPage transcript hydration', () => {
       mocks.events = events;
       return () => {};
     });
+    mocks.api.cancelSession.mockResolvedValue({ ok: true });
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
     mocks.api.getSession.mockReturnValue(sessionRow.promise);
     mocks.api.getSessionActivity.mockResolvedValue({ groups: [] });
@@ -234,6 +245,7 @@ describe('ChatPage transcript hydration', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('keeps the loading view when SSE Session-row recovery beats transcript bootstrap', async () => {
@@ -1106,5 +1118,202 @@ describe('ChatPage transcript hydration', () => {
     await screen.findByText('viewer-visible work step');
     expect(screen.queryByRole('button', { name: 'chat.agentActivity.disable' })).toBeNull();
     expect(mocks.api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  describe('quiet model recovery in the existing progress slots', () => {
+    const now = Date.parse('2026-09-09T04:00:10Z');
+    const recovery = (overrides: Partial<ModelRecoveryState> = {}): ModelRecoveryState => ({
+      request_id: 'pending-request',
+      phase: 'waiting',
+      attempt_count: 1,
+      started_at: new Date(now - 6000).toISOString(),
+      window_end: new Date(now + 114_000).toISOString(),
+      next_eligible_at: new Date(now + 24_000).toISOString(),
+      source_id: 'private-source',
+      reason: 'https://private-host.invalid/diagnostic',
+      ...overrides,
+    });
+    const running = (model_recovery: ModelRecoveryState[] = [recovery()]): SessionRuntimeState => ({
+      ...idleTurnState, in_flight: true, foreground: 'running', model_recovery,
+    });
+    const invalidate = () => mocks.events?.onSessionActivity({ session_id: 'session-new', event: 'model_recovery' });
+    const mount = async (state = running(), activity = false) => {
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        config: { ui: { show_agent_activity: activity } },
+        draft: { text: 'unsent draft 草稿' },
+        turn_state: state,
+      });
+      mocks.api.getTurnState.mockResolvedValue(state);
+      const view = render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <SessionSwitcher />
+          <SessionSwitcher sessionId="session-new" label="return chat" />
+          <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+        </MemoryRouter>,
+      );
+      await act(async () => Promise.resolve());
+      expect(screen.queryByText('common.loading')).toBeNull();
+      return view;
+    };
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+    });
+
+    it.each([false, true])('reuses the label with Activity enabled=%s, preserving controls and rows', async (activity) => {
+      const { container } = await mount(running([recovery({ started_at: new Date(now).toISOString() })]), activity);
+      if (activity) {
+        act(() => mocks.events?.onMessageNew({
+          ...projectedMessage('step', 'existing tool narration'), author: 'agent', type: 'assistant', source: 'agent',
+        }));
+      }
+      const generic = activity ? 'chat.agentActivity.running' : 'chat.thinking';
+      const labelSlot = screen.getByText(generic);
+      const structure = container.querySelectorAll('*').length;
+      expect(container.querySelectorAll('[data-message-id]')).toHaveLength(0);
+      act(() => vi.advanceTimersByTime(4999));
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(screen.getByText('chat.modelRecovery.waitingSeconds')).toBe(labelSlot);
+      expect(container.querySelectorAll('*')).toHaveLength(structure);
+      expect(container.querySelectorAll('[data-message-id]')).toHaveLength(0);
+      expect(container.textContent).not.toMatch(/private-source|https:|2026-09|UTC/);
+      expect(mocks.composer?.busy).toBe(true);
+      expect(mocks.composer?.initialDraft).toBe('unsent draft 草稿');
+      if (activity) expect(screen.getByText('existing tool narration')).toBeTruthy();
+      else expect(container.querySelectorAll('.vr-typing-dot')).toHaveLength(3);
+
+      await act(async () => mocks.composer?.onStop?.());
+      expect(mocks.api.cancelSession).toHaveBeenCalledExactlyOnceWith('session-new');
+      expect(mocks.composer?.busy).toBe(true);
+      expect(screen.getByText('chat.modelRecovery.waitingSeconds')).toBeTruthy();
+    });
+
+    it('restores a mature snapshot immediately, follows invalidations, and clears without ending work', async () => {
+      await mount();
+      expect(screen.getAllByText('chat.modelRecovery.waitingSeconds')).toHaveLength(1);
+      mocks.api.getTurnState.mockResolvedValue(running([recovery({ phase: 'attempting' })]));
+      await act(async () => invalidate());
+      expect(screen.getByText('chat.modelRecovery.attempting')).toBeTruthy();
+      mocks.api.getTurnState.mockResolvedValue(running([]));
+      await act(async () => invalidate());
+      expect(screen.queryByText('chat.modelRecovery.attempting')).toBeNull();
+      expect(screen.getByText('chat.thinking')).toBeTruthy();
+      expect(mocks.composer?.busy).toBe(true);
+      expect(mocks.composer?.initialDraft).toBe('unsent draft 草稿');
+    });
+
+    it('keeps the mature label when the first activity row replaces the thinking bubble', async () => {
+      const { container } = await mount(running(), true);
+      expect(container.querySelectorAll('.vr-typing-dot')).toHaveLength(3);
+      expect(screen.getByText('chat.modelRecovery.waitingSeconds')).toBeTruthy();
+      act(() => mocks.events?.onMessageNew({
+        ...projectedMessage('step', 'first activity'), author: 'agent', type: 'assistant', source: 'agent',
+      }));
+      expect(container.querySelectorAll('.vr-typing-dot')).toHaveLength(0);
+      expect(screen.getByText('first activity')).toBeTruthy();
+      expect(screen.getAllByText('chat.modelRecovery.waitingSeconds')).toHaveLength(1);
+    });
+
+    it('does not hide pending peer recovery when a terminal message arrives', async () => {
+      await mount();
+      act(() => mocks.events?.onMessageNew({
+        ...projectedMessage('peer-result', 'one request finished'),
+        author: 'agent', type: 'result', source: 'agent',
+      }));
+      expect(screen.getByText('one request finished')).toBeTruthy();
+      expect(screen.getByText('chat.modelRecovery.waitingSeconds')).toBeTruthy();
+      expect(mocks.composer?.busy).toBe(true);
+    });
+
+    it('ignores other sessions and rejects an older wait after a newer clear response', async () => {
+      await mount();
+      const stale = deferred<SessionRuntimeState>();
+      mocks.api.getTurnState.mockReturnValueOnce(stale.promise).mockResolvedValue(running([]));
+      await act(async () => mocks.events?.onSessionActivity({ session_id: 'elsewhere', event: 'model_recovery' }));
+      expect(mocks.api.getTurnState).not.toHaveBeenCalled();
+      act(invalidate);
+      await act(async () => invalidate());
+      expect(screen.getByText('chat.thinking')).toBeTruthy();
+      await act(async () => stale.resolve(running()));
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      expect(mocks.composer?.busy).toBe(true);
+    });
+
+    it.each(['start', 'end'] as const)('clears on turn %s and rejects an in-flight old snapshot', async (event) => {
+      await mount();
+      const stale = deferred<SessionRuntimeState>();
+      mocks.api.getTurnState.mockReturnValueOnce(stale.promise).mockResolvedValue(idleTurnState);
+      act(invalidate);
+      await act(async () => {
+        if (event === 'start') mocks.events?.onTurnStart({ session_id: 'session-new' });
+        else mocks.events?.onTurnEnd({ session_id: 'session-new' });
+      });
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      await act(async () => stale.resolve(running()));
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      expect(mocks.composer?.busy).toBe(event === 'start');
+    });
+
+    it.each(['start', 'end'] as const)('does not let a delayed bootstrap revive recovery after turn %s', async (event) => {
+      const stale = deferred<ReturnType<typeof bootstrapPayload>>();
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockReturnValue(stale.promise);
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+        </MemoryRouter>,
+      );
+      await act(async () => Promise.resolve());
+      await act(async () => {
+        if (event === 'start') mocks.events?.onTurnStart({ session_id: 'session-new' });
+        else mocks.events?.onTurnEnd({ session_id: 'session-new' });
+      });
+      await act(async () => stale.resolve({ ...bootstrapPayload('session-new'), turn_state: running() }));
+      expect(screen.queryByText('common.loading')).toBeNull();
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      expect(mocks.composer?.busy).toBe(event === 'start');
+    });
+
+    it('rejects a stale response through A → B → A navigation', async () => {
+      await mount();
+      const stale = deferred<SessionRuntimeState>();
+      mocks.api.getTurnState.mockReturnValueOnce(stale.promise);
+      act(invalidate);
+      mocks.api.getSessionBootstrap.mockImplementation((id: string) => Promise.resolve(bootstrapPayload(id)));
+      await act(async () => screen.getByText('switch chat').click());
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      await act(async () => screen.getByText('return chat').click());
+      await act(async () => stale.resolve(running()));
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      expect(mocks.composer?.busy).toBe(false);
+    });
+
+    it('clears a dropped end from an idle snapshot while preserving unknown-state recovery', async () => {
+      await mount();
+      mocks.api.getTurnState.mockResolvedValue({ ...idleTurnState, foreground: 'unknown', in_flight: null });
+      await act(async () => invalidate());
+      expect(screen.getByText('chat.modelRecovery.waitingSeconds')).toBeTruthy();
+      act(() => vi.advanceTimersByTime(5000));
+      mocks.api.getTurnState.mockResolvedValue({ ...idleTurnState, model_recovery: [recovery()] });
+      await act(async () => invalidate());
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      expect(mocks.composer?.busy).toBe(false);
+    });
+
+    it('does not let an older bootstrap revive a dropped end recovered by the idle poll', async () => {
+      await mount();
+      const stale = deferred<ReturnType<typeof bootstrapPayload>>();
+      mocks.api.getSessionBootstrap.mockReturnValue(stale.promise);
+      await act(async () => mocks.events?.onAuthorizationChanged({ resource_kinds: [] }));
+      act(() => vi.advanceTimersByTime(5000));
+      mocks.api.getTurnState.mockResolvedValue(idleTurnState);
+      await act(async () => invalidate());
+      await act(async () => stale.resolve({ ...bootstrapPayload('session-new'), turn_state: running() }));
+      expect(screen.queryByText('chat.modelRecovery.waitingSeconds')).toBeNull();
+      expect(mocks.composer?.busy).toBe(false);
+    });
   });
 });
