@@ -127,6 +127,22 @@ entries are never sent, and stale entries in the receiver's source directories
 are deleted during normal synchronization. Excluded runtime/dependency trees
 remain outside this cleanup boundary.
 
+The same sender-only policy covers `.DS_Store` at any depth and these
+repository-root host artifacts: `.bot.pid`, `.gstack/`, `.tmp/`,
+`vibe/_version.py`, and `vibe/show_runtime_manifest.json`. Their stale copies
+are removed only from the disposable synced source, never from the operator's
+checkout or persistent product home.
+
+This is not a blanket `.gitignore` filter: worktree regression still accepts
+uncommitted source files, and similarly named files inside test fixtures remain
+source inputs. When checking a master deployment against its Git tree, compare
+the filtered files and symlinks; empty directories carry no versioned content.
+UI assets are built in the instance. Editable installation generates its own
+Python version file when installation is needed; otherwise the source checkout
+supports its build-less version fallback, and `/api/version` identifies the
+deployed commit from the source receipt. Show Runtime uses the regression
+archive prepared below, not a host's generated release-packaging manifest.
+
 Show Runtime resolves the upstream commit on each update, but builds only when
 that commit, the target Node/platform/npm versions, the build recipe, or the
 archive checksum changes. The archive and its build receipt are kept together

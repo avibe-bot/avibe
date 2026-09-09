@@ -1602,7 +1602,7 @@ def root_exec(target: RegressionTarget, command: str, *, remote: str | None = No
 
 
 def source_excludes(*, include_ui_dist: bool = False) -> tuple[str, ...]:
-    """Path patterns dropped from the deployed source tree.
+    """Paths omitted from source sync and protected on the receiver.
 
     A bare pattern matches that name at any depth. A pattern with a leading
     ``/`` is anchored at the repository root, which is what keeps ``/dist``
@@ -1631,6 +1631,25 @@ def source_excludes(*, include_ui_dist: bool = False) -> tuple[str, ...]:
     return tuple(excludes)
 
 
+def source_hides() -> tuple[str, ...]:
+    """Host-only inputs: never send them or retain their stale deployed copies.
+
+    Unlike reusable dependency caches, these paths do not belong in the synced
+    source. Editable installs can generate their own version file; source
+    regression prepares its own Show Runtime archive, not a packaged manifest.
+    """
+    return (
+        ".env",
+        ".env.*",
+        ".DS_Store",
+        "/.bot.pid",
+        "/.gstack",
+        "/.tmp",
+        "/vibe/_version.py",
+        "/vibe/show_runtime_manifest.json",
+    )
+
+
 def is_env_file(relative: str) -> bool:
     return any(part == ".env" or part.startswith(".env.") for part in relative.split("/"))
 
@@ -1639,7 +1658,7 @@ def should_exclude(relative: str, *, include_ui_dist: bool = False) -> bool:
     if is_env_file(relative):
         return True
     parts = relative.split("/")
-    for pattern in source_excludes(include_ui_dist=include_ui_dist):
+    for pattern in (*source_excludes(include_ui_dist=include_ui_dist), *source_hides()):
         if pattern.startswith("/"):
             anchored = pattern[1:]
             if relative == anchored or relative.startswith(anchored + "/"):
@@ -1710,9 +1729,9 @@ def sync_source(
         shell.chmod(0o700)
         runner.run([
             "rsync", "-rltp", "--delete", "--stats",
-            # Hide secrets only on the sender. A receiver-side exclude would
-            # retain stale .env files that can change Vite's build environment.
-            "--filter=H .env", "--filter=H .env.*",
+            # Sender-only hides let --delete remove stale host artifacts.
+            # Receiver-side excludes below protect reusable target caches.
+            *(f"--filter=H {pattern}" for pattern in source_hides()),
             *(f"--exclude={pattern}" for pattern in excludes),
             "--rsh", str(shell), "--", str(repo_root) + "/", f"incus:{SOURCE_DIR}/",
         ])
