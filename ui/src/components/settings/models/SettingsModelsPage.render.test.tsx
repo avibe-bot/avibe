@@ -12,7 +12,7 @@ import i18n from '@/i18n';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
-import { modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
@@ -1180,6 +1180,57 @@ describe('SettingsModelsPage surface branches', () => {
       })).toBeNull());
     },
   );
+
+  it('[MH-SRC-DELETE-002] returns to the list once a removal commits, whichever way the route answered', async () => {
+    // The dialog renders one selected source, so a committed removal leaves it
+    // nothing to show, and returning to the list is the whole outcome the user
+    // asked for. Both commit shapes run here rather than as two cases because
+    // the property is that the route's answer does not change the ending: the
+    // second removal also proves the first close left the list operable.
+    const secondSource: Source = { ...retainedSource, id: 'src_second', display_name: 'Second source' };
+    const sourceRead = vi.spyOn(modelsApi, 'listSources');
+    renderPage([retainedSource, secondSource]);
+    const deleteWrite = vi.spyOn(modelsApi, 'deleteSource')
+      .mockResolvedValueOnce({ removed_hops: [], interrupted: [] })
+      .mockRejectedValueOnce(new ApiCallError('source_not_found'));
+
+    for (const removed of [retainedSource, secondSource]) {
+      const survivors = removed === retainedSource ? [secondSource] : [];
+      await userEvent.click((await screen.findByText(removed.display_name)).closest('button') as HTMLButtonElement);
+      expect(await screen.findByRole('dialog', { name: removed.display_name })).toBeTruthy();
+      sourceRead.mockResolvedValue(survivors);
+
+      await userEvent.click(screen.getByRole('button', {
+        name: new RegExp(`(?:Manage|管理) ${removed.display_name}`, 'i'),
+      }));
+      await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+      await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(deleteWrite).toHaveBeenLastCalledWith(removed.id, undefined);
+      // Not merely closed: the placeholder never became something to read past.
+      expect(screen.queryByText(/no longer available|已经不在了/i)).toBeNull();
+    }
+  });
+
+  it('states in the dialog that a source disappeared with no removal of ours', async () => {
+    // The other half of the same behavior: a refetch that finds the source gone
+    // is not a removal this dialog can close on, so it holds the placeholder —
+    // and the placeholder has to be a sentence, which is the bug that opened
+    // this lane: it rendered the raw key.
+    renderPage([retainedSource]);
+    vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(new ApiCallError('source_not_found'));
+
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+
+    await userEvent.click(within(sourceDialog).getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+
+    const placeholder = await screen.findByRole('dialog', { name: /no longer available|已经不在了/i });
+    expect(placeholder.textContent).toMatch(/no longer available|已经不在了/);
+    expect(placeholder.textContent).not.toContain('settings.models.sourceDetail.gone');
+  });
 
   it('cannot restore chains after the authoritative supply leaves hub mode', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };

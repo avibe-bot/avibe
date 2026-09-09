@@ -153,6 +153,20 @@ scenarios:
     kind: mutation
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order
+  # The removal the user performs has a second half the transaction above cannot
+  # state: what the surface they performed it from does next. Keyed to one
+  # selected source, the detail dialog had nothing left to render and stayed open
+  # over a placeholder, so the row states where each ending belongs — a removal
+  # of ours closes, and only a disappearance we did not cause is worth a sentence.
+  - id: MH-SRC-DELETE-002
+    name: A committed removal returns the source detail dialog to the list, leaving the placeholder to a disappearance the user did not cause
+    status: covered
+    kind: presentation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-SRC-DELETE-002
+    related_tests:
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::states in the dialog that a source disappeared with no removal of ours
+      - ui/src/i18n/modelHubKeys.test.ts
   - id: MH-SUPPLY-GAP-001
     name: Inventory loss preserves an explicit API-key route target
     status: covered

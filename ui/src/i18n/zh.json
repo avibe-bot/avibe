@@ -1690,6 +1690,7 @@
         "advanced": "高级设置",
         "back": "返回模型供应商列表",
         "close": "关闭供应商详情",
+        "gone": "这个供应商已经不在了。",
         "modelsHeading": "模型",
         "usageSummary_one": "{{count}} 个模型 · 被 {{backends}} 使用",
         "usageSummary_other": "{{count}} 个模型 · 被 {{backends}} 使用",
