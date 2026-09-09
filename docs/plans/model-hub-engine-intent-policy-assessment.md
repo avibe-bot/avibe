@@ -1,19 +1,18 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: maintained inactive engine source/test candidate implemented; the
-second-round recipe correction passes 361 deny-network pure consumers,
-pinned Ruff 0.4.9 and source/document syntax checks.
-Earlier Linux lane and independent orchestrator runs passed all maintained
-Go suites, diagnostic build and complete wire matrix on the prior recipe.
-Those runs do not accept the newly diagnosed toolchain/input, output,
-privileged-entry, scratch-layout or deadline boundaries. Revised privileged
-probes and engine execution remain held until independent source inspection.
-The frozen adapter/supervisor lifecycle and native-intent Go patch are
-unchanged; the earlier watcher-only failure and every prior receipt remain.
-Fresh orchestrator source acceptance and exact-head PR gates remain required.
-Shipping is blocked on separate source/provenance and publication
-authority. No Avibe runtime code, config, manifest, guard, or workflow changed;
-the currently pinned/installed engine behavior is unchanged.
+Status (2026-09-09): maintained inactive source/test candidate independently
+source-accepted on Linux arm64. The second-round recipe passes 361 deny-network
+pure consumers, pinned Ruff 0.4.9 and source/document syntax checks. Following
+independent source inspection and harmless kernel probes, the lane and then
+the orchestrator each ran one complete sequential test/build/wire invocation
+of the unchanged recipe. All three Go commands, diagnostic build, full wire
+matrix and original isolation/cleanup evidence passed in both runs.
+The current identities and trust limits are recorded below; historical macOS,
+watcher-only failure and earlier-recipe receipts remain historical.
+Exact-head Codex/CI/thread gates and final assessment inspection are still
+required. Shipping additionally requires separate source-provenance and
+publication authority. No Avibe runtime code, config, manifest, guard, or
+workflow changed; the currently pinned/installed engine behavior is unchanged.
 
 Owner: lane D, Session `sesm5hv4yk5c8`;
 orchestrator: Session `sesvmgbdub2gp`.
@@ -77,8 +76,117 @@ Pure consumers cover the original entry points, substituted compiler and
 runtime/tool files, canonical path aliases, repeat test/build/wire runs,
 output collisions, partial failures, stale build selection and fake-clock
 deadline propagation. Kernel probes, complete source execution and independent
-rerun of the revised bytes are still pending, not silently inherited from
-the successful historical runs below. Publication remains separately blocked.
+rerun of these revised bytes have now passed independently; acceptance is
+bound to the unchanged complete recipe below, not inherited from the
+successful historical runs. Publication remains separately blocked.
+
+## Current second-round Linux source acceptance
+
+On 2026-09-09 the lane completed `fullphase-sequence-2m05b_t9`. After reading
+all original evidence independently, the orchestrator ran the same inspected
+driver once more as `fullphase-sequence-lhboam7u`, from
+06:21:31.223856Z to 06:22:52.369652Z. Both executions were sequential
+test -> build -> wire, with no retry or cache reset. The orchestrator then
+read all 66 original text files, including every parent/preflight/invocation
+and phase log, the complete 456-line/58,205-byte engine log, full before/after
+inputs, hashed output inventories, selected build and lifecycle evidence.
+Exit codes or summary counts alone were not the acceptance criterion.
+
+| Current accepted input | Identity |
+| --- | --- |
+| Maintained commit at execution | `7ac2386d1bc9c413ff02a4fe70778efa3d465d47` |
+| Complete 21-file recipe Git tree | `5b6d733fa51d14489bc8889be4bab9bad248a643` |
+| Tracked recipe source SHA-256 | `7cceaf71c292b525eaab3df38cff68184967da8ed797f989cc93a47f3c0db2fa` |
+| Inspected sequential driver SHA-256 | `79fca450bdde28be11958d8c53c2a9b1066f020c261d4fb83e3d639303b45670` |
+| Engine base commit | `2a6b87aca083a5bf498ac1f68a1b636c500d7aaa` |
+| Complete patched engine source SHA-256 | `c49da0017dc015030cd8f460e3288381765bf1283fc49478af657f389c265fb2` |
+| Unchanged native patch SHA-256 | `f55a3731e82837ed92d8943e97ef6d6521d21a78d3026a65c97b0950c3c494be` |
+| Frozen Avibe fixture commit / tree | `76e269c9a9dfd3a6286ce0da81b77316ca4be38a` / `27f32c68b3b9c6b1d40fcde3a034838b58ca0636` |
+| Frozen fixture archive SHA-256 | `3352c66c7b88c35ce7851a4bcfbeb3ac2e6d842199ef7dcf7c93534c0233c4cc` |
+| Complete frozen fixture source SHA-256 | `61c9616c760f9bbe4750c507073deea183064ec7f55dbacc2174eac9c474031e` |
+| Observed Go version / build target | `go version go1.26.4 linux/arm64`; `linux/arm64`, `CGO_ENABLED=0` |
+| Verified Go archive SHA-256 | `ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768` |
+| Complete extracted Go tree SHA-256 | `494cfe7e2731c4125a75ddc194acfd3902657e1da9c5e846d63960aa78081f4a` |
+| Actually selected Go executable SHA-256 | `299613d26b2fc429f9b1a8dbbc6f8952f7e0fb7b5b624c63ff0442a15233eaad` |
+| Measured frozen-lock venv tree SHA-256 | `690bc736ecde2f7129dd1da41893b8ed31d287265e7cfd670084be369442df3b` |
+| Actual verifier normalized input SHA-256 | `e65b6372725d6a2dc98ac4de8cef65eacacfcc792f97f7930734fb14911ef53b` |
+| Complete observer normalized input SHA-256 | `9b9163a9f7d224893da522dd3ef1eff3782df510740687dcb2b305d23d4000a3` |
+
+The verifier object excludes only the observer-only
+`setup_only.verified_existing_uv_archive_sha256` fact. Both objects are
+preserved: the observer object is not emitted candidate provenance, and
+neither an execution nor extraction of uv is claimed. All six observer
+before/after files share raw SHA-256
+`3d393e7d6b1ee2ae96a959356f9d9c8f07627a9ed7db19e7a48597669c268fb2`;
+all six candidate files share
+`45a70b0d0a11425bbdfa894da77a4d99838392fe8b126fcb30c4c80b583f161e`.
+The committed catalogs and engine `go.sum` retain the identities in the
+historical input table below.
+
+| Independent root-run evidence | SHA-256 |
+| --- | --- |
+| Original test parent receipt | `dda6346209fefd8e1d9c5d1de88bf752328d0f60505bfa4a32c6d8d18104ee24` |
+| Original build parent receipt | `85abcee12ab40b801178d006707172c72fec2863013589a6e4b21cee3c60a077` |
+| Original wire parent receipt | `71bcb0ce7a54bd4c1abebee601acab3de969916fa84db2497432902274a7caf0` |
+| Linux diagnostic binary, 79,233,112 bytes | `638de6ce30cfb1c0c7f36a29ff60c41361ac4dad8f86d134076cbe84f7667ea4` |
+| Selected build's candidate receipt | `e32e0133269819cd03c42e7c6c4702d24a743cc22cb740b682ac59aa93ce4f55` |
+| Selected build artifact inventory | `9c774681d31b69988b6fd8743458af068edcee9a4f745c13564e13400843e432` |
+| Complete selected build tree | `6adc585281f813ad85f87c1160d39d8a291f292790a68e94ad6a989301f7ae5a` |
+| Wire candidate receipt | `8c25dcd7e6f7cc139cf4cff2c1fd8bd1cf5ec4ab8e9005fd05a185b5ad8cf4e5` |
+| Complete 380-row policy matrix | `71b15e16af5cde8f022bb51dc41507506f6a9d93e8e75830cd927f6e8f26fa15` |
+| Complete long-identity / image records | `cb807fd737c5294cc52c101a5a2805c96b661e0e45f9c8e458b8ef15c25a0ccb` |
+| Actual frozen lifecycle records | `92ac48c264657d7de8bdb9881a9879db6161a4934baa4c1849963fc2df8cdfb0` |
+| Complete engine log | `568445ac60dc48a428b7a202c3737746b4d27daae24a132527da06690d70d278` |
+| Supplementary complete root readback bundle | `223850d5f86ff7ab93e25175062f76c3afce37f57e7d38a02cdb3c837e5ffb15` |
+
+Wire selected only its own sequence's successful build, binding the original
+parent receipt, invocation, full input identity, binary and complete artifact
+tree before and after consumption. Parent receipts remain original root-owned
+mode-0640 single-link regular files. Supplementary artifacts were read
+unprivileged through anchored, no-follow, regular, single-link, bounded reads;
+binary contents were hashed without export. They do not replace parent custody.
+
+Every phase recorded actual UID 501/GID 1000, all five capability sets zero,
+`NoNewPrivs=1`, distinct mount/network/PID namespaces, readonly original
+inputs and exclusive invocation output. Wire's selected build was readonly.
+Each preflight recorded all twelve blocked sentinel attempts: test/wire had
+both private-loopback positives and errno 111 negatives; network-none build
+had IPv4 errno 101/IPv6 errno 99 and no positives. Outside receives were
+`[0, 0]`. Full inputs, outer mounts and boot ID were unchanged. Original and
+fresh cleanup found no surviving observed process identity, private PID
+namespace member or rootfs; unavailable privileged namespace links were not
+invented from unprivileged observations.
+
+Actual records reconcile 380 unique policy cases and 378 successful captures.
+The two HTTP 400 cases are only Chat -> Responses, narrow profile, absent
+intent, stream off/on, with zero upstream requests. All 24 complete Unicode
+identities pass, including distinct long shared-prefix tails. Three sequential
+image requests of 44,051,709 / 44,051,604 / 44,051,581 bytes preserve four
+distinct images and non-ASCII text. All five frozen lifecycle assertions pass:
+invalid Source/no restart, failed replacement rollback/recovery, committed
+stream/nonstream replacement, cancellation/reuse and failed-startup cleanup.
+Child outcomes are exactly `[0, 23, 0, 0, 23]`; the two injected exit-23 failures
+are required rollback/cleanup evidence, not successful starts.
+
+Remaining trust limits are explicit. Existing guest OS/kernel/Python/util-linux
+are trusted prerequisites; a measured venv and frozen lock are not an
+archive-attested Python distribution. Copied Go caches remain mutable trusted
+setup under the locked-module/offline model; the root reused their expected
+post-lane state without resetting or claiming seed equality. Three optional
+Antigravity updater attempts were refused at private proxy `127.0.0.1:1`,
+not successful external requests. The engine-only empty-object profile remains
+a test supplement, not generated product capability. Identical diagnostic
+binary hashes across these two runs do not establish cold-cache or
+four-platform production-release reproducibility.
+
+The separate 338-product-consumer private-loopback run belongs to historical
+head `7e4412c94c54b2fc7855b9b29f9a317d1bc94f82`, not an executed final-head
+test. Its runtime Python, four runtime/release-guard/catalog/live-resolution
+test files and dependency locks remain unchanged. Finalization integrates only
+landed master and updates this assessment; it does not repoint the frozen
+fixture. The landed presentation row `MH-SRC-DELETE-002` is checked by the
+pure catalog consumer, with no peer UI edits or new scenario allocation.
+Fresh exact-head CI and Codex review remain mandatory.
 
 ## Completed source-only implementation
 
@@ -152,9 +260,11 @@ conversions retain capability-free conversion, now source-aware. Configured
 unknown rows remain `UserDefined=false`: the missing-metadata branch is an
 explicit boundary policy, not a changed registration claim.
 
-### Historical local evidence and repaired acceptance status
+### Historical macOS and earlier-recipe evidence
 
-The results below came from the earlier macOS wildcard-loopback envelope.
+This section preserves superseded validation stages; current second-round
+Linux acceptance is recorded separately above.
+The initial results came from the earlier macOS wildcard-loopback envelope.
 They are source behavior observations, not sufficient evidence of test-owned
 listener isolation or the newly enforced fixture receipt closure. The Linux
 Go/build rerun passed. Wire passed all 380 policy, 24 identity and three image
@@ -216,7 +326,12 @@ Maintained commands are the `apply`, `test`, `build`, and `wire` phases in
 committed developer-machine paths. A successful mock capture proves
 preservation/routing, not that a real provider accepts a future effort value.
 
-## Exact inputs and evidence limits
+## Historical macOS diagnostic inputs and evidence limits
+
+The Darwin binary hashes in this table belong only to the initial macOS
+diagnosis and candidate. They are not the current Linux build identities.
+The frozen engine base, patch, fixture and catalog declarations remain inputs
+to the separately recorded current acceptance.
 
 | Input | Identity |
 | --- | --- |
@@ -224,11 +339,11 @@ preservation/routing, not that a real provider accepts a future effort value.
 | Engine repository | `router-for-me/CLIProxyAPI` |
 | Packaged engine version | `v7.2.149` |
 | Engine source fetched, read, tested, and compiled | `2a6b87aca083a5bf498ac1f68a1b636c500d7aaa` |
-| Go toolchain actually used | `go1.26.4`, matching the pinned release workflow |
-| Local build target | `darwin/arm64`, `CGO_ENABLED=0`; diagnostic binary, not a release reproduction |
-| Diagnostic binary SHA-256 | `f8b3a7bfe5f8be7d48a1f60506ae579a9e37877696d9f813bf6143f5ed4b5887` |
+| Historical Go toolchain | `go1.26.4`, matching the pinned release workflow |
+| Historical local build target | `darwin/arm64`, `CGO_ENABLED=0`; diagnostic binary, not a release reproduction |
+| Historical unpatched Darwin binary SHA-256 | `f8b3a7bfe5f8be7d48a1f60506ae579a9e37877696d9f813bf6143f5ed4b5887` |
 | Inactive candidate patch SHA-256 | `f55a3731e82837ed92d8943e97ef6d6521d21a78d3026a65c97b0950c3c494be` |
-| Patched diagnostic binary SHA-256 | `54af78bd25e4bd81cf383e91337c5927506d943ddf0f5458b3a98a0789d590df` |
+| Historical patched Darwin binary SHA-256 | `54af78bd25e4bd81cf383e91337c5927506d943ddf0f5458b3a98a0789d590df` |
 | Patched 380-record HTTP matrix SHA-256 | `71b15e16af5cde8f022bb51dc41507506f6a9d93e8e75830cd927f6e8f26fa15` |
 | Long-ID and multi-image evidence SHA-256 | `cb807fd737c5294cc52c101a5a2805c96b661e0e45f9c8e458b8ef15c25a0ccb` |
 | Embedded `models.json` SHA-256 | `b19b2655a4f294605d3a347be16e67ef6ea776d70cedbd69c36629f3dbb945d9` |
@@ -522,7 +637,8 @@ The harness SHA-256 is
 The maintained entry point is now `patches/cliproxyapi/verify.py`, using
 `wire_matrix.py` and the repository's existing mock.
 
-Maintained hermetic construction (corrected Linux lane rerun passed):
+Maintained hermetic construction (revised Linux lane and independent root
+reruns passed):
 
 1. Fetch only the exact engine commit into a new task directory. Give Go its
    own HOME, TMPDIR, module/build caches, and `GOENV=off`. Use the exact
@@ -539,8 +655,9 @@ Maintained hermetic construction (corrected Linux lane rerun passed):
    health checks and owned-child stop/start remain the product's responsibility.
 3. Use the approved temporary Linux mount/network/PID/chroot envelope,
    making mounts private before binding. Keep source, frozen fixture, recipe
-   and toolchain read-only, expose only task state for writes, hide guest/user
-   homes and namespace handles, close inherited descriptors, then drop
+   and toolchain read-only, expose only invocation output and the separate
+   task caches for writes, hide guest/user homes and namespace handles,
+   close inherited descriptors, then drop
    UID/GID/groups/capabilities and set no-new-privileges. Compile with networking
    disabled; dynamic Go listeners, engine and replacement mocks run together
    on the namespace's private loopback. No veth or host network is added.
