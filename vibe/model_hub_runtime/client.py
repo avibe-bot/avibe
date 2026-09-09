@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, AsyncIterator, BinaryIO, Literal, Mapping, TypeVar, cast
 
@@ -390,6 +391,8 @@ class EngineClient:
         # completion, transport failure, or owner cancellation ends that wait.
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         response: aiohttp.ClientResponse | None = None
+        retry_after: str | None = None
+        response_received_at: datetime | None = None
         first_received = False
         model_output_started = False
         ownership_transferred = False
@@ -412,6 +415,12 @@ class EngineClient:
 
             if outcome.usage is None and wire_state is not None and wire_state.usage is not None:
                 outcome = replace(outcome, usage=wire_state.usage)
+            if response_received_at is not None:
+                outcome = replace(
+                    outcome,
+                    retry_after=retry_after,
+                    response_received_at=response_received_at,
+                )
             return completed_handle(outcome)
 
         try:
@@ -422,6 +431,10 @@ class EngineClient:
                 allow_redirects=False,
             )
             if response.status >= 300:
+                response_received_at = datetime.now(timezone.utc)
+                retry_after = response.headers.get("Retry-After")
+                if retry_after is not None and (len(retry_after) > 128 or not retry_after.isascii()):
+                    retry_after = None
                 error_body = _StreamPrelude()
                 response_deadline = time.monotonic() + self.timeout
                 try:
