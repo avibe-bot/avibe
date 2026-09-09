@@ -1020,7 +1020,8 @@
     "recovery": {
       "waiting": "Waiting to retry the model request in about {seconds}s",
       "attempting": "Retrying the model request…",
-      "pending": "Waiting for the next model attempt…"
+      "pending": "Waiting for the next model attempt…",
+      "ended": "This model request could not complete. Automatic recovery has ended. You can retry later or choose another model."
     },
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",

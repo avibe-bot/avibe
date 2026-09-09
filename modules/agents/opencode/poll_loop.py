@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -17,7 +18,7 @@ from core.message_context import build_context_session_key
 from core.message_output import terminal_output_for, terminal_turn_output
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from modules.agents.base import AgentRequest
-from modules.agents.model_hub import bind_persisted_launch
+from modules.agents.model_hub import bind_persisted_launch, launch_for_context
 from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
@@ -47,6 +48,35 @@ def _opencode_error_text(error: object) -> str:
     error_data = error.get("data", {})
     error_message = error_data.get("message", "") if isinstance(error_data, dict) else str(error_data)
     return f"{error_name} - {error_message[:500]}".strip(" -")
+
+
+def _is_model_hub_recovery_exhausted(context: MessageContext, error: object) -> bool:
+    """Recognize the Hub's closed terminal, never a retry-looking error string."""
+
+    launch = launch_for_context(context)
+    if launch is None or launch.channel != "hub" or launch.backend != "opencode":
+        return False
+    if not isinstance(error, dict) or error.get("name") != "APIError":
+        return False
+    data = error.get("data")
+    if not isinstance(data, dict) or type(data.get("statusCode")) is not int or data["statusCode"] != 424:
+        return False
+    body = data.get("responseBody")
+    # This is recognition of a small closed envelope, not a response-body limit.
+    if not isinstance(body, str) or len(body) > 4096:
+        return False
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(payload, dict) or payload.get("type") != "error":
+        return False
+    detail = payload.get("error")
+    return (
+        isinstance(detail, dict)
+        and detail.get("type") == "model_hub_recovery_exhausted"
+        and detail.get("code") == "model_hub_recovery_exhausted"
+    )
 
 
 def _message_info(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -677,6 +707,7 @@ class OpenCodePollLoop:
                     if msg_error and last_id != last_error_message_id:
                         last_error_message_id = last_id
                         diagnostic = _opencode_error_text(msg_error)
+                        hub_recovery_ended = _is_model_hub_recovery_exhausted(request.context, msg_error)
 
                         logger.warning(
                             "OpenCode message error detected for %s: %s (retry %d/%d)",
@@ -686,7 +717,10 @@ class OpenCodePollLoop:
                             error_retry_limit,
                         )
 
-                        if error_retry_count < error_retry_limit:
+                        if (
+                            error_retry_count < error_retry_limit
+                            and not hub_recovery_ended
+                        ):
                             error_retry_count += 1
                             logger.info(
                                 "Auto-retrying OpenCode session %s with 'continue' (attempt %d/%d)",
@@ -723,7 +757,11 @@ class OpenCodePollLoop:
                                 )
 
                         await self._record_model_hub_failure(request.context, diagnostic)
-                        message = self._t("error.opencodeBackendError", error=diagnostic)
+                        message = (
+                            self._t("modelHub.recovery.ended")
+                            if hub_recovery_ended
+                            else self._t("error.opencodeBackendError", error=diagnostic)
+                        )
                         await emit_backend_failure(
                             self._agent.controller,
                             request.context,
