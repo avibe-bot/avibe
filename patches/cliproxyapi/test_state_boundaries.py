@@ -294,9 +294,9 @@ def test_macos_read_policy_uses_all_original_configured_and_canonical_locations(
     original_is_file = Path.is_file
     monkeypatch.setattr(Path, "is_file", lambda path: True if str(path) == "/usr/bin/sandbox-exec" else original_is_file(path))
     context = isolation.storage_context()
-    prefix = isolation.sandbox_prefix(tmp_path / "task")
+    prefix = isolation.sandbox_prefix(tmp_path / "task", required_inputs=(tmp_path / "staged-input",))
     assert prefix[:2] == ["/usr/bin/sandbox-exec", "-p"]
-    for boundary in context.protected:
+    for boundary in (*context.homes, *context.protected):
         assert f"(deny file-read* (subpath {json.dumps(str(boundary))}))" in prefix[2]
 
 
@@ -331,11 +331,12 @@ def private_storage(tmp_path, original_storage, monkeypatch):
     output.chmod(0o750)
     cache.mkdir()
     uid, gid = os.getuid(), os.getgid()
-    inner = {"mnt": "mnt:[11]", "net": "net:[12]", "pid": "pid:[13]"}
+    inner = {"mnt": "mnt:[11]", "net": "net:[12]", "pid": "pid:[13]", "ipc": "ipc:[14]"}
     proof = {
         "uid": uid, "gid": gid, "root": str(root), "output": str(output), "state": str(cache),
         "receipt": "one.json", "namespaces": inner,
-        "outer_namespaces": {"mnt": "mnt:[1]", "net": "net:[2]", "pid": "pid:[3]"},
+        "outer_namespaces": {"mnt": "mnt:[1]", "net": "net:[2]", "pid": "pid:[3]", "ipc": "ipc:[4]"},
+        "keyring_boundary": isolation.keyring_identity(),
         "storage_context": context.record(), "storage_sha256": context.fingerprint(),
     }
     marker = tmp_path / "parent-proof.json"
@@ -344,7 +345,7 @@ def private_storage(tmp_path, original_storage, monkeypatch):
     marker_inode = marker.stat().st_ino
     real_fstat, real_readlink, real_read_text = os.fstat, os.readlink, Path.read_text
     status = {**{name: "0" * 16 for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")},
-              "NoNewPrivs": "1"}
+              "NoNewPrivs": "1", "Seccomp": "2"}
     state = SimpleNamespace(root=root, output=output, cache=cache, original=original,
                             proof=proof, marker=marker, status=status, root_owned=True)
 
@@ -446,6 +447,124 @@ def test_ambient_safe_root_claim_does_not_waive_real_storage(tmp_path, original_
     with pytest.raises(ValueError):
         isolation.isolated_environment(protected / "output")
     assert not protected.exists()
+
+
+@pytest.mark.parametrize("failure", [
+    "missing-ipc", "same-ipc", "extra-namespace", "invalid-prefix", "missing-filter", "wrong-program",
+    "wrong-abi", "extra-filter-field", "missing-seccomp", "seccomp-disabled", "seccomp-strict",
+    "missing-capability", "invalid-capability",
+])
+def test_live_private_proof_requires_exact_ipc_filter_and_privilege_binding(private_storage, failure):
+    state = private_storage
+    if failure == "missing-ipc":
+        state.proof["namespaces"].pop("ipc")
+    elif failure == "same-ipc":
+        state.proof["outer_namespaces"]["ipc"] = state.proof["namespaces"]["ipc"]
+    elif failure == "extra-namespace":
+        state.proof["namespaces"]["user"] = "user:[15]"
+    elif failure == "invalid-prefix":
+        state.proof["outer_namespaces"]["ipc"] = "mnt:[4]"
+    elif failure == "missing-filter":
+        state.proof.pop("keyring_boundary")
+    elif failure in ("wrong-program", "wrong-abi", "extra-filter-field"):
+        field = {"wrong-program": "program_sha256", "wrong-abi": "abi", "extra-filter-field": "installed"}[failure]
+        state.proof["keyring_boundary"][field] = "untrusted"
+    elif failure == "missing-seccomp":
+        state.status.pop("Seccomp")
+    elif failure in ("seccomp-disabled", "seccomp-strict"):
+        state.status["Seccomp"] = "0" if failure == "seccomp-disabled" else "1"
+    elif failure == "missing-capability":
+        state.status.pop("CapEff")
+    else:
+        state.status["CapEff"] = "not-hex"
+    state.marker.write_text(json.dumps(state.proof))
+    before = fixture.source_digest(state.root)
+    with pytest.raises(RuntimeError):
+        isolation.namespace_receipt()
+    assert fixture.source_digest(state.root) == before
+
+
+@pytest.mark.parametrize("variable", isolation.STORAGE_ENV)
+@pytest.mark.parametrize("grant", ["/usr/bin/sandbox-exec", "/dev/null", "/usr/lib/diagnostic",
+                                  "/System/Library/Frameworks/Python.framework", "/Library/Frameworks/Python.framework"])
+def test_macos_every_system_and_tool_grant_uses_same_storage_admission(
+        tmp_path, original_storage, monkeypatch, variable, grant):
+    """Synthetic path identities only; never read system configuration contents."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(Path, "resolve", lambda path, **_kw: path)
+    monkeypatch.setattr(Path, "is_file", lambda _path: True)
+    # Even a protected subtree strictly inside a system input must refuse.
+    monkeypatch.setenv(variable, grant + "/configured-state")
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("Policy refusal must precede execution."))
+    with pytest.raises(ValueError):
+        isolation.sandbox_prefix(tmp_path / "task", required_inputs=(Path(grant),))
+    assert not (tmp_path / "task").exists()
+
+
+@pytest.mark.parametrize("shape", ["home", "home-child", "parent", "protected", "alias", "home-alias",
+                                  "broad-usr", "broad-system", "broad-library", "missing-inputs", "empty-inputs"])
+def test_macos_finite_input_refusals_are_before_effects(tmp_path, original_storage, monkeypatch, shape):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    context = isolation.StorageContext.capture()
+    task = tmp_path / "task"
+    inputs = (tmp_path / "staged",)
+    if shape == "home":
+        inputs = (original_storage.home,)
+    elif shape == "home-child":
+        inputs = (original_storage.home / ".ssh",)
+    elif shape == "parent":
+        inputs = (tmp_path,)
+    elif shape == "protected":
+        inputs = (context.protected[0],)
+    elif shape == "alias":
+        alias = tmp_path / "alias"
+        alias.symlink_to(original_storage.home / "Library/Application Support/Browser")
+        inputs = (alias,)
+    elif shape == "home-alias":
+        task = original_storage.home / "looks-outside"
+        task.symlink_to(tmp_path / "task")
+    elif shape.startswith("broad-"):
+        inputs = (Path({"broad-usr": "/usr", "broad-system": "/System", "broad-library": "/Library"}[shape]),)
+    elif shape == "missing-inputs":
+        inputs = None
+    else:
+        inputs = ()
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("Refused policy executed."))
+    with pytest.raises(ValueError):
+        isolation.sandbox_prefix(task, required_inputs=inputs)
+    assert not (tmp_path / "task").exists()
+
+
+def test_macos_disjoint_unicode_inputs_reach_actual_argv_without_policy_widening(tmp_path, original_storage, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    task, inputs = tmp_path / "task-唯一", tmp_path / 'staged-"quoted"'
+    inputs.mkdir()
+    sentinel = inputs / "approved.txt"
+    sentinel.write_bytes(b"synthetic approved input")
+    for relative in (".ssh/key", ".aws/config", "Library/Application Support/Browser/profile"):
+        path = original_storage.home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic private sentinel")
+    before = fixture.source_digest(original_storage.home)
+    context = isolation.storage_context()
+    calls = []
+    def consume(command, **kwargs):
+        assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
+        policy = command[2]
+        assert "(deny network*)" in policy and "(deny file-read*)" in policy and "(deny file-write*)" in policy
+        assert "(allow file-read*)" not in policy and "(allow file-read-metadata)" not in policy
+        for boundary in (*context.homes, *context.protected):
+            assert f"(deny file-read* (subpath {json.dumps(str(boundary))}))" in policy
+            assert f"(require-not (subpath {json.dumps(str(boundary))}))" in policy
+        assert json.dumps(str(inputs)) in policy and json.dumps(str(task)) in policy
+        assert command[3:] == ["/usr/bin/false"] and kwargs["close_fds"]
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(subprocess, "run", consume)
+    subprocess.run([*isolation.sandbox_prefix(task, required_inputs=(inputs,)), "/usr/bin/false"], close_fds=True)
+    assert len(calls) == 1 and not task.exists()
+    assert fixture.source_digest(original_storage.home) == before
+    assert sentinel.read_bytes() == b"synthetic approved input"
 
 
 # Independent expected plan: changing only the planner cannot shrink coverage.

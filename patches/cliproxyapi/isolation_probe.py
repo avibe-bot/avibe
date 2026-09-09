@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 
-from isolation import namespace_receipt
+from isolation import namespace_receipt, require_kernel_evidence
 
 
 def probe_blocked_connection(network: str, host: str, port: int, kind: str) -> dict:
@@ -55,6 +55,9 @@ def probe_blocked_connection(network: str, host: str, port: int, kind: str) -> d
 
 def main() -> None:
     proof = namespace_receipt()
+    # Consume the same exact four-namespace/filter schema before any probe
+    # socket or filesystem effect. A Seccomp=2 string alone is not its identity.
+    require_kernel_evidence(proof)
     attempts = [
         probe_blocked_connection(proof["network"], host, port, kind)
         for host, port in zip(("127.0.0.1", "::1"), proof["sentinel_ports"])

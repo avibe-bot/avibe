@@ -27,20 +27,63 @@ checkout is not the maintained source of truth. See the English assessment in
 
 ## Apply and verify
 
-Use an explicitly authorized, already-running Linux development guest with
-Git, Python 3.12, util-linux (`unshare`, `mount`, `setpriv`), iproute2 and
+After separate execution acceptance, use an explicitly authorized, already-running
+native AArch64 little-endian 64-bit Linux development guest with Git, Python 3.12,
+util-linux (`unshare`, `setpriv`), iproute2 and
 transient sudo. This recipe does not provision a guest or change packages,
 services, routes or Incus resources. Its macOS `sandbox-exec` path now denies
 all egress and is only for pure-source diagnostics. Executing the pinned
 Linux arm64 Go toolchain, including compilation, requires the Linux envelope;
 there is no macOS engine-build or network-suite fallback.
 
-Current acceptance boundary: the fourth reviewed head exposed missing caller
-directory custody at the privileged writer and ambient Python/Git startup
-authority before the namespace. The orchestrator authorized only this local
-recipe/test/document correction and HOST validation. Its new bytes have no
-Linux/privileged/Go/build/wire acceptance. Do not reuse the earlier recipe
-identity or diagnostic as acceptance of these changes.
+Current acceptance boundary: **source-only candidate, not OS-accepted and not
+released for delivery or execution**. The fifth findings-bearing head,
+`10b1bdd80e20eea300c97baeda9fb120522e9a33`, has four unresolved findings:
+UID keyrings, shared IPC, privileged child filesystem custody and complete
+captured-home read isolation on macOS. Review `5158126460` is terminal with
+findings. The full circuit has sixteen originals across five reviewed heads;
+the first twelve threads are resolved. Successful seventeen-job CI, CLEAN
+merge state and historical source acceptance do not override those findings.
+
+The candidate extends the existing namespace/storage owners, not the engine
+intent patch. Its Linux libc mount/proc-FD/overmount behavior, native ABI and
+seccomp installation/inheritance/keyring denial have NOT been executed or
+accepted. IPC separation and end-to-end privileged closure still need separate
+Linux evidence. No source-only test can establish those kernel properties.
+The macOS finite input policy's supported interpreter/system startup closure
+and positive/negative enforcement also remain UNMET. Do not execute the
+commands below on these bytes without the orchestrator's later release.
+
+The current candidate, including the corrected synthetic ownership fixture,
+passed 335 focused HOST cases. The orchestrator independently passed all 1,420
+cases in the seven-file pure suite on these same candidate inputs. That run
+used a hash-admitted, readonly 23-file current-input view outside real homes,
+preserving relative layout, with files 0444 and directories 0555. A separate
+task-writable execution subtree, fresh task storage and an independent outer
+HOST policy denied network, production writes and all real-home reads/metadata.
+No home-input exception or installed-state change was needed.
+
+The lane's earlier complete run remains failed: 1,071 passed before documented
+preparation hit denied home-ancestor resolution. The earlier focused failure
+remains 120 passed/one failed on inconsistent synthetic GID metadata; the
+original collection failure exited 2 with zero tests. None is relabeled by
+the later input-layout or fixture correction. Current pure passes establish
+only intercepted source consumers, not lint/static qualification, independent
+source acceptance, OS enforcement or delivery. The maintained emitted-program
+case contains 5,140 internal decode assertions in ONE test, not result rows
+or Linux execution.
+
+Historical fourth-round source `10b1` passed 1,190 pure cases, pinned Ruff 0.4.9
+and syntax/whitespace gates, including independent root execution. Historical
+scratch mechanism proof passed 51 HOST tests and executed 5,140 assertions
+decoding its actual 88-byte program; its stdout records a digest/count and
+51-test summary, not 5,140 individual result rows. Neither validates these new
+maintained bytes. Preserve both failed macOS attempts: the lane's nested route
+returned inner 71 (`sandbox_apply: Operation not permitted`) and outer 1;
+the root's later single-profile child returned -6 with empty streams and
+outer 1. No child access assertion passed. The root's earlier incorrect 0755
+assumption was corrected to the unchanged trusted Python's actual root-owned
+0775 mode; no installed permission was changed. No new macOS proof is claimed.
 
 Historical third-round boundary: the third reviewed head exposed configured user
 storage missing from pre-write protection. The orchestrator diagnosed the
@@ -75,7 +118,17 @@ fallback. Relative, parent-traversing or malformed configured paths fail closed
 without printing their values. Home/broad roots and their ancestors remain
 forbidden; storage roots reject equality, ancestors, descendants and lexical
 or canonical aliases, including writable ancestors containing protected targets.
-macOS deny-read exclusions use the same storage set.
+The macOS diagnostic also excludes complete original passwd/effective homes
+and their lexical/canonical aliases, not merely product/configuration children.
+`sandbox_prefix(task, required_inputs=(...))` requires a finite explicit set of
+staged recipe/source/interpreter/system inputs outside those roots. Every
+grant, including sandbox-exec, `/dev/null` and system/tool inputs, goes through
+the same storage admission. Whole home/project/task ancestors and broad
+`/usr`, `/System` or `/Library` grants refuse. The generated policy permits
+only finite admitted reads and task writes, denies network, and has no global
+read/metadata or unsandboxed fallback. Policy-construction tests are not
+sandbox enforcement evidence; the startup input closure remains an execution
+gate, not a reason to widen access.
 
 Begin from the invoking user's original environment, not `env -i`, a task HOME,
 or an already-sanitized sudo shell. Set `recipe_source` to this inspected
@@ -341,15 +394,45 @@ cannot be recovered: rerunning from a sanitized shell is not supported.
 
 Before the first privileged allocation, the parent opens the canonical task
 root without following a link and admits its actual directory type, caller UID
-and exact0700 mode. That one ExitStack-owned descriptor is reused for receipts,
-runs and the exclusive rootfs allocation, with custody/name-identity rechecked
-at each consumer. A missing, replaced, unreadable, foreign or wrong-mode root
-fails closed; the parent never repairs its ownership or permissions. Cleanup
-of its empty rootfs uses the same descriptor, not a reopened replacement path.
+and exact0700 mode. That one ExitStack-owned descriptor is reused for receipts
+and runs, with custody/name-identity rechecked at each consumer. A missing,
+replaced, unreadable, foreign or wrong-mode root fails closed; the parent never
+repairs its ownership or permissions. Rootfs is an exclusive child of the
+root-owned receipts/control descriptor, not the caller-writable task directory.
+Cleanup removes only its original empty identity relative to that retained
+protected parent; replacement trees and prior evidence remain untouched.
+
+The parent pins source, fixture, recipe, toolchain, Python environment, regular
+Go archive, state, allocated output and selected build through component-relative
+no-follow/nonblocking/close-on-exec handles. Selected build custody additionally
+matches the exact output identity recorded in its prior parent-owned receipt.
+Installed system trees retain explicit trusted-system prerequisites; the four
+allowed character devices use Linux O_PATH/no-follow with exact device type/
+major/minor. Directory pins preserve identities, not mutable file contents.
+Existing fixture/toolchain/content checks remain necessary.
+
+The fixed stdlib-only trampoline authenticates its bounded unnamed parent
+handoff before recipe imports. Only budgets/isolation/namespace module bytes
+are pread from pinned regular files, checked against parent-inspected digests
+and compiled; there is no privileged pathname import or cwd bootstrap.
+The initial inspected interpreter, standard library, modules and system inputs
+remain trust prerequisites. `close_fds`/`pass_fds` carry the complete actual
+handle set through unshare; malformed handoff/import/setup paths close partial
+child acquisitions.
+
+The direct typed libc mount adapter uses retained source FDs and protected
+target-parent FD/component pairs, never mount(8) helpers. It reopens the
+protected rootfs child AFTER tmpfs mounting to obtain the overmount view.
+All target topology, metadata and marker handles are prepared before binding
+caller-writable contents. Remounts use protected parent/component targets,
+not old underlying placeholder FDs. After marker completion and readonly
+rootfs remount, fchdir(new-view), chroot(".") and chdir("/") precede closure of
+all host/setup/input handles. These are source contracts; proc-FD binds,
+overmount views and installed-kernel behavior remain unexecuted premises.
 
 Root adds its own passwd-home protection, then carries the stable context only
 through the existing unnamed parent control and root-owned private proof.
-Child consumers reuse it only after verifying all three namespaces, dropped
+Child consumers reuse it only after verifying all four namespaces (mnt/net/pid/ipc), dropped
 privilege, context digest and exclusive invocation/output identity. Generated
 task HOME/XDG/cache does not redefine production. No public skip/allow flag,
 environment marker or caller-supplied safe-root dictionary grants an exception.
@@ -365,10 +448,25 @@ without capabilities or supplementary groups, with no-new-privileges and no
 inherited supervisor descriptors. PID 1 exit destroys remaining descendants.
 There are no public internal re-entry flags: the public CLI always invokes
 util-linux `unshare`. A fixed isolated-Python trampoline consumes an unlinked
-root-owned control descriptor, closes it, and compares all three actual
+root-owned control descriptor, closes it, and compares all four actual
 kernel namespace identities with the parent-captured identities before the
 first mount or interface operation. Caller-supplied dictionaries cannot select
 the private path. This protects the approved CLI, not arbitrary root Python.
+
+The candidate's finite keyring boundary is the inspected 11-instruction,
+88-byte classic-BPF program with SHA256
+`196f5affb55a9d30299561255adb1027f9a985aba9762b9c66624ed5cded604d`.
+It checks native `AUDIT_ARCH_AARCH64=0xc00000b7`, kills foreign architectures
+and unsigned syscall numbers at or above `0x40000000`, returns EPERM for
+add_key/request_key/keyctl (217/218/219), and permits other native low numbers.
+It is not a general kernel sandbox or an anonymous-session-keyring claim.
+The typed ctypes/prctl adapter requires NNP installation, filter installation,
+NNP=1 and filter-mode=2 readback, in order. Only successful installation adds
+the exact ABI/program identity to the immutable marker, before both dropped
+preflight and candidate. Live consumers require four complete distinct
+namespace IDs, zero capabilities, NNP=1, Seccomp=2 AND the trusted exact marker
+binding; Seccomp=2 alone does not identify a filter. Real fork/exec inheritance,
+harmless task-owned-key denial and IPC isolation remain future execution gates.
 
 Each parent receipt name owns exactly one fresh `runs/<receipt-name>/`
 directory for the invocation's logs, HOME/temp, binary and candidate records.

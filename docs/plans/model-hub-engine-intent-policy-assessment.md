@@ -1,7 +1,7 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: inactive, unshipped source/test candidate, under the fourth-head
-pre-envelope authority correction. The orchestrator accepted the earlier
+Status: inactive, unshipped **source-only fifth-head candidate**, not accepted
+for Linux/macOS execution or PR delivery. The orchestrator accepted the earlier
 configured-storage/preparation and nested private-context functionality only
 for its exact historical snapshot: 1,076 pure tests, one bounded Linux context
 diagnostic and independent native original-file readback. Those results and
@@ -51,7 +51,141 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
-## Fourth reviewed-head pre-envelope authority correction — local only
+## Fifth reviewed-head candidate — pure HOST evidence; OS gates UNMET
+
+The September 10, 2026 Asia/Shanghai circuit decision permits one local
+candidate directly after `10b1bdd80e20eea300c97baeda9fb120522e9a33`, not
+delivery or execution acceptance. The complete pre-edit nine-collection
+inventory equals the independently consumed root snapshot
+`root-1961-snapshot-10b1bdd80e20-20260909T191307308457Z.json` (SHA256
+`3140fa9a88e8eef0dc6fc7d0e8fa1af1290d35a8877105df33291e26f681dfdd`).
+There are five findings-bearing heads, sixteen original findings, seventeen
+review envelopes, twenty-eight inline objects, four issue comments and sixteen
+complete threads: twelve resolved, four unresolved. Twelve empty owner
+envelopes are not findings or clean passes. Review `5158126460` is terminal
+with findings on `10b1`; no pending review or genuine exact-head clean verdict
+exists. Sole lint `34380925809`, attempt 1, and all seventeen expected jobs
+succeeded. OPEN/non-draft/CLEAN does not establish readiness.
+
+| Current original | Thread | Boundary |
+| --- | --- | --- |
+| 3971583274 | PRRT_kwDOPbFPYs6gxv_t | Invoking UID's kernel keyrings |
+| 3971583287 | PRRT_kwDOPbFPYs6gxv_2 | Shared host IPC namespace |
+| 3971583298 | PRRT_kwDOPbFPYs6gxv_6 | Child bind-source and last privileged-effect custody |
+| 3971583305 | PRRT_kwDOPbFPYs6gxwAA | Complete captured-home macOS read isolation |
+
+These are namespace/storage owner corrections, not changes to prepared native
+intent, explicit disable, source-aware unknown conversion, xAI catalog-filter
+removal, Kimi native-object distinction or routing/auth/registration authority.
+The native patch, exact engine base, pins, fixture/apply implementations,
+budgets and execution-input/wire consumers remain frozen.
+
+The candidate uses the exact inspected native Linux AArch64 little-endian64
+11-instruction/88-byte BPF program (SHA256
+`196f5affb55a9d30299561255adb1027f9a985aba9762b9c66624ed5cded604d`).
+It rejects foreign architecture/high-number compatibility paths, denies only
+add_key/request_key/keyctl with EPERM and allows other native low syscalls.
+A typed stdlib ctypes/prctl adapter retains the actual program/array through
+NNP installation, filter installation and ordered NNP1/Seccomp2 readback.
+Success alone supplies the immutable marker's exact ABI/program identity.
+The marker precedes readonly-remount/chroot and both dropped preflight and
+candidate; all actual evidence consumers require live zero capabilities,
+NNP1/Seccomp2 and complete mnt/net/pid/ipc identities bound to that marker.
+An anonymous session keyring or Seccomp2 by itself is not accepted proof.
+
+One parent ExitStack, the existing unnamed handoff and private supervisor
+retain custody through reaping. Names after admission are diagnostic/mount
+labels, not resource reselection:
+
+| Resource | Admission and retained consumer |
+| --- | --- |
+| Caller root | Canonical original-storage admission, caller UID/directory/exact0700, one no-follow descriptor; rechecked before parent allocations/launch |
+| Source, frozen fixture, inspected recipe, toolchain, Python environment | Component-relative no-follow/nonblocking/close-on-exec directory pins, admitted dev/ino/type/uid/mode; direct libc bind from source FD, readonly/nosuid/nodev |
+| Go archive | Same component walk, regular-file pin, readonly FD bind; never treat a directory/device as an archive |
+| Writable state | Caller-UID directory pin and original-storage admission; writable/nosuid/nodev bind |
+| Exclusive output | Actual allocate_output descriptor retained; caller ownership/mode and parent receipt output identity; writable bind |
+| Selected prior build | Pinned beneath parent-owned runs; exact identity matches the successful prior parent-owned receipt; readonly bind |
+| Rootfs/control | Exclusive rootfs child of retained root-owned receipts/control FD; after tmpfs, reopen that protected child as the distinct overmount view |
+| Target topology/metadata/marker | Create and retain protected target-parent FDs and metadata files before any caller bind; remount via parent/component; marker written only after filter success |
+| Bootstrap modules | Authenticate bounded unnamed root-owned control first; pread only pinned budgets/isolation/namespace, verify all actual bytes against inspected digests before any module execution |
+| System trees and four devices | Explicit installed-system trust; finite pinned system directories/aliases; null/zero/random/urandom use Linux O_PATH/no-follow and exact character-device identities |
+| Chroot/closure/cleanup | fchdir(new overmount view), chroot("."), chdir("/"); close host/input/setup FDs before preflight, unnamed proof before candidate; parent removes only original empty rootfs identity relative to retained control FD |
+
+Pinning a directory does not freeze mutable contents. Fixture/toolchain and
+inspected recipe/interpreter/standard-library/system content prerequisites
+remain separate. The candidate uses an explicitly typed direct libc mount
+adapter, not mount(8) configuration/helpers. HOST target strings and fake view
+replacement are not evidence of actual Linux proc-FD bind or remount semantics.
+
+The macOS helper remains a finite pure-source diagnostic API. It requires
+explicit staged task/recipe/source/interpreter/system inputs, rejects every
+home/protected/alias overlap and broad home/project/system ancestor, and
+applies the same StorageContext admission to EVERY grant, including tools and
+system inputs. Its policy denies network, global reads and production writes;
+only admitted finite reads and task writes are granted. There is no global
+metadata permission, credential-name denylist, arbitrary fragment or
+unsandboxed fallback. The exact startup input closure is still unmeasured.
+
+After the fixture's per-inode synthetic ownership correction, the lane passed
+335 focused HOST cases (926 deselected). The orchestrator independently passed
+the complete seven-file pure suite: 1,420 passed in 25.07 seconds, exit 0,
+empty stderr and no skips, warnings or deselections. All 2,410 maintained
+entries and all 23 input-view files were unchanged before/after that run.
+It consumed hash-admitted CURRENT bytes in a readonly relative layout outside
+real homes: files 0444, directories 0555, separate task-writable execution and
+fresh HOME/XDG/product/temp roots. The independent outer HOST policy denied
+network, production writes and all real-home reads/metadata, without home-input
+exceptions. This admitted layout let strict README resolution reach its
+intended storage-refusal assertions without changing production or test code.
+
+These tests consume emitted bytes, intercepted typed libc adapters,
+component/ancestor replacement, old/new overmount ordering, verified bootstrap
+bytes, finite unprivileged HOST FD/import children, marker/probe/parent
+receipts and synthetic macOS policy refusal. The emitted-program case's
+5,140 decode assertions are internal to ONE test, not separate result rows
+or Linux execution. Pure passes are not lint/static qualification, independent
+source acceptance, OS enforcement or delivery.
+
+Earlier lane originals remain failures: the complete run exited 1 with
+1,071 passed/one failed when README strict resolution hit denied home ancestors
+before the intended refusal; the prior focused run exited 1 with 120 passed/
+one failed/1,027 deselected on inconsistent synthetic GID metadata; the initial
+collection attempt exited 2 with zero tests. Their commands and streams remain
+unmodified. No Linux syscall, proc, mount, namespace, keyring, IPC, sudo/chroot,
+engine, network listener or candidate macOS sandbox execution is claimed.
+
+Historical fourth-round `10b1` source acceptance included 1,190 HOST cases,
+pinned Ruff 0.4.9 and static/whitespace checks; root independently ran the same
+1,190 without skips/warnings. Historical scratch mechanism evidence is 51
+passing HOST tests and 5,140 executed decode assertions. Its original stdout
+contains program hex/digest, the count and 51-test summary, NOT 5,140 individual
+result records. Neither result validates this candidate's new bytes.
+
+Both macOS mechanism attempts remain failures. The lane's nested command
+returned inner 71, empty stdout and `sandbox-exec: sandbox_apply: Operation
+not permitted`, outer 1; only five synthetic admission refusals ran. Root's
+separate single-profile child returned -6 with empty stdout/stderr and outer 1.
+All positive/negative child read/write assertions are UNMET. Root's earlier
+extra non-group-writable interpreter assumption failed preparation; the later
+identity correction retained the same root-owned0775 Python and access ceiling,
+without changing installed modes. No failure is relabeled or rerun here.
+
+Remaining execution gates are native ABI/kernel filter support, actual
+fork/exec inheritance and harmless task-owned-key denial, IPC identity/resource
+separation, proc-FD mount/overmount/remount/chroot/cleanup continuity, and the
+macOS startup closure plus enforced synthetic positive/negative access.
+No new driver, synthetic kernel object, dependency or installed-state change
+is prepared by this candidate. Independent root source inspection is still
+required, and root alone can release later OS work or delivery.
+
+All historical Linux/fullphase/Go/338/macOS/uv/watcher, raw-versus-tracked/cache,
+observer-versus-verifier and publication/four-platform qualifications below
+remain attached to their original bytes. OLD Watch raw outer transport remains
+permanently UNMET. The stale twelve-original root gate is not invoked or
+updated here. Original lane/root forever Watches and distinct cursor lineages
+remain enabled until a later explicit post-merge removal decision.
+
+## Historical fourth reviewed-head pre-envelope authority correction
 
 The complete review inventory at the recorded scope decision contains four
 findings-bearing heads and twelve original findings: eight resolved historical

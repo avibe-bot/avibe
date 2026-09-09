@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
+import ctypes
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
 import socket
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,7 +22,26 @@ import pytest
 
 import namespace
 from budgets import PHASES
-from isolation import STORAGE_ENV, StorageContext, validate_state_root
+from isolation import (
+    CAPABILITY_FIELDS, NAMESPACE_NAMES, STORAGE_ENV, StorageContext,
+    keyring_identity, require_namespaces, validate_state_root,
+)
+
+
+def kernel_proof():
+    return {
+        "outer_namespaces": {name: f"{name}:[{index + 1}]" for index, name in enumerate(NAMESPACE_NAMES)},
+        "namespaces": {name: f"{name}:[{index + 11}]" for index, name in enumerate(NAMESPACE_NAMES)},
+        "keyring_boundary": keyring_identity(),
+        "process_status": {**dict.fromkeys(CAPABILITY_FIELDS, "0000000000000000"),
+                           "NoNewPrivs": "1", "Seccomp": "2"},
+    }
+
+
+def stat_fields(info, **changes):
+    """Preserve extended fields (especially st_rdev), unlike stat_result(tuple)."""
+    return SimpleNamespace(**{**{name: getattr(info, name) for name in dir(info) if name.startswith("st_")},
+                              **changes})
 
 
 @pytest.fixture
@@ -31,12 +55,16 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         paths[name].mkdir()
     paths["go_archive"] = root / "go.tar.gz"
     paths["go_archive"].write_bytes(b"test-archive-not-executed")
+    for name in ("budgets", "isolation", "namespace"):
+        (paths["recipe"] / (name + ".py")).write_bytes(
+            (Path(namespace.__file__).parent / (name + ".py")).read_bytes(),
+        )
     sentinel = tmp_path / "outside-child-state"
     sentinel.write_bytes(b"outside-task-sentinel-private-bytes")
     context = argparse.Namespace(
         root=root, sentinel=sentinel, paths=paths, servers=[], candidate=None,
         candidate_calls=0, launched=False, candidate_started=False,
-        probe_result={"isolation_probe": "pass", "original_preflight": True},
+        probe_result={"isolation_probe": "pass", "original_preflight": True, **kernel_proof()},
         probe_exit=0, probe_bytes=None, closed_channel=False, receipt="envelope.json",
         storage_reader=namespace.sudo_storage_context,
     )
@@ -52,21 +80,66 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Receipt/lifecycle cases receive the already-admitted immutable context.
     monkeypatch.setattr(namespace, "sudo_storage_context", lambda uid, expected: storage)
     # No sudo, mount, actual process, socket, privilege or ownership change.
-    real_fstat = os.fstat
+    real_stat, real_lstat, real_fstat = os.stat, os.lstat, os.fstat
+    ownership, ownership_effects, admitted_inodes = {}, [], set()
 
-    def simulated_ownership(fd):
-        info = list(real_fstat(fd))
-        # Simulate setup's fchown, including hosts whose scratch inherits gid 0.
-        info[5] = int(os.environ["SUDO_GID"])
-        return os.stat_result(info)
+    def admit_ownership_target(path):
+        assert path.is_relative_to(tmp_path) and path == path.resolve(strict=True)
+        info = real_lstat(path)
+        assert stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)
+        admitted_inodes.add((info.st_dev, info.st_ino))
 
-    def no_chown(*_args):
+    for path in (root, *paths.values(), sentinel):
+        admit_ownership_target(path)
+
+    def project(info):
+        changed = ownership.get((info.st_dev, info.st_ino))
+        return stat_fields(info, **changed) if changed is not None else info
+
+    def modeled_fchown(fd, uid, gid):
         assert not context.candidate_started, "Ownership change after candidate execution."
+        info = real_fstat(fd)
+        key = info.st_dev, info.st_ino
+        # The four production allocation targets are the only implicit
+        # additions. Preexisting test prerequisites are admitted explicitly.
+        # No recursive scan, proc-FD lookup, or real ownership change.
+        if key not in admitted_inodes:
+            for path in (root / "receipts", root / "runs",
+                         root / "receipts" / context.receipt, root / "runs" / context.receipt):
+                try:
+                    target = real_lstat(path)
+                except FileNotFoundError:
+                    continue
+                if (target.st_dev, target.st_ino) == key:
+                    admit_ownership_target(path)
+        assert key in admitted_inodes, "Ownership effect outside task fixture."
+        current = project(info)
+        ownership[key] = {
+            "st_uid": current.st_uid if uid == -1 else uid,
+            "st_gid": current.st_gid if gid == -1 else gid,
+        }
+        ownership_effects.append((key, uid, gid))
 
-    monkeypatch.setattr(os, "fstat", simulated_ownership)
-    monkeypatch.setattr(os, "fchown", no_chown)
+    def parent_owned(path):
+        """Explicit already-valid prerequisite, never repair by actual main."""
+        admit_ownership_target(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            os.fchown(fd, -1, int(os.environ["SUDO_GID"]))
+        finally:
+            os.close(fd)
+
+    context.ownership = ownership
+    context.ownership_effects = ownership_effects
+    context.parent_owned = parent_owned
+    context.raw_stat, context.raw_lstat, context.raw_fstat = real_stat, real_lstat, real_fstat
+    monkeypatch.setattr(os, "stat", lambda *a, **kw: project(real_stat(*a, **kw)))
+    monkeypatch.setattr(os, "lstat", lambda *a, **kw: project(real_lstat(*a, **kw)))
+    monkeypatch.setattr(os, "fstat", lambda fd: project(real_fstat(fd)))
+    monkeypatch.setattr(os, "fchown", modeled_fchown)
     monkeypatch.setattr(os, "chown", lambda *_args: pytest.fail("Path-based chown is forbidden."))
-    monkeypatch.setattr(namespace, "namespace_ids", lambda: {"net": "outer-net", "mnt": "outer-mnt", "pid": "outer-pid"})
+    monkeypatch.setattr(namespace, "namespace_ids", lambda: kernel_proof()["outer_namespaces"])
+    monkeypatch.setattr(namespace, "pin_system_resources", lambda _stack: ([], {}))
 
     class FakeSentinel:
         def __init__(self, family):
@@ -85,21 +158,27 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         assert kwargs["close_fds"] is True
         if command[0] == "/usr/bin/unshare":
             context.launched = True
-            assert "--kill-child=KILL" in command and kwargs["timeout"] == PHASES["test"].namespace_seconds
+            assert "--kill-child=KILL" in command and kwargs["timeout"] == PHASES[getattr(context, "phase", "test")].namespace_seconds
             assert "-I" in command and command[command.index("-c") + 1] == namespace.CHILD_TRAMPOLINE
             assert "--parent-namespaces" not in command and "--proof-fd" not in command
-            assert len(kwargs["pass_fds"]) == 2
-            parent_fd, control_fd = kwargs["pass_fds"]
-            assert str(control_fd) == command[-1]
+            assert "--ipc" in command
+            control_fd = int(command[-1])
+            control = json.loads(os.pread(control_fd, 65536, 0))
+            parent_fd = control["proof_fd"]
+            expected = {parent_fd, control_fd, *(record["fd"] for record in control["handles"].values()),
+                        *(record["fd"] for record in control["bootstrap"].values())}
+            assert set(kwargs["pass_fds"]) == expected
             assert os.fstat(parent_fd).st_nlink == 0
             assert os.fstat(control_fd).st_nlink == 0
-            control = json.loads(os.pread(control_fd, 65536, 0))
             assert control["outer_namespaces"] == namespace.namespace_ids()
             assert control["output"] == str(root / "runs" / context.receipt)
+            if getattr(context, "launch", None):
+                return context.launch(command, control, kwargs)
             child_fd = os.dup(parent_fd)
             context.child_fd = child_fd
             inner = argparse.Namespace(
                 **paths, proof_fd=child_fd, command=["candidate-test"], receipt=context.receipt, phase="test",
+                outer_namespaces=control["outer_namespaces"],
             )
             result = namespace.run_candidate(inner, ["mock-setpriv"], {})
             return subprocess.CompletedProcess(command, result)
@@ -137,10 +216,135 @@ def read_receipt(envelope) -> dict:
 
 def assert_cleanup(envelope) -> None:
     assert envelope.servers and all(server.closed for server in envelope.servers)
-    assert not list(envelope.root.glob("rootfs-*"))
+    assert not list((envelope.root / "receipts").glob("rootfs-*"))
     assert not list((envelope.root / "receipts").glob("*.preflight"))
     assert not list((envelope.root / "receipts").glob("*.control"))
     assert envelope.sentinel.read_bytes() == b"outside-task-sentinel-private-bytes"
+
+
+def test_envelope_ownership_effect_is_consistent_and_preserves_raw_metadata(envelope):
+    source = envelope.paths["source"]
+    raw = envelope.raw_lstat(source)
+    gid = raw.st_gid + 1
+    assert gid > 0 and gid != raw.st_gid
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    root_fd = os.open(envelope.root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert source.stat() == source.lstat() == os.fstat(source_fd) == raw
+        assert envelope.ownership == {}
+        os.fchown(source_fd, -1, gid)
+        for info in (source.stat(), source.lstat(), os.stat(source_fd),
+                     os.stat("source", dir_fd=root_fd), os.lstat("source", dir_fd=root_fd),
+                     os.stat("source", dir_fd=root_fd, follow_symlinks=False), os.fstat(source_fd)):
+            assert info.st_uid == raw.st_uid and info.st_gid == gid
+            for name in (name for name in dir(raw) if name.startswith("st_") and name != "st_gid"):
+                assert getattr(info, name) == getattr(raw, name)
+        assert envelope.raw_stat(source) == envelope.raw_lstat(source) == envelope.raw_fstat(source_fd) == raw
+        os.fchown(source_fd, raw.st_uid + 10000, -1)
+        assert source.stat().st_uid == raw.st_uid + 10000 and os.fstat(source_fd).st_gid == gid
+        previous = namespace.descriptor_identity(source.stat())
+        os.fchown(source_fd, -1, -1)
+        assert namespace.descriptor_identity(os.fstat(source_fd)) == previous
+        assert envelope.raw_lstat(source) == raw
+        before = dict(envelope.ownership)
+        envelope.candidate_started = True
+        with pytest.raises(AssertionError, match="after candidate"):
+            os.fchown(source_fd, -1, gid + 1)
+        assert envelope.ownership == before
+        envelope.candidate_started = False
+    finally:
+        os.close(source_fd)
+        os.close(root_fd)
+    with pytest.raises(OSError) as closed:
+        os.fstat(source_fd)
+    assert closed.value.errno == errno.EBADF
+    with pytest.raises(OSError) as closed:
+        os.fchown(source_fd, -1, gid)
+    assert closed.value.errno == errno.EBADF
+
+
+def test_envelope_ownership_follows_inode_not_names_aliases_or_reused_fds(envelope, tmp_path):
+    source = envelope.paths["source"]
+    saved = source.with_name("preserved-source")
+    raw = envelope.raw_lstat(source)
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    root_fd = os.open(envelope.root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fchown(source_fd, -1, raw.st_gid + 1)
+        source.rename(saved)
+        source.mkdir()
+        replacement = envelope.raw_lstat(source)
+        assert replacement.st_ino != raw.st_ino
+        assert source.stat() == replacement
+        assert saved.stat().st_gid == os.fstat(source_fd).st_gid == raw.st_gid + 1
+        alias = envelope.root / "source-alias"
+        alias.symlink_to(saved)
+        alias_raw = envelope.raw_lstat(alias)
+        assert alias.lstat() == os.lstat(alias) == alias_raw
+        assert os.stat(alias, follow_symlinks=False) == alias_raw
+        assert os.stat("source-alias", dir_fd=root_fd, follow_symlinks=False) == alias_raw
+        assert alias.stat().st_gid == os.stat("source-alias", dir_fd=root_fd).st_gid == raw.st_gid + 1
+        assert envelope.raw_lstat(saved).st_gid == raw.st_gid
+        with pytest.raises(FileNotFoundError):
+            os.stat("absent", dir_fd=root_fd, follow_symlinks=False)
+        with pytest.raises(FileNotFoundError):
+            os.lstat("absent", dir_fd=root_fd)
+        replacement_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.dup2(replacement_fd, source_fd)
+            assert os.fstat(source_fd) == replacement
+            assert saved.stat().st_gid == raw.st_gid + 1
+        finally:
+            os.close(replacement_fd)
+        # An unnamed file is not an admitted linked fixture object, even when
+        # its numeric FD happens to be one that previously carried an effect.
+        with tempfile.TemporaryFile(dir=tmp_path) as unnamed:
+            before = dict(envelope.ownership)
+            with pytest.raises(AssertionError, match="outside task fixture"):
+                os.fchown(unnamed.fileno(), -1, raw.st_gid + 2)
+            assert envelope.ownership == before
+    finally:
+        os.close(source_fd)
+        os.close(root_fd)
+
+
+@pytest.mark.parametrize("field", ["dev", "ino", "mode", "uid", "gid", "rdev"])
+def test_actual_parent_rejects_single_input_identity_drift_before_allocation(envelope, monkeypatch, field):
+    source = envelope.paths["source"]
+    before = namespace.descriptor_identity(source.lstat())
+    raw = envelope.raw_lstat(source)
+    original_open, original_fstat = os.open, os.fstat
+    reached = []
+
+    def opening(path, *args, **kwargs):
+        fd = original_open(path, *args, **kwargs)
+        if path == "source":
+            reached.append(fd)
+            if field in ("uid", "gid"):
+                os.fchown(fd, before["uid"] + 1 if field == "uid" else -1,
+                          before["gid"] + 1 if field == "gid" else -1)
+        return fd
+
+    def changed(fd):
+        info = original_fstat(fd)
+        if fd in reached and field not in ("uid", "gid"):
+            return stat_fields(info, **{"st_" + field: before[field] + (0o010 if field == "mode" else 1)})
+        return info
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "fstat", changed)
+    monkeypatch.setattr(namespace, "open_receipts", lambda *_: pytest.fail("Allocation after input identity drift."))
+    with pytest.raises(ValueError, match="Pinned resource changed after admission"):
+        namespace.main()
+    assert len(reached) == 1 and not envelope.launched and not envelope.servers
+    assert not (envelope.root / "receipts").exists() and not (envelope.root / "runs").exists()
+    assert envelope.raw_lstat(source) == raw
+    for fd in reached:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    if field in ("uid", "gid"):
+        after = namespace.descriptor_identity(source.lstat())
+        assert {name for name in before if after[name] != before[name]} == {field}
 
 
 @pytest.mark.parametrize("artifact", ["symlinks", "hardlinks", "directories", "fifos", "forged-files"])
@@ -185,7 +389,7 @@ def test_later_probe_tampering_cannot_replace_preflight(envelope) -> None:
     with pytest.raises(SystemExit):
         namespace.main()
     receipt = read_receipt(envelope)
-    assert receipt["probe"] == {"isolation_probe": "pass", "original_preflight": True}
+    assert receipt["probe"] == {"isolation_probe": "pass", "original_preflight": True, **kernel_proof()}
     assert receipt["preflight_custody"] == "unnamed-supervisor-fd-closed-before-candidate"
     assert_cleanup(envelope)
 
@@ -195,6 +399,7 @@ def test_preexisting_terminal_receipt_collision_preserves_evidence(envelope, kin
     directory = envelope.root / "receipts"
     directory.mkdir(mode=0o750)
     directory.chmod(0o750)
+    envelope.parent_owned(directory)
     path = directory / envelope.receipt
     if kind == "regular":
         path.write_bytes(b"previous evidence")
@@ -228,6 +433,7 @@ def test_preexisting_probe_channel_collision_is_not_unlinked(envelope) -> None:
     directory = envelope.root / "receipts"
     directory.mkdir(mode=0o750)
     directory.chmod(0o750)
+    envelope.parent_owned(directory)
     path = directory / (envelope.receipt + ".preflight")
     path.symlink_to(envelope.sentinel)
     before = path.lstat()
@@ -241,10 +447,55 @@ def test_preexisting_writable_receipt_directory_is_rejected(envelope) -> None:
     directory = envelope.root / "receipts"
     directory.mkdir()
     directory.chmod(0o770)
+    envelope.parent_owned(directory)
     with pytest.raises(RuntimeError, match="ownership or permissions"):
         namespace.main()
     assert not envelope.launched and list(directory.iterdir()) == []
     assert directory.stat().st_mode & 0o777 == 0o770
+
+
+@pytest.mark.parametrize("collection", ["receipts", "runs"])
+@pytest.mark.parametrize("failure", ["uid", "gid", "mode", "alias"])
+def test_preexisting_collection_refuses_its_own_defect_without_ownership_repair(envelope, collection, failure):
+    directory = envelope.root / collection
+    directory.mkdir(mode=0o750)
+    directory.chmod(0o750)
+    envelope.parent_owned(directory)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if failure in ("uid", "gid"):
+            info = os.fstat(fd)
+            os.fchown(fd, info.st_uid + 10000 if failure == "uid" else -1,
+                      info.st_gid + 1 if failure == "gid" else -1)
+        elif failure == "mode":
+            directory.chmod(0o770)
+        else:
+            preserved = directory.with_name(collection + "-preserved")
+            directory.rename(preserved)
+            directory.symlink_to(preserved, target_is_directory=True)
+        key = envelope.raw_fstat(fd).st_dev, envelope.raw_fstat(fd).st_ino
+        before = namespace.descriptor_identity(os.fstat(fd))
+        effects = list(envelope.ownership_effects)
+        if failure == "alias" and collection == "runs":
+            with pytest.raises(ValueError, match="Environment directory escapes"):
+                namespace.main()
+            assert not (envelope.root / "receipts").exists()
+        elif failure == "alias":
+            with pytest.raises(OSError):
+                namespace.main()
+        else:
+            message = "ownership or permissions" if collection == "receipts" else "Run collection"
+            with pytest.raises(RuntimeError, match=message):
+                namespace.main()
+        assert namespace.descriptor_identity(os.fstat(fd)) == before
+        assert [effect for effect in envelope.ownership_effects if effect[0] == key] == [
+            effect for effect in effects if effect[0] == key
+        ]
+        assert not envelope.launched and not envelope.servers
+        if collection == "runs" and failure != "alias":
+            assert read_receipt(envelope)["status"] == "failed"
+    finally:
+        os.close(fd)
 
 
 @pytest.mark.parametrize("failure", ["candidate-exit", "timeout", "probe-exit", "malformed-probe"])
@@ -333,33 +584,54 @@ def test_all_kernel_identities_required_before_first_mutation(monkeypatch, outer
 
 
 def test_private_handoff_is_closed_before_inside(tmp_path, monkeypatch):
+    import builtins
+
     with tempfile.TemporaryFile(dir=tmp_path) as control:
         values = {name: str(tmp_path / name) for name in (
             "root", "rootfs", "source", "fixture", "state", "recipe", "toolchain",
             "python_env", "go_archive", "output",
         )}
-        outer = {"mnt": "mnt:[11]", "net": "net:[12]", "pid": "pid:[13]"}
+        outer = kernel_proof()["outer_namespaces"]
         values.update(build=None, outer_namespaces=outer)
-        control.write(json.dumps(values).encode())
-        control.seek(0)
         fd = os.dup(control.fileno())
         original = os.fstat
 
         def root_owned(number):
-            info = list(original(number))
-            if number == fd:
-                info[4] = 0
-            return os.stat_result(info)
+            return stat_fields(original(number), st_uid=0) if number == fd else original(number)
 
         monkeypatch.setattr(os, "fstat", root_owned)
 
-        def consume(args, actual_outer):
+        def consume(body):
             with pytest.raises(OSError):
                 os.fstat(fd)
-            assert actual_outer == outer and args.root == Path(values["root"])
+            for record in values["bootstrap"].values():
+                with pytest.raises(OSError):
+                    os.fstat(record["fd"])
+            namespace.child_from_control(body)
 
-        monkeypatch.setattr(namespace, "inside", consume)
-        namespace.child_from_control(fd)
+        observed = []
+        monkeypatch.setattr(namespace, "inside", lambda args, ids: observed.append((args.root, ids)))
+        monkeypatch.setattr(builtins, "_bootstrap_consumer", consume, raising=False)
+        with ExitStack() as stack:
+            bootstrap = {}
+            for name in ("budgets", "isolation", "namespace"):
+                path = tmp_path / (name + ".py")
+                path.write_text("from builtins import _bootstrap_consumer as child_from_control\n"
+                                if name == "namespace" else "# finite inspected test module\n")
+                record = namespace.pin_beneath(
+                    stack, _directory_fd(stack, tmp_path), Path(path.name), kind="file",
+                )
+                bootstrap[name] = {"fd": os.dup(record["fd"]), "identity": record["identity"],
+                                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            values["bootstrap"] = bootstrap
+            control.write(json.dumps(values).encode())
+            control.flush()
+            control.seek(0)
+            monkeypatch.setattr(sys, "argv", ["-c", str(fd)])
+            for name in bootstrap:
+                monkeypatch.setitem(sys.modules, name, sys.modules[name])
+            exec(compile(namespace.CHILD_TRAMPOLINE, "<actual fixed trampoline>", "exec"), {})
+        assert observed == [(Path(values["root"]), outer)]
 
 
 def test_named_handoff_is_rejected_before_inside(tmp_path, monkeypatch):
@@ -367,9 +639,15 @@ def test_named_handoff_is_rejected_before_inside(tmp_path, monkeypatch):
     path.write_bytes(b"{}")
     monkeypatch.setattr(namespace, "inside", lambda *_: pytest.fail("Untrusted handoff reached setup."))
     fd = os.open(path, os.O_RDONLY)
+    monkeypatch.setattr(sys, "argv", ["-c", str(fd)])
+    closures = []
+    monkeypatch.setattr(os, "closerange", lambda start, end: closures.append((start, end)))
     with pytest.raises(RuntimeError, match="parent handoff"):
-        namespace.child_from_control(fd)
+        exec(compile(namespace.CHILD_TRAMPOLINE, "<actual fixed trampoline>", "exec"), {})
+    with pytest.raises(OSError):
+        os.fstat(fd)
     assert path.read_bytes() == b"{}"
+    assert closures and closures[0][0] == 3
 
 
 def test_parent_deadline_failure_has_receipt_and_cleanup(envelope, monkeypatch):
@@ -391,6 +669,7 @@ def test_orphan_output_collision_preserves_all_previous_files(envelope):
     runs = envelope.root / "runs"
     runs.mkdir(mode=0o750)
     runs.chmod(0o750)
+    envelope.parent_owned(runs)
     output = runs / envelope.receipt
     output.mkdir()
     prior = output / "prior-evidence"
@@ -407,6 +686,7 @@ def test_prior_build_requires_real_matching_parent_receipt(envelope, kind):
     directory = envelope.root / "receipts"
     directory.mkdir(mode=0o750)
     directory.chmod(0o750)
+    envelope.parent_owned(directory)
     root = envelope.root / "runs" / "build-old.json"
     root.mkdir(parents=True)
     path = directory / root.name
@@ -422,6 +702,8 @@ def test_prior_build_requires_real_matching_parent_receipt(envelope, kind):
                  "output": str(envelope.paths["state"] if kind == "wrong-output" else root)}
         path.write_text(json.dumps(value))
         path.chmod(0o640)
+    if kind in ("failed", "wrong-phase", "wrong-output"):
+        envelope.parent_owned(path)
     # Only the task-owned parent receipt directory is opened; no candidate
     # artifact consumer or privileged operation is involved.
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
@@ -442,56 +724,114 @@ def test_phase_network_mismatch_refuses_before_parent_setup(envelope, monkeypatc
     assert not envelope.servers and not (envelope.root / "receipts").exists()
 
 
-def test_actual_private_setup_keeps_prior_build_readonly_and_only_current_output_writable(tmp_path, monkeypatch):
-    """Exercise the setup consumer; every kernel/process operation is replaced."""
+def _directory_fd(stack, path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    stack.callback(os.close, fd)
+    return fd
+
+
+@pytest.fixture
+def private_setup(tmp_path, monkeypatch):
+    """Task-only directory replacement models views; it is NOT a mount proof."""
     root = tmp_path / "task"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     paths = {}
-    for name in ("source", "fixture", "state", "recipe", "toolchain", "python_env", "output", "build", "rootfs"):
+    for name in ("source", "fixture", "state", "recipe", "toolchain", "python_env", "output", "build",
+                 "control", "runs"):
         paths[name] = root / name
-        paths[name].mkdir()
+        paths[name].mkdir(mode=0o750)
+        paths[name].chmod(0o750)
+    paths["rootfs"] = paths["control"] / "rootfs-test"
+    paths["rootfs"].mkdir(mode=0o700)
     paths["go_archive"] = root / "go.tar.gz"
     paths["go_archive"].write_bytes(b"not a compiler")
-    outer = {"mnt": "mnt:[1]", "net": "net:[2]", "pid": "pid:[3]"}
-    inner = {"mnt": "mnt:[11]", "net": "net:[12]", "pid": "pid:[13]"}
+    outer, inner = kernel_proof()["outer_namespaces"], kernel_proof()["namespaces"]
     calls, closed = [], []
-    args = argparse.Namespace(
-        **paths, root=root, network="loopback", phase="wire", receipt="test-wire.json",
-        selected_build={"output": str(paths["build"])}, uid=501, gid=1000, proof_fd=7,
-        sentinel_ports=[17000, 17001], command=["never-executed"],
-        storage_context=StorageContext.capture(uid=501).record(),
-    )
+    descriptors = []
+    for name, path in {"root": root, **paths}.items():
+        fd = os.open(path, os.O_RDONLY | (0 if name == "go_archive" else os.O_DIRECTORY))
+        descriptors.append((name, namespace.retained_handle(fd, "file" if name == "go_archive" else "directory")))
+    with tempfile.TemporaryFile(dir=tmp_path) as proof:
+        args = argparse.Namespace(
+            **paths, root=root, network="loopback", phase="wire", receipt="test-wire.json",
+            selected_build={"output": str(paths["build"])}, uid=os.getuid(), gid=os.getgid(), proof_fd=os.dup(proof.fileno()),
+            sentinel_ports=[17000, 17001], command=["never-executed"],
+            storage_context=StorageContext.capture().record(), handles=dict(descriptors),
+            system_mounts=[], system_aliases={},
+        )
+    saved = paths["rootfs"].with_name("preserved-underlay")
+    context = SimpleNamespace(args=args, paths=paths, calls=calls, closed=closed, outer=outer, inner=inner,
+                              saved=saved, descriptors=descriptors, bind_observer=None)
+
+    def mount(source, target, filesystem, flags, data=None):
+        calls.append(("mount", source, target, filesystem, flags, data))
+        if filesystem == "tmpfs":
+            paths["rootfs"].rename(saved)
+            paths["rootfs"].mkdir(mode=0o755)
+            paths["rootfs"].chmod(0o755)
+        if flags == namespace.MS_BIND:
+            marker = paths["rootfs"] / "run/avibe-engine-test-isolation.json"
+            assert marker.exists() and marker.read_bytes() == b""
+            if context.bind_observer:
+                context.bind_observer(source, target)
+
     monkeypatch.setattr(namespace, "namespace_ids", lambda: inner)
     monkeypatch.setattr(namespace, "run", lambda *command: calls.append(command))
-    monkeypatch.setattr(namespace.subprocess, "check_output", lambda _command: b'[{"ifname":"lo"}]')
+    monkeypatch.setattr(namespace, "linux_mount", mount)
+    monkeypatch.setattr(namespace, "install_keyring_boundary", lambda: calls.append(("filter",)) or keyring_identity())
+    monkeypatch.setattr(namespace.subprocess, "check_output", lambda _command, **_kw: b'[{"ifname":"lo"}]')
+    monkeypatch.setattr(os, "fchdir", lambda fd: calls.append(("fchdir", namespace.descriptor_identity(os.fstat(fd)))))
     monkeypatch.setattr(os, "chroot", lambda path: calls.append(("mock-chroot", str(path))))
-    monkeypatch.setattr(os, "chdir", lambda _path: None)
+    monkeypatch.setattr(os, "chdir", lambda path: calls.append(("chdir", path)))
     monkeypatch.setattr(os, "closerange", lambda first, last: closed.append((first, last)))
     monkeypatch.setattr(os, "set_inheritable", lambda fd, value: calls.append(("inherit", fd, value)))
-    monkeypatch.setattr(namespace.resource, "getrlimit", lambda _name: (64, 64))
+    monkeypatch.setattr(namespace.resource, "getrlimit", lambda _name: (4096, 4096))
+    yield context
+    for fd in {args.proof_fd, *(record["fd"] for _, record in descriptors)}:
+        try:
+            os.close(fd)
+        except OSError as exc:
+            assert exc.errno == errno.EBADF
+
+
+def test_actual_private_setup_keeps_prior_build_readonly_and_only_current_output_writable(private_setup, monkeypatch):
+    state = private_setup
+    args, paths, calls, closed = state.args, state.paths, state.calls, state.closed
 
     def candidate(actual_args, drop, env):
-        assert actual_args is args and closed == [(3, 7), (8, 64)]
+        assert actual_args is args and closed == [(3, args.proof_fd), (args.proof_fd + 1, 4096)]
         assert "--clear-groups" in drop and "--no-new-privs" in drop
         assert all(flag in drop for flag in ("--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all"))
         assert env["HOME"] == str(paths["output"] / "home")
         marker = json.loads((paths["rootfs"] / "run/avibe-engine-test-isolation.json").read_text())
-        assert marker["outer_namespaces"] == outer and marker["namespaces"] == inner
+        assert marker["outer_namespaces"] == state.outer and marker["namespaces"] == state.inner
+        assert marker["keyring_boundary"] == keyring_identity()
         assert marker["selected_build"] == args.selected_build and marker["phase"] == "wire"
         assert marker["budget"] == PHASES["wire"].receipt()
+        for _, record in state.descriptors:
+            with pytest.raises(OSError):
+                os.fstat(record["fd"])
+        os.close(args.proof_fd)
         return 0
 
     monkeypatch.setattr(namespace, "run_candidate", candidate)
     with pytest.raises(SystemExit) as finished:
-        namespace.inside(args, outer)
+        namespace.inside(args, state.outer)
     assert finished.value.code == 0
-    assert calls[0] == ("/usr/bin/mount", "--make-rprivate", "/")
+    assert calls[0] == ("mount", None, "/", None, namespace.MS_REC | namespace.MS_PRIVATE, None)
     for name in ("source", "fixture", "recipe", "toolchain", "python_env", "go_archive", "build"):
-        target = str(paths["rootfs"] / str(paths[name]).lstrip("/"))
-        assert ("/usr/bin/mount", "-o", "remount,bind,nosuid,ro", target) in calls
+        bind = next(call for call in calls if call[:2] == ("mount", namespace.fd_path(args.handles[name]["fd"])))
+        assert ("mount", None, bind[2], None, namespace.MS_BIND | namespace.MS_REMOUNT |
+                namespace.MS_NOSUID | namespace.MS_NODEV | namespace.MS_RDONLY, None) in calls
     for name in ("state", "output"):
-        target = str(paths["rootfs"] / str(paths[name]).lstrip("/"))
-        assert ("/usr/bin/mount", "-o", "remount,bind,nosuid", target) in calls
+        bind = next(call for call in calls if call[:2] == ("mount", namespace.fd_path(args.handles[name]["fd"])))
+        assert ("mount", None, bind[2], None, namespace.MS_BIND | namespace.MS_REMOUNT |
+                namespace.MS_NOSUID | namespace.MS_NODEV, None) in calls
+    assert calls.index(("filter",)) < next(i for i, call in enumerate(calls)
+                                           if call[0] == "mount" and call[4] == 39)
+    view = next(call[1] for call in calls if call[0] == "fchdir")
+    assert view["ino"] == paths["rootfs"].stat().st_ino != state.saved.stat().st_ino
+    assert ("mock-chroot", ".") in calls and ("chdir", "/") in calls
 
 
 @pytest.mark.parametrize("variable", STORAGE_ENV)
@@ -779,9 +1119,10 @@ def test_root_replacement_never_redirects_allocation_or_cleanup(envelope, monkey
         return result
 
     def allocate(args, stack, fd):
-        output(args, stack, fd)
+        result = output(args, stack, fd)
         if seam == "after-output":
             replace()
+        return result
 
     def listener(family):
         result = sentinel(family)
@@ -829,11 +1170,17 @@ def test_successful_parent_holds_one_caller_root_descriptor_for_all_allocations(
     def mkdir(path, *args, **kwargs):
         if path in ("receipts", "runs") or str(path).startswith("rootfs-"):
             fd = kwargs["dir_fd"]
-            assert root_fds == [fd]
             info = os.fstat(fd)
-            assert (info.st_dev, info.st_ino, info.st_uid, info.st_mode) == (
-                identity.st_dev, identity.st_ino, identity.st_uid, identity.st_mode,
-            )
+            if str(path).startswith("rootfs-"):
+                assert fd != root_fds[0]
+                control = (envelope.root / "receipts").stat()
+                assert (info.st_dev, info.st_ino) == (control.st_dev, control.st_ino)
+                assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o750
+            else:
+                assert root_fds == [fd]
+                assert (info.st_dev, info.st_ino, info.st_uid, info.st_mode) == (
+                    identity.st_dev, identity.st_ino, identity.st_uid, identity.st_mode,
+                )
             effects.append(str(path).split("-")[0])
         return real_mkdir(path, *args, **kwargs)
 
@@ -847,3 +1194,605 @@ def test_successful_parent_holds_one_caller_root_descriptor_for_all_allocations(
     assert closed.value.errno == errno.EBADF
     assert read_receipt(envelope)["status"] == "passed"
     assert_cleanup(envelope)
+
+
+def test_actual_emitted_filter_decode_excludes_foreign_abi_and_three_keyring_syscalls():
+    """Decode the actual bytes, not an independent production policy predicate."""
+    raw = namespace.keyring_program()
+    assert len(raw) == 88 and hashlib.sha256(raw).hexdigest() == keyring_identity()["program_sha256"]
+    instructions = tuple(struct.iter_unpack("<HBBI", raw))
+
+    def evaluate(arch, number):
+        pc, accumulator = 0, 0
+        for _ in range(len(instructions)):
+            code, yes, no, value = instructions[pc]
+            if code == 0x20:
+                accumulator = {0: number & 0xFFFFFFFF, 4: arch}[value]
+                pc += 1
+            elif code in (0x15, 0x35):
+                condition = accumulator == value if code == 0x15 else accumulator >= value
+                pc += 1 + (yes if condition else no)
+            elif code == 0x06:
+                return value
+            else:
+                pytest.fail("Unexpected emitted opcode.")
+        pytest.fail("Emitted filter did not terminate.")
+
+    count = 0
+    for arch in (0xC00000B7, 0x40000028, 0xC000003E, 0, 0xFFFFFFFF):
+        for number in (*range(1024), 0x3FFFFFFF, 0x40000000, 0xFFFFFFFF, -1):
+            expected = (0x80000000 if arch != 0xC00000B7 or (number & 0xFFFFFFFF) >= 0x40000000
+                        else 0x00050001 if number in (217, 218, 219) else 0x7FFF0000)
+            assert evaluate(arch, number) == expected
+            count += 1
+    assert count == 5140
+
+
+@pytest.mark.parametrize("stage", ["success", "nnp-error", "filter-error", "nnp-readback", "filter-readback",
+                                  "bool-result", "bad-program"])
+def test_actual_typed_filter_adapter_and_order(monkeypatch, stage):
+    calls = []
+    monkeypatch.setattr(namespace, "require_native_abi", lambda: None)
+
+    class Prctl:
+        def __call__(self, option, a2, a3, a4, a5):
+            assert self.argtypes == [ctypes.c_int, *([ctypes.c_ulong] * 4)]
+            assert self.restype is ctypes.c_int and (a4, a5) == (0, 0)
+            calls.append(option)
+            if option == 22:
+                program = ctypes.cast(a3, ctypes.POINTER(namespace.SockFprog)).contents
+                assert a2 == 2 and program.len == 11
+                assert ctypes.string_at(program.filter, 88) == namespace.keyring_program()
+            if (stage == "nnp-error" and option == 38) or (stage == "filter-error" and option == 22):
+                ctypes.set_errno(errno.EPERM)
+                return -1
+            if stage == "nnp-readback" and option == 39:
+                return 0
+            if stage == "filter-readback" and option == 21:
+                return 1
+            if stage == "bool-result":
+                return False
+            return {38: 0, 22: 0, 39: 1, 21: 2}[option]
+
+    adapter = Prctl()
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, **kwargs: (
+        pytest.fail("Unexpected library selection.") if path is not None or kwargs != {"use_errno": True}
+        else SimpleNamespace(prctl=adapter)
+    ))
+    if stage == "bad-program":
+        monkeypatch.setattr(namespace, "keyring_program", lambda: b"\0" * 88)
+    if stage == "success":
+        assert namespace.install_keyring_boundary() == keyring_identity()
+        assert calls == [38, 22, 39, 21]
+    else:
+        with pytest.raises((RuntimeError, OSError)):
+            namespace.install_keyring_boundary()
+        assert calls == {"nnp-error": [38], "filter-error": [38, 22], "nnp-readback": [38, 22, 39],
+                         "filter-readback": [38, 22, 39, 21], "bool-result": [38], "bad-program": []}[stage]
+
+
+@pytest.mark.parametrize("platform_name,machine,byteorder,width", [
+    ("darwin", "arm64", "little", 8), ("linux", "x86_64", "little", 8),
+    ("linux", "aarch64", "big", 8), ("linux", "aarch64", "little", 4),
+])
+def test_unsupported_abi_refuses_before_any_adapter(monkeypatch, platform_name, machine, byteorder, width):
+    monkeypatch.setattr(sys, "platform", platform_name)
+    monkeypatch.setattr(namespace.platform, "machine", lambda: machine)
+    monkeypatch.setattr(sys, "byteorder", byteorder)
+    monkeypatch.setattr(ctypes, "sizeof", lambda _: width)
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_a, **_kw: pytest.fail("Unsupported ABI reached libc."))
+    with pytest.raises(RuntimeError, match="Unsupported"):
+        namespace.install_keyring_boundary()
+    with pytest.raises(RuntimeError, match="Unsupported"):
+        namespace.linux_mount(None, "/", None, 0)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_actual_direct_mount_adapter_signature_and_errno(monkeypatch, failure):
+    monkeypatch.setattr(namespace, "require_native_abi", lambda: None)
+    calls = []
+
+    class Mount:
+        def __call__(self, source, target, filesystem, flags, data):
+            assert self.argtypes == [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                                     ctypes.c_ulong, ctypes.c_void_p]
+            assert self.restype is ctypes.c_int
+            calls.append((source, target, filesystem, flags, ctypes.string_at(data)))
+            ctypes.set_errno(errno.EACCES if failure else 0)
+            return -1 if failure else 0
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_a, **_kw: SimpleNamespace(mount=Mount()))
+    if failure:
+        with pytest.raises(OSError) as error:
+            namespace.linux_mount("tmpfs", "/proc/self/fd/7/唯一", "tmpfs", 6, "mode=0755")
+        assert error.value.errno == errno.EACCES
+    else:
+        namespace.linux_mount("tmpfs", "/proc/self/fd/7/唯一", "tmpfs", 6, "mode=0755")
+    assert calls == [(b"tmpfs", "/proc/self/fd/7/唯一".encode(), b"tmpfs", 6, b"mode=0755")]
+
+
+@pytest.mark.parametrize("name", NAMESPACE_NAMES)
+@pytest.mark.parametrize("side", ["outer_namespaces", "namespaces"])
+@pytest.mark.parametrize("failure", ["missing", "extra", "same", "integer", "wrong-prefix", "empty", "zero", "suffix"])
+def test_complete_namespace_identity_schema_at_actual_consumer(name, side, failure):
+    proof = kernel_proof()
+    values = proof[side]
+    if failure == "missing":
+        values.pop(name)
+    elif failure == "extra":
+        values["user"] = "user:[22]"
+    elif failure == "same":
+        values[name] = proof["namespaces" if side == "outer_namespaces" else "outer_namespaces"][name]
+    else:
+        values[name] = {"integer": 2, "wrong-prefix": "user:[2]", "empty": "", "zero": f"{name}:[0]",
+                        "suffix": f"{name}:[12]oops"}[failure]
+    with pytest.raises(RuntimeError):
+        require_namespaces(proof["outer_namespaces"], proof["namespaces"])
+
+
+@pytest.mark.parametrize("failure", ["missing", "extra", "prefix", "type"])
+def test_parent_bad_outer_capture_refuses_before_allocations(envelope, monkeypatch, failure):
+    outer = kernel_proof()["outer_namespaces"]
+    if failure == "missing":
+        outer.pop("ipc")
+    elif failure == "extra":
+        outer["user"] = "user:[99]"
+    else:
+        outer["ipc"] = "net:[4]" if failure == "prefix" else 4
+    monkeypatch.setattr(namespace, "namespace_ids", lambda: outer)
+    monkeypatch.setattr(namespace, "open_receipts", lambda *_: pytest.fail("Allocation before outer validation."))
+    with pytest.raises(RuntimeError):
+        namespace.main()
+    assert not envelope.servers and not (envelope.root / "receipts").exists()
+
+
+@pytest.mark.parametrize("name", [*namespace.INPUT_NAMES, "output", "build"])
+def test_actual_bind_consumes_pin_after_child_and_ancestor_replacement(private_setup, monkeypatch, name):
+    state = private_setup
+    path = state.paths[name]
+    original = state.args.handles[name]["identity"]
+    path.rename(path.with_name(path.name + "-preserved"))
+    if name == "go_archive":
+        path.write_bytes(b"replacement archive")
+    else:
+        path.mkdir()
+        (path / "replacement").write_bytes(b"untouched")
+    ancestor = state.args.root
+    preserved = ancestor.with_name("preserved-task")
+    ancestor.rename(preserved)
+    ancestor.mkdir()
+    (ancestor / "replacement-evidence").write_bytes(b"untouched ancestor")
+    # The HOST view simulator must follow its own task-only preserved directory.
+    state.paths["rootfs"] = preserved / "control/rootfs-test"
+    state.saved = preserved / "control/preserved-underlay"
+    # This test stops at the exact source-consuming bind, before any real mount.
+    def mount(source, target, filesystem, flags, data=None):
+        if filesystem == "tmpfs":
+            state.paths["rootfs"].rename(state.saved)
+            state.paths["rootfs"].mkdir(mode=0o755)
+            state.paths["rootfs"].chmod(0o755)
+        if source == namespace.fd_path(state.args.handles[name]["fd"]) and flags == namespace.MS_BIND:
+            assert namespace.descriptor_identity(os.fstat(state.args.handles[name]["fd"])) == original
+            assert target.startswith("/proc/self/fd/") and target.endswith("/" + path.name)
+            raise LookupError("finite stop at actual retained bind source")
+    monkeypatch.setattr(namespace, "linux_mount", mount)
+    with pytest.raises(LookupError, match="retained bind source"):
+        namespace.inside(state.args, state.outer)
+    assert (ancestor / "replacement-evidence").read_bytes() == b"untouched ancestor"
+    replaced = preserved / path.name
+    assert (replaced.read_bytes() if name == "go_archive" else (replaced / "replacement").read_bytes()) == (
+        b"replacement archive" if name == "go_archive" else b"untouched"
+    )
+    for _, record in state.descriptors:
+        with pytest.raises(OSError):
+            os.fstat(record["fd"])
+    with pytest.raises(OSError):
+        os.fstat(state.args.proof_fd)
+
+
+@pytest.mark.parametrize("stage", ["namespace", "context", "missing-handle", "aliased-handle", "identity",
+                                  "mount", "overmount", "filter"])
+def test_actual_inside_partial_failure_closes_all_received_handles(private_setup, monkeypatch, stage):
+    state = private_setup
+    if stage == "namespace":
+        state.outer.pop("ipc")
+    elif stage == "context":
+        state.args.storage_context["uid"] += 10000
+    elif stage == "missing-handle":
+        # Preserve the FD in another received record so closure remains observable.
+        state.args.handles["unexpected"] = state.args.handles.pop("state")
+    elif stage == "aliased-handle":
+        state.args.system_mounts = [{"resource": state.args.handles["state"]}]
+    elif stage == "identity":
+        state.args.handles["source"]["identity"]["ino"] += 1
+    elif stage == "mount":
+        monkeypatch.setattr(namespace, "linux_mount", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("finite mount failure")))
+    elif stage == "overmount":
+        monkeypatch.setattr(namespace, "linux_mount", lambda *_a, **_kw: None)
+    else:
+        monkeypatch.setattr(namespace, "install_keyring_boundary",
+                            lambda: (_ for _ in ()).throw(RuntimeError("finite filter failure")))
+    monkeypatch.setattr(namespace, "run_candidate", lambda *_: pytest.fail("Candidate after setup failure."))
+    with pytest.raises((RuntimeError, ValueError, OSError)):
+        namespace.inside(state.args, state.outer)
+    for _, record in state.descriptors:
+        with pytest.raises(OSError):
+            os.fstat(record["fd"])
+    with pytest.raises(OSError):
+        os.fstat(state.args.proof_fd)
+    marker = state.paths["rootfs"] / "run/avibe-engine-test-isolation.json"
+    if marker.exists():
+        assert marker.read_bytes() == b""
+
+
+@pytest.mark.parametrize("kind", ["directory", "file", "device"])
+@pytest.mark.parametrize("failure", ["none", "wrong-type", "symlink", "missing", "unreadable", "ancestor-alias"])
+def test_actual_component_pins_type_flags_and_partial_closure(tmp_path, monkeypatch, kind, failure):
+    root = tmp_path / "root"
+    parent = root / "a"
+    parent.mkdir(parents=True)
+    target = parent / "resource"
+    if kind == "directory" and failure != "wrong-type":
+        target.mkdir()
+    else:
+        target.write_bytes(b"synthetic regular backing, never a device")
+    if failure == "symlink":
+        original = target.with_name("preserved")
+        target.rename(original)
+        target.symlink_to(original)
+    elif failure == "missing":
+        target.rename(target.with_name("preserved"))
+    elif failure == "ancestor-alias":
+        parent.rename(root / "preserved")
+        parent.symlink_to(root / "preserved")
+    real_open, real_fstat = os.open, os.fstat
+    opened, devices = [], set()
+    def opening(path, flags, *args, **kwargs):
+        assert flags & os.O_NOFOLLOW and flags & os.O_CLOEXEC
+        if path == "resource" and failure == "unreadable":
+            raise PermissionError("finite consuming open failure")
+        is_device = bool(flags & 0o10000000)
+        if is_device:
+            assert kind == "device"
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        fd = real_open(path, flags, *args, **kwargs)
+        opened.append(fd)
+        if is_device and failure != "wrong-type":
+            devices.add(fd)
+        return fd
+    def info(fd):
+        value = real_fstat(fd)
+        return stat_fields(value, st_mode=stat.S_IFCHR | 0o600, st_rdev=os.makedev(1, 3)) if fd in devices else value
+    with ExitStack() as stack:
+        root_fd = _directory_fd(stack, root)
+        monkeypatch.setattr(namespace, "require_native_abi", lambda: None)
+        monkeypatch.setattr(os, "open", opening)
+        monkeypatch.setattr(os, "fstat", info)
+        if failure == "none":
+            record = namespace.pin_beneath(stack, root_fd, Path("a/resource"), kind=kind)
+            assert namespace.check_handle(record) == record["fd"]
+        else:
+            # A regular directory supplies the wrong type for a regular-file pin.
+            if kind == "file" and failure == "wrong-type":
+                target.unlink()
+                target.mkdir()
+            with pytest.raises((OSError, ValueError)):
+                namespace.pin_beneath(stack, root_fd, Path("a/resource"), kind=kind)
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+@pytest.mark.parametrize("different_inherited_gid", [False, True])
+def test_rootfs_pin_failure_cleans_only_the_original_empty_control_child(envelope, monkeypatch, different_inherited_gid):
+    raw = envelope.raw_lstat(envelope.paths["source"])
+    if different_inherited_gid:
+        monkeypatch.setenv("SUDO_GID", str(raw.st_gid + 1))
+        assert int(os.environ["SUDO_GID"]) > 0 and int(os.environ["SUDO_GID"]) != raw.st_gid
+    reached = []
+    original = namespace.pin_beneath
+    def pin(stack, fd, path, **kwargs):
+        if path.name.startswith("rootfs-"):
+            reached.append(path.name)
+            raise PermissionError("finite rootfs pin denial")
+        return original(stack, fd, path, **kwargs)
+    monkeypatch.setattr(namespace, "pin_beneath", pin)
+    with pytest.raises(PermissionError, match="rootfs pin denial"):
+        namespace.main()
+    result = read_receipt(envelope)
+    assert result["status"] == "failed" and result["temporary_rootfs_removed"] and not result["cleanup_errors"]
+    assert len(reached) == 1 and result["failure"] == "PermissionError"
+    assert envelope.paths["source"].lstat() == raw
+    assert envelope.raw_lstat(envelope.paths["source"]) == raw
+    assert not list((envelope.root / "receipts").glob("rootfs-*"))
+    assert not envelope.servers and not envelope.launched
+
+
+@pytest.mark.parametrize("failure", ["none", "wrong-identity", "replacement", "nonempty"])
+def test_exact_rootfs_cleanup_preserves_replacements_and_nonempty_evidence(tmp_path, failure):
+    root = tmp_path / "control"
+    root.mkdir()
+    target = root / "rootfs-test"
+    target.mkdir(mode=0o700)
+    with ExitStack() as stack:
+        fd = _directory_fd(stack, root)
+        record = namespace.pin_beneath(stack, fd, Path(target.name), kind="directory")
+        if failure == "wrong-identity":
+            record["identity"]["ino"] += 1
+        elif failure == "replacement":
+            target.rename(root / "preserved")
+            target.mkdir()
+        if failure in ("replacement", "nonempty"):
+            (target / "evidence").write_bytes(b"preserve")
+        if failure == "none":
+            namespace.remove_rootfs(namespace.retained_handle(fd, "directory"), record, target.name)
+            assert not target.exists()
+        else:
+            with pytest.raises((RuntimeError, OSError)):
+                namespace.remove_rootfs(namespace.retained_handle(fd, "directory"), record, target.name)
+            assert target.exists()
+            if failure in ("replacement", "nonempty"):
+                assert (target / "evidence").read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_selected_build_consumes_exact_output_identity_from_parent_receipt(envelope, failure):
+    control = envelope.root / "receipts"
+    control.mkdir(mode=0o750)
+    envelope.parent_owned(control)
+    build = envelope.root / "runs" / "old-build.json"
+    build.mkdir(parents=True)
+    with ExitStack() as stack:
+        fd = _directory_fd(stack, control)
+        build_fd = _directory_fd(stack, build)
+        record = namespace.retained_handle(build_fd, "directory")
+        value = {"status": "passed", "phase": "build", "output": str(build),
+                 "output_identity": {**record["identity"], "ino": record["identity"]["ino"] + int(failure)}}
+        receipt = control / build.name
+        receipt.write_text(json.dumps(value))
+        receipt.chmod(0o640)
+        envelope.parent_owned(receipt)
+        if failure:
+            with pytest.raises(RuntimeError, match="directory does not match"):
+                namespace.selected_build_receipt(SimpleNamespace(build=build), fd, record)
+        else:
+            assert namespace.selected_build_receipt(SimpleNamespace(build=build), fd, record)["output_identity"] == record["identity"]
+
+
+@pytest.mark.parametrize("case", ["success", "pathname-replacement", "same-inode-write", "wrong-hash",
+                                 "missing-fd", "missing-module", "named-control", "oversized-control"])
+def test_actual_host_exec_inheritance_and_fixed_trampoline_bytes(tmp_path, case):
+    """Real unprivileged HOST exec only; finite control-UID metadata adaptation."""
+    recipe = tmp_path / "recipe"
+    recipe.mkdir()
+    source = {
+        "budgets": "VALUE = 'trusted-budget'\n",
+        "isolation": "from budgets import VALUE\n",
+    }
+    source["namespace"] = (
+        "import json, os\nfrom isolation import VALUE\n"
+        "def child_from_control(value):\n"
+        " for fd in value['closed_sources']:\n"
+        "  try: os.fstat(fd)\n"
+        "  except OSError: pass\n"
+        "  else: raise RuntimeError('bootstrap descriptor survived import')\n"
+        " print(json.dumps({'value': VALUE, 'fixed_import': True}))\n"
+    )
+    for name, text in source.items():
+        (recipe / (name + ".py")).write_text(text)
+    with ExitStack() as stack:
+        recipe_fd = _directory_fd(stack, recipe)
+        pinned = namespace.pin_bootstrap(stack, namespace.retained_handle(recipe_fd, "directory"))
+        control = stack.enter_context(
+            (tmp_path / "named-control").open("w+b") if case == "named-control"
+            else tempfile.TemporaryFile(dir=tmp_path),
+        )
+        os.fchmod(control.fileno(), 0o600)
+        values = {"recipe": str(recipe), "bootstrap": pinned, "closed_sources": [item["fd"] for item in pinned.values()]}
+        if case == "pathname-replacement":
+            (recipe / "budgets.py").rename(recipe / "preserved.py")
+            (recipe / "budgets.py").write_text("raise RuntimeError('replacement must not import')\n")
+        elif case == "same-inode-write":
+            (recipe / "budgets.py").write_text("raise RuntimeError('changed content must not import')\n")
+        elif case == "wrong-hash":
+            pinned["isolation"]["sha256"] = "0" * 64
+        elif case == "missing-module":
+            pinned.pop("isolation")
+        data = json.dumps(values).encode() if case != "oversized-control" else b"x" * 65537
+        control.write(data)
+        control.flush()
+        control.seek(0)
+        # No privilege change: the trusted HOST test shim changes only the
+        # returned UID metadata for this one task-owned unnamed control file.
+        adaptation = (
+            "import os, sys, types\n"
+            "original_fstat=os.fstat\n"
+            "def host_fstat(fd):\n"
+            " info=original_fstat(fd)\n"
+            " if fd!=int(sys.argv[1]): return info\n"
+            " fields={key:getattr(info,key) for key in dir(info) if key.startswith('st_')}\n"
+            " fields['st_uid']=0\n"
+            " return types.SimpleNamespace(**fields)\n"
+            "os.fstat=host_fstat\n"
+        )
+        passed = [control.fileno(), *(item["fd"] for item in pinned.values())]
+        if case == "missing-fd":
+            passed.remove(pinned["isolation"]["fd"])
+        command = [sys.executable, "-I", "-B", "-c", adaptation + namespace.CHILD_TRAMPOLINE, str(control.fileno())]
+        environment = {name: str(tmp_path / ("child-" + name)) for name in (*STORAGE_ENV, "TMPDIR")}
+        for value in environment.values():
+            Path(value).mkdir()
+        environment.update(PATH="/usr/bin:/bin", PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run(command, cwd=tmp_path, env=environment, close_fds=True,
+                                pass_fds=tuple(passed), capture_output=True, timeout=10)
+        (tmp_path / "child-command.json").write_text(json.dumps({
+            "argv": command, "cwd": str(tmp_path), "environment": environment, "pass_fds": passed,
+            "timeout": 10, "close_fds": True, "qualification": "HOST-only control UID metadata seam; no Linux effect",
+        }, indent=2))
+        (tmp_path / "child.stdout").write_bytes(result.stdout)
+        (tmp_path / "child.stderr").write_bytes(result.stderr)
+        (tmp_path / "child.exit").write_text(str(result.returncode) + "\n")
+    if case in ("success", "pathname-replacement"):
+        assert result.returncode == 0 and result.stderr == b""
+        assert json.loads(result.stdout) == {"value": "trusted-budget", "fixed_import": True}
+    else:
+        assert result.returncode != 0 and result.stdout == b""
+        assert b"replacement must not import" not in result.stderr
+        assert b"changed content must not import" not in result.stderr
+
+
+def test_connected_parent_fixed_bootstrap_inside_probe_and_public_receipt(envelope, monkeypatch):
+    """Actual producer/consumers, task-only FD/view adapters; no OS acceptance."""
+    import builtins
+    from contextlib import redirect_stdout
+    import io
+    import isolation_probe
+
+    envelope.phase = "build"
+    argv = list(sys.argv)
+    argv[argv.index("--phase") + 1] = "build"
+    argv[argv.index("--network") + 1] = "none"
+    monkeypatch.setattr(sys, "argv", argv)
+    events, child_fds = [], []
+    real_exec, real_fstat = builtins.exec, os.fstat
+    real_exists, real_read_text, real_write = Path.exists, Path.read_text, Path.write_bytes
+    actual_uid = os.getuid()
+
+    def launch(command, control, kwargs):
+        # In-process HOST simulation duplicates the exact passed handles to
+        # preserve the real parent's ownership. Numeric-FD translation is the
+        # only handoff adaptation; real exec inheritance is tested separately.
+        translated = json.loads(json.dumps(control))
+        mapping = {fd: os.dup(fd) for fd in kwargs["pass_fds"] if fd != int(command[-1])}
+        child_fds.extend(mapping.values())
+        for record in (*translated["handles"].values(), *translated["bootstrap"].values()):
+            record["fd"] = mapping[record["fd"]]
+        translated["proof_fd"] = mapping[translated["proof_fd"]]
+        rootfs = Path(control["rootfs"])
+        underlay = rootfs.with_name(rootfs.name + "-underlay")
+        marker = rootfs / "run/avibe-engine-test-isolation.json"
+        with tempfile.TemporaryFile(dir=envelope.root) as handoff, monkeypatch.context() as child:
+            handoff.write(json.dumps(translated).encode())
+            handoff.flush()
+            handoff.seek(0)
+            control_fd = os.dup(handoff.fileno())
+            control_identity = real_fstat(control_fd).st_ino
+            child.setattr(sys, "argv", ["-c", str(control_fd)])
+            for name in ("budgets", "isolation", "namespace"):
+                child.setitem(sys.modules, name, sys.modules[name])
+
+            def fstat(fd):
+                info = real_fstat(fd)
+                if info.st_ino == control_identity or (marker.exists() and info.st_ino == marker.stat().st_ino):
+                    return stat_fields(info, st_uid=0)
+                return info
+
+            def mount(source, target, filesystem, flags, data=None):
+                events.append(("mount", source, target, flags))
+                if filesystem == "tmpfs":
+                    rootfs.rename(underlay)
+                    rootfs.mkdir(mode=0o755)
+                    rootfs.chmod(0o755)
+                if flags == namespace.MS_BIND:
+                    assert marker.exists() and marker.read_bytes() == b""
+                    source_fd = int(source.rsplit("/", 1)[1])
+                    assert source_fd in mapping.values()
+                    os.fstat(source_fd)
+                if flags == namespace.MS_REMOUNT | namespace.MS_RDONLY | namespace.MS_NOSUID | namespace.MS_NODEV:
+                    assert json.loads(marker.read_text())["keyring_boundary"] == keyring_identity()
+                    events.append(("immutable-marker",))
+
+            def execute(code, globals=None, locals=None, **options):
+                result = real_exec(code, globals, locals, **options)
+                if globals is not None and globals.get("__name__") == "namespace":
+                    module = sys.modules["namespace"]
+                    child.setattr(module, "namespace_ids", lambda: kernel_proof()["namespaces"])
+                    child.setattr(module, "linux_mount", mount)
+                    child.setattr(module, "install_keyring_boundary",
+                                  lambda: events.append(("filter",)) or keyring_identity())
+                    child.setattr(sys.modules["isolation"], "PROOF_PATH", marker)
+                return result
+
+            def read_text(path, *args, **kwargs):
+                if str(path) == "/proc/self/status":
+                    return "\n".join(f"{name}: {value}" for name, value in kernel_proof()["process_status"].items())
+                if str(path) == "/proc/self/mountinfo":
+                    return ""
+                return real_read_text(path, *args, **kwargs)
+
+            def exists(path):
+                if str(path) in ("/Users", "/home", "/root", "/sys", "/run/netns"):
+                    return False
+                return real_exists(path)
+
+            def write(path, value):
+                if path.name == ".isolation-write-probe":
+                    raise PermissionError("finite readonly bind seam")
+                return real_write(path, value)
+
+            def run(command, **options):
+                assert options["close_fds"] and "pass_fds" not in options
+                assert command[0] == "/usr/bin/setpriv"
+                assert "--clear-groups" in command and "--bounding-set=-all" in command
+                for fd in mapping.values():
+                    if fd != translated["proof_fd"]:
+                        with pytest.raises(OSError):
+                            os.fstat(fd)
+                if command[-1].endswith("isolation_probe.py"):
+                    events.append(("preflight",))
+                    child.setattr(isolation_probe, "namespace_receipt", sys.modules["isolation"].namespace_receipt)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        isolation_probe.main()
+                    return subprocess.CompletedProcess(command, 0, stdout=output.getvalue().encode())
+                assert command[-1] == "candidate-test"
+                with pytest.raises(OSError):
+                    os.fstat(translated["proof_fd"])
+                events.append(("candidate",))
+                return subprocess.CompletedProcess(command, 0)
+
+            child.setattr(os, "fstat", fstat)
+            child.setattr(builtins, "exec", execute)
+            child.setattr(Path, "read_text", read_text)
+            child.setattr(Path, "exists", exists)
+            child.setattr(Path, "write_bytes", write)
+            original_readlink = os.readlink
+            child.setattr(os, "readlink", lambda path, *a, **kw: (
+                kernel_proof()["namespaces"][Path(path).name] if str(path).startswith("/proc/self/ns/")
+                else original_readlink(path, *a, **kw)
+            ))
+            child.setattr(namespace.subprocess, "check_output", lambda *_a, **_kw: b'[{"ifname":"lo"}]')
+            child.setattr(namespace.subprocess, "run", run)
+            child.setattr(os, "fchdir", lambda fd: events.append(("new-view", os.fstat(fd).st_ino)))
+            child.setattr(os, "chroot", lambda path: (events.append(("chroot", path)),
+                                                     child.setattr(os, "geteuid", lambda: actual_uid)))
+            child.setattr(os, "chdir", lambda path: events.append(("chdir", path)))
+            child.setattr(os, "closerange", lambda *_: None)
+            child.setattr(isolation_probe, "probe_blocked_connection", lambda network, host, port, kind: {
+                "host": host, "kind": kind, "blocked": True, "errno": errno.ECONNREFUSED,
+            })
+            with pytest.raises(SystemExit) as result:
+                real_exec(compile(namespace.CHILD_TRAMPOLINE, "<actual connected trampoline>", "exec"), {})
+            assert result.value.code == 0
+            assert events.index(("filter",)) < events.index(("immutable-marker",)) < events.index(("preflight",))
+            assert events.index(("preflight",)) < events.index(("candidate",))
+            assert next(event[1] for event in events if event[0] == "new-view") != underlay.stat().st_ino
+            rootfs.rename(rootfs.with_name(rootfs.name + "-preserved-view"))
+            underlay.rename(rootfs)
+        return subprocess.CompletedProcess(command, 0)
+
+    envelope.launch = launch
+    with pytest.raises(SystemExit) as result:
+        namespace.main()
+    assert result.value.code == 0
+    receipt = read_receipt(envelope)
+    assert receipt["status"] == "passed" and receipt["temporary_rootfs_removed"]
+    assert receipt["probe"]["keyring_boundary"] == keyring_identity()
+    assert receipt["probe"]["namespaces"] == kernel_proof()["namespaces"]
+    assert receipt["probe"]["outer_namespaces"] == kernel_proof()["outer_namespaces"]
+    assert receipt["probe"]["isolation_probe"] == "pass"
+    assert "storage_context" not in receipt["probe"]
+    assert receipt["output_identity"]["ino"] == (envelope.root / "runs" / envelope.receipt).stat().st_ino
+    for fd in child_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)

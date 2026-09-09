@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -24,6 +25,51 @@ XDG_DEFAULTS = {
     "XDG_DATA_HOME": ".local/share", "XDG_STATE_HOME": ".local/state",
 }
 PROOF_PATH = Path("/run/avibe-engine-test-isolation.json")
+NAMESPACE_NAMES = ("mnt", "net", "pid", "ipc")
+KEYRING_ABI = "linux-aarch64-le64"
+KEYRING_PROGRAM_SHA256 = "196f5affb55a9d30299561255adb1027f9a985aba9762b9c66624ed5cded604d"
+CAPABILITY_FIELDS = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+
+
+def keyring_identity() -> dict:
+    """One expected identity; only the successful installer creates its marker."""
+    return {"abi": KEYRING_ABI, "program_sha256": KEYRING_PROGRAM_SHA256}
+
+
+def require_namespace_ids(values: dict) -> None:
+    """One exact capture schema, shared by the outer and every inner consumer."""
+    if not isinstance(values, dict) or set(values) != set(NAMESPACE_NAMES):
+        raise RuntimeError("Refusing setup outside new mount, network, PID and IPC namespaces.")
+    for name in NAMESPACE_NAMES:
+        if not isinstance(values[name], str) or not re.fullmatch(rf"{name}:\[[1-9][0-9]*\]", values[name]):
+            raise RuntimeError("Invalid namespace identity.")
+
+
+def require_namespaces(outer: dict, actual: dict) -> None:
+    """Validate both complete namespace sets before any privileged child effect."""
+    require_namespace_ids(outer)
+    require_namespace_ids(actual)
+    for name in NAMESPACE_NAMES:
+        if outer[name] == actual[name]:
+            raise RuntimeError("Namespace remains shared with its parent.")
+
+
+def require_kernel_evidence(proof: dict) -> None:
+    """Common private/probe/parent consumer, never an ambient success flag."""
+    if not isinstance(proof, dict):
+        raise RuntimeError("Missing kernel evidence.")
+    require_namespaces(proof.get("outer_namespaces"), proof.get("namespaces"))
+    if proof.get("keyring_boundary") != keyring_identity():
+        raise RuntimeError("Missing exact installed keyring-boundary identity.")
+    status = proof.get("process_status")
+    fields = {*CAPABILITY_FIELDS, "NoNewPrivs", "Seccomp"}
+    if not isinstance(status, dict) or set(status) != fields:
+        raise RuntimeError("Incomplete live privilege/filter evidence.")
+    if status["NoNewPrivs"] != "1" or status["Seccomp"] != "2":
+        raise RuntimeError("Candidate lacks no-new-privileges or the installed filter.")
+    for name in CAPABILITY_FIELDS:
+        if not isinstance(status[name], str) or not re.fullmatch(r"0+", status[name]):
+            raise RuntimeError("Candidate process still has Linux capabilities.")
 
 # A finite bootstrap caller, not an arbitrary Git command runner. Configuration
 # that can load code, redirect objects/worktrees or select transports is refused
@@ -179,6 +225,23 @@ class StorageContext:
                 raise ValueError("Task writes must not target protected user state.")
         return canonical
 
+    def read_input(self, path: Path) -> Path:
+        """Admit EVERY finite macOS read grant, including system/tool inputs.
+
+        This constructs source policy only; its actual OS startup closure still
+        requires independent execution evidence. No privileged read occurs here.
+        """
+        lexical = _absolute(str(path), "diagnostic input")
+        canonical = self.validate(lexical)
+        broad = {Path(value) for value in ("/usr", "/System", "/Library", "/dev", "/etc", "/private")}
+        for target in (lexical, canonical):
+            if target in broad or any(
+                target == boundary or target.is_relative_to(boundary) or boundary.is_relative_to(target)
+                for boundary in (*self.homes, *self.protected)
+            ):
+                raise ValueError("Diagnostic inputs must be narrow and outside all original user storage.")
+        return canonical
+
 
 def storage_context() -> StorageContext:
     """Only actual private namespace proof may replace ambient user identity."""
@@ -220,16 +283,17 @@ def _namespace_proof() -> dict:
     if len(raw) > 65536:
         raise RuntimeError("Oversized namespace proof.")
     proof = json.loads(raw)
-    required = {"mnt", "net", "pid"}
-    if set(proof["namespaces"]) != required or set(proof["outer_namespaces"]) != required:
-        raise RuntimeError("All three namespace identities are required.")
+    require_namespaces(proof.get("outer_namespaces"), proof.get("namespaces"))
     for name, expected in proof["namespaces"].items():
         if os.readlink(f"/proc/self/ns/{name}") != expected or expected == proof["outer_namespaces"][name]:
             raise RuntimeError("Namespace identity does not match the isolated envelope.")
     status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
-    if any(int(status[name].strip(), 16) for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")):
-        raise RuntimeError("Candidate process still has Linux capabilities.")
-    if (status["NoNewPrivs"].strip() != "1" or os.getuid() == 0
+    proof["process_status"] = {
+        name: status[name].strip()
+        for name in (*CAPABILITY_FIELDS, "NoNewPrivs", "Seccomp") if name in status
+    }
+    require_kernel_evidence(proof)
+    if (os.getuid() == 0
             or os.getuid() != os.geteuid() or os.getuid() != proof["uid"] or os.getgid() != proof["gid"]):
         raise RuntimeError("Candidate process has not dropped privilege.")
     context = StorageContext.from_parent(proof["storage_context"])
@@ -248,10 +312,6 @@ def _namespace_proof() -> dict:
     for target in (root, output, state):
         if context.validate(target) != target:
             raise RuntimeError("Private task roots must match parent canonical identities.")
-    proof["process_status"] = {
-        name: status[name].strip()
-        for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")
-    }
     proof["actual_uid"], proof["actual_gid"] = os.getuid(), os.getgid()
     return proof
 
@@ -332,9 +392,10 @@ def isolated_environment(root: Path, *, cache: Path | None = None, go: Path | No
     }
 
 
-def sandbox_prefix(root: Path) -> list[str]:
-    """Deny all network egress for macOS pure-source diagnostics."""
+def sandbox_prefix(root: Path, *, required_inputs: tuple[Path, ...] | None = None) -> list[str]:
+    """Finite macOS diagnostic inputs; OS enforcement/startup remain unqualified."""
     context = storage_context()
+    lexical_root = root
     root = context.validate(root)
     if sys.platform == "linux":
         proof = namespace_receipt()
@@ -343,14 +404,27 @@ def sandbox_prefix(root: Path) -> list[str]:
         return []
     if sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file():
         raise RuntimeError("This recipe requires macOS sandbox-exec; no unsandboxed fallback.")
+    if not isinstance(required_inputs, tuple) or not 1 <= len(required_inputs) <= 32:
+        raise ValueError("Declare the finite inspected recipe/source/interpreter/system inputs.")
+    root = context.read_input(lexical_root)
+    inputs = [root]
+    for path in (*required_inputs, Path("/usr/bin/sandbox-exec"), Path("/dev/null")):
+        admitted = context.read_input(path)
+        if admitted != root and root.is_relative_to(admitted):
+            raise ValueError("Do not grant a whole task/project ancestor as a diagnostic input.")
+        inputs.append(admitted)
+
     def quote(value: Path) -> str:
         return json.dumps(str(value))
-    policy = (
-        '(version 1) (allow default) (deny network-outbound) '
-        '(deny file-write*) '
-        f'(allow file-write* (subpath {quote(root)})) '
-        '(allow file-write* (subpath "/dev")) '
-    )
-    for boundary in context.protected:
+
+    boundaries = sorted(set((*context.homes, *context.protected)))
+    exclusions = " ".join(f"(require-not (subpath {quote(path)}))" for path in boundaries)
+    policy = '(version 1) (allow default) (deny network*) (deny file-write*) (deny file-read*) '
+    for path in sorted(set(inputs)):
+        matcher = "literal" if path == Path("/dev/null") else "subpath"
+        policy += f"(allow file-read* (require-all ({matcher} {quote(path)}) {exclusions})) "
+    policy += f"(allow file-write* (require-all (subpath {quote(root)}) {exclusions})) "
+    policy += f'(allow file-write* (require-all (literal "/dev/null") {exclusions})) '
+    for boundary in boundaries:
         policy += f'(deny file-read* (subpath {quote(boundary)})) '
     return ["/usr/bin/sandbox-exec", "-p", policy]
