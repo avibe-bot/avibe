@@ -9,6 +9,12 @@ capability:
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
+    - tests/test_model_hub_retry_advice.py
+    - tests/test_model_hub_recovery_evidence.py
+    - tests/test_model_hub_progress.py
+    - tests/test_model_hub_failure_presentation.py
+    - tests/test_opencode_model_hub_retry.py
+    - ui/src/lib/modelHubRecovery.test.ts
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
@@ -77,6 +83,42 @@ status_legend:
     expected_fail: false
     priority: false
 scenarios:
+  - id: MH-RETRY-NATIVE-001
+    name: OpenCode consumes the Hub terminal without automatically sending continue
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_opencode_model_hub_retry.py::test_hub_terminal_skips_automatic_continue_and_emits_one_failure
+  - id: MH-RETRY-ADVICE-001
+    name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_retry_advice.py::test_retry_advice_survives_error_body_delays_and_failures
+  - id: MH-RETRY-EVIDENCE-001
+    name: Unknown buffered success passes through without proving recovery
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_recovery_evidence.py::test_unknown_buffered_success_is_forwarded_without_recovery_evidence
+  - id: MH-RETRY-PROGRESS-001
+    name: Recovery progress invalidates only its exact live Session
+    status: covered
+    kind: projection
+    layer: unit
+    test: tests/test_model_hub_progress.py::test_only_the_exact_live_session_gets_read_invalidation
+  - id: MH-RETRY-COPY-001
+    name: Terminal copy says recovery ended instead of promising automatic restoration
+    status: covered
+    kind: copy
+    layer: unit
+    test: tests/test_model_hub_failure_presentation.py::test_terminal_copy_never_promises_automatic_recovery
+  - id: MH-RETRY-WEB-001
+    name: The quiet Web label cannot infer recovery from either deadline
+    status: covered
+    kind: projection
+    layer: unit
+    test: ui/src/lib/modelHubRecovery.test.ts::MH-RETRY-WEB-001
   - id: MH-CATALOG-001
     name: Every scenario, observation, and canonical test resolves to discoverable executable evidence
     status: covered
@@ -861,11 +903,11 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
   - id: D6
-    name: A server error uses the current flat cooldown
-    status: baseline
+    name: A server error honors later upstream advice through the real engine
+    status: assert
     kind: failover
     layer: e2e-auto
-    test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown
+    test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_preserves_later_retry_after_through_real_engine
   - id: D7
     name: A partial stream terminates without replaying another source
     status: skip
@@ -875,7 +917,7 @@ scenarios:
     owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D8
-    name: Cooldown expiry recovers hop zero and emits recovery
+    name: Cooldown expiry permits a real attempt and verified output proves recovery
     status: skip
     kind: recovery
     layer: contract
@@ -1011,7 +1053,6 @@ next_priority:
   - B8
   - B9
   - D1
-  - D6
   - F1
   - G2
   - G3

@@ -144,6 +144,7 @@ async def test_buffered_native_completion_proves_recovery_without_changing_bytes
     ],
 )
 async def test_unknown_buffered_success_is_forwarded_without_recovery_evidence(protocol: str, payload: bytes) -> None:
+    """MH-RETRY-EVIDENCE-001: permissive forwarding cannot prove Source recovery."""
     async def respond(_request: web.Request) -> web.Response:
         return web.Response(body=payload, content_type="application/json")
 

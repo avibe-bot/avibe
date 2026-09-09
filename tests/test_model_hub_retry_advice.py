@@ -173,6 +173,7 @@ async def test_failed_http_response_carries_only_bounded_ascii_advice(
 async def test_retry_advice_survives_error_body_delays_and_failures(
     monkeypatch: pytest.MonkeyPatch, protocol: str, stream: bool, body_mode: str,
 ) -> None:
+    """MH-RETRY-ADVICE-001: advice keeps the header receipt clock across body failures."""
     receipt = datetime(2026, 9, 9, 4, 15, tzinfo=timezone.utc)
     current_time = receipt
     clock_samples = []

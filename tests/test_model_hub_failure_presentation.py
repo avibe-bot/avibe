@@ -117,6 +117,7 @@ async def test_historical_notice_does_not_consume_a_live_turn_projection():
 
 @pytest.mark.parametrize("language", ["en", "zh"])
 def test_terminal_copy_never_promises_automatic_recovery(language):
+    """MH-RETRY-COPY-001: final failures never promise that a timer will recover a Source."""
     params = {"model": "test", "source": "relay", "retry_at": "2026-09-09T04:00:00Z"}
     for key in ("modelHub.launch.waiting", "modelHub.launch.waiting_without_retry"):
         text = t(key, language, **params)

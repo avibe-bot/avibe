@@ -90,6 +90,7 @@ def test_no_turn_or_gateway_has_no_snapshot():
 
 
 def test_only_the_exact_live_session_gets_read_invalidation():
+    """MH-RETRY-PROGRESS-001: material recovery updates invalidate only their live Session."""
     def entry(turn_id, done=False):
         return SimpleNamespace(
             context=SimpleNamespace(platform_specific={"turn_token": turn_id}),

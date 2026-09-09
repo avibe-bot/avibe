@@ -75,7 +75,7 @@ describe('quiet Model Hub recovery label', () => {
     expect(result.current.label).toBe('Waiting to retry in about 34s');
   });
 
-  it('never infers an attempt, recovery, or end from either deadline expiring', () => {
+  it('MH-RETRY-WEB-001: never infers an attempt, recovery, or end from either deadline expiring', () => {
     vi.setSystemTime(start + 29_000);
     const { result, rerender } = mount();
     expect(result.current.label).toBe('Waiting to retry in about 1s');

@@ -451,6 +451,10 @@ silently omitted from the accepted contract.
 
 ### Native terminal compatibility decision
 
+The [native audit record](model-hub-retry-native-compatibility.md) separates
+observed binary behavior, isolation, significant launch settings, and remaining
+acceptance layers.
+
 The domain result for an exhausted automatic recovery episode is
 `model_hub_recovery_exhausted`, in both `error.type` and `error.code`. Its wire
 message is exactly:

@@ -71,7 +71,7 @@ Out of scope (documented, not dropped silently):
 | D3 | hop0 → 429 before first output | same-turn failover to hop1; `switch` event; hop0 cooldown 60s; chat copy unchanged (silent) | assert |
 | D4 | hop0 → quota (`insufficient_quota`) | fallback, cooldown 300s | assert |
 | D5 | hop0 → 401 (api_key, non-refreshable) | `credential_revoked` needs_action; UI shows repair action; no mid-turn refresh attempt | assert |
-| D6 | hop0 → 5xx | fallback 30s cooldown; retry-after header **ignored** (document; decide with D-4 whether to keep) | baseline |
+| D6 | hop0 → 5xx | source backoff with positive bounded jitter; later valid Retry-After survives the managed engine and takes precedence | assert |
 | D7 | stream interrupt after first output | terminal frame injected per protocol; **no replay/failover**; source still settles; next turn resolves hop1 (takeover pill visible) | assert |
 | D8 | cooldown `retry_at` elapses | next resolve recovers source, chain returns to hop0, `recover` event | assert |
 | D9 | all hops failing | 503 `mapping_target_unavailable` + waiting copy with retry_at | assert |
@@ -161,7 +161,10 @@ Unit/contract suites already cover: config validation, guard structure, classifi
 - **D-1 subscription-first placement.** Restore "subscription before API key" at placement time (surgical change in `_apply_source_placement`, reuse dead `recommended_source_order`), incl. one-time re-sort of existing configs? Current shipped contract says append-at-tail. Affects D1.
 - **D-2 `count_tokens` 404.** Serve it (proxy to upstream tokenizers or estimate) or document Claude Code context-estimation degradation in hub mode? Affects D11.
 - **D-3 missing `modelHub.*` browser i18n keys + absent Python-bundle codes.** Fix now (makes B11 pass) or baseline as expected-fail for this round?
-- **D-4 Retry-After honoring.** Keep flat cooldowns (simple, predictable) or honor upstream reset headers? Affects D6.
+- **D-4 Retry-After honoring (approved 2026-09-09).** Use the later of
+  reason-specific backoff and valid upstream advice measured at header receipt.
+  D6 asserts the real managed-engine forwarding boundary. See
+  [bounded quiet recovery](model-hub-retry-experience.md).
 - **D-5 tier provenance ladder (approved 2026-09-03).** Apply the first available
   `upstream > catalog > user > null` rung; managed tiers are read-only, a refresh
   override is observable, and silent stripping is attributed to the exact attempt.
