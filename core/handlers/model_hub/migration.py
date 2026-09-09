@@ -23,6 +23,7 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
+from core.handlers.model_hub.identifiers import canonical_model_id
 from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
 from vibe.backend_model_catalog import (
     backend_model_entries,
@@ -430,11 +431,8 @@ def _opencode_manual_models(
         return ()
     models: list[NativeManualModel] = []
     for model_id, model_config in raw_models.items():
-        if (
-            not isinstance(model_id, str)
-            or not model_id.strip()
-            or contains_credential_material(model_id.strip())
-        ):
+        model_id = canonical_model_id(model_id)
+        if model_id is None or contains_credential_material(model_id):
             continue
         raw_name = model_config.get("name") if isinstance(model_config, dict) else None
         display_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
@@ -442,7 +440,7 @@ def _opencode_manual_models(
             display_name = None
         models.append(
             NativeManualModel(
-                id=model_id.strip(),
+                id=model_id,
                 display_name=display_name,
             )
         )

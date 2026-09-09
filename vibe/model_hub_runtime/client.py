@@ -959,7 +959,16 @@ def _project_model_inventory(
             )
         return result
 
-    if not project_json_reader(reader, paths, visit) or not root_is_map:
+    # IDs select routes; supported parameters feed the reasoning-tier consumer.
+    # Neither is a diagnostic copy that can be elided without changing behavior.
+    lossless_paths = {
+        (member, *suffix)
+        for member in ("data", "models")
+        for suffix in (("*",), ("*", "id"), ("*", "supported_parameters", "*"))
+    }
+    if not project_json_reader(
+        reader, paths, visit, lossless_string_paths=lossless_paths
+    ) or not root_is_map:
         return None
     if (data_seen and invalid_data_models) or (
         not data_seen and fallback_seen and invalid_fallback_models

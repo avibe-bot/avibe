@@ -2208,16 +2208,17 @@ def test_oauth_source_bindings_are_scoped_and_follow_reauthentication(tmp_path: 
 
 
 @contextmanager
-def _models_endpoint():
+def _models_endpoint(model_ids=("model-a", "model-b")):
     class Handler(BaseHTTPRequestHandler):
         authorization: str | None = None
+        invocations: list[tuple[str, dict]] = []
 
         def log_message(self, *args):
             pass
 
         def do_GET(self):
             Handler.authorization = self.headers.get("Authorization")
-            body = json.dumps({"data": [{"id": "model-a"}, {"id": "model-b"}]}).encode()
+            body = json.dumps({"data": [{"id": model_id} for model_id in model_ids]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -2227,6 +2228,34 @@ def _models_endpoint():
             self.wfile.flush()
             time.sleep(0.05)
             self.wfile.write(body[midpoint:])
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            Handler.invocations.append((self.path, payload))
+            if self.path == "/v1/messages":
+                result = {
+                    "id": "msg-fixture", "type": "message", "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            elif self.path == "/v1/responses":
+                result = {
+                    "id": "resp-fixture", "object": "response", "status": "completed",
+                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            else:
+                result = {
+                    "id": "chat-fixture", "object": "chat.completion",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
+            body = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2238,6 +2267,63 @@ def _models_endpoint():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "config_key", "endpoint"),
+    (("anthropic", "claude-api-key", "/v1/messages"),
+     ("openai_responses", "codex-api-key", "/v1/responses"),
+     ("openai_chat", "openai-compatibility", "/v1/chat/completions")),
+)
+def test_long_inventory_identity_reaches_runtime_config_and_http_consumer(
+    tmp_path: Path, protocol: str, config_key: str, endpoint: str,
+) -> None:
+    head = "模型🧪/e\u0301" * 3000
+    identities = (head + "-one", head + "-two")
+    route_only = head + "-unlisted"
+
+    async def run(base_url, handler):
+        discovered = await client_module.probe_models(
+            vendor="custom", protocol=protocol, base_url=base_url, secret=None,
+        )
+        assert tuple(model.id for model in discovered) == identities
+        store = EngineStateStore(tmp_path / "state")
+        instance_dir, secrets = store.prepare_instance("install-1")
+        credential_ref = store.store_api_key("synthetic-secret", base_url=base_url, protocol=protocol)
+        binding = _binding(
+            credential_ref, protocol=protocol, base_url=base_url,
+            model_ids=identities, route_model_ids=(route_only,),
+        )
+        store.sync_sources([binding])
+        source = EngineStateStore(tmp_path / "state").get_source(binding.source_id)
+        assert source is not None
+        assert source.model_ids == identities
+        assert source.route_model_ids == (route_only,)
+        config_path = instance_dir / "config.yaml"
+        write_engine_config(
+            config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir,
+            runtime_secrets=secrets, sources=[source], state_store=store,
+        )
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config[config_key][0]["models"] == [
+            {"name": identity, "alias": identity} for identity in (*identities, route_only)
+        ]
+        client = EngineClient(EngineConnection(base_url.removesuffix("/v1"), "management", "gateway"))
+        for identity in (*identities, route_only):
+            handle = await client.invoke(source, identity, {}, stream=False)
+            try:
+                outcome = await handle.outcome()
+                assert outcome.kind is RawOutcomeKind.SUCCESS
+                assert outcome.model_id == identity
+                assert outcome.source_id == source.source_id
+            finally:
+                await handle.close_stream()
+        assert [(path, body["model"]) for path, body in handler.invocations] == [
+            (endpoint, f"{source.prefix}/{identity}") for identity in (*identities, route_only)
+        ]
+
+    with _models_endpoint(identities) as (base_url, handler):
+        asyncio.run(run(base_url, handler))
 
 
 def test_model_inventory_duplicate_top_level_members_replace_earlier_values() -> None:
@@ -2388,14 +2474,66 @@ def test_model_inventory_duplicate_ids_keep_the_first_complete_record() -> None:
     ]
 
 
-def test_model_inventory_rejects_an_elided_model_identifier() -> None:
-    oversized = b"x" * (16 * 1024 + 1)
+@pytest.mark.parametrize(("member", "result_index"), (("data", 2), ("models", 5)))
+@pytest.mark.parametrize("object_rows", (True, False))
+@pytest.mark.parametrize("ensure_ascii", (True, False))
+def test_model_inventory_preserves_complete_long_unicode_identities(
+    member: str, result_index: int, object_rows: bool, ensure_ascii: bool,
+) -> None:
+    head = "模型🧪/e\u0301" * 3000
+    ids = [f"{head}-one", f"{head}-two", "é", "e\u0301", "x" * 16385]
+    rows = [{"id": model_id} for model_id in ids] if object_rows else ids
+    projected = client_module._project_model_inventory(
+        io.BytesIO(json.dumps({member: rows, "ignored": "x" * 100_000}, ensure_ascii=ensure_ascii).encode())
+    )
+    assert projected is not None
+    assert projected[result_index] == [DiscoveredModel(id=model_id) for model_id in ids]
+
+
+@pytest.mark.parametrize(("member", "result_index"), (("data", 2), ("models", 5)))
+@pytest.mark.parametrize(
+    "parameters", (("reasoning", "模型🧪" * 6000), (" " * 16385 + "reasoning",)),
+    ids=("reasoning-with-long-unknown", "long-padded-reasoning"),
+)
+def test_model_inventory_retains_reasoning_evidence_past_diagnostic_budget(
+    member: str, result_index: int, parameters: tuple[str, ...],
+) -> None:
+    from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
 
     projected = client_module._project_model_inventory(
-        io.BytesIO(b'{"data":[{"id":"valid"},{"id":"' + oversized + b'"}]}')
+        io.BytesIO(json.dumps({member: [{"id": "unknown-model", "supported_parameters": parameters}]}).encode())
     )
+    assert projected is not None
+    model = projected[result_index][0]
+    assert model.supported_parameters == parameters
+    resolution = resolve_reasoning_tiers(
+        protocol="openai_chat", model_id=model.id,
+        supported_parameters=model.supported_parameters, catalog_efforts_by_model={},
+    )
+    assert resolution.source == "upstream"
+    assert resolution.efforts
 
-    assert projected is None
+
+def test_model_inventory_lossless_values_keep_duplicate_member_and_id_scope() -> None:
+    first, second = "模型🧪" * 6000, "m" * 17000
+    quoted_first, quoted_second = json.dumps(first), json.dumps(second)
+    projected = client_module._project_model_inventory(
+        io.BytesIO(
+            (
+                '{"data":[{"id":"stale"}],"data":['
+                f'{{"id":"stale","id":{quoted_first},"supported_parameters":["stale"],'
+                f'"supported_parameters":[{quoted_second},"reasoning"]}},'
+                f'{{"id":{quoted_first},"supported_parameters":["temperature"]}},'
+                f'{{"id":{quoted_second},"supported_parameters":["tools"]}}'
+                ']}'
+            ).encode()
+        )
+    )
+    assert projected is not None
+    assert projected[2] == [
+        DiscoveredModel(id=first, supported_parameters=(second, "reasoning")),
+        DiscoveredModel(id=second, supported_parameters=("tools",)),
+    ]
 
 
 def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> None:

@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
 
+import aiohttp
 from aiohttp import web
+from packaging.version import Version
 
 from config import paths
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
@@ -63,7 +65,7 @@ from .service import (
 )
 
 
-_MAX_REQUEST_BYTES: Final = 16 * 1024 * 1024
+_MAX_REQUEST_BYTES: Final = 128 * 1024 * 1024
 _BUFFERED_RESPONSE_MEMORY_BYTES: Final = 256 * 1024
 _RESPONSE_CHUNK_BYTES: Final = 64 * 1024
 _SUPPORTED_PATHS: Final = frozenset(
@@ -490,7 +492,12 @@ class ModelHubTurnGateway:
         async with self._start_lock:
             if self._runner is not None:
                 return
-            app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
+            # Before 3.14, aiohttp's reader rejects at >= instead of >.
+            # Compensate only there so our byte budget stays inclusive.
+            client_max_size = _MAX_REQUEST_BYTES
+            if Version(aiohttp.__version__).release < (3, 14):
+                client_max_size += 1
+            app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
             runner = web.AppRunner(
@@ -758,6 +765,15 @@ class ModelHubTurnGateway:
             )
         try:
             payload = await request.json(loads=json.loads)
+        except web.HTTPRequestEntityTooLarge:
+            terminalizer.fail("invalid_parameter")
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
+                status=413,
+                code="request_too_large",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
         except (json.JSONDecodeError, UnicodeDecodeError):
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
@@ -1225,7 +1241,11 @@ class ModelHubTurnGateway:
         copy = project_turn_outcome_copy(turn_outcome) if turn_outcome is not None else None
         message = render_turn_outcome_copy(turn_outcome, language) if turn_outcome is not None else None
         key = copy.key if copy is not None else None
-        if message is None and fallback_code is not None:
+        if fallback_code == "request_too_large":
+            # Refine the local admission error without changing its turn outcome.
+            key = "modelHub.errors.request_too_large"
+            message = i18n_t(key, language, limit_mib=f"{_MAX_REQUEST_BYTES / (1024 * 1024):g}")
+        elif message is None and fallback_code is not None:
             fallback_key = f"modelHub.errors.{fallback_code}"
             fallback_message = i18n_t(fallback_key, language)
             if fallback_message == fallback_key:

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -85,7 +85,7 @@ afterEach(() => {
 });
 
 describe('BackendModelEditorDialog', () => {
-  it('refuses an empty, overlong, or already-taken model ID', async () => {
+  it('refuses an empty or already-taken model ID', async () => {
     const user = userEvent.setup();
     const { onCommit } = renderEditor({ takenIds: new Set(['taken']) });
 
@@ -108,18 +108,19 @@ describe('BackendModelEditorDialog', () => {
     });
   });
 
-  it('caps the ID at the contract length while it can still be typed', async () => {
+  it.each(['x'.repeat(257), '模型🧪/e\u0301'.repeat(3000)])('submits a long pasted ID without shortening it (%#)', async (identifier) => {
     const user = userEvent.setup();
-    const { onCommit } = renderEditor();
+    const { onCommit } = renderEditor({ backend: 'opencode' });
 
-    expect(modelField().getAttribute('maxlength')).toBe('256');
-    // The browser stops at the cap, so reaching the error needs a value the
-    // field never lets a keystroke produce.
-    fireEvent.change(modelField(), { target: { value: 'x'.repeat(257) } });
+    expect(modelField().getAttribute('maxlength')).toBeNull();
+    await user.click(modelField());
+    await user.paste(`  ${identifier}  `);
+    await waitFor(() => expect(search).toHaveBeenCalledWith(
+      expect.stringContaining(identifier), expect.any(AbortSignal),
+    ));
     await user.click(screen.getByRole('button', { name: 'Add model' }));
 
-    expect(onCommit).not.toHaveBeenCalled();
-    expect(screen.getByText('A model ID may be at most 256 characters.')).toBeTruthy();
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: identifier }));
   });
 
   it('edits a persisted ID that predates the length cap', async () => {
@@ -135,10 +136,9 @@ describe('BackendModelEditorDialog', () => {
     };
     const { onCommit } = renderEditor({ model: legacy, takenIds: new Set([legacy.id]) });
 
-    // Shown in full, not clipped: the cap belongs to what can be typed.
+    // The full persisted ID remains read-only while its metadata is editable.
     expect(modelField().value).toBe(legacy.id);
     expect(modelField().getAttribute('maxlength')).toBeNull();
-    expect(screen.queryByText('A model ID may be at most 256 characters.')).toBeNull();
 
     await user.type(screen.getByLabelText('Display name'), 'Legacy house model');
     await user.clear(screen.getByLabelText('Maximum output'));

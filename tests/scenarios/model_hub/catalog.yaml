@@ -9,6 +9,7 @@ capability:
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
+    - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_local_deps.py
@@ -35,6 +36,7 @@ capability:
     - tests/e2e/test_model_hub_mock_upstream.py
     - tests/e2e/test_model_hub_routing.py
     - tests/e2e/test_model_hub_backend_settings.py
+    - tests/e2e/test_model_hub_catalog_consumer.py
     - tests/e2e/test_model_hub_runtime.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
@@ -229,6 +231,24 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
+  - id: MH-REQUEST-BUDGET-001
+    name: Large multi-image requests retain exact model input through authenticated HTTP ingress
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_large_multi_image_request_is_forwarded_exactly
+  - id: MH-REQUEST-BUDGET-002
+    name: The inclusive request byte budget returns a local structured error without upstream admission or health mutation
+    status: covered
+    kind: boundary
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_request_budget_is_inclusive_and_local
+  - id: MH-REQUEST-BUDGET-003
+    name: Invalid gateway authentication cannot parse or admit a request body
+    status: covered
+    kind: security
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_bad_auth_does_not_parse_or_admit
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered
@@ -254,12 +274,21 @@ scenarios:
     layer: contract
     missing_layer: scenario
     test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
+    partial_evidence:
+      covers: Real Codex catalog and turn consumption preserves unknown image and explicit effort intent; this does not exercise the managed engine
+      test: tests/e2e/test_model_hub_catalog_consumer.py::test_codex_unknown_catalog_preserves_supplied_image_and_effort
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_explicit_catalog_choices_reach_the_consumer
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_native_context_override_wins_over_catalog_planning
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_auto_compaction_consumes_resolved_limits
   - id: MH-CLAUDE-LAUNCH-001
     name: Claude Hub turns preserve the configured Source and model despite native connection settings
     status: covered
     kind: injection
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_claude_consumer_preserves_explicit_limit_settings
   - id: MH-CODEX-LAUNCH-001
     name: Native Codex provider settings preserve the configured Hub Source and upstream model
     status: covered
@@ -364,19 +393,22 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_runtime.py::test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
   - id: MH-USAGE-006
-    name: Every model identifier a persisted config still loads is one the ledger can key
+    # Malformed historical whitespace/surrogate exceptions remain documented in
+    # docs/plans/model-hub-identifier-boundary-assessment.md; these rows do not
+    # claim that every arbitrary loadable legacy string is correctly attributed.
+    name: Supported persisted model identities remain meterable across reload
     status: covered
     kind: compatibility
     layer: unit
     test: tests/test_model_hub_usage.py::test_metering_can_key_exactly_the_identities_a_config_can_hold
   - id: MH-USAGE-007
-    name: Two model identifiers a config holds are never metered onto one ledger row
+    name: Distinct nonblank UTF-8 model identities and folded literals retain separate usage rows
     status: covered
     kind: persistence
     layer: unit
     test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
   - id: MH-USAGE-008
-    name: Every metered row is labelled under the identity it was metered for, however it was keyed
+    name: Configured nonblank UTF-8 identities label their verbatim and folded ledger rows
     status: covered
     kind: compatibility
     layer: unit
