@@ -1017,10 +1017,16 @@
         "native_cli_unavailable": "CLI login is not available in this process"
       }
     },
+    "recovery": {
+      "waiting": "Waiting to retry the model request in about {seconds}s",
+      "attempting": "Retrying the model request…",
+      "pending": "Waiting for the next model attempt…",
+      "ended": "This model request could not complete. Automatic recovery has ended. You can retry later or choose another model."
+    },
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",
-      "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
-      "waiting_without_retry": "The route for model {model} has recovered. Retry directly.",
+      "waiting": "This request could not complete: {source} is temporarily unavailable for model {model}, and no backup is usable. Automatic recovery has ended. You can retry later or choose another model.",
+      "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
       "request_incompatible": "This request is incompatible; switching Sources will not help."

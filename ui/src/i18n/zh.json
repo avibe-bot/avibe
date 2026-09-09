@@ -4138,6 +4138,11 @@
     "scrollToBottom": "回到最新",
     "streaming": "实时输出中",
     "thinking": "思考中…",
+    "modelRecovery": {
+      "waitingSeconds": "等待重试，预计 {{seconds}} 秒",
+      "waiting": "等待重试…",
+      "attempting": "正在重试…"
+    },
     "notifyLabel": "通知",
     "retryRequested": "已请求重试",
     "retryFailed": "未能提交重试，可以再次点击。",

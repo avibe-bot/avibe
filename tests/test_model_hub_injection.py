@@ -130,6 +130,7 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "999999",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "999999",
+            "CLAUDE_CODE_MAX_RETRIES": "9",
             "PATH": "/bin",
         },
         launch,
@@ -137,6 +138,7 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert env["ANTHROPIC_BASE_URL"] == launch.gateway_base_url
     assert env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
     assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert env["CLAUDE_CODE_MAX_RETRIES"] == "0"
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
@@ -169,6 +171,8 @@ def test_claude_hub_settings_own_connection_after_native_and_sdk_env_merges():
     assert effective_env["PATH"] == "/bin"
     assert settings["autoMemoryEnabled"] is False
     assert settings["apiKeyHelper"] == ""
+    settings = json.loads(claude_settings_for_launch('{"env":{"CLAUDE_CODE_MAX_RETRIES":"9"}}', launch))
+    assert settings["env"]["CLAUDE_CODE_MAX_RETRIES"] == "0"
 
 
 @pytest.mark.parametrize("channel", [None, "direct", "native_cli"])
@@ -307,6 +311,9 @@ def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
     assert 'wire_api="responses"' in rendered
     assert "model_provider=\"avibe_model_hub\"" in rendered
     assert f'model_catalog_json="{catalog_path}"' in rendered
+    assert "model_providers.avibe_model_hub.request_max_retries=0" in args
+    assert "features.unbounded_connection_retries=false" in args
+    assert not any("stream_max_retries" in arg for arg in args)
     assert env == {"AVIBE_MODEL_HUB_TOKEN": "local-test-token"}
 
 

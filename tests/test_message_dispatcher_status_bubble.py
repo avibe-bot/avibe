@@ -125,6 +125,40 @@ def _dispatcher(controller, *, now=1000.0, disable_heartbeat=True):
 
 
 class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_reuses_existing_bubble_without_notification_or_step(self):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        controller = _StubController(platform="slack")
+        rows = []
+        controller.model_hub_turn_gateway = SimpleNamespace(
+            correlation=SimpleNamespace(recovery_snapshot=lambda _turn_id: rows),
+        )
+        dispatcher = _dispatcher(controller)
+        context = _ctx()
+        context.platform_specific = {"turn_token": "turn-exact"}
+        await dispatcher.begin_status_bubble(context)
+        key = dispatcher._get_consolidated_message_key(context)
+        message_id = dispatcher._consolidated_message_ids[key]
+        now = datetime.now(timezone.utc)
+        rows.append({
+            "phase": "waiting",
+            "started_at": (now - timedelta(seconds=10)).isoformat(),
+            "next_eligible_at": (now + timedelta(seconds=20)).isoformat(),
+        })
+        await dispatcher._status_heartbeat_render_once(context, controller.im_client, key, message_id)
+        self.assertEqual(len(controller.im_client.sent), 1)
+        self.assertIn("Waiting to retry", controller.im_client.edits[-1][1])
+        self.assertEqual(dispatcher._status_step_count.get(key, 0), 0)
+        body, _footer = dispatcher._compose_status_message(
+            context, key, done=True, result_body="Final answer",
+        )
+        self.assertEqual(body, "Final answer")
+        rows.clear()
+        await dispatcher._status_heartbeat_render_once(context, controller.im_client, key, message_id)
+        self.assertNotIn("retry", controller.im_client.edits[-1][1])
+        self.assertEqual(len(controller.im_client.sent), 1)
+
     async def test_missing_progress_getter_defaults_off(self):
         controller = object()
         d = ConsolidatedMessageDispatcher(controller)

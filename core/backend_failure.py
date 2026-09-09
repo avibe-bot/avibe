@@ -129,6 +129,39 @@ def _failure_texts(backend_name: str, diagnostic: Any, display_text: Any) -> tup
     return error, visible
 
 
+def _model_hub_failure_text(
+    controller: Any, context: Any, request: Any, backend: str
+) -> str | None:
+    """Render exact live Hub evidence, never parse a native exception wrapper.
+
+    The registry owns ambiguity, pending-request, and Stop guards. Without that
+    evidence the original backend error remains authoritative; an earlier source
+    outage must not disguise an unrelated native/tool failure.
+    """
+
+    from core.handlers.model_hub.provenance import (
+        TurnOutcomeProjectionInput,
+        render_turn_outcome_copy,
+    )
+
+    gateway = getattr(controller, "model_hub_turn_gateway", None)
+    registry = getattr(gateway, "correlation", None)
+    project = getattr(registry, "terminal_projection", None)
+    if not callable(project):
+        return None
+    for source in (getattr(request, "context", None), context):
+        payload = getattr(source, "platform_specific", None) or {}
+        turn_id = payload.get("turn_token")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            continue
+        projection = project(turn_id.strip(), backend=backend)
+        if not isinstance(projection, TurnOutcomeProjectionInput):
+            continue
+        language = str(getattr(getattr(controller, "config", None), "language", "en") or "en")
+        return render_turn_outcome_copy(projection, language)
+    return None
+
+
 def backend_failure_notification_output(
     context: Any,
     backend: str,
@@ -328,6 +361,9 @@ async def emit_backend_failure(
 
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
+    hub_visible = _model_hub_failure_text(controller, context, request, backend_name)
+    if hub_visible is not None:
+        visible = hub_visible
     terminal = _terminal_output(request, output)
     harness_run_id = _harness_run_identity(context, request)
     owns_failure_contract = bool(

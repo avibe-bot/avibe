@@ -8,7 +8,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
 
@@ -343,6 +343,7 @@ def build_claude_hub_env(
         result["ANTHROPIC_BASE_URL"] = launch.gateway_base_url
         result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
         result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+        result["CLAUDE_CODE_MAX_RETRIES"] = "0"
     else:
         # A native_cli hop keeps the user's official CLI authentication.
         result = dict(base_env)
@@ -387,6 +388,10 @@ def build_codex_hub_launch(
         f"model_providers.{provider}.supports_websockets=false",
         "-c",
         f"model_providers.{provider}.requires_openai_auth=false",
+        "-c",
+        f"model_providers.{provider}.request_max_retries=0",
+        "-c",
+        "features.unbounded_connection_retries=false",
         "-c",
         f"model_catalog_json={format_toml_basic_string(str(model_catalog_path))}",
     ]
@@ -541,19 +546,28 @@ class ModelHubRuntimeRouter:
             now=self.service.now(),
             unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
             supply_channel=supply_channel,
+            live_recovery=self.service.recovery_annotations(config),
         )
-        if not resolution.recoverable_source_ids:
-            return config, resolution
-        await self.service._recover_resolution_sources(resolution)
-        config = self.service.store.load()
-        return config, resolve_model_hub_turn(
-            config,
-            backend,
-            requested_model,
-            now=self.service.now(),
-            unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
-            supply_channel=supply_channel,
-        )
+        if (
+            self.turn_gateway is not None and resolution.source is None
+            and resolution.supply_status == "waiting"
+            and resolution.inspected_hops
+            and any(
+                hop.source is not None and hop.source.supply_channel == "hub"
+                for hop in resolution.inspected_hops
+            )
+        ):
+            # Preflight prepares the existing native delivery. Its first model
+            # request owns recovery admission; no second startup wait/window.
+            first = next(
+                hop for hop in resolution.inspected_hops
+                if hop.source is not None and hop.source.supply_channel == "hub"
+            )
+            resolution = replace(
+                resolution, channel="hub", source=first.source,
+                target_model=first.model_id or requested_model,
+            )
+        return config, resolution
 
     @staticmethod
     def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
@@ -1129,8 +1143,11 @@ class ModelHubRuntimeRouter:
             provider["models"][identifier] = projected_model
             projected_identifiers.append(identifier)
             model_provider_ids.append((identifier, overlay_provider_id))
-            if resolution.candidate_hops:
-                candidate = resolution.candidate_hops[0]
+            if resolution.source is not None:
+                candidate = (
+                    resolution.candidate_hops[0] if resolution.candidate_hops
+                    else next(hop for hop in resolution.inspected_hops if hop.source_id == resolution.source.id)
+                )
                 if candidate.source is None or candidate.model_id is None:
                     continue
                 available_identifiers.append(identifier)

@@ -42,6 +42,7 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
+from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
     ProtocolSSEState,
@@ -847,33 +848,19 @@ class ModelHubTurnGateway:
                 translation = translate_opencode_tool_names(payload)
                 payload = translation.request
                 execution.response_tool_aliases = translation.response_aliases
-            for retry in range(2):
-                try:
-                    resolved = await self.service.resolve(
-                        backend=backend,
-                        model_id=resolution_model,
-                        request=ModelHubRequest(
-                            payload,
-                            protocol=_REQUEST_PROTOCOLS[endpoint],
-                            headers=protocol_headers,
-                        ),
-                        stream=stream,
-                        supply_channel="hub",
-                        attempt_observer=observe_attempt,
-                    )
-                    break
-                except ModelHubError as exc:
-                    delay = self._cooldown_retry_delay(exc.turn_outcome)
-                    if (
-                        retry
-                        or delay is None
-                        or exc.turn_outcome is None
-                        or exc.turn_outcome.outcome != "no_candidate"
-                    ):
-                        raise
-                    # Native callers may ignore Retry-After. With no runnable
-                    # hop, wait for one known recovery before admission.
-                    await asyncio.sleep(delay)
+            resolved = await self.service.resolve_with_recovery(
+                backend=backend,
+                model_id=resolution_model,
+                request=ModelHubRequest(
+                    payload,
+                    protocol=_REQUEST_PROTOCOLS[endpoint],
+                    headers=protocol_headers,
+                ),
+                stream=stream,
+                supply_channel="hub",
+                attempt_observer=observe_attempt,
+                recovery_observer=terminalizer.update_recovery,
+            )
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -882,6 +869,22 @@ class ModelHubTurnGateway:
                 terminalizer.engine_down()
             elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
+            if exc.code == RECOVERY_EXHAUSTED_CODE:
+                self._commit_and_render_turn_outcome(execution, terminalizer, turn_outcome)
+                # Native compatibility is keyed by the caller backend. Keep its
+                # transport result separate from actual upstream provenance.
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": RECOVERY_EXHAUSTED_CODE,
+                            "code": RECOVERY_EXHAUSTED_CODE,
+                            "message": RECOVERY_EXHAUSTED_MESSAGE,
+                        },
+                    },
+                    status=400 if backend == "codex" else 424,
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                )
             return self._terminal_error_response(
                 execution,
                 terminalizer,
@@ -894,6 +897,12 @@ class ModelHubTurnGateway:
         if resolved.handle is not None and resolved.handle.stream is not None:
             execution.handle = resolved.handle
             resources.push_async_callback(resolved.handle.close_stream)
+            # The execution boundary must own cleanup before an awaited health
+            # write: cancellation here still settles and meters this handle.
+            await self.service._observe_handle_recovery(
+                resolved.source_id, resolved.settlement_generation, resolved.handle,
+                backend=resolved.backend, model_id=resolved.requested_model_id,
+            )
         return await self._resolved_response(
             request,
             resolved,

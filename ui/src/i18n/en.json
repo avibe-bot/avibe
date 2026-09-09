@@ -4138,6 +4138,11 @@
     "scrollToBottom": "Scroll to latest",
     "streaming": "Streaming",
     "thinking": "Thinking…",
+    "modelRecovery": {
+      "waitingSeconds": "Waiting to retry in about {{seconds}}s",
+      "waiting": "Waiting to retry…",
+      "attempting": "Trying again…"
+    },
     "notifyLabel": "Notify",
     "retryRequested": "Retry requested",
     "retryFailed": "Could not request retry. You can try again safely.",

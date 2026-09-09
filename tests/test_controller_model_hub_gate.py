@@ -4,12 +4,13 @@ import asyncio
 import json
 import threading
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from config.v2_config import V2Config
 from core.controller import Controller
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
 from modules.agents.model_hub import resolve_model_hub_launch, resolve_opencode_overlay_launch
 
 
@@ -44,7 +45,7 @@ def test_controller_leaves_model_hub_aggregate_absent_when_explicitly_disabled(m
 
 
 @pytest.mark.parametrize("env_value", [None, "1"])
-def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable(monkeypatch, env_value):
+def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable(monkeypatch, tmp_path, env_value):
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
@@ -61,6 +62,9 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
             calls.append(("gateway", value, language_provider))
             self.service = value
             self.language_provider = language_provider
+            self.correlation = TurnCorrelationRegistry(
+                BoundedProvenanceStore(tmp_path / "provenance.json"),
+            )
 
     class Router:
         def __init__(self, *, service, turn_gateway):
@@ -165,6 +169,46 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),
         ("router", service, controller.model_hub_turn_gateway),
     ]
+
+    # Exercise the initializer's real callback binding, not a second test-only
+    # binding: one registry publishes material changes for its live Session.
+    registry = controller.model_hub_turn_gateway.correlation
+    assert callable(registry.on_recovery_changed)
+    token = registry.credentials("codex", "fixture-controller", "turn-live")
+    registry.begin_gateway_request(
+        backend="codex", token=token, requested_model_id="agent-model",
+    )
+    controller.session_turns = SimpleNamespace(in_flight={
+        "ses-live": SimpleNamespace(
+            task=SimpleNamespace(done=lambda: False),
+            context=SimpleNamespace(platform_specific={"turn_token": "turn-live"}),
+        ),
+        "ses-peer": SimpleNamespace(
+            task=SimpleNamespace(done=lambda: False),
+            context=SimpleNamespace(platform_specific={"turn_token": "turn-peer"}),
+        ),
+    })
+    publish = Mock()
+    monkeypatch.setattr("core.inbox_events.bus.publish", publish)
+    progress = {
+        "phase": "waiting", "attempt_count": 1, "source_id": "src_recovery01",
+        "reason": "network", "started_at": "2026-09-09T00:00:00+00:00",
+        "next_eligible_at": "2026-09-09T00:00:01+00:00",
+        "window_end": "2026-09-09T00:02:00+00:00",
+    }
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=progress)
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=dict(progress))
+    publish.assert_called_once_with(
+        "session.activity", {"session_id": "ses-live", "event": "model_recovery"},
+    )
+    assert registry.recovery_snapshot("turn-live") == [{**progress, "request_id": "one"}]
+    publish.reset_mock()
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=None)
+    publish.assert_called_once_with(
+        "session.activity", {"session_id": "ses-live", "event": "model_recovery"},
+    )
+    assert registry.recovery_snapshot("turn-live") == []
+    assert not registry.store.path.exists()
 
     refresh_callbacks[0]()
 
