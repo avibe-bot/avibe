@@ -595,3 +595,20 @@ def test_half_open_projection_cannot_hide_action_or_native_blockers(tmp_path):
             with pytest.raises(AssertionError):
                 _assert_valid("agent-chain.schema.json", blocked)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind,suffix", [
+    (RawOutcomeKind.NETWORK_ERROR, "network"), (RawOutcomeKind.TIMEOUT, "timeout"),
+])
+def test_selected_source_probe_does_not_claim_or_schedule_recovery(tmp_path, kind, suffix):
+    async def run():
+        service, clock = clock_service(tmp_path, outcomes=[_outcome(kind, source_id="src_recovery01")])
+        before = copy.deepcopy(service.store.load().to_payload())
+        result = await service.probe_source("src_recovery01", {"model": "shared-model"})
+        assert result["reachable"] is False
+        assert result["error"] == f"models.source.cooldown.{suffix}"
+        assert len(service.adapter.invocations) == 1
+        assert service.recovery._sources == {} and clock.delays == []
+        assert service.store.load().to_payload() == before
+        assert service.events.list() == []
+    asyncio.run(run())

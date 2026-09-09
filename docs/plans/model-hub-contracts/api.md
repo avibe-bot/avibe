@@ -1073,6 +1073,14 @@ closed live key and validates only as `channel: hub`, `reachable: false`, and
 `latency_ms: null`; native probes and Hub probes with measured latency cannot carry it.
 It never reports the removed persistent network/timeout cooldown keys.
 
+The independently selected saved-Source model test (`probe_source`) is not an
+Agent probe or recovery request: it calls once without changing Source health
+or scheduling retry. Its legacy `models.source.cooldown.network` and
+`models.source.cooldown.timeout` error identities remain display-only results,
+not persisted cooldowns. It must not use the live backoff copy that promises
+a forthcoming retry. This distinction is explicit at the shared probe-result
+formatter's call boundary; it does not introduce a second policy.
+
 ## Live request recovery and terminal projection
 
 The service is the only recovery-policy owner. `resolve_with_recovery` is the

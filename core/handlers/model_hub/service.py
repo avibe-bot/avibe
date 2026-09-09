@@ -5302,7 +5302,9 @@ class ModelHubService:
         decision = classify_outcome(outcome)
         if decision.action == "refresh":
             decision = ResolutionDecision("fallback", reason="credential_revoked")
-        error = None if succeeded else self._probe_failure(outcome, decision)[0]
+        error = None if succeeded else self._probe_failure(
+            outcome, decision, recovery_managed=False,
+        )[0]
         return {
             "source_id": source.id,
             "model_id": model_id,
@@ -5316,13 +5318,21 @@ class ModelHubService:
     def _probe_failure(
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
+        *,
+        recovery_managed: bool,
     ) -> tuple[str, Optional[EventReason]]:
         if decision.action == "surface":
             return "models.source.error.unclassified", None
         if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
-            return "models.source.backoff.connection_failed", "network"
+            return (
+                "models.source.backoff.connection_failed" if recovery_managed else "models.source.cooldown.network",
+                "network",
+            )
         if outcome.kind == RawOutcomeKind.TIMEOUT:
-            return "models.source.backoff.connection_failed", "network"
+            return (
+                "models.source.backoff.connection_failed" if recovery_managed else "models.source.cooldown.timeout",
+                "network",
+            )
         if decision.reason in {
             "credential_expired",
             "credential_revoked",
@@ -5515,7 +5525,7 @@ class ModelHubService:
             error_key: Optional[str] = None
             latency_ms: Optional[int] = elapsed_ms
             if not reachable:
-                error_key, event_reason = self._probe_failure(outcome, decision)
+                error_key, event_reason = self._probe_failure(outcome, decision, recovery_managed=True)
                 if error_key == "models.source.backoff.connection_failed":
                     latency_ms = None
                 if event_reason is not None:
