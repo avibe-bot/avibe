@@ -349,7 +349,7 @@ export const Dock: React.FC = () => {
               key={w.id}
               type="button"
               title={label}
-              aria-label={t('apps.window.restore', { defaultValue: 'Restore' })}
+              aria-label={t('apps.window.restore')}
               onClick={() => wm.restore(w.id)}
               className="group/min flex w-[64px] shrink-0 flex-col items-center gap-1"
             >

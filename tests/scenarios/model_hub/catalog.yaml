@@ -169,7 +169,7 @@ scenarios:
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-SRC-DELETE-002
     related_tests:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::states in the dialog that a source disappeared with no removal of ours
-      - ui/src/i18n/modelHubKeys.test.ts
+      - ui/src/i18n/keyCoverage.test.ts
   - id: MH-SUPPLY-GAP-001
     name: Inventory loss preserves an explicit API-key route target
     status: covered

@@ -1,15 +1,20 @@
-// The Model Hub draws its copy through `t('settings.models…')` literals, and a
-// key that never reached the bundles renders as the raw key: removing a provider
+// Every piece of user-visible copy is drawn through a `t('…')` literal, and a key
+// that never reached the bundles renders as the raw key: removing a provider
 // showed `settings.models.sourceDetail.gone` where a sentence belonged.
 //
-// So the guard states the property — every literal key those components ask for
-// has copy in BOTH locales — and EXTRACTS the key list from the components
-// themselves. A key or a whole new component added later is covered without
-// editing this file, which a hand-written list could never promise.
+// So the guard states the property — every literal key the app asks for has copy
+// in BOTH locales — and EXTRACTS the key list from the components themselves. A
+// key, or a whole new surface added later, is covered without editing this file,
+// which a hand-written list could never promise.
+//
+// The root is `src/`, so the property belongs to the app rather than to one
+// directory. It was scoped to the Model Hub for exactly as long as it had to be:
+// eight keys on three other surfaces had copy in neither locale, four of them
+// rendering raw keys, and the root widened in the change that wrote them.
 //
 // Resolution runs through a real i18next instance instead of walking the JSON,
 // because the bundles use two shapes a plain path walk reports as missing and
-// the page depends on: plural families (`usageSummary_one` with no plain key)
+// the app depends on: plural families (`usageSummary_one` with no plain key)
 // and flat dotted keys (`"vendor.hint"` sitting inside `field`, found by
 // `ignoreJSONStructure`). The audit that opened this lane walked paths, and
 // called 12 keys missing that the runtime resolves.
@@ -23,7 +28,7 @@
 // `_other` renders the raw key the moment a real call passes 2, and a call
 // passing no count renders the raw key against a family that has no plain key.
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createInstance, type i18n as I18n } from 'i18next';
@@ -33,7 +38,8 @@ import { describe, expect, it } from 'vitest';
 import en from './en.json';
 import zh from './zh.json';
 
-const MODEL_HUB = resolve(dirname(fileURLToPath(import.meta.url)), '../components/settings/models');
+const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const MODEL_HUB = join('components', 'settings', 'models');
 
 /** A `t()` call site: the key it names, and whether it hands i18next a `count`. */
 type Reference = { key: string; counted: boolean };
@@ -57,16 +63,22 @@ const passesCount = (options: ts.Expression | undefined): boolean =>
  * argument shape that decides which copy that key needs.
  *
  * Read from the syntax tree, so the callee itself is the whole test of what a
- * translation call is: the page's own `jsonInit('POST')` and a `request.t(…)`
+ * translation call is: a page's own `jsonInit('POST')` and a `request.t(…)`
  * member call are not one, and a key built from a variable or an interpolated
- * template is invisible here by construction. The ones a frozen contract
+ * template is invisible here by construction — that dynamic form is exactly
+ * where the app's `defaultValue` fallbacks live. The keys a frozen contract
  * declares are covered by the models page's own `contractLocaleKeys.test.ts`.
  *
  * `counted` is what the call can be SEEN to pass — a `count` property, written
  * long or shorthand. An options object that hides one behind a spread reads as
  * uncounted and is probed without one, which against a plural-only key fails
- * this guard rather than passing it: the residual risk stays a loud failure
- * someone looks at, never a raw key shipped past a green CI.
+ * this guard rather than passing it. A bare `t(…)` that is not i18next at all
+ * would likewise be asked for copy it does not need. Both residuals stay a loud
+ * failure someone looks at, never a raw key shipped past a green CI.
+ *
+ * A key's namespace is not part of this: every `useTranslation()` in the app
+ * takes the default one, so a key resolves against `translation` exactly as the
+ * probes below resolve it.
  */
 export const collectReferences = (source: string, fileName = 'fixture.tsx'): Reference[] => {
   const file = ts.createSourceFile(
@@ -103,7 +115,7 @@ const sourceFiles = (dir: string): string[] =>
 
 const referencedCallSites = (): Reference[] => {
   const found = new Map<string, Reference>();
-  for (const file of sourceFiles(MODEL_HUB)) {
+  for (const file of sourceFiles(APP_SOURCE)) {
     for (const reference of collectReferences(readFileSync(file, 'utf8'), file)) {
       found.set(label(reference), reference);
     }
@@ -155,7 +167,7 @@ const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean
     return typeof rendered !== 'string' || rendered === '' || rendered === reference.key;
   });
 
-describe('Model Hub i18n key coverage', () => {
+describe('app i18n key coverage', () => {
   const referenced = referencedCallSites();
 
   it('collects the literal keys and how they are called, and only those, from a source file', () => {
@@ -164,40 +176,44 @@ describe('Model Hub i18n key coverage', () => {
     // part of that now — a sweep that stopped seeing `count` would quietly stop
     // asking for the plural copy, which is the hole this case also closes.
     const fixture = `
-      const label = t('settings.models.fixture.literal');
-      const quoted = t("settings.models.fixture.double");
+      const label = t('fixture.literal');
+      const quoted = t("fixture.double");
       const wrapped = t(
-        'settings.models.fixture.wrapped',
+        'fixture.wrapped',
         { count: 2 },
       );
-      const shorthand = t('settings.models.fixture.shorthand', { count });
-      const alongside = t('settings.models.fixture.alongside', { count: total, name: 'x' });
-      const interpolated = t('settings.models.fixture.interpolated', { name: 'x' });
-      const spread = t('settings.models.fixture.spread', { ...options });
-      const nested = t('settings.models.fixture.outer', { hint: t('settings.models.fixture.inner', { count: 3 }) });
+      const shorthand = t('fixture.shorthand', { count });
+      const alongside = t('fixture.alongside', { count: total, name: 'x' });
+      const interpolated = t('fixture.interpolated', { name: 'x' });
+      const spread = t('fixture.spread', { ...options });
+      const nested = t('fixture.outer', { hint: t('fixture.inner', { count: 3 }) });
       void jsonInit('POST');
-      void request.t('settings.models.fixture.member');
-      void t(\`settings.models.fixture.\${dynamic}\`);
+      void request.t('fixture.member');
+      void t(\`fixture.\${dynamic}\`);
     `;
     expect(collectReferences(fixture)).toEqual([
-      { key: 'settings.models.fixture.alongside', counted: true },
-      { key: 'settings.models.fixture.double', counted: false },
-      { key: 'settings.models.fixture.inner', counted: true },
-      { key: 'settings.models.fixture.interpolated', counted: false },
-      { key: 'settings.models.fixture.literal', counted: false },
-      { key: 'settings.models.fixture.outer', counted: false },
-      { key: 'settings.models.fixture.shorthand', counted: true },
-      { key: 'settings.models.fixture.spread', counted: false },
-      { key: 'settings.models.fixture.wrapped', counted: true },
+      { key: 'fixture.alongside', counted: true },
+      { key: 'fixture.double', counted: false },
+      { key: 'fixture.inner', counted: true },
+      { key: 'fixture.interpolated', counted: false },
+      { key: 'fixture.literal', counted: false },
+      { key: 'fixture.outer', counted: false },
+      { key: 'fixture.shorthand', counted: true },
+      { key: 'fixture.spread', counted: false },
+      { key: 'fixture.wrapped', counted: true },
     ]);
   });
 
-  it('reads its key list out of the live components', () => {
-    // Not a floor on the count, which would only say the scan found something:
-    // the scan must have walked the tree, and produced both the key whose
-    // absence put a raw `settings.models.sourceDetail.gone` on the remove flow
-    // and a counted call site, which needs copy no bare probe asks for.
-    expect(sourceFiles(MODEL_HUB).length).toBeGreaterThan(1);
+  it('reads its key list out of the whole app, not one directory', () => {
+    // Not a floor on the count, which would only say the scan found something.
+    // The scan must have walked past the directory this guard started in — the
+    // narrower root passed while eight keys on other surfaces had no copy — and
+    // produced both the key whose absence put a raw
+    // `settings.models.sourceDetail.gone` on the remove flow and a counted call
+    // site, which needs copy no bare probe asks for.
+    const files = sourceFiles(APP_SOURCE).map((file) => relative(APP_SOURCE, file));
+    expect(files.some((file) => file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
+    expect(files.some((file) => !file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false });
     expect(referenced.some((reference) => reference.counted)).toBe(true);
   });
