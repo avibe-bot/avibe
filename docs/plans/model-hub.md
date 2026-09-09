@@ -587,7 +587,9 @@ else EXHAUSTED(classify_blockers(C))
 ```
 
 `inspect_exact_hop` checks only whether that configured hop can run now. `healthy` and
-an elapsed cooldown are runnable. An unelapsed cooldown, `needs_action`, `error`, a
+an elapsed cooldown are eligible, unless a real request already owns half-open
+admission. Eligibility is not proof of recovery. An unelapsed cooldown, live
+connection backoff, `needs_action`, `error`, a
 missing/deleted Source, a configured model no longer callable by that Source, or an
 unavailable native CLI process is not runnable; the hop stays at its configured
 position. The canonical reasons are respectively the existing classified Source reason,
@@ -716,14 +718,19 @@ overlay and keeps that durable/self-healing blocker's established health, reason
 retry facts. The one process-layer exception is simultaneous `native_cli` unavailability:
 its actionable `native_cli_unavailable` reason takes the single reason slot while the
 backoff health and deadline remain visible and the chain is `interrupted`.
-Deadline expiry makes the hop runnable again without a write. The first subsequent
-user-visible model-output byte produced by that same affected Source clears both
-deadline and streak automatically; successful fallback output from another Source does
-not. Source endpoint/credential replacement and process reconstruction also clear them
+Deadline expiry makes the hop eligible again without a write or `recover` event. The
+first subsequent recognized model output, or `SUCCESS` with `recovery_verified: true`,
+produced by that same affected Source clears both deadline and streak automatically.
+Permissive buffered HTTP 200 admission and its compatibility `stream_started` flag
+are not recovery evidence; actual streaming output is read from
+`handle.observed.model_output_started`. Recognized empty protocol completion is valid
+success. Successful fallback output from another Source does not clear the affected
+Source. Source endpoint/credential replacement and process reconstruction also clear them
 because the state is in-memory and identity-specific. Before an API read is serialized,
 the assembler captures one read time and normalizes an expired overlay to the Source's
 underlying non-backoff health and runnability; a stale backoff deadline never crosses the
-API boundary. The maximum is 30 seconds. This family never uses
+API boundary. The local network schedule caps at 30 seconds; valid longer upstream
+advice is not shortened to that cap. This family never uses
 `models.source.cooldown.*`, never writes `Source.state`, and never creates a permanent
 health verdict.
 
@@ -755,10 +762,88 @@ The final mirror registry checks the closed (classification, credential capabili
 row and fails any extra retry or unlisted remedy.
 
 Because health is source-global, a cooldown created through one backend affects every
-route using that Source. Because every turn runs the algorithm again, an elapsed
-cooldown naturally restores the configured leading hop without mutating order.
+route using that Source. Because every request runs the algorithm again, an elapsed
+cooldown naturally makes the configured leading hop eligible without mutating order.
 The Model Gateway and Usage pages remain the pull surfaces for takeover state,
 connector color, recent switches, and usage; provenance remains a debug affordance.
+
+**Bounded automatic recovery (owner amendment, September 9, 2026).** One
+`ModelHubService.recovery` owns live Source deadlines and half-open admission.
+The gateway calls `resolve_with_recovery`; the existing `resolve` remains one
+walk for explicit probes and single-walk characterization. There is no background
+probe scheduler or prompt/Turn/Source blackout deduplication.
+
+Each pending model HTTP request has one 120-second automatic admission window,
+starting at its first retryable failure or temporarily blocked admission. Fallback
+passes and Source changes never reset it. The service re-reads the effective route
+after waits and immediately tries a runnable fallback. It waits only for
+all-temporary supply; empty routes and mixed action/process/capability blockers
+retain their existing terminal rules. If the next eligibility time is outside
+the remaining window, it ends immediately; an in-flight owner may instead wake
+waiters before their window closes. Window expiry prevents another admission,
+never cancels an already connected slow inference, and never permits replay
+after output. Explicit Stop and downstream disconnection retain cancellation.
+An expired admission remains the explicit exhausted-recovery domain result even
+if another owner recovers or a route changes before this waiter resumes or
+finishes engine preparation. An actual admitted request's permanent, request,
+engine, or post-output failure retains its own terminal classification.
+
+Consecutive failed HTTP attempts on the same Hub Source identity use:
+
+- network: 1, 2, 4, 8, 16, 30 seconds;
+- server error: 30, 60, 120 seconds;
+- rate limit: 60, 120, 240, 300 seconds;
+- quota exhaustion: 300 seconds.
+
+Each family stays at its final value. Positive jitter adds at most 20%, capped
+at that family's local maximum, and never makes a local delay shorter. A valid
+`Retry-After` integer or HTTP date uses the response-header receipt instant,
+not body completion; admission uses the later of upstream advice and local
+backoff. Malformed, past, oversized, and non-ASCII advice is ignored with a
+redacted diagnostic. Scheduling and window duration are monotonic; aware UTC
+timestamps are read projections. Network state is never persisted. Existing
+shaped cooldown persistence remains compatible with earlier releases.
+Direct `native_cli` failures do not enter this HTTP coordinator: no Hub handle
+can prove their later success. They retain fixed native cooldowns (server 30,
+rate 60, quota 300 seconds), existing deadline-based launch eligibility and
+native display semantics, without live streaks, half-open ownership or
+timer-generated `recover` events. Unclassified native connection failures remain
+non-persistent and do not create a Hub backoff.
+
+An eligible affected Source admits one real request as half-open owner across
+waiting Sessions. Ownership and stale settlement fencing reuse the existing
+attempt-start generation. Cancellation releases that owner only after transport
+cleanup; old generations and replaced endpoint/credential identities cannot clear
+or extend the new identity's state. A valid recovery clears the streak and emits
+one `recover`; mere timer expiry emits none. Live reads expose optional
+`recovery: eligible | in_flight` on AgentChain hops. `in_flight` is not runnable;
+with no stronger blocker it is temporary `waiting`, with nullable `retry_at`.
+The same annotation feeds service, runtime launch, API chain and AgentSupply reads.
+If the adapter returns a completed local failure without transport admission,
+release the provisional half-open claim on that normal return as well as on
+exception or cancellation. Do not synthesize `on_admitted`, attempt observations
+or retry counts for a request the engine never owned.
+
+Temporary cooldown persistence and recovery bookkeeping are observational.
+A failed write cannot destroy valid output or replace the actual upstream
+failure. The same in-memory policy supplies effective shaped cooldown health,
+deadline and reason even when disk still says `standby`. After verified success,
+it retires only the exact old persisted cooldown observation for the same Source
+identity while that observation remains on disk. Fresh reads must not import it
+again, emit duplicate recovery, or retain its old failure streak. A different
+persisted cooldown, observed on-disk retirement, identity replacement or removal
+invalidates that retirement; action, configuration and inventory blockers still
+win. This is not a permanent healthy override, another freshness generation or
+a persistent recovery record. Canonical hop inspection supplies these private
+effective facts to chain serialization and both terminal blocker projections;
+public health/recovery enums and the public reason whitelist are unchanged.
+
+For an all-temporary chain with Hub supply, runtime preflight prepares the Hub
+launch immediately. The first model request owns the window; no pre-native wait
+spends a second window or delays native acceptance. Connected inference remains
+independent of this admission budget. The exhausted native wire response and
+read-only request-correlation hooks are specified in `model-hub-contracts/api.md`;
+neither changes historical provenance or authorizes an extra notification surface.
 
 **Settlement freshness is owned by the attempt that started (round-7 audit, fixed
 round-8).** Because health is source-global and every turn re-runs the algorithm, a
@@ -943,7 +1028,9 @@ and every stored route position. (Top-up is the third tap
 and needs no *replacement* route of ours — no credential of ours changes; it is a
 link out to the vendor.)
 
-**A normal turn never probes a blocked Source in hope that it recovered.** The explicit
+**A normal turn never probes an action-blocked Source in hope that it recovered.**
+Temporary eligibility admits the pending real request under the bounded policy
+above; it does not launch an independent probe. The explicit
 Source-details recovery path is `POST /api/models/sources/<id>/refresh`, the same saved
 mutation defined in §4.1. It may test `needs_action` or `error` after a
 user acts; a successful current observation clears the blocker without recreating or
@@ -959,7 +1046,7 @@ splits — on whether the user owes an action:
 | --- | --- | --- | --- |
 | `ok` | 正常 | — | serving from the intended head of the chain |
 | `degraded` | 降级 | — | serving via a fallback, and/or some sources in the chain are down |
-| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is a persisted cooldown or live connection backoff — recovers unattended at the earliest `retry_at` |
+| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is an effective cooldown, live connection backoff, or an in-flight half-open owner — eligibility may return unattended; recovery still needs actual success |
 | `interrupted` | 无可用来源 | **no** | nothing runnable and the effective chain is empty or at least one hop has a non-self-healing blocker: `needs_action`, `error`, `source_missing`, `model_unsupported`, or `native_cli_unavailable` |
 
 These four values are the **only backend-level supply-health wording**. The Gateway
@@ -984,12 +1071,14 @@ detail/remedy copy for restoring the sanctioned local CLI; it is never presented
 upstream Source cooldown.
 
 `waiting` exists to keep the surfacing rule below consistent. An agent whose
-sources are *all* in persisted cooldown or live connection backoff has nothing runnable,
+sources are *all* in effective cooldown, live connection backoff, or half-open
+ownership has nothing runnable,
 but nothing is owed either —
-it heals itself in minutes. Collapsing that into `interrupted` would tell the user to
-go fix a problem that resolves before they finish reading the sentence, which is
-exactly what the self-healing tier is supposed to prevent. The Turn-outcome copy matrix
-renders its recovery time rather than a fault; `current` is null in both states, so
+automatic recovery can proceed without user action. Collapsing that into `interrupted` would tell the user to
+repair a Source that may only need time. This does not promise that it will
+recover or that a terminal request remains live. The Turn-outcome copy matrix
+states when automatic recovery has ended; live progress and Source eligibility
+are separate read projections. `current` is null in both states, so
 neither ever renders a stale 使用中.
 
 **Two grains, one taxonomy.** `supply_status` above is the **agent** rollup, and it
@@ -1008,7 +1097,7 @@ rollup stays what its name says. One taxonomy, two grains, and only one definiti
 The predicate itself is stated **once, here**, and every contract that carries either
 grain points back at this table rather than restating it: `interrupted` when the chain
 is empty **or at least one blocker needs the user**, `waiting` only when every blocker
-is a persisted cooldown or live connection backoff. The asymmetry is deliberate and
+is an effective cooldown, live connection backoff, or half-open ownership. The asymmetry is deliberate and
 load-bearing — `interrupted` is the
 OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
 revoked key is `interrupted`. Reading it as "every member needs the user" leaves that

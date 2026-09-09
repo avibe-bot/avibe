@@ -151,6 +151,7 @@ import {
 import { errorMessage } from '@/lib/errorMessage';
 import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
 import { sessionAgentDisplayName } from './sessionAgentName';
+import { useModelHubRecovery } from '../../lib/modelHubRecovery';
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -688,13 +689,15 @@ export const ChatPage: React.FC = () => {
     setLiveStartedAt(next.startedAt);
   }, []);
   // Lifecycle guards for ``syncTurnState``'s clear-on-idle (Codex P2):
-  //  - ``turnEpochRef`` bumps every time a turn STARTS (local send / send-now /
-  //    observed ``turn.start``). syncTurnState captures it before its request and
-  //    refuses to clear if it changed meanwhile — so an idle snapshot can't stomp
-  //    a turn that started WHILE the request was in flight.
+  //  - ``turnEpochRef`` fences lifecycle changes and confirmed live state.
+  //    Runtime reads capture it before requesting: a stale snapshot cannot clear
+  //    a newer Turn or revive a settled Turn's recovery.
   //  - ``workingSetAtRef`` records when we last set working true, so syncTurnState
   //    can ignore an idle reading that lands inside the post-send registration gap.
   const turnEpochRef = useRef(0);
+  // Material recovery invalidations may overlap: only the latest read can
+  // install a snapshot, including an empty one that clears an earlier wait.
+  const turnStateRequestRef = useRef(0);
   const workingSetAtRef = useRef(0);
   // A single pending "re-check after the post-send grace expires" timer + a ref
   // to the latest syncTurnState, so an idle reading that arrives INSIDE the grace
@@ -707,6 +710,9 @@ export const ChatPage: React.FC = () => {
   // every "a turn is starting now" path so clear-on-idle stays race-safe. Also sets
   // ``workingRef`` synchronously so a settle refresh in the same tick reads it.
   const markWorking = useCallback(() => {
+    if (!workingRef.current) {
+      setRuntimeState((current) => ({ ...current, model_recovery: [] }));
+    }
     // Authoritative running can arrive after an early idle read on navigation.
     // Resume before hydrating, so the next live row cannot discard that history.
     if (liveStateRef.current.settled) dispatchLive({ type: 'turn_start' });
@@ -1363,16 +1369,19 @@ export const ChatPage: React.FC = () => {
   const syncTurnState = useCallback(async (options?: { quiet?: boolean }) => {
     if (!sessionId) return;
     const epochAtRequest = turnEpochRef.current;
+    const request = ++turnStateRequestRef.current;
     try {
       const res = await api.getTurnState(sessionId, { handleError: !options?.quiet });
-      if (sessionId !== sessionIdRef.current) return;
+      if (sessionId !== sessionIdRef.current
+        || turnEpochRef.current !== epochAtRequest
+        || request !== turnStateRequestRef.current) return;
       if (res.foreground === 'unknown') return;
-      setRuntimeState(res);
       if (res.foreground === 'running') {
         // markWorking (not setWorking): bump the epoch + timestamp so an OLDER
         // overlapping sync whose idle response lands AFTER this one can't clear
         // the Stop we just confirmed live — its captured epoch is now stale (P2).
         markWorking();
+        setRuntimeState(res);
         scheduleActivityRefresh();
         return;
       }
@@ -1382,10 +1391,12 @@ export const ChatPage: React.FC = () => {
       //  (2) we're past the post-send registration grace — a turn we just sent may
       //      not be in the controller's in-flight map yet, making this idle a
       //      false negative.
-      if (turnEpochRef.current !== epochAtRequest) return;
       const sinceSet = Date.now() - workingSetAtRef.current;
+      // Idle cannot carry live recovery, even inside the optimistic send grace.
+      setRuntimeState({ ...res, model_recovery: [] });
       if (sinceSet > WORKING_SETTLE_GRACE_MS) {
         const recoveredDroppedTurnEnd = workingRef.current;
+        if (recoveredDroppedTurnEnd) turnEpochRef.current += 1;
         activityForegroundRef.current = 'idle';
         workingRef.current = false;
         setWorking(false);
@@ -1442,6 +1453,7 @@ export const ChatPage: React.FC = () => {
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
       const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
+      const epochAtRequest = turnEpochRef.current;
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
@@ -1499,18 +1511,26 @@ export const ChatPage: React.FC = () => {
       }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
-      activityForegroundRef.current = bootstrap.turn_state.foreground;
       setQueue(bootstrap.queued ?? []);
       setInitialDraft(bootstrap.draft?.text ?? '');
-      setRuntimeState(bootstrap.turn_state);
       // Restore Stop for a turn that is still running (e.g. opened in another tab
       // or reloaded mid-turn). markWorking on the live branch so a racing
       // syncTurnState idle response can't clear it; an idle load is authoritative
       // for the fresh page, so clear directly (Codex P2).
-      if (bootstrap.turn_state.foreground === 'running') markWorking();
-      else if (bootstrap.turn_state.foreground === 'idle') {
-        workingRef.current = false;
-        setWorking(false);
+      // Hydrate the transcript even if live lifecycle events outran this read,
+      // but never reinstall an older Turn's working state or recovery snapshot.
+      if (epochAtRequest === turnEpochRef.current) {
+        activityForegroundRef.current = bootstrap.turn_state.foreground;
+        if (bootstrap.turn_state.foreground === 'running') markWorking();
+        else if (bootstrap.turn_state.foreground === 'idle') {
+          workingRef.current = false;
+          setWorking(false);
+        }
+        setRuntimeState({
+          ...bootstrap.turn_state,
+          model_recovery: bootstrap.turn_state.foreground === 'running'
+            ? bootstrap.turn_state.model_recovery : [],
+        });
       }
       // Reconcile only after restoring the live generation above, so a recovered
       // running turn's history request is tagged with the generation it belongs to.
@@ -1539,6 +1559,7 @@ export const ChatPage: React.FC = () => {
   // and the merge in ``refresh`` only ever unions same-session rows.
   useEffect(() => {
     bootstrapRequestGenerationRef.current += 1;
+    turnEpochRef.current += 1;
     // The gate is session-scoped. A PATCH for the previous chat may still be
     // pending after navigation, but it must never hold the new chat's bootstrap
     // or recovery reads hostage.
@@ -1676,7 +1697,7 @@ export const ChatPage: React.FC = () => {
         // markWorking (not setWorking): bump the epoch so a syncTurnState idle
         // reading already in flight can't clear this freshly-started turn.
         if (data.session_id === sessionIdRef.current) {
-          setRuntimeState((current) => ({ ...current, in_flight: true, foreground: 'running' }));
+          setRuntimeState((current) => ({ ...current, in_flight: true, foreground: 'running', model_recovery: [] }));
           // Agent Activity: a new turn begins → bump the generation (fresh empty
           // buffer). Any stale rows from the previous turn become invisible by
           // construction and can never merge with the new turn's rows.
@@ -1689,8 +1710,9 @@ export const ChatPage: React.FC = () => {
         // or user cancel) — the authoritative end of the working state. There is
         // no turn-duration timeout, so this only fires on a REAL terminal signal.
         if (data.session_id === sessionIdRef.current) {
+          turnEpochRef.current += 1;
           activityForegroundRef.current = 'idle';
-          setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle' }));
+          setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle', model_recovery: [] }));
           workingRef.current = false;
           setWorking(false);
           // Agent Activity: the turn settled (result / error / interrupt) → mark the
@@ -1714,6 +1736,10 @@ export const ChatPage: React.FC = () => {
         if (data.session_id === sessionIdRef.current) void refreshQueue();
       },
       onSessionActivity: (data) => {
+        if (data.session_id === sessionIdRef.current && data.event === 'model_recovery') {
+          void syncTurnState({ quiet: true });
+          return;
+        }
         if (data.session_id === sessionIdRef.current && data.event === 'archived') {
           // The session you're viewing was archived (here or in another tab) —
           // archive is terminal, so cancel any prepared external launch before
@@ -2843,6 +2869,7 @@ export const ChatPage: React.FC = () => {
           session={session}
           agentDisplayName={agentDisplayName}
           working={working}
+          modelRecovery={runtimeState.model_recovery}
           hasOlder={!!olderCursor}
           loadingOlder={loadingOlder}
           onLoadOlder={loadOlderMessages}
@@ -3681,6 +3708,7 @@ interface TranscriptProps {
   session: WorkbenchSession;
   agentDisplayName: string | null;
   working: boolean;
+  modelRecovery?: SessionRuntimeState['model_recovery'];
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => void | Promise<boolean>;
@@ -3744,6 +3772,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   session,
   agentDisplayName,
   working,
+  modelRecovery,
   hasOlder,
   loadingOlder,
   onLoadOlder,
@@ -3765,6 +3794,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   footer,
 }) => {
   const { t } = useTranslation();
+  const recovery = useModelHubRecovery(modelRecovery, working);
   const navigate = useNavigate();
   const { openApp } = useWindowManager();
   const fileViewer = useFileViewer();
@@ -3901,7 +3931,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // a dropped turn.end that the idle poll recovered — invisible by construction.
   const liveActive = !!activity?.enabled && activity.liveRows.length > 0;
   const showActivityCard = shouldShowRunningCard(!!activity?.enabled, working, activity?.liveRows.length ?? 0);
-  const showThinking = working && !lastIsAgentTerminal && !liveActive;
+  const showThinking = working && (!lastIsAgentTerminal || recovery.active) && !liveActive;
   // Render one settled-turn chip (before/after its anchor message, or at the top).
   // Plain render helper (not a component) so it stays referentially simple.
   const renderActivityChip = (group: ActivityGroup) =>
@@ -4299,12 +4329,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
               showToolCalls={activity.showToolCalls}
               onToggleTools={activity.onToggleTools}
               onDisableActivity={activity.onDisable}
+              statusLabel={recovery.label}
             />
           ) : showThinking ? (
             <ThinkingBubble
               session={session}
               agentDisplayName={agentDisplayName}
               onShowActivity={!activity?.enabled ? activity?.onEnable : undefined}
+              statusLabel={recovery.label}
             />
           ) : null}
           {footer}
@@ -4362,7 +4394,8 @@ export const ThinkingBubble: React.FC<{
   session: WorkbenchSession;
   agentDisplayName: string | null;
   onShowActivity?: () => void;
-}> = ({ session, agentDisplayName, onShowActivity }) => {
+  statusLabel?: string | null;
+}> = ({ session, agentDisplayName, onShowActivity, statusLabel }) => {
   const { t } = useTranslation();
   const dots = (
     <div className="flex items-center gap-1 py-0.5">
@@ -4377,7 +4410,7 @@ export const ThinkingBubble: React.FC<{
         <div className="flex items-center gap-2 px-0.5">
           <RoleAvatar tone="mint"><Bot /></RoleAvatar>
           <span className="text-[11px] font-medium text-muted">
-            {agentDisplayName || session.agent_name || t('chat.thinking')}
+            {statusLabel || agentDisplayName || session.agent_name || t('chat.thinking')}
           </span>
         </div>
         {onShowActivity ? (

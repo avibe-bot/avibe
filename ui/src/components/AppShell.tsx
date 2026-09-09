@@ -282,7 +282,21 @@ export const AppShell: React.FC = () => {
             <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
+            {/* This copy deliberately names no address. Composing one here from
+                `ui.setup_host` / `ui.setup_port` was wrong twice (port, then
+                address family), and delegating to
+                `remote_access.origin_service_for_pairing` was wrong too: that
+                function answers which origin `cloudflared` should dial, which
+                only equals "which address opens this UI" while the cloud tunnel
+                is enabled, because that is the only case where the bind is
+                widened to a wildcard. This card renders before setup is
+                finished — usually with the tunnel off — where the projected
+                `127.0.0.1` is unreachable for every non-loopback `setup_host`.
+                No address means none to get wrong. See issue #1965 for the
+                pre-existing pairing bug that analysis uncovered. */}
+            <p className="text-sm leading-relaxed text-muted">
+              {t('setup.remoteOwner.hint')}
+            </p>
             <Button asChild>
               <Link to="/settings/service">
                 {t('setup.remoteOwner.action')}

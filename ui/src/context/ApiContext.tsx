@@ -1385,6 +1385,17 @@ export type SessionActivityState = {
   schedule_type?: 'at' | 'cron' | null;
 };
 
+export type ModelRecoveryState = {
+  request_id: string;
+  phase: 'waiting' | 'attempting';
+  attempt_count: number;
+  started_at: string;
+  window_end: string;
+  source_id: string | null;
+  reason: string | null;
+  next_eligible_at: string | null;
+};
+
 export type SessionRuntimeState = {
   in_flight: boolean | null;
   foreground: 'idle' | 'running' | 'unknown';
@@ -1395,6 +1406,7 @@ export type SessionRuntimeState = {
   connection: 'connected' | 'reconnecting' | 'disconnected' | 'unknown';
   backend?: string;
   recovered_agent_status?: boolean;
+  model_recovery?: ModelRecoveryState[];
 };
 
 export type WorkbenchSessionBootstrap = {

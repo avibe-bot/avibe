@@ -102,7 +102,9 @@ def exact_hop_blockers(
             inspection.source is not None
             and EVENT_REASON_AUTHORITY.get(str(reason)) != "structural"
         ):
-            if inspection.source.state.status == "cooldown":
+            if inspection.backoff or inspection.recovery == "in_flight":
+                reason = "network" if inspection.backoff else "cooldown"
+            elif inspection.cooldown:
                 reason = "cooldown"
             elif inspection.source.state.detail_key is not None:
                 reason = SOURCE_DETAIL_EVENT_REASONS.get(
@@ -405,9 +407,9 @@ def turn_supply_facts(
         "waiting" if resolution.supply_status == "waiting" else "interrupted"
     )
     cooling = tuple(
-        source
-        for source in resolution.matching_sources
-        if source.state.status == "cooldown" and source.state.retry_at
+        hop
+        for hop in resolution.inspected_hops
+        if hop.temporary_blocker and not hop.runnable
     )
     blockers: list[TurnSupplyBlocker] = []
     for inspection in resolution.inspected_hops:
@@ -416,9 +418,10 @@ def turn_supply_facts(
         source = inspection.source
         reason = inspection.reason
         if reason not in EVENT_REASON_AUTHORITY and source is not None:
-            reason = SOURCE_DETAIL_EVENT_REASONS.get(
-                source.state.detail_key or "",
-                reason,
+            reason = (
+                inspection.cooldown_reason
+                if inspection.cooldown_reason in EVENT_REASON_AUTHORITY
+                else SOURCE_DETAIL_EVENT_REASONS.get(source.state.detail_key or "", reason)
             )
         if reason not in EVENT_REASON_AUTHORITY:
             continue
@@ -443,9 +446,9 @@ def turn_supply_facts(
         backend=resolution.backend,
         model=model,
         supply_state=supply_state,
-        source=", ".join(source.display_name for source in cooling),
+        source=", ".join(hop.source.display_name for hop in cooling if hop.source is not None),
         retry_at=min(
-            (source.state.retry_at or "" for source in cooling),
+            (hop.retry_at for hop in cooling if hop.retry_at),
             key=parse_model_hub_timestamp,
             default="",
         ),
@@ -533,6 +536,7 @@ class TurnTrace:
     terminal_outcome: TurnOutcomeProjectionInput | None = None
     admission_closed: bool = False
     outcome_frozen: bool = False
+    recovery_requests: dict[str, dict] = field(default_factory=dict)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -616,6 +620,7 @@ class GatewayTurnTerminalizer:
         self._stream_started = False
         self._attempt_started = False
         self._downstream_canceled = False
+        self._recovery_closed = False
         self.on_attribution_released: Callable[[], None] | None = None
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
@@ -717,6 +722,15 @@ class GatewayTurnTerminalizer:
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
+
+    def update_recovery(self, snapshot: dict | None) -> None:
+        if self._recovery_closed:
+            return
+        if snapshot is None:
+            self._recovery_closed = True
+        self._registry.update_recovery(
+            self.turn_id, backend=self._backend, request_id=self._request_id, snapshot=snapshot,
+        )
 
     def record_turn_outcome(
         self,
@@ -844,13 +858,82 @@ class BoundedProvenanceStore:
 class TurnCorrelationRegistry:
     """Correlate process credentials to the existing Workbench turn token."""
 
-    def __init__(self, store: BoundedProvenanceStore):
+    def __init__(
+        self, store: BoundedProvenanceStore,
+        *, on_recovery_changed: Callable[[str], None] | None = None,
+    ):
         self.store = store
         self._lock = threading.RLock()
         self._scopes: dict[ScopeKey, ProcessScope] = {}
         self._credentials: dict[str, GatewayCredential] = {}
         self._turn_scopes: dict[str, set[ScopeKey]] = {}
         self._traces: dict[str, TurnTrace] = {}
+        self.on_recovery_changed = on_recovery_changed
+
+    def _readable_trace(
+        self, turn_id: str, backend: str | None = None, *, allow_closed: bool = False,
+    ) -> TurnTrace | None:
+        """Called under the registry lock; attribution is never inferred."""
+
+        trace = self._traces.get(turn_id)
+        if (
+            trace is None or trace.ambiguous or trace.outcome_frozen
+            or (trace.admission_closed and not allow_closed)
+            or (backend is not None and trace.agent != backend)
+        ):
+            return None
+        keys = self._turn_scopes.get(turn_id, set())
+        if not keys or any(
+            key[0] != trace.agent or (scope := self._scopes.get(key)) is None
+            or scope.untracked_use or turn_id in scope.ambiguous_turns
+            or turn_id not in scope.active_turns
+            for key in keys
+        ):
+            return None
+        return trace
+
+    def terminal_projection(self, turn_id: str, *, backend: str) -> TurnOutcomeProjectionInput | None:
+        with self._lock:
+            trace = self._readable_trace(turn_id, backend, allow_closed=True)
+            if (
+                trace is None or trace.pending_attempts or trace.terminal_outcome is None
+                or trace.terminal_outcome.outcome in {"served", "canceled"}
+            ):
+                return None
+            return trace.terminal_outcome
+
+    def recovery_snapshot(self, turn_id: str) -> list[dict]:
+        with self._lock:
+            trace = self._readable_trace(turn_id)
+            return [dict(item) for item in trace.recovery_requests.values()] if trace else []
+
+    def update_recovery(
+        self, turn_id: str | None, *, backend: str, request_id: str, snapshot: dict | None,
+    ) -> None:
+        if turn_id is None:
+            return
+        changed = False
+        with self._lock:
+            trace = self._readable_trace(turn_id, backend)
+            if trace is None:
+                return
+            previous = trace.recovery_requests.get(request_id)
+            current = {**snapshot, "request_id": request_id} if snapshot is not None else None
+            if previous != current:
+                changed = True
+                if current is None:
+                    trace.recovery_requests.pop(request_id, None)
+                else:
+                    trace.recovery_requests[request_id] = current
+        if changed and self.on_recovery_changed is not None:
+            self._notify_recovery_changed(turn_id)
+
+    def _notify_recovery_changed(self, turn_id: str) -> None:
+        if self.on_recovery_changed is not None:
+            try:
+                self.on_recovery_changed(turn_id)
+            except Exception:
+                logger.exception("Could not publish Model Hub recovery activity")
 
     @staticmethod
     def _scope_key(backend: str, process_scope: str) -> ScopeKey:
@@ -1535,6 +1618,10 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(normalized)
             if trace is None or trace.outcome_frozen:
                 return
+            if self.terminal_projection(normalized, backend=trace.agent) is not None:
+                # The native failure is reporting the gateway's completed
+                # failure, not rejecting content that the gateway served.
+                return
             trace.outcome_frozen = True
             identity = trace.pending_attempt
             payload = (
@@ -1586,7 +1673,10 @@ class TurnCorrelationRegistry:
                 return
             if decision.action == "fallback" and decision.reason is not None:
                 trace.failed_attempts.append(
-                    {**identity.payload(), "reason": decision.reason}
+                    {
+                        **identity.payload(), "reason": decision.reason,
+                        **({"http_status": outcome.http_status} if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599 else {}),
+                    }
                 )
                 return
             if decision.action == "surface":
@@ -1616,15 +1706,20 @@ class TurnCorrelationRegistry:
             if trace is None or trace.admission_closed:
                 return
             trace.admission_closed = True
+            had_recovery = bool(trace.recovery_requests)
+            trace.recovery_requests.clear()
             if settled_by == SETTLED_BY_STOPPED:
                 # Preserve the exact facts present at Stop. Teardown may expose
                 # a later producer success, but cannot change who ended the turn.
                 trace.outcome_frozen = True
+        if had_recovery:
+            self._notify_recovery_changed(turn_id)
 
     def settle(self, turn_id: str, *, settled_by: Optional[str], ts: Optional[str] = None) -> None:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return
+        self.close_turn_admission(normalized_turn_id, settled_by=settled_by)
         with self._lock:
             trace = self._traces.pop(normalized_turn_id, None)
             scope_keys = self._turn_scopes.pop(normalized_turn_id, set())

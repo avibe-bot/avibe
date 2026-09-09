@@ -2626,6 +2626,7 @@
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
+        "localOnly": "Notifications unavailable for this account",
         "installFirst": "Add to Home Screen first",
         "enable": "Enable notifications",
         "enabled": "Notifications on",
@@ -2667,6 +2668,14 @@
         "title": "Vaults",
         "description": "Secrets and API keys that the Agent can pull into ENV / .env without you copy-pasting."
       }
+    }
+  },
+  "setup": {
+    "remoteOwner": {
+      "title": "Setup runs on the machine itself",
+      "body": "You're connected through remote access, so Avibe skips the first-run wizard here.",
+      "hint": "Platforms, backends, and models are all in Settings. The wizard itself only runs on the machine running Avibe.",
+      "action": "Open Settings"
     }
   },
   "wizard": {
@@ -3393,11 +3402,14 @@
     "filterPlaceholder": "Filter users…",
     "allUsers": "All users",
     "showDisabled": "Show disabled",
+    "disabled": "Disabled",
     "settingsSaved": "User settings saved",
     "settingsSaveFailed": "Failed to save user settings",
     "admin": "Admin",
     "user": "User",
     "bot": "Bot",
+    "promoteAdminTitle": "Promote to admin",
+    "demoteAdminTitle": "Demote admin",
     "boundAt": "Bound",
     "boundAgo": "bound {{ago}}",
     "removeUser": "Remove",
@@ -4138,6 +4150,11 @@
     "scrollToBottom": "Scroll to latest",
     "streaming": "Streaming",
     "thinking": "Thinking…",
+    "modelRecovery": {
+      "waitingSeconds": "Waiting to retry in about {{seconds}}s",
+      "waiting": "Waiting to retry…",
+      "attempting": "Trying again…"
+    },
     "notifyLabel": "Notify",
     "retryRequested": "Retry requested",
     "retryFailed": "Could not request retry. You can try again safely.",

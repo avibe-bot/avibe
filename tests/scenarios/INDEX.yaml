@@ -151,6 +151,14 @@ capabilities:
       - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
       - tests/test_model_hub_inference_wait.py
+      - tests/test_model_hub_retry_advice.py
+      - tests/test_model_hub_retry_policy.py
+      - tests/test_model_hub_retry_lifecycle.py
+      - tests/test_model_hub_recovery_evidence.py
+      - tests/test_model_hub_progress.py
+      - tests/test_model_hub_failure_presentation.py
+      - tests/test_opencode_model_hub_retry.py
+      - ui/src/lib/modelHubRecovery.test.ts
       - tests/test_model_hub_request_body_budget.py
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_usage.py

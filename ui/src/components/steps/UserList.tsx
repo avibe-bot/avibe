@@ -643,7 +643,7 @@ export const UserList: React.FC = () => {
               variant="secondary"
               size="sm"
               onClick={() => setRefreshTrigger((v) => v + 1)}
-              title={t('common.refresh', { defaultValue: 'Refresh' })}
+              title={t('common.refresh')}
               className="px-3"
             >
               <RefreshCw size={14} />
@@ -702,7 +702,7 @@ export const UserList: React.FC = () => {
                 ? selectedAgent
                   ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
                   : `${backendLabel(effectiveBackend)}${backendModel ? `/${backendModel}` : ''}`
-                : t('userList.disabled', { defaultValue: 'Disabled' });
+                : t('userList.disabled');
 
               const updateRow = (patch: Partial<UserConfig>) => updateUser(u.platform, u.userId, patch);
               const toggleEnabled = () => updateRow({ enabled: !userConfig.enabled });
@@ -791,8 +791,8 @@ export const UserList: React.FC = () => {
                           }
                         }}
                         title={userConfig.is_admin
-                          ? t('userList.demoteAdminTitle', { defaultValue: 'Demote admin' })
-                          : t('userList.promoteAdminTitle', { defaultValue: 'Promote to admin' })}
+                          ? t('userList.demoteAdminTitle')
+                          : t('userList.promoteAdminTitle')}
                         className={clsx(
                           'inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors',
                           userConfig.is_admin

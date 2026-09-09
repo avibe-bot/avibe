@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
 
@@ -124,6 +125,14 @@ class RawCallOutcome:
     # would otherwise take its token report with it, and a vendor that reported
     # tokens billed for them whether or not the call ended well.
     usage: ProtocolUsageReport | None = None
+    # Only failed HTTP responses supply retry advice: ASCII, at most 128
+    # characters, unparsed. L2 owns validation and the resulting retry policy.
+    retry_after: str | None = None
+    # Aware UTC receipt time of those headers, before reading the error body.
+    response_received_at: datetime | None = None
+    # Recognized model output or protocol success, independently of permissive
+    # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
+    recovery_verified: bool = False
 
 
 class ObservationOutcome(str, Enum):

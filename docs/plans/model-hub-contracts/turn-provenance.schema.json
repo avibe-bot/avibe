@@ -88,6 +88,12 @@
           "channel": { "enum": ["native_cli", "hub"] },
           "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
           "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" },
+          "http_status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599,
+            "description": "Optional actual upstream HTTP status, independent of the native-compatible recovery-exhausted gateway response. Absent for unobserved/native transport failures and historical records."
+          },
           "reason": {
             "enum": [
               "quota_exhausted",

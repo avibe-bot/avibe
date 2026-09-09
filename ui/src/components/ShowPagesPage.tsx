@@ -533,7 +533,7 @@ export function ShowPagesView({
             variant="secondary"
             size="sm"
             onClick={reload}
-            title={t('common.refresh', { defaultValue: 'Refresh' })}
+            title={t('common.refresh')}
             className="px-2.5"
           >
             <RefreshCw size={14} />

@@ -497,9 +497,15 @@ def _terminal_resolution_facts(
                 source_id=(source.id if source is not None else None),
                 model_id=model,
                 reason=blocker_reason,
+                temporary_blocker=(source is not None and source.state.status == "cooldown"),
+                retry_at=source.state.retry_at if source is not None else None,
+                backoff=False,
+                recovery=None,
+                cooldown=(source is not None and source.state.status == "cooldown"),
+                cooldown_reason=None,
             ),
         )
-        if blocker_reason is not None
+        if blocker_reason is not None or (source is not None and source.state.status == "cooldown")
         else ()
     )
     candidates = (
@@ -1275,9 +1281,10 @@ def _service(
     sources: list[ModelHubSourceConfig],
     outcomes: list[RawCallOutcome] | None = None,
     live_handles: list[LiveInvokeHandle | BlockingLiveInvokeHandle] | None = None,
+    recovery_window_seconds: float = 0,
 ) -> ModelHubService:
     store = MemoryStore(_config(sources))
-    return ModelHubService(
+    service = ModelHubService(
         store=store,
         adapter=ProbeAdapter(outcomes or [], live_handles),
         events=BoundedEventLog(tmp_path / "events.json"),
@@ -1287,6 +1294,12 @@ def _service(
         now=lambda: NOW,
         requested_model_override=store.requested_model,
     )
+    # This fixture characterizes a single resolver walk. Recovery behavior opts
+    # into its own clocked policy; ordinary production requests default to 120s.
+    service.recovery.window_seconds = recovery_window_seconds
+    service.recovery.monotonic = lambda: (service.now() - NOW).total_seconds()
+    service.recovery.jitter = lambda low, high: low
+    return service
 
 
 def _canonicalize_fixed_test_routes(
@@ -2961,7 +2974,7 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
         ("opencode", "chat/completions", "openai_chat"),
     ],
 )
-def test_gateway_cooldown_is_one_cancellable_retry(
+def test_gateway_cooldown_uses_one_cancellable_recovery_window(
     tmp_path: Path,
     already_cooling: bool,
     ending: str,
@@ -2969,7 +2982,7 @@ def test_gateway_cooldown_is_one_cancellable_retry(
     endpoint: str,
     protocol: str,
 ) -> None:
-    """MH-RUNTIME-009: known recovery, not caller retry speed, owns cooldown waiting."""
+    """MH-RUNTIME-009: one pending request owns all bounded recovery admission."""
 
     async def exercise() -> None:
         source = _source(
@@ -2985,7 +2998,8 @@ def test_gateway_cooldown_is_one_cancellable_retry(
         service = _service(
             tmp_path,
             sources=[source],
-            outcomes=([failure] if not already_cooling else []) + [final],
+            outcomes=([failure] if not already_cooling else []) + ([final] * 4 if ending == "fail" else [final]),
+            recovery_window_seconds=120,
         )
         fixed = _canonicalize_fixed_test_routes(service)
         model = fixed[backend] if backend in fixed else "shared-model"
@@ -3031,19 +3045,8 @@ def test_gateway_cooldown_is_one_cancellable_retry(
             source_id=source.id,
         )
         try:
-            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+            with patch.object(service.recovery, "sleep", side_effect=wait_for_recovery):
                 async with aiohttp.ClientSession(trust_env=False) as client:
-                    if not already_cooling:
-                        first = await client.post(
-                            f"{base_url}/v1/{endpoint}",
-                            json=payload,
-                            headers={"Authorization": f"Bearer {token}"},
-                        )
-                        await first.read()
-                        assert first.status == 503
-                        assert first.headers["Retry-After"] == "30"
-                    if ending == "admitted_cancel":
-                        service.adapter.invoke = invoke_until_stopped
                     request = asyncio.create_task(client.post(
                         f"{base_url}/v1/{endpoint}",
                         json=payload,
@@ -3059,6 +3062,7 @@ def test_gateway_cooldown_is_one_cancellable_retry(
                                 await request
                             await asyncio.wait_for(wait_ended.wait(), timeout=2)
                         elif ending == "admitted_cancel":
+                            service.adapter.invoke = invoke_until_stopped
                             release.set()
                             await asyncio.wait_for(admitted.wait(), timeout=2)
                             gateway.correlation.close_turn_admission(
@@ -3082,25 +3086,26 @@ def test_gateway_cooldown_is_one_cancellable_retry(
                             response = await asyncio.wait_for(request, timeout=2)
                             await response.read()
                             assert response.status == {
-                                "recover": 200, "fail": 503, "config_change": 409, "extend_recover": 503,
+                                "recover": 200, "fail": 400 if backend == "codex" else 424,
+                                "config_change": 409, "extend_recover": 200,
                             }[ending]
-                            if ending in {"fail", "extend_recover"}:
-                                assert response.headers["Retry-After"] == "30"
-                            else:
-                                assert "Retry-After" not in response.headers
-                            if ending == "extend_recover":
-                                clock["now"] += timedelta(seconds=30)
-                                recovered = await client.post(
-                                    f"{base_url}/v1/{endpoint}",
-                                    json=payload,
-                                    headers={"Authorization": f"Bearer {token}"},
-                                )
-                                await recovered.read()
-                                assert recovered.status == 200
-                        assert delays == [30.0]
+                            if ending == "fail":
+                                assert await response.json() == {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "model_hub_recovery_exhausted",
+                                        "code": "model_hub_recovery_exhausted",
+                                        "message": "Automatic recovery has ended. Try again or choose another model.",
+                                    },
+                                }
+                            assert "Retry-After" not in response.headers
+                        assert delays == (
+                            [30.0, 30.0 if already_cooling else 60.0] if ending == "fail"
+                            else [30.0, 30.0] if ending == "extend_recover" else [30.0]
+                        )
                         expected = (0 if already_cooling else 1) + (
                             ending in {"recover", "fail", "extend_recover", "admitted_cancel"}
-                        )
+                        ) + (ending == "fail")
                         assert len(service.adapter.invocations) == expected
                     finally:
                         if not request.done():
@@ -3171,10 +3176,11 @@ def test_cooldown_selection_uses_instants_through_probe_and_gateway(tmp_path, re
         with pytest.raises(ModelHubError) as probe:
             await service.probe_agent("codex", model)
         assert probe.value.code == "probe_no_candidate"
-        assert probe.value.data["supply"]["retry_at"] == early
+        expected_retry_at = (NOW + timedelta(seconds=delay)).isoformat()
+        assert probe.value.data["supply"]["retry_at"] == expected_retry_at
         with pytest.raises(ModelHubError) as failed:
             await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
-        assert failed.value.turn_outcome.supply_facts.retry_at == early
+        assert failed.value.turn_outcome.supply_facts.retry_at == expected_retry_at
 
         gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
         assert gateway._cooldown_retry_delay(failed.value.turn_outcome) == delay
@@ -3189,7 +3195,8 @@ def test_cooldown_selection_uses_instants_through_probe_and_gateway(tmp_path, re
             requested_model_id=model, resolved_model_id="shared-model", source_id=first.id,
         )
         try:
-            with patch("core.handlers.model_hub.turn_gateway.asyncio.sleep", side_effect=wait_for_recovery):
+            service.recovery.window_seconds = 120
+            with patch.object(service.recovery, "sleep", side_effect=wait_for_recovery):
                 async with aiohttp.ClientSession(trust_env=False) as client:
                     response = await client.post(
                         f"{base_url}/v1/responses",
@@ -9083,10 +9090,6 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     _assert_valid("probe-result.schema.json", not_found)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AC-50: cooldown.network → backoff.connection_failed 契约先行,实现随 I7 落地",
-)
 def test_probe_transport_failures_await_ac50_backoff_contract(tmp_path: Path) -> None:
     for name, kind in (
         ("network", RawOutcomeKind.NETWORK_ERROR),
@@ -9566,7 +9569,7 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
         )
         return first_persisted, repeated_persisted
 
-    assert asyncio.run(cool_twice()) == (True, False)
+    assert asyncio.run(cool_twice()) == (True, True)
 
     events = service.list_events(limit=20)
     assert len(events) == 1

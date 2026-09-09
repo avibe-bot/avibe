@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, AsyncIterator, BinaryIO, Literal, Mapping, TypeVar, cast
 
@@ -390,6 +391,8 @@ class EngineClient:
         # completion, transport failure, or owner cancellation ends that wait.
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         response: aiohttp.ClientResponse | None = None
+        retry_after: str | None = None
+        response_received_at: datetime | None = None
         first_received = False
         model_output_started = False
         ownership_transferred = False
@@ -412,6 +415,14 @@ class EngineClient:
 
             if outcome.usage is None and wire_state is not None and wire_state.usage is not None:
                 outcome = replace(outcome, usage=wire_state.usage)
+            if wire_state is not None and wire_state.model_output_started:
+                outcome = replace(outcome, recovery_verified=True)
+            if response_received_at is not None:
+                outcome = replace(
+                    outcome,
+                    retry_after=retry_after,
+                    response_received_at=response_received_at,
+                )
             return completed_handle(outcome)
 
         try:
@@ -422,6 +433,10 @@ class EngineClient:
                 allow_redirects=False,
             )
             if response.status >= 300:
+                response_received_at = datetime.now(timezone.utc)
+                retry_after = response.headers.get("Retry-After")
+                if retry_after is not None and (len(retry_after) > 128 or not retry_after.isascii()):
+                    retry_after = None
                 error_body = _StreamPrelude()
                 response_deadline = time.monotonic() + self.timeout
                 try:
@@ -463,6 +478,7 @@ class EngineClient:
                         outcome="failed_terminal",
                         error_payload=payload,
                         message=f"upstream returned HTTP {response.status}",
+                        recovery_verified=False,
                     ),
                     source=source,
                     model_id=model_id,
@@ -1408,6 +1424,8 @@ async def _response_stream(
             if on_transport_done is not None:
                 on_transport_done()
         if outcome is not None and not outcome_future.done():
+            if wire_state.model_output_started:
+                outcome = replace(outcome, recovery_verified=True)
             outcome_future.set_result(outcome)
 
 
@@ -1453,6 +1471,7 @@ def _reduce_protocol_observation(
             http_status=http_status,
             stream_started=stream_started,
             usage=observation.usage,
+            recovery_verified=observation.recovery_verified,
         )
     if observation.outcome == "failed_terminal":
         projected_types = tuple(
@@ -1485,6 +1504,7 @@ def _reduce_protocol_observation(
             message=observation.message or "upstream returned a protocol error event",
             stream_started=stream_started,
             usage=observation.usage,
+            recovery_verified=observation.recovery_verified,
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1494,6 +1514,7 @@ def _reduce_protocol_observation(
         message=observation.message or "upstream emitted invalid protocol data",
         stream_started=stream_started,
         usage=observation.usage,
+        recovery_verified=observation.recovery_verified,
     )
 
 
@@ -1558,6 +1579,7 @@ def _outcome(
     message: str | None = None,
     stream_started: bool = False,
     usage: ProtocolUsageReport | None = None,
+    recovery_verified: bool = False,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1570,6 +1592,7 @@ def _outcome(
         error_type=error_type,
         error_candidates=error_candidates,
         usage=usage,
+        recovery_verified=recovery_verified,
     )
 
 
