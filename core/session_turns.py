@@ -7672,11 +7672,13 @@ class SessionTurnManager:
         entry = self.in_flight.get(session_id)
         active = entry is not None and not entry.task.done()
         native_turn_started = False
+        active_turn_id: str | None = None
         backend = ""
         backend_alive: Optional[bool] = None
         owner: dict[str, Any] | None = None
         if active and entry is not None:
             payload = getattr(entry.context, "platform_specific", None) or {}
+            active_turn_id = str(payload.get("turn_token") or "").strip() or None
             target = payload.get("agent_session_target")
             if isinstance(target, dict):
                 backend = str(target.get("agent_backend") or "").strip()
@@ -7718,6 +7720,7 @@ class SessionTurnManager:
                     durable_turn = delivery_store.active_turn(conn, session_id)
                     if durable_turn is not None:
                         active = True
+                        active_turn_id = str(durable_turn["id"])
                         native_turn_started = durable_turn["state"] == "active"
                         backend = str(durable_turn.get("backend") or "").strip()
                         initial = delivery_store.delivery_for_turn(
@@ -7825,6 +7828,12 @@ class SessionTurnManager:
             result["backend"] = backend
         if owner is not None:
             result["owner"] = owner
+        if active and active_turn_id:
+            from core.model_hub_progress import recovery_snapshot
+
+            recovery = recovery_snapshot(self.controller, active_turn_id)
+            if recovery:
+                result["model_recovery"] = recovery
         return result
 
     async def release_for_service_shutdown(self) -> int:

@@ -709,6 +709,11 @@ class Controller:
             self.model_hub_service,
             language_provider=lambda: self.config.language,
         )
+        from core.model_hub_progress import publish_recovery_changed
+
+        self.model_hub_turn_gateway.correlation.on_recovery_changed = (
+            lambda turn_id: publish_recovery_changed(self, turn_id)
+        )
         self.model_hub_runtime = ModelHubRuntimeRouter(
             service=self.model_hub_service,
             turn_gateway=self.model_hub_turn_gateway,

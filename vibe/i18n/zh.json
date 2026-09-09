@@ -1017,6 +1017,11 @@
         "native_cli_unavailable": "当前进程无法使用 CLI 登录"
       }
     },
+    "recovery": {
+      "waiting": "正在等待重试模型请求，预计 {seconds} 秒后再次尝试",
+      "attempting": "正在重试模型请求…",
+      "pending": "正在等待下一次模型请求…"
+    },
     "launch": {
       "retry": "已自动切换到备用供应商，直接重试即可",
       "waiting": "本次请求未完成：{source} 暂时无法提供模型 {model}，且没有可用备用源。自动恢复已结束，你可以稍后重试或切换模型。",

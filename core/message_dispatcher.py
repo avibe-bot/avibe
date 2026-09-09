@@ -937,12 +937,19 @@ class ConsolidatedMessageDispatcher:
         if done:
             footer = self._status_footer_text(context, elapsed_s=elapsed_s, done=True, reason=reason)
         else:
+            from core.model_hub_progress import recovery_status_text
+
+            recovery_label = recovery_status_text(
+                self.controller,
+                (context.platform_specific or {}).get("turn_token"),
+                str(getattr(getattr(self.controller, "config", None), "language", "en") or "en"),
+            )
             last = self._status_last_activity_at.get(consolidated_key, started)
             tick = self._status_render_tick.get(consolidated_key, 0)
             self._status_render_tick[consolidated_key] = tick + 1
             hourglass = "⏳" if tick % 2 == 0 else "⌛"
             backend_dead = self._backend_dead(context)
-            body = self._decorate_body_with_action_time(
+            body = recovery_label or self._decorate_body_with_action_time(
                 context, body, now - last, backend_dead=backend_dead
             )
             footer = self._status_footer_text(

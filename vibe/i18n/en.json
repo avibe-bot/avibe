@@ -1017,6 +1017,11 @@
         "native_cli_unavailable": "CLI login is not available in this process"
       }
     },
+    "recovery": {
+      "waiting": "Waiting to retry the model request in about {seconds}s",
+      "attempting": "Retrying the model request…",
+      "pending": "Waiting for the next model attempt…"
+    },
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",
       "waiting": "This request could not complete: {source} is temporarily unavailable for model {model}, and no backup is usable. Automatic recovery has ended. You can retry later or choose another model.",
