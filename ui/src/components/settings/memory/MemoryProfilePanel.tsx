@@ -64,7 +64,9 @@ const ProfileEntry: React.FC<{
         aria-expanded={open}
         className={clsx(DISCLOSURE_TRIGGER_CLASSES, 'w-full py-0.5')}
       >
-        <Badge variant="secondary" className="min-w-0 flex-1 whitespace-normal break-words text-left">
+        {/* No flex-grow: hug short labels like the app's other badges; min-w-0 + shrink
+            let a long label give up space to the chevron and wrap instead of overflowing. */}
+        <Badge variant="secondary" className="min-w-0 shrink whitespace-normal break-words text-left">
           {label}
         </Badge>
         <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', !open && '-rotate-90')} />
