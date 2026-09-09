@@ -27,6 +27,12 @@
 // one let a half-translated family pass: a locale that keeps `_one` and loses
 // `_other` renders the raw key the moment a real call passes 2, and a call
 // passing no count renders the raw key against a family that has no plain key.
+//
+// Reading the tree is also what lets the sweep follow the app's second way of
+// naming a key: an `i18nKey`, which `<Trans>` takes as a prop when the copy wraps
+// a link, and which a component's own table carries to hand to `t()` later. Those
+// are the same literal keys with the same copy requirement, and a sweep that knew
+// only `t('…')` stayed green while `remoteAccess.flowStep1` was deletable.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,26 +47,72 @@ import zh from './zh.json';
 const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MODEL_HUB = join('components', 'settings', 'models');
 
-/** A `t()` call site: the key it names, and whether it hands i18next a `count`. */
+/** A call site: the key it names, and whether it hands i18next a `count`. */
 type Reference = { key: string; counted: boolean };
 
 /** How a reference reads in a failure report: the key, and how it was called. */
 const label = (reference: Reference): string =>
   (reference.counted ? `${reference.key} (count)` : reference.key);
 
+/** The written name of an object-literal property or a JSX attribute. */
+const nameOf = (node: ts.Node | undefined): string | undefined =>
+  (node !== undefined && (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) ? node.text : undefined);
+
 const passesCount = (options: ts.Expression | undefined): boolean =>
   options !== undefined
   && ts.isObjectLiteralExpression(options)
-  && options.properties.some((property) => {
-    const name = property.name;
-    return name !== undefined
-      && (ts.isIdentifier(name) || ts.isStringLiteralLike(name))
-      && name.text === 'count';
-  });
+  && options.properties.some((property) => nameOf(property.name) === 'count');
+
+/** `t('literal', …)`, whose options say whether the call selects a plural. */
+const translationCall = (node: ts.Node): Reference | undefined => {
+  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression) || node.expression.text !== 't') {
+    return undefined;
+  }
+  const [key, options] = node.arguments;
+  return key && ts.isStringLiteralLike(key) ? { key: key.text, counted: passesCount(options) } : undefined;
+};
+
+/** A JSX attribute's value when it is written as a literal, quoted or braced. */
+const attributeLiteral = (value: ts.JsxAttributeValue | undefined): string | undefined => {
+  if (value === undefined) return undefined;
+  if (ts.isStringLiteralLike(value)) return value.text;
+  if (ts.isJsxExpression(value) && value.expression && ts.isStringLiteralLike(value.expression)) {
+    return value.expression.text;
+  }
+  return undefined;
+};
 
 /**
- * Every key a source file names as a literal first argument to `t()`, with the
- * argument shape that decides which copy that key needs.
+ * An `i18nKey` naming a literal key, in either place the app writes one: the
+ * prop `<Trans>` takes, and a property in a component's own table of keys.
+ *
+ * `<Trans count={…}>` selects a plural exactly as `t()` does, so a sibling
+ * `count` attribute counts. A table property has no call of its own to read —
+ * the `t(row.i18nKey)` that consumes it is a dynamic key — so it is probed
+ * uncounted, which against a plural-only family fails rather than passes.
+ *
+ * A `PropertySignature` in a type (`i18nKey: string`) has no literal value and
+ * so is not one of these, and an `i18nKey` given a variable or a call result is
+ * dynamic like any other computed key.
+ */
+const i18nKeyReference = (node: ts.Node): Reference | undefined => {
+  if (ts.isJsxAttribute(node) && nameOf(node.name) === 'i18nKey') {
+    const key = attributeLiteral(node.initializer);
+    if (key === undefined) return undefined;
+    const counted = ts.isJsxAttributes(node.parent)
+      && node.parent.properties.some((property) => ts.isJsxAttribute(property) && nameOf(property.name) === 'count');
+    return { key, counted };
+  }
+  if (ts.isPropertyAssignment(node) && nameOf(node.name) === 'i18nKey' && ts.isStringLiteralLike(node.initializer)) {
+    return { key: node.initializer.text, counted: false };
+  }
+  return undefined;
+};
+
+/**
+ * Every key a source file names as a literal — as the first argument to `t()`,
+ * or as an `i18nKey` — with the argument shape that decides which copy that key
+ * needs.
  *
  * Read from the syntax tree, so the callee itself is the whole test of what a
  * translation call is: a page's own `jsonInit('POST')` and a `request.t(…)`
@@ -90,15 +142,10 @@ export const collectReferences = (source: string, fileName = 'fixture.tsx'): Ref
   );
   const found = new Map<string, Reference>();
   const visit = (node: ts.Node) => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 't') {
-      const [key, options] = node.arguments;
-      if (key && ts.isStringLiteralLike(key)) {
-        // Keyed by the shape too, because one key named by a counted and by an
-        // uncounted call site needs both kinds of copy to be there.
-        const reference: Reference = { key: key.text, counted: passesCount(options) };
-        found.set(label(reference), reference);
-      }
-    }
+    const reference = translationCall(node) ?? i18nKeyReference(node);
+    // Keyed by the shape too, because one key named by a counted and by an
+    // uncounted call site needs both kinds of copy to be there.
+    if (reference) found.set(label(reference), reference);
     ts.forEachChild(node, visit);
   };
   visit(file);
@@ -174,7 +221,8 @@ describe('app i18n key coverage', () => {
     // The forward guard on the collector itself: a coverage test whose collector
     // silently stops matching reports coverage it never had. The call shape is
     // part of that now — a sweep that stopped seeing `count` would quietly stop
-    // asking for the plural copy, which is the hole this case also closes.
+    // asking for the plural copy, which is the hole this case also closes — and
+    // so is `i18nKey`, in both places the app writes one.
     const fixture = `
       const label = t('fixture.literal');
       const quoted = t("fixture.double");
@@ -187,12 +235,20 @@ describe('app i18n key coverage', () => {
       const interpolated = t('fixture.interpolated', { name: 'x' });
       const spread = t('fixture.spread', { ...options });
       const nested = t('fixture.outer', { hint: t('fixture.inner', { count: 3 }) });
+      const wrapping = <Trans i18nKey="fixture.trans" components={{ link: <a /> }} />;
+      const braced = <Trans i18nKey={'fixture.braced'} />;
+      const plural = <Trans i18nKey="fixture.transCount" count={total} />;
+      const rows = [{ id: 'x', i18nKey: 'fixture.table' }];
+      type Row = { i18nKey: string };
+      const computed = <Trans i18nKey={dynamic} />;
+      const carried = { i18nKey: pickKey(row) };
       void jsonInit('POST');
       void request.t('fixture.member');
       void t(\`fixture.\${dynamic}\`);
     `;
     expect(collectReferences(fixture)).toEqual([
       { key: 'fixture.alongside', counted: true },
+      { key: 'fixture.braced', counted: false },
       { key: 'fixture.double', counted: false },
       { key: 'fixture.inner', counted: true },
       { key: 'fixture.interpolated', counted: false },
@@ -200,6 +256,9 @@ describe('app i18n key coverage', () => {
       { key: 'fixture.outer', counted: false },
       { key: 'fixture.shorthand', counted: true },
       { key: 'fixture.spread', counted: false },
+      { key: 'fixture.table', counted: false },
+      { key: 'fixture.trans', counted: false },
+      { key: 'fixture.transCount', counted: true },
       { key: 'fixture.wrapped', counted: true },
     ]);
   });
@@ -208,13 +267,15 @@ describe('app i18n key coverage', () => {
     // Not a floor on the count, which would only say the scan found something.
     // The scan must have walked past the directory this guard started in — the
     // narrower root passed while eight keys on other surfaces had no copy — and
-    // produced both the key whose absence put a raw
-    // `settings.models.sourceDetail.gone` on the remove flow and a counted call
+    // produced each kind of reference the app's own code contains: the key whose
+    // absence put a raw `settings.models.sourceDetail.gone` on the remove flow,
+    // the `<Trans>` key that carries the Avibe Cloud link, and a counted call
     // site, which needs copy no bare probe asks for.
     const files = sourceFiles(APP_SOURCE).map((file) => relative(APP_SOURCE, file));
     expect(files.some((file) => file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     expect(files.some((file) => !file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false });
+    expect(referenced).toContainEqual({ key: 'remoteAccess.flowStep1', counted: false });
     expect(referenced.some((reference) => reference.counted)).toBe(true);
   });
 

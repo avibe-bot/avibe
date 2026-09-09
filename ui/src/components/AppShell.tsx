@@ -282,7 +282,13 @@ export const AppShell: React.FC = () => {
             <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
+            {/* The port the wizard actually listens on, not the default: an owner
+                who moved it would otherwise be sent to an address nothing answers.
+                Only the port interpolates — the host is deliberately loopback,
+                since `ui.setup_host` is a bind address and may be `0.0.0.0`. */}
+            <p className="text-sm leading-relaxed text-muted">
+              {t('setup.remoteOwner.hint', { port: config?.ui?.setup_port || 5123 })}
+            </p>
             <Button asChild>
               <Link to="/settings/service">
                 {t('setup.remoteOwner.action')}
