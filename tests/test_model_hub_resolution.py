@@ -157,6 +157,9 @@ class FakeInvokeHandle:
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
 
+    async def close_stream(self) -> None:
+        return None
+
 
 class FakeAdapter:
     def __init__(self, discovered: tuple[str, ...] = ("claude-opus-4-6",)):

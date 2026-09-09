@@ -465,7 +465,7 @@ def test_g3_settlement_returns_are_consumed() -> None:
 
 def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
     allowed_owners = {
-        SERVICE: {"admitted"},
+        SERVICE: {"_invoke_admitted"},
         ROUTER: {"resolve"},
     }
     for path, expected in allowed_owners.items():
@@ -483,16 +483,24 @@ def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
         }
         assert owners == expected
         if path == SERVICE:
-            admission_owners = set()
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call) or _call_name(node) != "_reserve_settlement_generation":
-                    continue
-                parent = parents[node]
-                while not isinstance(parent, ast.FunctionDef):
-                    parent = parents[parent]
-                assert parent.name == "admitted"
-                admission_owners.add(_owner_name(parent, parents))
-            assert admission_owners == {"_probe_agent_once", "resolve"}
+            admission = _functions(tree)["_invoke_admitted"]
+            source = ast.get_source_segment(path.read_text(encoding="utf-8"), admission)
+            assert source is not None
+            # The generation is reserved under the same mutation exclusion as
+            # candidate revalidation and the half-open claim, before invocation.
+            acquire_at = source.index("await self._mutation_lock.acquire()")
+            revalidate_at = source.index("self._invocation_resolution(", acquire_at)
+            reserve_at = source.index("self._reserve_settlement_generation(", revalidate_at)
+            claim_at = source.index("self.recovery.claim(", reserve_at)
+            invoke_at = source.index("self.adapter.invoke(", claim_at)
+            assert acquire_at < revalidate_at < reserve_at < claim_at < invoke_at
+            admitted = _functions(admission)["admitted"]
+            assert any(
+                isinstance(node, ast.Call)
+                and _call_name(node) == "on_admitted"
+                and [ast.unparse(arg) for arg in node.args] == ["generation"]
+                for node in ast.walk(admitted)
+            )
 
     settlement_owner = _functions(_tree(SERVICE))["_settle_fallback_source"]
     assert not any(

@@ -14,6 +14,7 @@ from config.v2_config import (
     DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
 )
 from core.backend_failure import emit_backend_failure
+from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE
 from core.message_context import build_context_session_key
 from core.message_output import terminal_output_for, terminal_turn_output
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -74,8 +75,8 @@ def _is_model_hub_recovery_exhausted(context: MessageContext, error: object) -> 
     detail = payload.get("error")
     return (
         isinstance(detail, dict)
-        and detail.get("type") == "model_hub_recovery_exhausted"
-        and detail.get("code") == "model_hub_recovery_exhausted"
+        and detail.get("type") == RECOVERY_EXHAUSTED_CODE
+        and detail.get("code") == RECOVERY_EXHAUSTED_CODE
     )
 
 

@@ -30,13 +30,13 @@ The incident's observed `server_error` classification does not itself prove
 a socket failure: a relay can return 503 because its own upstream is down.
 User-facing specificity must follow the recorded wire evidence.
 
-## Evidence and existing contracts
+## Incident evidence and baseline contracts
 
-The incident was investigated on Avibe `3.0.15rc7`. This proposal was checked
+The incident was investigated on Avibe `3.0.15rc7`. The initial design was checked
 against source baseline `49813f73471720e2e00d38fdbff1d82e8f4d58a7`.
 An in-flight engine-intent change is not assumed to be deployed or required.
 
-| Boundary | Current implementation / recorded incident evidence |
+| Boundary | Pre-change baseline / recorded incident evidence |
 | --- | --- |
 | Source selection | A fallback-class failure excludes that Source for the current resolution and tries the next eligible configured hop. No candidate yields `no_candidate`; a failed walk yields `exhausted`. |
 | Cooldown | Server/overload failures use 30 seconds, rate limits 60 seconds, and recoverable quota failures 300 seconds. Delays are fixed, without jitter or consecutive-failure growth. Actionable balance/auth failures retain their separate rules. |
@@ -62,20 +62,19 @@ Existing authorities to reuse:
 - [Delivery foundation](session-delivery-foundation.md): retained input,
   admission, and native acceptance ownership.
 
-This proposal deliberately revises three contracts, rather than treating them
-as implementation omissions:
+The approved implementation revises three baseline contracts:
 
 - Permit bounded retries of retryable, pre-output failures within one gateway
-  request; the inference-deadlines contract currently permits only delayed
+  request; the baseline inference-deadlines contract permitted only delayed
   admission after `no_candidate`.
 - Replace timer-based recovery claims with eligibility plus observed recovery;
   add single-request recovery admission and increasing shaped-error cooldowns.
 - Add jitter and valid empty-completion recovery evidence to the existing
   network-backoff design. Its documented 30-second maximum remains intact.
 
-These revisions are not authoritative until their canonical contracts,
-production enums/interfaces, localization keys, and mirror fixtures change
-together during implementation.
+Canonical contracts, production interfaces, localization keys, and mirror
+fixtures must change together in the implementation PR. Approval alone does
+not change a running installation.
 
 ## Ownership and safety boundaries
 
@@ -83,7 +82,7 @@ together during implementation.
 | --- | --- |
 | Existing Turn / Delivery manager | Own input, native acceptance, queue order, cancellation, final settlement, and explicit user Retry. A waiting subphase is not a new Turn or Delivery. |
 | Existing Model Hub service and resolver | Own classification, configured fallback, per-Source eligibility, backoff, and a shared in-memory recovery admission coordinator. |
-| Gateway and runtime router | Consume that one policy for pending Hub requests and pre-native admission respectively. Do not maintain independent retry counters or sleep loops. |
+| Gateway and runtime router | Gateway consumes the service policy. Router launches an all-temporary Hub chain without pre-native waiting; only the arriving gateway request owns a recovery window. Neither owns a second retry counter. |
 | CPA | Execute the selected attempt. Keep inference request retries disabled; preserve the existing bounded credential-refresh exception. |
 | Native backend | Execute the agent and any supported continuation. For `channel=hub`, redundant whole-HTTP-request retry must be reconciled with Hub ownership. For `native_cli`, Hub cannot control unobserved provider requests. |
 | Web / IM | Render controller-owned progress and terminal facts. Never retry model requests from a view timer. |
@@ -110,13 +109,14 @@ model, restart a backend, or change credentials implicitly.
 
 ### One bounded automatic recovery window
 
-Recommended initial default: **120 seconds per pending model request**, starting
+Approved default: **120 seconds per pending model request**, starting
 at its first retryable failure or first blocked admission. The same window
 covers fallback passes, cooldown waits, and recovery admission; it never resets
-because another Source was tried. Preserve its identity across preflight and
-the first gateway request so startup cannot receive a second full window.
-Preflight can wait for eligibility but cannot claim recovery or reserve a slot
-that the eventual gateway request must wait behind.
+because another Source was tried. For an all-temporary Hub chain, preflight
+constructs the gateway launch immediately without waiting, starting a recovery
+clock, or reserving a half-open slot. The first gateway request then owns its
+window. Dispatch acknowledgement and native acceptance retain their existing
+owners and deadlines.
 
 This is an admission limit, not an inference timeout:
 
@@ -138,7 +138,7 @@ This is an admission limit, not an inference timeout:
 
 Two minutes allows two recovery opportunities after typical 30-second and
 60-second transient delays while bounding unattended outage waits. It is a
-proposed starting policy, not a measured optimum. Do not add a user-facing
+starting policy, not a measured optimum. Do not add a user-facing
 timeout control in the first release.
 
 Native transport compatibility is a release gate, not an assumption. Validate
@@ -149,14 +149,14 @@ stream retries to keep a waiting connection alive. If a backend cannot support
 the contract, resolve that ownership boundary before rollout and document the
 limitation; do not claim uniform automatic recovery.
 
-For Hub-managed Codex traffic, use the supported per-provider request-retry
-setting to remove duplicate HTTP retries, after exact-version verification.
-Audit Claude and OpenCode similarly. An unchanged terminal native retry must
-not reopen a completed recovery window or create another batch of upstream
-attempts. The existing request/Turn correlation must enforce this boundary.
-Distinguish a native retry from a legitimate later model request in the same
-Turn; if the backend cannot provide that distinction, treat it as an ownership
-gate rather than deduplicating by prompt text or blocking the whole Turn.
+For Hub-managed traffic, disable independently controllable HTTP retries and
+use the exact-version-tested closed terminal described below. The selected
+native callers terminate after receiving it; OpenCode's Avibe-side automatic
+`continue` also recognizes it. Existing request/Turn correlation does not provide
+cross-retry invocation identity. If the terminal response is lost, a subsequent
+HTTP request cannot reliably be distinguished from a legitimate later model
+call; no exactly-once delivery guarantee is claimed. Do not compensate with
+prompt deduplication or a whole-Turn blacklist.
 Direct `native_cli` traffic retains native retry ownership; only its observable
 preflight availability and terminal rendering participate in this proposal.
 
@@ -166,7 +166,7 @@ Count consecutive eligible failed attempts for the same Source identity.
 Do not count waiters, native error notifications, elapsed timers, or failures
 whose settlement generation is stale.
 
-| Classified failure | Proposed local delay, before upstream advice | Storage / action |
+| Classified failure | Approved local delay, before upstream advice | Storage / action |
 | --- | --- | --- |
 | Unclassified pre-output connection failure | 1, 2, 4, 8, 16, 30 seconds; cap 30 | Reuse contracted live Source-scoped backoff; no Source/config write. |
 | Retryable server/overload | 30, 60, 120 seconds; cap 120 | Keep existing shaped-error Source cooldown; streak is live state. |
@@ -298,8 +298,9 @@ before the first assistant/tool activity row. The existing Activity model has
 no waiting row type today: extend its live status projection deliberately,
 rather than faking assistant text or recording a failed terminal notification.
 
-IM uses the current Turn's progress delivery path: edit a supported status
-message, or emit at most one waiting notice when editing is unavailable.
+IM uses the current Turn's progress delivery path to edit an existing supported
+status bubble. When that feature is disabled or unavailable, keep the wait
+silent rather than adding a waiting notice.
 Do not send each backoff step or a per-second countdown as new messages.
 Terminal failure is emitted once through existing delivery. Successful
 fallback adds no standalone chat notification; normal output resumes and
@@ -316,7 +317,7 @@ native exception strings in each UI. The minimum facts and their consumers are:
 | Exact Turn/Delivery, gateway request, and attempt identities | Existing ownership/correlation; controller progress and terminal settlement reject stale updates. No new cross-session correlation key. |
 | Live recovery phase, attempt count, next eligible time, window end | Hub coordinator; runtime router/gateway publish through existing controller dispatch/IPC. Views render a non-authoritative snapshot. |
 | Source/model, failure layer, reason, upstream status, gateway status | Existing adapter/classifier/provenance; terminal renderer and expandable diagnostics distinguish relay failure from local engine failure. |
-| Sanitized upstream error code/message/request ID and retry advice | Adapter allowlist and redaction boundary; bounded diagnostic details only. Never forward arbitrary headers or error bodies. |
+| Retry advice and header-receipt time | The adapter carries only bounded `Retry-After` and an aware receipt instant to the service policy. No new upstream header/body/request-ID diagnostic surface is introduced. |
 | Observed recovery versus eligibility expiry | Service settlement; Source read projection and event feed. Historical timer-based `recover` entries must not become proof of successful inference. |
 
 Wire names belong in the existing canonical interfaces during implementation;
@@ -382,9 +383,12 @@ least one IM delivery path in isolated developer-local Incus with a controllable
 mock upstream. Do not use real relay credentials, paid inference, the running
 workstation service, or remote tenant environments.
 
-Proposal validation only: check document links and whitespace. Runtime tests,
-native compatibility, UI/design verification, and rollout remain implementation
-gates; this document does not claim they have passed.
+Validation is reported by layer in the implementation PR: clock-controlled
+tests, real loopback adapter/gateway tests, fixed-version native caller audit,
+and UI tests/build are distinct evidence. Integrated controller/native/IM
+acceptance in local Incus and browser visual checks must be reported separately;
+neither unit success nor the native-only audit implies that they passed.
+Deployment and service restart require separate authorization.
 
 ## Implementation ownership and boundary contract
 
@@ -415,9 +419,10 @@ delegation:
   annotations, Source settlement, gateway retry loop, runtime-router admission,
   their canonical contracts, and tests. Recovery waits are cancelable and a
   request retry never becomes a Delivery replay.
-- The adapter lane owns only the two outcome members, HTTP propagation, their
-  mirror, and focused wire tests. It does not classify, sleep, retry, or change
-  engine retry configuration.
+- The adapter lane owns the three additive outcome members, HTTP propagation,
+  positive protocol recovery-evidence projection, their mirror, and focused
+  wire tests. It does not classify, sleep, retry, or change engine retry
+  configuration.
 - Native retry settings, Turn correlation, progress, and terminal presentation
   are integrated only after the native-boundary audit. No lane may deduplicate
   distinct model requests using prompt text or implement a second retry owner.
@@ -438,6 +443,10 @@ Live presentation consumes the core lane's public registry methods:
   maps the exact live Turn to its Session and publishes the existing
   `session.activity` invalidation with `event=model_recovery`. The existing
   `turn-state` response adds optional `model_recovery` with that snapshot.
+- `failed_attempts[].http_status` optionally retains the actual upstream
+  response status as an integer from 100 through 599; omit it when no response
+  status was observed. It is independent of the gateway's native-compatibility
+  400/424 status and adds no upstream header/body exposure.
 - Web reuses the existing working/Activity label after a five-second debounce,
   with no new notification or view-owned retry. IM concise status rendering
   reads the same snapshot on its existing heartbeat and edits its existing
