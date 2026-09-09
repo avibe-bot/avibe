@@ -239,6 +239,21 @@ const label = (reference: Reference): string => {
   return called.length > 0 ? `${reference.key} (${called.join(', ')})` : reference.key;
 };
 
+/**
+ * What makes two references the SAME reference — and it is not how one reads.
+ *
+ * `label` is free to leave a field out, because a report annotated with every
+ * `defaultValue` call would only ever be noise. Deduplicating by it therefore
+ * merged what it chose not to distinguish: `t('x')` and
+ * `t('x', { defaultValue })` were one entry, the later file won, and the exact
+ * call's demand for copy vanished into a call that demands none. So identity is
+ * read off the reference itself rather than written out — a field added to
+ * `Reference` is part of it the moment it exists, which is the only version of
+ * this that cannot drift again.
+ */
+const identity = (reference: Reference): string =>
+  JSON.stringify(Object.entries(reference).sort(([left], [right]) => left.localeCompare(right)));
+
 /** The written name of an object-literal property or a JSX attribute. */
 const nameOf = (node: ts.Node | undefined): string | undefined =>
   (node !== undefined && (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) ? node.text : undefined);
@@ -445,10 +460,12 @@ const i18nKeyReference = (node: ts.Node, checker?: ts.TypeChecker): Reference[] 
 const referencesIn = (file: ts.SourceFile, checker?: ts.TypeChecker): Reference[] => {
   const found = new Map<string, Reference>();
   const visit = (node: ts.Node) => {
-    // Keyed by the shape too, because one key named by a counted and by an
-    // uncounted call site needs both kinds of copy to be there.
+    // Keyed by the whole shape, because one key named by a counted and by an
+    // uncounted call site needs both kinds of copy to be there — and one named
+    // by an exact call and by a call carrying its own fallback still has to
+    // answer the exact one.
     for (const reference of [...translationCall(node, checker), ...i18nKeyReference(node, checker)]) {
-      found.set(label(reference), reference);
+      found.set(identity(reference), reference);
     }
     ts.forEachChild(node, visit);
   };
@@ -557,7 +574,7 @@ const referencedCallSites = (): Reference[] => {
     // A file the program could not load would silently contribute no keys.
     expect(source, `${relative(APP_SOURCE, file)} is missing from the program`).toBeDefined();
     for (const reference of referencesIn(source as ts.SourceFile, checker)) {
-      found.set(label(reference), reference);
+      found.set(identity(reference), reference);
     }
   }
   return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
@@ -903,9 +920,10 @@ describe('app i18n key coverage', () => {
     // silently stops matching reports coverage it never had. So this pins the
     // whole boundary rather than a sample of it — every static form the collector
     // must see through, every dynamic leaf it must decline, the two places a key
-    // is named, all three demands, and `count`, whose loss would quietly stop
-    // asking for plural copy. A form added to `staticKeys` later, or an options
-    // shape read differently, fails here until it is stated.
+    // is named, all three demands and one name carrying two of them, and
+    // `count`, whose loss would quietly stop asking for plural copy. A form
+    // added to `staticKeys` later, or an options shape read differently, fails
+    // here until it is stated.
     const fixture = `
       const label = t('fixture.literal');
       const quoted = t("fixture.double");
@@ -929,6 +947,11 @@ describe('app i18n key coverage', () => {
       const chosenOptions = t('fixture.chosen', many ? { count } : undefined);
       const defaulted = t('fixture.defaulted', { defaultValue: 'Background work' });
       const defaultedHiding = t('fixture.defaultedSpread', { defaultValue: 'x', ...options });
+
+      // One name, two demands. The call that carries a fallback cannot answer
+      // for the one that does not, so neither absorbs the other.
+      const both = t('fixture.both');
+      const bothDefaulted = t('fixture.both', { defaultValue: 'x' });
 
       // A template is the product of its parts, and needs no checker when every
       // part is written out.
@@ -978,6 +1001,8 @@ describe('app i18n key coverage', () => {
       { key: 'fixture.asserted', counted: false, listed: false, demand: 'exact' },
       { key: 'fixture.b', counted: false, listed: false, demand: 'exact' },
       { key: 'fixture.bang', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.both', counted: false, listed: false, demand: 'exact' },
+      { key: 'fixture.both', counted: false, listed: false, demand: 'none' },
       { key: 'fixture.braced', counted: false, listed: false, demand: 'exact' },
       { key: 'fixture.c', counted: false, listed: false, demand: 'exact' },
       { key: 'fixture.carried', counted: false, listed: false, demand: 'any' },
@@ -1012,6 +1037,24 @@ describe('app i18n key coverage', () => {
       { key: 'fixture.wrapped', counted: true, listed: false, demand: 'exact' },
       { key: 'fixture.yes', counted: false, listed: false, demand: 'exact' },
     ]);
+  });
+
+  it('tells two references apart by every field one carries', () => {
+    // Which is why the dedup key is read off the reference rather than written
+    // out: a field added to `Reference` later belongs to its identity without
+    // anyone remembering to say so. The length check is the same argument
+    // applied to this test — the variants below are a list, and a list goes
+    // stale exactly when the identity it stands for does.
+    const base: Reference = { key: 'a.b', counted: false, listed: false, demand: 'exact' };
+    expect(Object.keys(base)).toHaveLength(4);
+    const variants: Reference[] = [
+      { ...base, key: 'a.c' },
+      { ...base, counted: true },
+      { ...base, listed: true },
+      { ...base, demand: 'any' },
+      { ...base, demand: 'none' },
+    ];
+    expect(new Set([base, ...variants].map(identity)).size).toBe(variants.length + 1);
   });
 
   it('reads its key list out of the whole app, not one directory', () => {
@@ -1049,6 +1092,13 @@ describe('app i18n key coverage', () => {
         'remoteAuthorization.unavailable.body',
       ]),
     );
+    // A name two kinds of call reach. `RouteOriginBadge` asks for the copy
+    // outright; a dozen sites pass `agent.backend` as their own fallback. Both
+    // belong here, and while the dedup key was the failure label the fallback
+    // calls buried the outright one — so the whole family sat outside the
+    // existence check, in the one place the app names its backends.
+    expect(referenced).toContainEqual({ key: 'settings.models.backends.claude', counted: false, listed: false, demand: 'exact' });
+    expect(referenced).toContainEqual({ key: 'settings.models.backends.claude', counted: false, listed: false, demand: 'none' });
   });
 
   // A key NO locale resolves is not an existence gap: nothing here can tell it
