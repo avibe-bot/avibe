@@ -113,8 +113,15 @@ event type never becomes a notification by accident.
 
 A terminal `runs.updated` notifies only if **either**:
 
-1. the run's wall time since it first went `running` (or since the
-   shell first observed it, if it joined mid-flight) is ≥ 30 seconds;
+1. the run's wall time since it **started** is ≥ 30 seconds. The
+   clock is the run's durable `started_at`, not "when this shell first
+   saw a `running` event" — the broker has no replay, so attaching
+   mid-flight or reconnecting can miss that transition. Terminal
+   `runs.updated` events therefore include `started_at` (ISO-8601). If
+   a terminal event omits it, the shell refetches `GET /api/harness/runs/<run_id>`
+   once and reads `started_at` there before applying the threshold.
+   A missing timestamp after refetch fails closed (no notify) rather
+   than treating "first seen at terminal" as zero duration.
    or
 2. the run was started in a way the product already treats as
    background. Stored `run_type` values (from `core/scheduled_tasks.py` /
@@ -200,9 +207,11 @@ SSEBroker ──GET /api/events──►         attention filter
 /ready probe (existing, 2s)  liveness only, never attention
 ```
 
-Python changes in v1: **none**, unless a test needs a fixture event.
-The two event types already flow to `/api/events` today
-(`publish_run_updated` / `_publish_vaults_updated`).
+Python changes in v1: include `started_at` on terminal `runs.updated`
+payloads (`run_updated_payload` / `publish_run_updated`). The two
+event types already flow to `/api/events`; this is an additive field
+on an existing payload, not a new route. Interactive Workbench refetch
+consumers ignore unknown fields.
 
 Rust changes live in `desktop/runtime-host` (filter, dedup, reconnect
 — Tauri-free, testable) and a thin `src-tauri` adapter that fires the
@@ -221,6 +230,10 @@ plugin and reads window-focus / tray-pref state.
 - Background rule: a `runs.updated` that reaches `succeeded` in under
   30s with no `run_type` of `{scheduled, watch}` produces no intent;
   the same run after 30s, or with `run_type=scheduled`, does.
+  Mid-flight attach: a terminal event for an interactive run whose
+  `started_at` is ≥ 30s in the past produces an intent even if the
+  shell never saw `running`; a terminal event with no `started_at` and
+  a refetch that also lacks it produces none.
 - Focus gate: window focused + visible → no intent even on a matching
   event.
 - Reconnect: stream drop then restore does not panic, does not
