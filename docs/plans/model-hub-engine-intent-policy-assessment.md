@@ -1,15 +1,21 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: **locally qualified inactive source**, unshipped and not accepted
-for Linux/macOS execution or PR delivery. The orchestrator accepted the earlier
+Status: **locally SOURCE-qualified seventh-round inactive source**, unshipped;
+final-byte qualification and a conditional LOCAL commit remain ahead.
+Exact5abe's historical source acceptance and renewed review exposed writable
+host RNG authority. The original four-file construction-only release covered
+finite device subtraction, connected HOST regressions and bounded qualification.
+After independent source inspection and checks, root accepted those dirty bytes
+and released final prose qualification followed by one conditional local commit.
+Remote delivery, clean review, seven-thread closure, OS and merge acceptance
+remain held. The orchestrator accepted the earlier
 configured-storage/preparation and nested private-context functionality only
 for its exact historical snapshot: 1,076 pure tests, one bounded Linux context
 diagnostic and independent native original-file readback. Those results and
 the successful CI on `e2d9c6361350` do not validate the new recipe bytes.
 The orchestrator independently inspected the sixth-head correction and accepted
-its bounded source mechanisms. The current scope is final prose qualification
-and a conditional local-only commit, not remote delivery or thread closure.
-Final-byte validation and a later clean exact-head review remain separate gates.
+its bounded source mechanisms for renewed review. Neither that acceptance nor
+its exact5abe tests validate the seventh-round device subtraction.
 The orchestrator explicitly adjusted its supplementary source-evidence
 criterion; the old Watch's raw outer streams remain unavailable and complete
 original transport accounting remains UNMET. No new recipe Linux/privileged/
@@ -53,7 +59,53 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
-## Sixth reviewed-head correction — source inspected; OS gates UNMET
+## Seventh reviewed-head correction — finite device subtraction; OS gates UNMET
+
+Terminal review `5162069141` binds exact5abe and original `3974966709`.
+The complete circuit contains seven findings-bearing heads/nineteen originals,
+twelve resolved/seven unresolved; eighteen empty owner envelopes and the
+Completed summary are not passes. Sole exact5abe lint `34429289014`, attempt1,
+and all seventeen jobs succeeded, but OPEN/non-draft/CLEAN does not override
+the repeated external-resource-authority family or unresolved review gates.
+
+The existing finite system owner subtracts `/dev/random` and `/dev/urandom`;
+only null/zero retain their original type, exact major/minor, root ownership,
+O_PATH/no-follow admission and FD custody. Identity admission and O_PATH
+acquisition alone do not constrain a later writable device bind, and a readonly
+label is not substituted for removing RNG authority. No replacement device,
+descriptor, provider, service, syscall filter or fallback is introduced.
+Syscall randomness remains unchanged; consumers needing an absent RNG path
+must fail startup closed. Pinned Go/Python source references do not establish
+compatibility of every unexecuted diagnostic consumer.
+
+Connected regressions pass actual pin output through the existing parent,
+fixed handoff and private mount owner, covering the full positive device/
+directory/alias set, non-ASCII input/output labels, exact bind/remount flags,
+NODEV on non-device resources, state/output-only writable directories and
+received-FD closure after success or partial failure. Admission rejects wrong
+device identities/types and unexpected aliases. Only task-owned regular
+backing and intercepted host metadata/effects are used; no real RNG device,
+mount, unshare, keyring or chroot operation runs. Existing private-rootfs,
+NODEV, descriptor-closure and capability-drop premises remain source-level
+companions against alternate paths/handles, not kernel enforcement.
+
+The preceding final bytes passed the lane's 1,457-case pure run in 18.32
+seconds, Ruff 0.4.9 and syntax/whitespace checks before the local5abe commit.
+Root then independently passed 1,457 cases in 17.34 seconds on exact5abe
+before source acceptance and bounded delivery.
+Those results and all earlier failures remain bound to their original bytes.
+The seventh-round construction handoff returned unstaged/uncommitted source:
+lane checks passed 279 focused cases in 3.13 seconds and 1,482 complete cases
+in 19.20 seconds, with Ruff 0.4.9 and static/whitespace checks. Root inspected
+that exact candidate and independently passed 1,482 cases in 18.62 seconds
+before accepting its inactive source. These checks precede this final prose
+freeze, not the separately released final-byte qualification and conditional
+local commit. New outcomes belong only in the external return; no maintained
+prose changes follow validation. Root must independently accept any resulting
+committed bytes before later delivery. All OS/startup and publication gates,
+content-custody prerequisites and OLD Watch transport UNMET persist.
+
+## Historical sixth reviewed-head correction — source inspected; OS gates UNMET
 
 The September 10, 2026 Asia/Shanghai root circuit decision first released a
 bounded local source correction and finite HOST qualification, then independent
@@ -102,8 +154,9 @@ reconciled. Precisely scoped whitespace checks had empty diagnostic streams;
 their raw content-difference exits remain one, not rewritten zero.
 These are overlapping source checks on the inspected pre-final-prose bytes,
 using the CURRENT readonly 23-file layout described below, not OS evidence.
-Final-prose validation and any local commit have separate external records;
-neither is predeclared, and remote delivery and thread closure remain held.
+The later exact5abe final-prose qualification, local commit and bounded
+delivery have separate external records, summarized above; thread closure
+and OS acceptance were never established by those source results.
 The namespace/filter/bootstrap/ownership-fixture contracts and native patch
 remain unchanged.
 
@@ -171,7 +224,7 @@ labels, not resource reselection:
 | Rootfs/control | Exclusive rootfs child of retained root-owned receipts/control FD; after tmpfs, reopen that protected child as the distinct overmount view |
 | Target topology/metadata/marker | Create and retain protected target-parent FDs and metadata files before any caller bind; remount via parent/component; marker written only after filter success |
 | Bootstrap modules | Authenticate bounded unnamed root-owned control first; pread only pinned budgets/isolation/namespace, verify all actual bytes against inspected digests before any module execution |
-| System trees and four devices | Explicit installed-system trust; finite pinned system directories/aliases; null/zero/random/urandom use Linux O_PATH/no-follow and exact character-device identities |
+| System trees and four devices (historical) | Explicit installed-system trust; finite pinned system directories/aliases; null/zero/random/urandom used Linux O_PATH/no-follow and exact character-device identities. The current seventh correction removes both RNG devices. |
 | Chroot/closure/cleanup | fchdir(new overmount view), chroot("."), chdir("/"); close host/input/setup FDs before preflight, unnamed proof before candidate; parent removes only original empty rootfs identity relative to retained control FD |
 
 Pinning a directory does not freeze mutable contents. Fixture/toolchain and

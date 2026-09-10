@@ -36,22 +36,40 @@ all egress and is only for pure-source diagnostics. Executing the pinned
 Linux arm64 Go toolchain, including compilation, requires the Linux envelope;
 there is no macOS engine-build or network-suite fallback.
 
-Current acceptance boundary: **locally qualified inactive source; remote
-delivery and OS execution remain held**. The sixth findings-bearing head,
-`90cfc9b3dc99d54607561eb91783c69690c4888e`, received terminal review
-`5160886376` with two additional findings: macOS service IPC and multiply-linked
-source files. The full circuit has eighteen originals across six reviewed
-heads: twelve resolved and six unresolved, including the preceding UID-keyring,
-Linux IPC, privileged child-custody and complete-home findings. Successful
-seventeen-job CI, CLEAN merge state and historical inactive-source acceptance
-do not override those findings. The orchestrator independently inspected and
-accepted the bounded correction as inactive source. Before this final prose
-update, the lane passed 1,001 focused cases and 1,457 complete pure cases;
-the orchestrator independently passed the same 1,457-case suite. Lane Ruff
-0.4.9, all fifteen Python ASTs, nine shell and six embedded Python syntax
-checks, and precisely scoped whitespace checks also passed on those bytes.
-Final-prose qualification and any conditional local-only commit require their
-own records; neither is predeclared here. Review-thread closure remains held.
+Current boundary: **locally SOURCE-qualified seventh-round inactive source;
+final-byte qualification and a conditional LOCAL commit remain ahead**. Reviewed
+head `5abebf8375d1301fb8abf254e402ab0217efbcbf` received terminal review
+`5162069141` with writable host RNG finding `3974966709`. The circuit has
+nineteen originals across seven findings-bearing heads: twelve resolved,
+seven unresolved. Successful seventeen-job CI and CLEAN merge state are not
+a clean Codex verdict. The original four-file construction-only release
+produced lane 279-case focused/1,482-case complete checks (3.13/19.20 seconds),
+Ruff 0.4.9 and static/whitespace checks. Root independently inspected those
+bytes and passed 1,482 cases in 18.62 seconds before source acceptance and
+this final prose freeze. The later release permits one local commit only
+after its own final-byte gates; their outcomes belong in the external return,
+not a post-validation prose edit. Remote delivery, clean review, seven-thread
+closure, OS, merge and publication acceptance remain held.
+
+The preceding exact5abe source passed lane/root 1,457-case pure runs
+(18.32/17.34 seconds), Ruff 0.4.9 and static/whitespace checks before
+independent inactive-source acceptance and renewed review. Its earlier
+pre-final-prose checks passed lane 1,001 focused/1,457 complete and root
+1,457 complete cases. These are historical byte-bound results, not validation
+of this device subtraction.
+
+The existing installed-system device owner now admits only `/dev/null` and
+`/dev/zero`, retaining their exact character-device identities and descriptor
+custody. Neither `/dev/random` nor `/dev/urandom` is pinned or bound; a readonly
+label is not used as a claim of character-device confinement. Syscall-based
+randomness is unchanged. A diagnostic consumer requiring an absent RNG
+pathname lacks a startup prerequisite and must fail closed, without a new
+device, provider or fallback. Compatibility of every consumer is unproved.
+System/input NODEV remounts, private-rootfs custody, received-FD closure and
+capability drop remain companion source premises, not kernel evidence.
+Connected HOST regressions consume actual system pins through parent handoff,
+private bind/remount and success/partial-failure closure with task-only
+metadata and effect interception; they do not open real host RNG devices.
 
 The macOS helper now constructs default-deny policy. Only process-exec and
 process-fork are positive non-file operations; no Mach/XPC, POSIX/System V IPC

@@ -251,7 +251,9 @@ def pin_system_resources(stack: ExitStack) -> tuple[list[dict], dict]:
             aliases[name] = value
         else:
             pin("/" + name, "directory")
-    for name, minor in (("null", 3), ("zero", 5), ("random", 8), ("urandom", 9)):
+    # No host RNG device authority: syscall randomness is unchanged. A consumer
+    # requiring an RNG pathname lacks a startup prerequisite; do not add a fallback.
+    for name, minor in (("null", 3), ("zero", 5)):
         pin("/dev/" + name, "device", writable=True)
         device = mounts[-1]["resource"]["identity"]["rdev"]
         if (os.major(device), os.minor(device)) != (1, minor):

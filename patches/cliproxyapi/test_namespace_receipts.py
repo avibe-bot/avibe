@@ -67,6 +67,7 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         probe_result={"isolation_probe": "pass", "original_preflight": True, **kernel_proof()},
         probe_exit=0, probe_bytes=None, closed_channel=False, receipt="envelope.json",
         storage_reader=namespace.sudo_storage_context,
+        system_pin=namespace.pin_system_resources,
     )
     monkeypatch.setattr(sys, "platform", "linux")
     # The macOS pure runner's actual tmp_path is not a Linux /tmp path. Test
@@ -166,6 +167,7 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             control = json.loads(os.pread(control_fd, 65536, 0))
             parent_fd = control["proof_fd"]
             expected = {parent_fd, control_fd, *(record["fd"] for record in control["handles"].values()),
+                        *(item["resource"]["fd"] for item in control["system_mounts"]),
                         *(record["fd"] for record in control["bootstrap"].values())}
             assert set(kwargs["pass_fds"]) == expected
             assert os.fstat(parent_fd).st_nlink == 0
@@ -208,6 +210,129 @@ def envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
              "--caller-storage-sha256", storage.fingerprint(), "--", "candidate-test"]
     monkeypatch.setattr(sys, "argv", argv)
     return context
+
+
+@pytest.fixture
+def installed_system(envelope, tmp_path, monkeypatch):
+    """Actual finite pin owner over task files; only host metadata/open effects modeled."""
+    root = tmp_path / "installed-system-系统"
+    root.mkdir()
+    directories = [root]
+    for relative in ("usr", "usr/bin", "usr/sbin", "usr/lib", "usr/share", "usr/lib64", "dev"):
+        path = root / relative
+        path.mkdir()
+        directories.append(path)
+    devices = {}
+    for name, minor in (("null", 3), ("zero", 5)):
+        path = root / "dev" / name
+        path.write_bytes(b"regular task backing; no host device I/O")
+        info = envelope.raw_lstat(path)
+        devices[(info.st_dev, info.st_ino)] = (name, minor)
+    trusted = {(info.st_dev, info.st_ino) for info in map(envelope.raw_lstat, directories)}
+    original_open, original_stat, original_fstat = os.open, os.stat, os.fstat
+    context = SimpleNamespace(root=root, opened=[], device_opens=[], mounts=None, aliases=None,
+                              fault=None, pinning=False, calls=0)
+
+    def layout(shape, overrides=None):
+        assert shape in ("directories", "relative-aliases", "absolute-aliases")
+        for name in ("bin", "sbin", "lib", "lib64"):
+            path = root / name
+            if shape == "directories":
+                path.mkdir()
+            else:
+                target = (overrides or {}).get(name, ("/" if shape == "absolute-aliases" else "") + "usr/" + name)
+                path.symlink_to(target)
+            info = envelope.raw_lstat(path)
+            trusted.add((info.st_dev, info.st_ino))
+
+    def project(info):
+        key = info.st_dev, info.st_ino
+        if key in devices:
+            name, minor = devices[key]
+            changes = {"st_mode": stat.S_IFCHR | 0o666, "st_rdev": os.makedev(1, minor), "st_uid": 0}
+            if context.fault and context.fault[0] == name:
+                changes.update(context.fault[1])
+            return stat_fields(info, **changes)
+        if key in trusted:
+            return stat_fields(info, st_uid=0)
+        return info
+
+    def opening(path, flags, *args, **kwargs):
+        is_device = bool(flags & 0o10000000)
+        if context.pinning:
+            if path == "/":
+                assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+                path = root
+            if is_device:
+                assert path in ("null", "zero"), "RNG or another host device must not be acquired."
+                assert flags == 0o10000000 | os.O_NOFOLLOW | os.O_CLOEXEC
+                parent = envelope.raw_fstat(kwargs["dir_fd"])
+                actual_dev = envelope.raw_lstat(root / "dev")
+                assert (parent.st_dev, parent.st_ino) == (actual_dev.st_dev, actual_dev.st_ino)
+                context.device_opens.append(path)
+                # O_PATH is modeled only for the exact regular task backing.
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            fd = original_open(path, flags, *args, **kwargs)
+            context.opened.append(fd)
+            return fd
+        assert not is_device, "No unmodeled device acquisition."
+        return original_open(path, flags, *args, **kwargs)
+
+    def pin(stack):
+        context.calls += 1
+        context.pinning = True
+        try:
+            result = envelope.system_pin(stack)
+        finally:
+            context.pinning = False
+        context.mounts, context.aliases = result
+        return result
+
+    context.layout = layout
+    monkeypatch.setattr(namespace, "require_native_abi", lambda: None)
+    monkeypatch.setattr(namespace, "pin_system_resources", pin)
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "stat", lambda *a, **kw: project(original_stat(*a, **kw)))
+    monkeypatch.setattr(os, "fstat", lambda fd: project(original_fstat(fd)))
+    return context
+
+
+@pytest.mark.parametrize("device", ["null", "zero"])
+@pytest.mark.parametrize("failure", ["type", "major", "minor", "owner"])
+def test_actual_system_device_admission_refuses_before_parent_effects(envelope, installed_system, device, failure):
+    installed_system.layout("relative-aliases")
+    changes = {
+        "type": {"st_mode": stat.S_IFREG | 0o600},
+        "major": {"st_rdev": os.makedev(2, 3 if device == "null" else 5)},
+        "minor": {"st_rdev": os.makedev(1, 8 if device == "null" else 9)},
+        "owner": {"st_uid": os.getuid() or 1000},
+    }
+    installed_system.fault = device, changes[failure]
+    with pytest.raises((ValueError, RuntimeError), match="wrong type|device identity|trusted ownership"):
+        namespace.main()
+    assert installed_system.calls == 1 and installed_system.mounts is None
+    assert installed_system.device_opens == (["null"] if device == "null" else ["null", "zero"])
+    for fd in installed_system.opened:
+        with pytest.raises(OSError) as closed:
+            envelope.raw_fstat(fd)
+        assert closed.value.errno == errno.EBADF
+    assert not envelope.launched and not envelope.servers and envelope.candidate_calls == 0
+    assert not (envelope.root / "receipts").exists() and not (envelope.root / "runs").exists()
+
+
+@pytest.mark.parametrize("alias", ["bin", "sbin", "lib", "lib64"])
+@pytest.mark.parametrize("target", ["../outside", "/dev/urandom", "usr/lib/../lib"])
+def test_actual_system_alias_admission_refuses_before_parent_effects(envelope, installed_system, alias, target):
+    installed_system.layout("relative-aliases", {alias: target})
+    with pytest.raises(RuntimeError, match="Unexpected installed system alias"):
+        namespace.main()
+    assert installed_system.calls == 1 and installed_system.mounts is None
+    assert not installed_system.device_opens and not envelope.launched and not envelope.servers
+    for fd in installed_system.opened:
+        with pytest.raises(OSError) as closed:
+            envelope.raw_fstat(fd)
+        assert closed.value.errno == errno.EBADF
+    assert not (envelope.root / "receipts").exists() and not (envelope.root / "runs").exists()
 
 
 def read_receipt(envelope) -> dict:
@@ -1641,17 +1766,29 @@ def test_actual_host_exec_inheritance_and_fixed_trampoline_bytes(tmp_path, case)
         assert b"changed content must not import" not in result.stderr
 
 
-def test_connected_parent_fixed_bootstrap_inside_probe_and_public_receipt(envelope, monkeypatch):
+@pytest.mark.parametrize("shape", ["directories", "relative-aliases", "absolute-aliases"])
+@pytest.mark.parametrize("failure", [None, "zero-bind"])
+def test_connected_parent_fixed_bootstrap_inside_probe_and_public_receipt(
+        envelope, installed_system, monkeypatch, shape, failure):
     """Actual producer/consumers, task-only FD/view adapters; no OS acceptance."""
     import builtins
     from contextlib import redirect_stdout
     import io
     import isolation_probe
 
+    installed_system.layout(shape)
     envelope.phase = "build"
     argv = list(sys.argv)
     argv[argv.index("--phase") + 1] = "build"
     argv[argv.index("--network") + 1] = "none"
+    if shape == "absolute-aliases":
+        # Non-ASCII input and output labels reach the same parent/private seam.
+        source = envelope.paths["source"].with_name("source-输入")
+        envelope.paths["source"].rename(source)
+        envelope.paths["source"] = source
+        argv[argv.index("--source") + 1] = str(source)
+        envelope.receipt = "运行-envelope.json"
+        argv[argv.index("--receipt") + 1] = envelope.receipt
     monkeypatch.setattr(sys, "argv", argv)
     events, child_fds = [], []
     real_exec, real_fstat = builtins.exec, os.fstat
@@ -1659,18 +1796,50 @@ def test_connected_parent_fixed_bootstrap_inside_probe_and_public_receipt(envelo
     actual_uid = os.getuid()
 
     def launch(command, control, kwargs):
+        assert installed_system.calls == 1
+        assert control["system_mounts"] == installed_system.mounts
+        assert control["system_aliases"] == installed_system.aliases
+        expected_directories = ["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/share"]
+        expected_aliases = {}
+        if shape == "directories":
+            expected_directories += ["/bin", "/sbin", "/lib", "/lib64"]
+        else:
+            expected_aliases = {name: ("/" if shape == "absolute-aliases" else "") + "usr/" + name
+                                for name in ("bin", "sbin", "lib", "lib64")}
+        assert control["system_aliases"] == expected_aliases
+        assert [item["path"] for item in control["system_mounts"]] == [*expected_directories, "/dev/null", "/dev/zero"]
+        assert installed_system.device_opens == ["null", "zero"]
+        for item in control["system_mounts"]:
+            resource = item["resource"]
+            assert resource["identity"]["uid"] == 0
+            if item["path"] in ("/dev/null", "/dev/zero"):
+                assert resource["kind"] == "device" and item["writable"] is True
+                assert stat.S_ISCHR(resource["identity"]["mode"])
+                assert (os.major(resource["identity"]["rdev"]), os.minor(resource["identity"]["rdev"])) == (
+                    1, 3 if item["path"] == "/dev/null" else 5,
+                )
+            else:
+                assert resource["kind"] == "directory" and item["writable"] is False
+                assert stat.S_ISDIR(resource["identity"]["mode"])
         # In-process HOST simulation duplicates the exact passed handles to
         # preserve the real parent's ownership. Numeric-FD translation is the
         # only handoff adaptation; real exec inheritance is tested separately.
         translated = json.loads(json.dumps(control))
         mapping = {fd: os.dup(fd) for fd in kwargs["pass_fds"] if fd != int(command[-1])}
         child_fds.extend(mapping.values())
-        for record in (*translated["handles"].values(), *translated["bootstrap"].values()):
+        for record in (*translated["handles"].values(), *translated["bootstrap"].values(),
+                       *(item["resource"] for item in translated["system_mounts"])):
             record["fd"] = mapping[record["fd"]]
         translated["proof_fd"] = mapping[translated["proof_fd"]]
         rootfs = Path(control["rootfs"])
         underlay = rootfs.with_name(rootfs.name + "-underlay")
         marker = rootfs / "run/avibe-engine-test-isolation.json"
+        expected_mounts = [*translated["system_mounts"], *(
+            {"path": control[name], "resource": translated["handles"][name],
+             "writable": name in ("state", "output")}
+            for name in (*namespace.INPUT_NAMES, "output")
+        )]
+        bound, remounted = [], []
         with tempfile.TemporaryFile(dir=envelope.root) as handoff, monkeypatch.context() as child:
             handoff.write(json.dumps(translated).encode())
             handoff.flush()
@@ -1698,6 +1867,27 @@ def test_connected_parent_fixed_bootstrap_inside_probe_and_public_receipt(envelo
                     source_fd = int(source.rsplit("/", 1)[1])
                     assert source_fd in mapping.values()
                     os.fstat(source_fd)
+                    item = expected_mounts[len(bound)]
+                    assert source_fd == item["resource"]["fd"]
+                    relative = Path(item["path"]).relative_to("/")
+                    parent_fd = int(target.split("/")[-2])
+                    parent_info = os.fstat(parent_fd)
+                    expected_parent = (rootfs / relative.parent).stat()
+                    assert (parent_info.st_dev, parent_info.st_ino) == (expected_parent.st_dev, expected_parent.st_ino)
+                    assert target.endswith("/" + relative.name)
+                    bound.append((item, target))
+                    if failure == "zero-bind" and item["path"] == "/dev/zero":
+                        raise OSError(errno.EPERM, "finite task-only zero bind refusal")
+                elif flags & namespace.MS_BIND and flags & namespace.MS_REMOUNT:
+                    item, expected_target = bound[len(remounted)]
+                    expected_flags = namespace.MS_BIND | namespace.MS_REMOUNT | namespace.MS_NOSUID
+                    if item["resource"]["kind"] != "device":
+                        expected_flags |= namespace.MS_NODEV
+                    if not item["writable"]:
+                        expected_flags |= namespace.MS_RDONLY
+                    assert source is None and filesystem is None and target == expected_target
+                    assert flags == expected_flags
+                    remounted.append(item)
                 if flags == namespace.MS_REMOUNT | namespace.MS_RDONLY | namespace.MS_NOSUID | namespace.MS_NODEV:
                     assert json.loads(marker.read_text())["keyring_boundary"] == keyring_identity()
                     events.append(("immutable-marker",))
@@ -1771,28 +1961,60 @@ def test_connected_parent_fixed_bootstrap_inside_probe_and_public_receipt(envelo
             child.setattr(isolation_probe, "probe_blocked_connection", lambda network, host, port, kind: {
                 "host": host, "kind": kind, "blocked": True, "errno": errno.ECONNREFUSED,
             })
-            with pytest.raises(SystemExit) as result:
-                real_exec(compile(namespace.CHILD_TRAMPOLINE, "<actual connected trampoline>", "exec"), {})
-            assert result.value.code == 0
-            assert events.index(("filter",)) < events.index(("immutable-marker",)) < events.index(("preflight",))
-            assert events.index(("preflight",)) < events.index(("candidate",))
-            assert next(event[1] for event in events if event[0] == "new-view") != underlay.stat().st_ino
+            if failure is None:
+                with pytest.raises(SystemExit) as result:
+                    real_exec(compile(namespace.CHILD_TRAMPOLINE, "<actual connected trampoline>", "exec"), {})
+                assert result.value.code == 0
+                assert events.index(("filter",)) < events.index(("immutable-marker",)) < events.index(("preflight",))
+                assert events.index(("preflight",)) < events.index(("candidate",))
+                assert next(event[1] for event in events if event[0] == "new-view") != underlay.stat().st_ino
+                assert remounted == expected_mounts
+                assert [item["path"] for item in remounted if item["writable"] and item["resource"]["kind"] == "directory"] == [
+                    control["state"], control["output"],
+                ]
+            else:
+                with pytest.raises(OSError, match="finite task-only zero bind refusal") as refused:
+                    real_exec(compile(namespace.CHILD_TRAMPOLINE, "<actual connected trampoline>", "exec"), {})
+                assert refused.value.errno == errno.EPERM
+                assert [item["path"] for item, _ in bound] == [*expected_directories, "/dev/null", "/dev/zero"]
+                assert [item["path"] for item in remounted] == [*expected_directories, "/dev/null"]
+                assert not any(event[0] in ("filter", "immutable-marker", "preflight", "candidate") for event in events)
+            for fd in mapping.values():
+                with pytest.raises(OSError) as closed:
+                    os.fstat(fd)
+                assert closed.value.errno == errno.EBADF
+            for name, target in expected_aliases.items():
+                assert os.readlink(rootfs / name) == target
+            assert not (rootfs / "dev/random").exists() and not (rootfs / "dev/urandom").exists()
             rootfs.rename(rootfs.with_name(rootfs.name + "-preserved-view"))
             underlay.rename(rootfs)
-        return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(command, 0 if failure is None else 1)
 
     envelope.launch = launch
-    with pytest.raises(SystemExit) as result:
-        namespace.main()
-    assert result.value.code == 0
+    if failure is None:
+        with pytest.raises(SystemExit) as result:
+            namespace.main()
+        assert result.value.code == 0
+    else:
+        with pytest.raises(RuntimeError, match="Namespace execution or preflight/cleanup/sentinel acceptance failed"):
+            namespace.main()
     receipt = read_receipt(envelope)
-    assert receipt["status"] == "passed" and receipt["temporary_rootfs_removed"]
-    assert receipt["probe"]["keyring_boundary"] == keyring_identity()
-    assert receipt["probe"]["namespaces"] == kernel_proof()["namespaces"]
-    assert receipt["probe"]["outer_namespaces"] == kernel_proof()["outer_namespaces"]
-    assert receipt["probe"]["isolation_probe"] == "pass"
-    assert "storage_context" not in receipt["probe"]
+    assert receipt["status"] == ("passed" if failure is None else "failed")
+    assert receipt["temporary_rootfs_removed"] and not receipt["cleanup_errors"]
+    if failure is None:
+        assert receipt["probe"]["keyring_boundary"] == keyring_identity()
+        assert receipt["probe"]["namespaces"] == kernel_proof()["namespaces"]
+        assert receipt["probe"]["outer_namespaces"] == kernel_proof()["outer_namespaces"]
+        assert receipt["probe"]["isolation_probe"] == "pass"
+        assert "storage_context" not in receipt["probe"]
+    else:
+        assert receipt["failure"] is None and receipt["exit_code"] == 1
+        assert receipt["preflight"] == "missing-or-invalid" and "probe" not in receipt
     assert receipt["output_identity"]["ino"] == (envelope.root / "runs" / envelope.receipt).stat().st_ino
     for fd in child_fds:
         with pytest.raises(OSError):
             os.fstat(fd)
+    for fd in installed_system.opened:
+        with pytest.raises(OSError) as closed:
+            envelope.raw_fstat(fd)
+        assert closed.value.errno == errno.EBADF
