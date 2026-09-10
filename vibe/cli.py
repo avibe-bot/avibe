@@ -11820,13 +11820,15 @@ def cmd_start(*, open_browser: bool | None = None):
     # what left Memory profile/search/clear answering memory_access_denied after
     # a partial restart, so track which side actually started here.
     memory_ui_secret = generate_ui_read_secret()
-    live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
     live_ui_pid = _live_ui_server_pid()
+    service_start = runtime.ProcessStartInfo()
+    ui_start = runtime.ProcessStartInfo()
     service_pid = runtime.start_service(
         wait_for_ready=False,
         memory_ui_secret=memory_ui_secret,
+        start_info=service_start,
     )
-    service_reused = live_service_pid is not None and service_pid == live_service_pid
+    service_reused = service_start.reused
     if service_reused:
         # The reused service still verifies proofs with the secret it was started
         # with. Signing with a different one would only produce requests it
@@ -11845,6 +11847,7 @@ def cmd_start(*, open_browser: bool | None = None):
         bind_host,
         config.ui.setup_port,
         memory_ui_secret=ui_memory_secret,
+        start_info=ui_start,
     )
     if service_reused and ui_pid != live_ui_pid:
         logger.warning(
@@ -11870,6 +11873,7 @@ def cmd_start(*, open_browser: bool | None = None):
         )
         if resolved_pid is not None:
             service_pid = resolved_pid
+            service_start.capture(service_pid, reused=service_reused)
             service_ready = True
     if service_ready:
         runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
@@ -11879,6 +11883,18 @@ def cmd_start(*, open_browser: bool | None = None):
         runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
         raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
+    from vibe.desktop_runtime import start_receipt_line
+
+    receipt_line = start_receipt_line(
+        {
+            "schema_version": 1,
+            "outcome": "reused" if service_reused else "started",
+            "service_pid": service_pid,
+            "ui_pid": ui_pid,
+            "service_create_unix_ms": service_start.create_unix_ms,
+            "ui_create_unix_ms": ui_start.create_unix_ms,
+        }
+    )
     ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
 
     # Always print Web UI access instructions.
@@ -11898,6 +11914,7 @@ def cmd_start(*, open_browser: bool | None = None):
             print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
             print("")
 
+    print(receipt_line, flush=True)
     return 0
 
 
@@ -11968,7 +11985,35 @@ def _runtime_process_was_running() -> bool:
     return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
-def cmd_stop():
+def _stop_receipt_refusal(receipt_json: str) -> str | None:
+    from vibe.desktop_runtime import START_RECEIPT_TIME_TOLERANCE_MS, validate_start_receipt
+
+    try:
+        receipt = validate_start_receipt(json.loads(receipt_json))
+    except (ValueError, RecursionError):
+        return "invalid_receipt"
+    try:
+        recorded_pid = int(paths.get_runtime_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return "service_pid_mismatch"
+    if recorded_pid != receipt["service_pid"]:
+        return "service_pid_mismatch"
+    if not runtime.pid_alive(recorded_pid):
+        return "service_identity_unavailable"
+    created = runtime.process_create_time(recorded_pid)
+    if created is None:
+        return "service_identity_unavailable"
+    if not abs(created * 1000 - receipt["service_create_unix_ms"]) <= START_RECEIPT_TIME_TOLERANCE_MS:
+        return "service_create_time_mismatch"
+    return None
+
+
+def cmd_stop(*, receipt: str | None = None):
+    if receipt is not None:
+        reason = _stop_receipt_refusal(receipt)
+        if reason is not None:
+            print(json.dumps({"reason": reason}, separators=(",", ":")), file=sys.stderr)
+            return 3
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
@@ -13897,7 +13942,11 @@ def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("stop", help="Stop all services")
+    stop_parser = subparsers.add_parser("stop", help="Stop all services")
+    stop_parser.add_argument(
+        "--receipt",
+        help="Stop only if the service identity matches this startup receipt JSON.",
+    )
     start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
     start_parser.add_argument(
         "--no-open-browser",
@@ -15521,7 +15570,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "stop":
-        sys.exit(cmd_stop())
+        sys.exit(cmd_stop(receipt=args.receipt) if args.receipt is not None else cmd_stop())
     if args.command == "start":
         sys.exit(cmd_start(open_browser=args.open_browser))
     if args.command == "desktop" and args.desktop_command == "endpoint":

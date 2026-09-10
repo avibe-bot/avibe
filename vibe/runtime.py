@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
@@ -38,6 +39,21 @@ SHUTDOWN_INTENT_TTL_SECONDS = 30
 SHUTDOWN_INTENT_ENV = "VIBE_REQUIRE_SHUTDOWN_INTENT"
 SERVICE_LOCK_READY_TIMEOUT_SECONDS = 5.0
 SERVICE_SLOW_START_TIMEOUT_SECONDS = 120.0
+
+
+@dataclass
+class ProcessStartInfo:
+    pid: int | None = None
+    create_unix_ms: float | None = None
+    reused: bool = False
+
+    def capture(self, pid: int, *, reused: bool) -> int:
+        if self.pid != pid:
+            created = process_create_time(pid)
+            self.pid = pid
+            self.create_unix_ms = created * 1000 if created is not None else None
+        self.reused = reused
+        return pid
 
 
 def get_package_root() -> Path:
@@ -1501,9 +1517,13 @@ def start_service(
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
     memory_ui_secret: str | None = None,
+    start_info: ProcessStartInfo | None = None,
 ):
     from storage.migrations import guard_source_checkout_default_state_bootstrap
     from core.memory.ui_access import process_ui_read_secret
+
+    def result(pid: int, *, reused: bool) -> int:
+        return start_info.capture(pid, reused=reused) if start_info is not None else pid
 
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
@@ -1518,16 +1538,16 @@ def start_service(
             if existing_pid and pid_alive(existing_pid):
                 if not _pid_mismatches_service(existing_pid):
                     if service_pid_recorded(existing_pid):
-                        return existing_pid
+                        return result(existing_pid, reused=True)
                     if _pid_reservation_is_fresh(pid_path, existing_pid):
                         if not wait_for_ready:
-                            return existing_pid
+                            return result(existing_pid, reused=True)
                         ready_pid = wait_for_service_ready(
                             existing_pid,
                             timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS,
                         )
                         if ready_pid is not None:
-                            return ready_pid
+                            return result(ready_pid, reused=True)
                         _raise_service_start_not_ready(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
                     logger.warning(
                         "Ignoring stale service pid file pid=%s because it never acquired the service lock",
@@ -1542,7 +1562,7 @@ def start_service(
                                 "match this CLI install",
                                 existing_pid,
                             )
-                            return lock_holder_pid
+                            return result(lock_holder_pid, reused=True)
                         raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
                     raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
                 logger.warning(
@@ -1554,7 +1574,7 @@ def start_service(
         lock_available, lock_holder_pid = service_instance_lock_available()
         if not lock_available:
             if lock_holder_pid and lock_holder_pid == existing_pid and pid_alive(lock_holder_pid):
-                return lock_holder_pid
+                return result(lock_holder_pid, reused=True)
             raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
 
         extra_pids = extra_service_process_pids()
@@ -1582,16 +1602,18 @@ def start_service(
             **spawn_kwargs,
         )
         pid = process.pid
+        result(pid, reused=False)
         _SERVICE_START_PROCESSES[pid] = process
         _record_service_pid_reservation(pid)
         if scope_prefix:
             # Scoped launches resolve their pid via the authoritative lock holder
             # (poll-and-adopt), never by trusting the spawn pid alone.
-            return _start_scoped_service_result(
+            resolved_pid = _start_scoped_service_result(
                 pid,
                 initial_ready_timeout=initial_ready_timeout,
                 wait_for_ready=wait_for_ready,
             )
+            return result(resolved_pid, reused=False)
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
         exit_code = _service_start_exit_code(pid)
@@ -1808,6 +1830,7 @@ def start_ui(
     *,
     wait_for_ready: bool = True,
     memory_ui_secret: str | None = None,
+    start_info: ProcessStartInfo | None = None,
 ):
     from core.memory.ui_access import process_ui_read_secret
     from vibe.desktop_runtime import normalize_desktop_port
@@ -1822,6 +1845,8 @@ def start_ui(
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
             if _pid_matches_ui_server(existing_pid) and _ui_server_compatible(host, port):
+                if start_info is not None:
+                    start_info.capture(existing_pid, reused=True)
                 return existing_pid
             if _pid_matches_ui_server(existing_pid):
                 logger.warning(
@@ -1850,6 +1875,8 @@ def start_ui(
         "ui_stderr.log",
         **spawn_kwargs,
     )
+    if start_info is not None:
+        start_info.capture(pid, reused=False)
     if wait_for_ready and not wait_for_ui_server(host, port):
         logger.warning(
             "Started UI pid=%s but required health checks did not pass for %s",
