@@ -237,9 +237,21 @@ def classify_auth_error(backend: str, error_text: str) -> bool:
     if not text:
         return False
 
+    # Status evidence must be distinct from UUIDs, paths, ports, and counts.
+    # Keep the native CLI/HTTP and serialized response shapes we consume.
+    http_401 = text == "401" or bool(
+        re.search(
+            r"""(?<![\w/.-])(?:http(?:/\d(?:\.\d)?|error)?"""
+            r"""|status(?:[_ ]?code)?|(?:api )?error(?: code)?"""
+            r"""|failed to (?:send message|start async prompt))"""
+            r"""["']?\s*[:=]?\s*["']?401(?=$|[\s,;:)}\]"'])""",
+            text,
+        )
+        or re.search(r"(?<![\w/.-])401\s+client error\b", text)
+    )
+
     if backend == "codex":
         needles = (
-            "401",
             "unauthorized",
             "not logged in",
             "login required",
@@ -247,11 +259,10 @@ def classify_auth_error(backend: str, error_text: str) -> bool:
             "oauth",
             "token data is not available",
         )
-        return any(needle in text for needle in needles)
+        return http_401 or any(needle in text for needle in needles)
 
     if backend == "claude":
         needles = (
-            "401",
             "unauthorized",
             "oauth",
             "re-auth",
@@ -260,19 +271,16 @@ def classify_auth_error(backend: str, error_text: str) -> bool:
             "login",
             "logged out",
         )
-        return any(needle in text for needle in needles)
+        return http_401 or any(needle in text for needle in needles)
 
     if backend == "opencode":
         needles = (
-            "401",
             "unauthorized",
             "authentication",
             "credential",
             "api key",
-            "failed to send message: 401",
-            "failed to start async prompt: 401",
         )
-        return any(needle in text for needle in needles)
+        return http_401 or any(needle in text for needle in needles)
 
     return False
 

@@ -48,6 +48,25 @@ by the orchestrator and are outside this implementation lane.
 - Run focused tests and changed-file Ruff, then exact-head Codex review
   and the repository's complete required CI gates.
 
+## Implementation
+
+- The authentication classifier recognizes contextual HTTP/CLI status forms
+  while retaining backend-specific authentication messages.
+- Claude's typed missing-session failure bypasses OAuth recovery. Its localized
+  notification includes the existing `MessageOutput` Turn provenance so the
+  failed-notice Retry action can resolve the original input.
+- Before native write, Claude records `failure.reason=native_session_not_found`
+  and `failure.requires_explicit_retry=true` in the shared dispatch evidence.
+  The existing terminal owner copies this evidence to the `not_written` start
+  receipt in each affected Delivery's history. No schema or lifecycle is added.
+- Automatic start claims respect that receipt until the existing failed-notice
+  Retry action or explicit Send Now authorizes a new attempt. Input snapshots
+  remain unchanged. Other startup failures and unknown acceptance keep their
+  existing policy; a repeated missing-session failure requires another explicit
+  retry.
+- MESSAGE-DELIVERY-029 covers Claude's consuming error path, durable input
+  retention, periodic/restart recovery, and both explicit retry paths.
+
 ## Operational recovery
 
 The orchestrator separately checks native transcript availability and live
