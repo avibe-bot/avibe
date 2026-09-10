@@ -52,8 +52,10 @@ launch, frozen:
    does not).
 3. On successful `/ready`, navigate the WebView to the Runtime
    origin (content changes; frame does not).
-4. User moves/resizes: plugin debounces writes to the app config
-   directory.
+4. User moves/resizes: the shell debounces calls to the plugin's
+   existing `save_window_state` (the plugin writes on demand / on
+   close, it does not debounce to disk by itself). Do not introduce a
+   second store. Debounce is a shell-side timer around that API.
 
 Closing to tray and re-showing ("Open Avibe") must restore the
 **last shown frame**, not re-center. Quit and relaunch reads the

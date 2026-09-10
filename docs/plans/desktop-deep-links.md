@@ -41,8 +41,15 @@ or `avibe://<kind>`:
 
 `<session_id>` and `<request_id>` are the product's existing identifiers
 (Workbench session ids, vault request ids). They are accepted only when
-they match `^[A-Za-z0-9._-]+$` and are at most 128 bytes. Anything else
-is malformed.
+they match `^[A-Za-z0-9._-]+$`, are at most 128 bytes, and are **not**
+the complete path segments `.` or `..`. Ordinary dots inside an id
+(`ses.abc`) remain valid.
+
+Rejected complete `.` / `..` because WHATWG URL path normalization
+would turn `/chat/.` into `/chat/` and `/chat/..` into `/`, so the
+in-window navigation could not land on the mapped session route. Percent-
+encoded `%2E` / `%2E%2E` are not those segments and stay subject only
+to the character/length rule (they do not normalize as dot-segments).
 
 Rejected (no navigation, no quoted echo into the WebView):
 
@@ -126,8 +133,9 @@ are not the desktop OS and cannot route the scheme.
 
 - Parser: every row in the mapping table produces the exact
   Workbench path; every rejected shape (wrong scheme, extra
-  segment, bad id, authority) produces `None` and never includes the
-  raw input in a UI string.
+  segment, bad id, complete `.` / `..` path id, authority) produces
+  `None` and never includes the raw input in a UI string. An id that
+  merely contains a dot still maps.
 - Hot path: a second-instance argv containing a valid link focuses
   the main window and requests in-window navigation to the mapped
   path on the **currently adopted origin**, not on `devUrl` / port
