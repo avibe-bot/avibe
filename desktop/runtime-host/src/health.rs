@@ -171,7 +171,7 @@ fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> 
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -199,7 +199,10 @@ mod tests {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             thread_contacted.store(true, Ordering::SeqCst);
-                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                            stream.set_nonblocking(false).expect("test request stream is blocking");
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .expect("test request reads are bounded");
                             let mut request = Vec::new();
                             while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
                                 let mut chunk = [0_u8; 1024];
@@ -243,6 +246,79 @@ mod tests {
         bytes.extend_from_slice(b"\r\n");
         bytes.extend_from_slice(body);
         bytes
+    }
+
+    #[test]
+    fn test_server_waits_for_complete_request_headers() {
+        let expected_response = response("200 OK", &[], READY_BODY.as_bytes());
+        let server = TestServer::start(expected_response.clone());
+        let mut client =
+            TcpStream::connect(server.origin.as_str().trim_start_matches("http://")).expect("test client connects");
+        client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("test client reads are bounded");
+
+        for fragment in [b"".as_slice(), b"GET /ready HTTP/1.1\r\nHost: localhost\r\n".as_slice()] {
+            client.write_all(fragment).expect("test request fragment writes");
+            let mut pending_response = [0_u8; 1];
+            let error = client
+                .read(&mut pending_response)
+                .expect_err("test server waits until the headers are complete");
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+        }
+
+        client.write_all(b"\r\n").expect("test request headers complete");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("test response reads are bounded");
+        let mut actual_response = Vec::new();
+        client.read_to_end(&mut actual_response).expect("test response reads");
+        assert_eq!(actual_response, expected_response);
+        assert!(server.finish());
+    }
+
+    #[test]
+    fn test_server_rejects_truncated_request_headers() {
+        let mut server = TestServer::start(Vec::new());
+        let mut client =
+            TcpStream::connect(server.origin.as_str().trim_start_matches("http://")).expect("test client connects");
+        client
+            .write_all(b"GET /ready HTTP/1.1\r\n")
+            .expect("test request writes");
+        client.shutdown(Shutdown::Write).expect("test request ends");
+        let failure = server
+            .handle
+            .take()
+            .expect("test server has a thread")
+            .join()
+            .expect_err("truncated headers fail the test server");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"test request contains complete headers")
+        );
+    }
+
+    #[test]
+    fn test_server_rejects_oversized_request_headers() {
+        let mut server = TestServer::start(Vec::new());
+        let mut client =
+            TcpStream::connect(server.origin.as_str().trim_start_matches("http://")).expect("test client connects");
+        client
+            .write_all(&vec![b'x'; 16 * 1024 + 1])
+            .expect("test request writes");
+        let failure = server
+            .handle
+            .take()
+            .expect("test server has a thread")
+            .join()
+            .expect_err("oversized headers fail the test server");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"test request headers are bounded")
+        );
     }
 
     #[test]
