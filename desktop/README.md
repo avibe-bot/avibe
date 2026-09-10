@@ -159,6 +159,35 @@ Run everything from `desktop/`.
 embeds the frontend at compile time. Run `npm run build` first in a fresh
 checkout — `npm run tauri dev` and `npm run tauri build` handle this themselves.
 
+## Native links and window frame
+
+Packaged installations register `avibe://` for native, single-window navigation:
+
+| Link | Existing Workbench destination |
+| --- | --- |
+| `avibe://session/<id>` | `/chat/<id>` |
+| `avibe://show/<id>` | `/apps/show/<id>` |
+| `avibe://settings` | `/admin/settings/service` |
+| `avibe://vaults/request/<id>` | `/vaults?request_id=<id>` |
+
+IDs use literal ASCII letters, digits, `.`, `_`, and `-`, up to 128 bytes;
+complete `.` and `..` are not IDs. Other schemes, URL syntax, and extra segments
+are silently dropped. A link received during startup waits for readiness; a
+failed bootstrap discards it. Links never select a different Runtime origin or
+grant the Workbench native commands. IM/browser links remain HTTPS.
+
+The main window remembers its native position, size, and maximized state in the
+window-state plugin's app configuration store. Restore happens before showing
+the window; bootstrap and Runtime navigation only change its content. Open from
+the tray preserves the last shown frame, with off-screen recovery against the
+current display work areas. Fullscreen, Spaces, visibility, and routes are not
+restored. An absent or corrupt store uses the centered 1200×800 default.
+
+For manual acceptance, use a packaged test install with isolated app config and
+a fake loopback Runtime: set a non-default frame, quit/relaunch, hide/Open, and
+deliver a link both before and after readiness. Check the destination and frame,
+not just process startup. Development `tauri dev` does not register the scheme.
+
 ## Environment overrides
 
 All optional; the defaults are what ships.

@@ -95,6 +95,79 @@ fn the_shell_enables_no_capability_beyond_bootstrap() {
 }
 
 #[test]
+fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
+    let source = shipping_source("src/lib.rs");
+    let build = shipping_source("build.rs");
+    for required in [
+        "tauri_plugin_deep_link::init()",
+        "receive_native_deep_link(app, argv.iter().skip(1))",
+        "receive_native_deep_link(app, urls.iter().map(Url::as_str))",
+        "std::env::args_os()",
+        "links.bootstrap_navigation(ready)",
+        "links.workbench_navigation(&origin, &current_url)",
+        "links.observe_bootstrap(&status)",
+        "PageLoadEvent::Finished",
+    ] {
+        assert!(source.contains(required), "native deep-link path is missing {required}");
+    }
+    assert!(!build.contains("deep_link") && !build.contains("window_state"));
+    assert!(!source.contains("on_open_url") && !source.contains(".eval("));
+    let receiver = source
+        .split("fn receive_native_deep_link(")
+        .nth(1)
+        .unwrap()
+        .split("fn apply_pending_deep_link")
+        .next()
+        .unwrap();
+    assert!(receiver.contains("focus_or_restore_main_window(app)"));
+    assert_eq!(
+        config()["plugins"]["deep-link"]["desktop"]["schemes"],
+        serde_json::json!(["avibe"])
+    );
+    assert_eq!(config()["identifier"], "bot.avibe.desktop");
+}
+
+#[test]
+fn window_frames_are_restored_before_show_without_document_or_remote_authority() {
+    let source = shipping_source("src/lib.rs");
+    let native_frame = shipping_source("src/native_frame.rs");
+    let window = &config()["app"]["windows"][0];
+    assert_eq!(window["visible"], false);
+    assert_eq!(window["width"], 1200);
+    assert_eq!(window["height"], 800);
+    assert_eq!(window["minWidth"], 880);
+    assert_eq!(window["minHeight"], 600);
+    assert_eq!(window["center"], true);
+    assert!(
+        source.find("tauri_plugin_window_state::Builder::new()").unwrap()
+            < source.find("native_frame::init()").unwrap()
+    );
+    assert!(source.contains(".with_filter(|label| label == MAIN_WINDOW)"));
+    assert!(source.contains(".with_state_flags(native_frame::state_flags())"));
+    assert!(native_frame.contains("StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED"));
+    assert_eq!(native_frame.matches("StateFlags::").count(), 3);
+    assert!(native_frame.contains(".on_window_ready("));
+    assert!(native_frame.find("clamp(&window)").unwrap() < native_frame.find("window.show()").unwrap());
+    assert!(native_frame.contains("tokio::time::sleep("));
+    assert!(native_frame.contains("save_app.save_window_state(state_flags())"));
+    assert!(!native_frame.contains("#[tauri::command]") && !native_frame.contains("invoke_handler"));
+    assert!(!native_frame.contains("on_page_load") && !native_frame.contains("std::fs"));
+    let handoff = source
+        .split("fn open_workbench(")
+        .nth(1)
+        .unwrap()
+        .split("fn workbench_navigation_failure_status")
+        .next()
+        .unwrap();
+    for mutation in ["set_size", "set_position", ".center(", "restore_state"] {
+        assert!(
+            !handoff.contains(mutation),
+            "content handoff must not alter the restored frame"
+        );
+    }
+}
+
+#[test]
 fn product_bundles_have_an_explicit_private_runtime_gate() {
     let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
     let source = shipping_source("src/lib.rs");
@@ -323,7 +396,7 @@ fn every_navigation_stays_on_the_shell_or_the_proved_runtime_listener() {
 fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "window.navigate(origin.navigation_url()).is_err()",
+        "window.navigate(destination.clone()).is_err()",
         "workbench_navigation_failure_status(ready, &origin)",
         "BootstrapNoticeCode::WorkbenchNavigationFailed",
     ] {

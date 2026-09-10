@@ -21,11 +21,13 @@
 #![forbid(unsafe_code)]
 
 pub mod bootstrap;
+pub mod deep_link;
 pub mod health;
 pub mod launcher;
 pub mod origin;
 pub mod private_runtime;
 pub mod status;
+pub mod window_frame;
 
 use std::sync::Arc;
 
