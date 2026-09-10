@@ -163,6 +163,43 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
 }
 
 #[test]
+fn native_link_consumption_uses_one_success_and_window_generation_commit_boundary() {
+    let source = shipping_source("src/lib.rs");
+    let cold = source
+        .split("fn open_workbench(")
+        .nth(1)
+        .unwrap()
+        .split("fn workbench_navigation_failure_status")
+        .next()
+        .unwrap();
+    assert!(cold.find("let Some(window)").unwrap() < cold.find("links.bootstrap_navigation(ready)").unwrap());
+    assert!(
+        cold.find("window.navigate(navigation.url().clone())").unwrap()
+            < cold.find("commit_deep_link_navigation(").unwrap()
+    );
+    assert!(cold.contains("WorkbenchHandoff::Monitor => {\n                commit_deep_link_navigation"));
+    let hot = source
+        .split("fn apply_pending_deep_link(")
+        .nth(1)
+        .unwrap()
+        .split("fn commit_deep_link_navigation")
+        .next()
+        .unwrap();
+    assert!(hot.contains("let succeeded = window.navigate(navigation.url().clone()).is_ok()"));
+    assert!(hot.contains("commit_deep_link_navigation(app, &navigation, succeeded, observed_generation)"));
+    let commit = source
+        .split("fn commit_deep_link_navigation(")
+        .nth(1)
+        .unwrap()
+        .split("fn application_menu")
+        .next()
+        .unwrap();
+    assert!(commit.contains("links.commit_navigation("));
+    assert!(commit.contains("shell.window_generation.load(Ordering::SeqCst)"));
+    assert!(!commit.contains(".navigate("));
+}
+
+#[test]
 fn window_frames_are_restored_before_show_without_document_or_remote_authority() {
     let source = shipping_source("src/lib.rs");
     let native_frame = shipping_source("src/native_frame.rs");
@@ -431,7 +468,7 @@ fn every_navigation_stays_on_the_shell_or_the_proved_runtime_listener() {
 fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "window.navigate(destination.clone()).is_err()",
+        "window.navigate(navigation.url().clone()).is_err()",
         "workbench_navigation_failure_status(ready, &origin)",
         "BootstrapNoticeCode::WorkbenchNavigationFailed",
     ] {

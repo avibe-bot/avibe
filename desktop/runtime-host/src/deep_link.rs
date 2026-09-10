@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use url::Url;
 
-use crate::{BootstrapPhase, BootstrapStatus, LoopbackOrigin};
+use crate::{BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LoopbackOrigin};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeepLinkTarget {
@@ -68,9 +70,20 @@ fn valid_identifier(identifier: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+pub struct DeepLinkNavigation {
+    destination: Url,
+    delivery: Option<Arc<DeepLinkTarget>>,
+}
+
+impl DeepLinkNavigation {
+    pub fn url(&self) -> &Url {
+        &self.destination
+    }
+}
+
 #[derive(Default)]
 pub struct DeepLinks {
-    pending: Option<DeepLinkTarget>,
+    pending: Option<Arc<DeepLinkTarget>>,
     failed: bool,
 }
 
@@ -83,35 +96,62 @@ impl DeepLinks {
             .into_iter()
             .find_map(|argument| parse_deep_link(argument.as_ref()))
         {
-            self.pending = Some(target);
+            self.pending = Some(Arc::new(target));
         }
     }
 
     pub fn observe_bootstrap(&mut self, status: &BootstrapStatus) {
-        self.failed = status.phase == BootstrapPhase::Failed;
+        self.failed = status.phase == BootstrapPhase::Failed
+            && status.notice.code != BootstrapNoticeCode::WorkbenchNavigationFailed;
         if self.failed {
             self.pending = None;
         }
     }
 
-    pub fn bootstrap_navigation(&mut self, status: &BootstrapStatus) -> Option<Url> {
+    pub fn bootstrap_navigation(&mut self, status: &BootstrapStatus) -> Option<DeepLinkNavigation> {
         self.observe_bootstrap(status);
         if status.phase != BootstrapPhase::Ready {
             return None;
         }
         let origin = LoopbackOrigin::parse(&status.origin).ok()?;
-        Some(self.take_navigation(&origin).unwrap_or_else(|| origin.navigation_url()))
+        Some(self.prepare_navigation(&origin))
     }
 
-    pub fn workbench_navigation(&mut self, origin: &LoopbackOrigin, current_url: &Url) -> Option<Url> {
+    pub fn workbench_navigation(&self, origin: &LoopbackOrigin, current_url: &Url) -> Option<DeepLinkNavigation> {
         if !origin.matches_url_origin(current_url) {
             return None;
         }
-        self.take_navigation(origin)
+        self.pending.as_ref()?;
+        Some(self.prepare_navigation(origin))
     }
 
-    fn take_navigation(&mut self, origin: &LoopbackOrigin) -> Option<Url> {
-        self.pending.take().map(|target| target.navigation_url(origin))
+    pub fn commit_navigation(
+        &mut self,
+        navigation: &DeepLinkNavigation,
+        navigation_succeeded: bool,
+        issuing_generation: u64,
+        current_generation: u64,
+    ) -> bool {
+        if !navigation_succeeded || issuing_generation != current_generation {
+            return false;
+        }
+        match (&self.pending, &navigation.delivery) {
+            (Some(pending), Some(delivery)) if Arc::ptr_eq(pending, delivery) => {
+                self.pending = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn prepare_navigation(&self, origin: &LoopbackOrigin) -> DeepLinkNavigation {
+        DeepLinkNavigation {
+            destination: self
+                .pending
+                .as_ref()
+                .map_or_else(|| origin.navigation_url(), |target| target.navigation_url(origin)),
+            delivery: self.pending.clone(),
+        }
     }
 }
 
@@ -201,13 +241,9 @@ mod tests {
                 .workbench_navigation(&origin, &Url::parse(current).unwrap())
                 .is_none());
         }
-        assert_eq!(
-            links
-                .workbench_navigation(&origin, &origin.navigation_url())
-                .unwrap()
-                .as_str(),
-            "http://127.0.0.1:39567/chat/hot"
-        );
+        let navigation = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+        assert_eq!(navigation.url().as_str(), "http://127.0.0.1:39567/chat/hot");
+        assert!(links.commit_navigation(&navigation, true, 1, 1));
         assert!(links.workbench_navigation(&origin, &origin.navigation_url()).is_none());
     }
 
@@ -221,8 +257,58 @@ mod tests {
             links
                 .workbench_navigation(&origin, &origin.navigation_url())
                 .unwrap()
+                .url()
                 .path(),
             "/chat/first"
         );
+    }
+
+    #[test]
+    fn only_success_in_the_issuing_window_consumes_a_prepared_delivery() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:39567").unwrap();
+        let issuing_generation = 2;
+        for navigation_succeeded in [false, true] {
+            for current_generation in 1..=3 {
+                let mut links = DeepLinks::default();
+                links.receive(["avibe://session/pending"]);
+                let navigation = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+                assert!(links.workbench_navigation(&origin, &origin.navigation_url()).is_some());
+                let should_commit = navigation_succeeded && issuing_generation == current_generation;
+                assert_eq!(
+                    links.commit_navigation(
+                        &navigation,
+                        navigation_succeeded,
+                        issuing_generation,
+                        current_generation
+                    ),
+                    should_commit
+                );
+                assert_eq!(
+                    links.workbench_navigation(&origin, &origin.navigation_url()).is_none(),
+                    should_commit
+                );
+                assert!(!links.commit_navigation(&navigation, false, issuing_generation, current_generation));
+            }
+        }
+    }
+
+    #[test]
+    fn an_older_commit_never_clears_a_newer_delivery_even_for_the_same_url() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:39567").unwrap();
+        let ready = BootstrapStatus::ready(&origin, 1, BootstrapNoticeCode::Ready);
+        for first in [None, Some("avibe://session/first")] {
+            for next in ["avibe://session/first", "avibe://show/newer"] {
+                let mut links = DeepLinks::default();
+                links.receive(first);
+                let older = links.bootstrap_navigation(&ready).unwrap();
+                links.receive([next]);
+                assert!(!links.commit_navigation(&older, true, 1, 1));
+                let newer = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+                assert_eq!(newer.url(), &parse_deep_link(next).unwrap().navigation_url(&origin));
+                assert!(links.commit_navigation(&newer, true, 1, 1));
+                assert!(!links.commit_navigation(&newer, true, 1, 1));
+                assert!(links.workbench_navigation(&origin, &origin.navigation_url()).is_none());
+            }
+        }
     }
 }

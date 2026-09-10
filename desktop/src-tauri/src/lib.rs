@@ -25,7 +25,7 @@ mod macos_deep_link;
 
 #[cfg(feature = "bundled-runtime")]
 use avibe_runtime_host::bundled_runtime_host;
-use avibe_runtime_host::deep_link::DeepLinks;
+use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
 use avibe_runtime_host::default_runtime_host;
 use avibe_runtime_host::{
@@ -791,13 +791,6 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         return;
     };
     let window_generation = app.state::<Shell>().window_generation.clone();
-    let destination = app
-        .state::<Mutex<DeepLinks>>()
-        .lock()
-        .ok()
-        .and_then(|mut links| links.bootstrap_navigation(ready))
-        .unwrap_or_else(|| origin.navigation_url());
-
     loop {
         let observed_generation = window_generation.load(Ordering::SeqCst);
         let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
@@ -810,6 +803,15 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         if window_generation.load(Ordering::SeqCst) != observed_generation {
             continue;
         }
+        let Some(navigation) = app
+            .state::<Mutex<DeepLinks>>()
+            .lock()
+            .ok()
+            .and_then(|mut links| links.bootstrap_navigation(ready))
+        else {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            return;
+        };
         // A recreated window clears the previous navigation grant. Restore the
         // exact ready origin for each generation immediately before navigating
         // that generation's window.
@@ -817,7 +819,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
             return;
         }
-        if window.navigate(destination.clone()).is_err() {
+        if window.navigate(navigation.url().clone()).is_err() {
             if window_generation.load(Ordering::SeqCst) != observed_generation {
                 continue;
             }
@@ -832,6 +834,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         }
         match complete_workbench_handoff(&activity, &window_generation, observed_generation) {
             WorkbenchHandoff::Monitor => {
+                commit_deep_link_navigation(app, &navigation, true, observed_generation);
                 apply_pending_deep_link(app);
                 start_runtime_monitor(app.clone(), origin, activity);
                 return;
@@ -1069,6 +1072,7 @@ fn apply_pending_deep_link(app: &AppHandle) {
     if shell.activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR {
         return;
     }
+    let observed_generation = shell.window_generation.load(Ordering::SeqCst);
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         return;
     };
@@ -1078,13 +1082,34 @@ fn apply_pending_deep_link(app: &AppHandle) {
     let Ok(current_url) = window.url() else {
         return;
     };
-    let destination = app
+    let navigation = app
         .state::<Mutex<DeepLinks>>()
         .lock()
         .ok()
-        .and_then(|mut links| links.workbench_navigation(&origin, &current_url));
-    if let Some(destination) = destination {
-        let _ = window.navigate(destination);
+        .and_then(|links| links.workbench_navigation(&origin, &current_url));
+    if let Some(navigation) = navigation {
+        if shell.window_generation.load(Ordering::SeqCst) != observed_generation {
+            return;
+        }
+        let succeeded = window.navigate(navigation.url().clone()).is_ok();
+        commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+    }
+}
+
+fn commit_deep_link_navigation(
+    app: &AppHandle,
+    navigation: &DeepLinkNavigation,
+    navigation_succeeded: bool,
+    issuing_generation: u64,
+) {
+    let shell = app.state::<Shell>();
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.commit_navigation(
+            navigation,
+            navigation_succeeded,
+            issuing_generation,
+            shell.window_generation.load(Ordering::SeqCst),
+        );
     }
 }
 
@@ -1482,26 +1507,45 @@ mod tests {
     fn a_navigation_failure_is_retryable_without_losing_the_ready_origin() {
         let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
         let ready = BootstrapStatus::ready(&origin, 4, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive(["avibe://session/retry"]);
+        let navigation = links.bootstrap_navigation(&ready).unwrap();
 
         let failed = workbench_navigation_failure_status(&ready, &origin);
+        links.observe_bootstrap(&failed);
 
         assert_eq!(failed.phase, BootstrapPhase::Failed);
         assert_eq!(failed.origin, origin.as_str());
         assert_eq!(failed.attempt, ready.attempt);
         assert_eq!(failed.notice.code, BootstrapNoticeCode::WorkbenchNavigationFailed);
         assert!(failed.retryable);
+        assert_eq!(links.bootstrap_navigation(&ready).unwrap().url(), navigation.url());
     }
 
     #[test]
     fn a_recreated_window_keeps_bootstrap_ownership_during_handoff() {
         let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
         let generation = AtomicU64::new(2);
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+        let ready = BootstrapStatus::ready(&origin, 1, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive(["avibe://session/recreated"]);
+        let navigation = links.bootstrap_navigation(&ready).unwrap();
 
         assert_eq!(
             complete_workbench_handoff(&activity, &generation, 1),
             WorkbenchHandoff::RetryCurrentWindow
         );
         assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+        assert!(!links.commit_navigation(&navigation, true, 1, generation.load(Ordering::SeqCst)));
+        let replacement = links.bootstrap_navigation(&ready).unwrap();
+        assert_eq!(replacement.url(), navigation.url());
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 2),
+            WorkbenchHandoff::Monitor
+        );
+        assert!(links.commit_navigation(&replacement, true, 2, generation.load(Ordering::SeqCst)));
+        assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
     }
 
     #[test]

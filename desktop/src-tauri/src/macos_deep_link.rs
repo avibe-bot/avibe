@@ -167,7 +167,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .workbench_navigation(&origin, &origin.navigation_url());
-            assert_eq!(navigation.as_ref().map(|url| url.path()), expected_path);
+            assert_eq!(
+                navigation.as_ref().map(|navigation| navigation.url().path()),
+                expected_path
+            );
+            if let Some(navigation) = navigation {
+                assert!(links.lock().unwrap().commit_navigation(&navigation, true, 1, 1));
+            }
         }
     }
 }

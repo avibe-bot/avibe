@@ -9,8 +9,9 @@ amendment. Requires #1979 merged first; its branch is not stacked into this lane
 - Native argv, single-instance delivery, and a macOS raw GURL Apple Event handler share a
   Tauri-free parser and one pending target. The first valid link in one delivery
   wins; a later valid delivery replaces an unconsumed target.
-- Only a ready, adopted Runtime supplies the origin. Bootstrap consumes the
-  pending target once; bootstrap failure drops it. A hot delivery waits until
+- Only a ready, adopted Runtime supplies the origin. Navigation prepares a
+  target and consumes it only on native success in the issuing window generation.
+  True Runtime bootstrap failure drops it. A hot delivery waits until
   the WebView has reached that origin before applying the same route mapping.
 - Raw links never become JavaScript or error copy. Complete dot segments are
   rejected; ordinary identifier dots remain valid. Percent escapes fail the
@@ -64,3 +65,22 @@ the installing thread until Exit removes the registration, and never writes a
 reply descriptor. No delegate replacement, swizzle, or current-event lookup is
 used. Plugin setup runs before Tauri's event loop, while the process-level stash
 already exists, so an early event does not depend on window or Runtime readiness.
+
+## Review correction: navigation commit ownership
+
+Review 5167442411 on head 12f5b5855f identified a distinct second class:
+preparing a cold or hot navigation consumed its target before the native window
+accepted it. The September 10 orchestrator ruling freezes two-phase delivery:
+
+- Missing windows, generation changes, native navigation errors, and
+  `WorkbenchNavigationFailed` retain the target for a ready Runtime.
+- True Runtime bootstrap failure discards the target.
+- Only successful navigation in the issuing window generation may commit.
+- An old attempt cannot clear a newer delivery, even when both URLs are equal.
+
+The existing `DeepLinks` owner retains an immutable delivery identity and returns
+a prepared URL plus that identity. Both native paths share one commit boundary;
+neither holds the stash mutex during native navigation. No new persistent store,
+IPC, capability, dependency, or G6 behavior is introduced. Fake-Runtime tests and
+pure owner tests cover handoff retry, generation changes, failure distinction,
+newer delivery preservation, and one-shot successful consumption.
