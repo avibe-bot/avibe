@@ -106,7 +106,13 @@ pub struct RuntimeHost {
     probe: Arc<dyn HealthProbe>,
     launcher: Arc<dyn RuntimeLauncher>,
     settings: RuntimeHostSettings,
-    launched_runtime: Mutex<Option<LaunchedRuntime>>,
+    launched_runtime: Mutex<Option<LaunchAttempt>>,
+}
+
+struct LaunchAttempt {
+    runtime: LaunchedRuntime,
+    launcher: Arc<dyn ResolvedRuntimeLauncher>,
+    stopping: bool,
 }
 
 impl RuntimeHost {
@@ -123,9 +129,50 @@ impl RuntimeHost {
         &self.settings
     }
 
-    /// Whether this host has already started a Runtime that it must not start again.
+    /// Whether this host retains a launch attempt for launch deduplication.
     pub fn has_launched(&self) -> bool {
         self.launched_runtime().is_some()
+    }
+
+    pub fn has_owned_runtime(&self) -> bool {
+        self.launched_runtime()
+            .as_ref()
+            .is_some_and(|attempt| attempt.runtime.watch.owned_receipt().is_some())
+    }
+
+    pub async fn stop_owned_runtime(&self) -> Result<(), LaunchError> {
+        let (launcher, receipt) = {
+            let mut launched = self.launched_runtime();
+            let owned = launched.as_mut().ok_or(LaunchError::NotOwned)?;
+            let receipt = owned
+                .runtime
+                .watch
+                .owned_receipt()
+                .cloned()
+                .ok_or(LaunchError::NotOwned)?;
+            if owned.stopping {
+                return Err(LaunchError::RuntimeStop);
+            }
+            owned.stopping = true;
+            (owned.launcher.clone(), receipt)
+        };
+        let stopping = launcher.clone();
+        let result = tokio::task::spawn_blocking(move || stopping.stop(&receipt))
+            .await
+            .map_err(|_| LaunchError::RuntimeStop)
+            .and_then(|result| result);
+        let mut owned = self.launched_runtime();
+        if owned
+            .as_ref()
+            .is_some_and(|owned| Arc::ptr_eq(&owned.launcher, &launcher))
+        {
+            if result.is_ok() || matches!(result, Err(LaunchError::OwnershipLost)) {
+                *owned = None;
+            } else if let Some(owned) = owned.as_mut() {
+                owned.stopping = false;
+            }
+        }
+        result
     }
 
     /// Probes the exact validated origin using the same readiness contract as bootstrap.
@@ -146,7 +193,7 @@ impl RuntimeHost {
     ///
     /// Installed/user-managed launchers return `false` and are never modified.
     pub async fn remove_private_runtime(&self, active_origin: Option<&LoopbackOrigin>) -> Result<bool, LaunchError> {
-        let launched_by_host = self.has_launched();
+        let launched_by_host = self.has_owned_runtime();
         let state = match active_origin {
             Some(origin) => match self.probe.readiness(origin).await {
                 Some(readiness) if readiness.desktop_runtime_id.is_some() => RuntimeRemovalState::Managed,
@@ -155,6 +202,7 @@ impl RuntimeHost {
                 None => RuntimeRemovalState::Unknown,
             },
             None if launched_by_host => RuntimeRemovalState::Managed,
+            None if self.has_launched() => RuntimeRemovalState::Unknown,
             None => RuntimeRemovalState::Inactive,
         };
         let launcher = self.launcher.clone();
@@ -291,7 +339,15 @@ impl RuntimeHost {
                     cleanup_if_current(resolved_launcher.as_ref(), &readiness).await;
                     return publish(
                         sink,
-                        BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Ready),
+                        BootstrapStatus::ready(
+                            &origin,
+                            attempt,
+                            if self.has_owned_runtime() {
+                                BootstrapNoticeCode::Ready
+                            } else {
+                                BootstrapNoticeCode::Adopted
+                            },
+                        ),
                     );
                 }
                 needs_polling_handover = !handover_performed
@@ -384,7 +440,7 @@ impl RuntimeHost {
         .map_err(|_| LaunchError::EndpointOutput)?
     }
 
-    fn launched_runtime(&self) -> MutexGuard<'_, Option<LaunchedRuntime>> {
+    fn launched_runtime(&self) -> MutexGuard<'_, Option<LaunchAttempt>> {
         self.launched_runtime
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -392,10 +448,13 @@ impl RuntimeHost {
 
     fn launch_if_needed(&self, resolved_launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>) -> Result<(), LaunchError> {
         let mut launched = self.launched_runtime();
+        if launched.as_ref().is_some_and(|owned| owned.stopping) {
+            return Err(LaunchError::RuntimeStop);
+        }
         // A previous `vibe start` may have exited zero without producing a
         // ready UI. Check and replace it under one lock so a just-completed
         // helper cannot strand this Retry between inspection and launch.
-        if launched.as_ref().is_some_and(|runtime| runtime.watch.succeeded()) {
+        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.succeeded()) {
             *launched = None;
         }
         if launched.is_none() {
@@ -403,7 +462,11 @@ impl RuntimeHost {
                 Some(resolved) => resolved,
                 None => self.launcher.resolve()?,
             };
-            *launched = Some(resolved_launcher.launch()?);
+            *launched = Some(LaunchAttempt {
+                runtime: resolved_launcher.launch()?,
+                launcher: resolved_launcher,
+                stopping: false,
+            });
         }
         Ok(())
     }
@@ -411,11 +474,11 @@ impl RuntimeHost {
     /// Clears a launch only after its retained watch proves that it failed.
     ///
     /// A successful short-lived launcher and an unobservable long-running
-    /// launcher both remain owned by this host, preserving the at-most-one
-    /// launch contract across retries.
+    /// launcher both remain retained, preserving the at-most-one launch
+    /// contract across retries without granting stop authority.
     fn clear_failed_launch(&self) -> bool {
         let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|runtime| runtime.watch.failed()) {
+        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.failed()) {
             *launched = None;
             return true;
         }
@@ -429,7 +492,7 @@ impl RuntimeHost {
     /// otherwise unobservable remains retained, so attempts never overlap.
     fn clear_successful_launch(&self) -> bool {
         let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|runtime| runtime.watch.succeeded()) {
+        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.succeeded()) {
             *launched = None;
             return true;
         }
@@ -472,6 +535,220 @@ fn publish(sink: &dyn StatusSink, status: BootstrapStatus) -> BootstrapStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launcher::{LaunchWatch, StartupReceipt};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ReadyProbe;
+
+    #[async_trait::async_trait]
+    impl HealthProbe for ReadyProbe {
+        async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None,
+            })
+        }
+    }
+
+    fn receipt_watch(outcome: &str) -> LaunchWatch {
+        let receipt = StartupReceipt::from_json(
+            format!(
+                r#"{{"schema_version":1,"outcome":"{outcome}","service_pid":1234,"ui_pid":5678,"service_create_unix_ms":1789010100123.5,"ui_create_unix_ms":1789010100456.5}}"#
+            ).as_bytes(),
+        ).expect("valid receipt");
+        LaunchWatch::exited_with_receipt(true, receipt)
+    }
+
+    #[derive(Clone)]
+    struct RecordingLauncher {
+        resolutions: Arc<AtomicUsize>,
+        launches: Arc<AtomicUsize>,
+        stops: Arc<AtomicUsize>,
+        fail_stop: Arc<AtomicBool>,
+        ownership_lost: Arc<AtomicBool>,
+        removals: Arc<Mutex<Vec<RuntimeRemovalState>>>,
+        watch: LaunchWatch,
+    }
+
+    impl Default for RecordingLauncher {
+        fn default() -> Self {
+            Self {
+                resolutions: Arc::default(),
+                launches: Arc::default(),
+                stops: Arc::default(),
+                fail_stop: Arc::default(),
+                ownership_lost: Arc::default(),
+                removals: Arc::default(),
+                watch: receipt_watch("started"),
+            }
+        }
+    }
+
+    impl RuntimeLauncher for RecordingLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(self.clone()))
+        }
+
+        fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
+            self.removals.lock().expect("record removals").push(state);
+            Err(LaunchError::RuntimeRemoval)
+        }
+    }
+
+    impl ResolvedRuntimeLauncher for RecordingLauncher {
+        fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+            Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").expect("test origin"))
+        }
+
+        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            Ok(LaunchedRuntime {
+                pid: 9012,
+                watch: self.watch.clone(),
+            })
+        }
+
+        fn stop(&self, receipt: &StartupReceipt) -> Result<(), LaunchError> {
+            assert_eq!(Some(receipt), self.watch.owned_receipt());
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            if self.ownership_lost.load(Ordering::SeqCst) {
+                Err(LaunchError::OwnershipLost)
+            } else if self.fail_stop.load(Ordering::SeqCst) {
+                Err(LaunchError::RuntimeStop)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_adopted_runtime_can_never_be_stopped_by_the_host() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+        assert_eq!(
+            host.bootstrap(&DiscardStatus).await.notice.code,
+            BootstrapNoticeCode::Adopted
+        );
+        assert!(!host.has_launched());
+        assert!(!host.has_owned_runtime());
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launcher.resolutions.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+    }
+
+    struct TransientProbe(AtomicBool);
+
+    #[async_trait::async_trait]
+    impl HealthProbe for TransientProbe {
+        async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+            self.0.swap(true, Ordering::SeqCst).then_some(RuntimeReadiness {
+                desktop_runtime_id: None,
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_reuse_after_a_transient_probe_miss_never_grants_stop_authority() {
+        let launcher = Arc::new(RecordingLauncher {
+            watch: receipt_watch("reused"),
+            ..RecordingLauncher::default()
+        });
+        let host = RuntimeHost::new(
+            Arc::new(TransientProbe(AtomicBool::new(false))),
+            launcher.clone(),
+            RuntimeHostSettings::default(),
+        );
+        let status = host.bootstrap(&DiscardStatus).await;
+        assert_eq!(status.phase, crate::BootstrapPhase::Ready);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::Adopted);
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+        assert!(host.has_launched());
+        assert!(!host.has_owned_runtime());
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn only_completed_successful_started_receipts_grant_stop_authority() {
+        for watch in [
+            LaunchWatch::default(),
+            LaunchWatch::exited(true),
+            LaunchWatch::exited(false),
+            receipt_watch("reused"),
+        ] {
+            let launcher = Arc::new(RecordingLauncher {
+                watch,
+                ..RecordingLauncher::default()
+            });
+            let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+            host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
+            assert!(host.has_launched());
+            assert!(!host.has_owned_runtime());
+            assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+            assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                host.remove_private_runtime(None).await,
+                Err(LaunchError::RuntimeRemoval)
+            ));
+            assert_eq!(
+                *launcher.removals.lock().expect("recorded removal"),
+                [RuntimeRemovalState::Unknown]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_refusal_revokes_authority_without_retrying_or_stopping_a_replacement() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+        host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
+        assert!(host.has_owned_runtime());
+        launcher.ownership_lost.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            host.stop_owned_runtime().await,
+            Err(LaunchError::OwnershipLost)
+        ));
+        assert!(!host.has_owned_runtime());
+        assert!(!host.has_launched());
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.bootstrap(&DiscardStatus).await.notice.code,
+            BootstrapNoticeCode::Adopted
+        );
+        assert!(!host.has_owned_runtime());
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_uses_the_retained_launcher_and_releases_only_successful_ownership() {
+        let resolver = Arc::new(RecordingLauncher::default());
+        let launched = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), resolver.clone(), RuntimeHostSettings::default());
+        host.launch_if_needed(Some(launched.clone())).expect("fake launch");
+        launched.fail_stop.store(true, Ordering::SeqCst);
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::RuntimeStop)));
+        assert!(host.has_launched());
+        assert!(host.has_owned_runtime());
+        launched.fail_stop.store(false, Ordering::SeqCst);
+        host.stop_owned_runtime().await.expect("explicit retry succeeds");
+        assert!(!host.has_launched());
+        assert!(!host.has_owned_runtime());
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launched.stops.load(Ordering::SeqCst), 2);
+        assert_eq!(resolver.resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(resolver.stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirmed_loss_revokes_stop_authority() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+        host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
+        host.reset_after_confirmed_runtime_loss();
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn production_discovers_the_origin_from_the_installed_runtime() {

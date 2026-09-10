@@ -21,6 +21,8 @@ type NoticeCode =
   | 'runtime_install_failed'
   | 'runtime_discovery_failed'
   | 'runtime_spawn_failed'
+  | 'runtime_stopped'
+  | 'runtime_ownership_lost'
   | 'launcher_exited'
   | 'ready_timeout'
   | 'workbench_navigation_failed'
@@ -60,6 +62,8 @@ const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
   'runtime_install_failed',
   'runtime_discovery_failed',
   'runtime_spawn_failed',
+  'runtime_stopped',
+  'runtime_ownership_lost',
   'launcher_exited',
   'ready_timeout',
   'workbench_navigation_failed',

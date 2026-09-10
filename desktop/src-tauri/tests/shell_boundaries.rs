@@ -365,3 +365,113 @@ fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
         "the invoke response must not overwrite a newer terminal status event"
     );
 }
+
+#[test]
+fn native_lifecycle_controls_never_add_a_webview_permission() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "TrayIconBuilder::with_id(TRAY_ID)",
+        "tauri_plugin_autostart::Builder::new().build()",
+        "host.stop_owned_runtime().await",
+        "api.prevent_close()",
+        "window.hide()",
+        "api.prevent_exit()",
+        "request_runtime_lifecycle(app.clone(), true)",
+        "fn exit_shell",
+    ] {
+        assert!(source.contains(required), "native lifecycle wiring missing {required}");
+    }
+    assert_eq!(source.matches("#[tauri::command]").count(), 3);
+    for permission in capability()["permissions"].as_array().expect("capability permissions") {
+        let permission = permission.as_str().expect("string permission");
+        assert!(!permission.contains("autostart") && !permission.contains("tray") && !permission.contains("dialog"));
+    }
+    let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
+    assert!(
+        !setup.contains(".enable()"),
+        "login registration is never a startup side effect"
+    );
+}
+
+#[test]
+fn native_lifecycle_authority_requires_a_receipt_not_a_launch_attempt() {
+    let source = shipping_source("src/lib.rs");
+    assert!(source.contains("shell.host.has_owned_runtime()"));
+    assert!(!source.contains("host.has_launched()"));
+    let stop = source
+        .split("fn stop_runtime(")
+        .nth(1)
+        .expect("native stop")
+        .split("fn toggle_start_at_login")
+        .next()
+        .expect("stop body");
+    let refusal = stop
+        .split("Err(LaunchError::OwnershipLost | LaunchError::NotOwned)")
+        .nth(1)
+        .expect("receipt refusal")
+        .split("Err(_)")
+        .next()
+        .expect("refusal handling");
+    assert!(refusal.contains("BootstrapNoticeCode::RuntimeOwnershipLost"));
+    assert!(refusal.contains("ACTIVITY_IDLE"));
+    assert!(refusal.contains("focus_or_restore_main_window(&app)"));
+    assert!(!refusal.contains("start_runtime_monitor("));
+    assert!(!stop.contains("spawn_bootstrap("));
+}
+
+#[test]
+fn native_tray_copy_has_locale_and_placeholder_parity() {
+    let root = crate_dir().join("../../ui/src/i18n");
+    let english = read_json(root.join("en.json"));
+    let chinese = read_json(root.join("zh.json"));
+    let english = english["desktopBootstrap"]["tray"]
+        .as_object()
+        .expect("English tray catalog");
+    let chinese = chinese["desktopBootstrap"]["tray"]
+        .as_object()
+        .expect("Chinese tray catalog");
+    assert_eq!(english.keys().collect::<Vec<_>>(), chinese.keys().collect::<Vec<_>>());
+    for (key, value) in english {
+        let source = value.as_str().expect("English string");
+        let translated = chinese[key].as_str().expect("Chinese string");
+        assert!(!source.is_empty() && !translated.is_empty());
+        let placeholders = |text: &str| -> Vec<String> {
+            text.split("{{")
+                .skip(1)
+                .map(|part| part.split("}}").next().expect("placeholder").to_owned())
+                .collect()
+        };
+        assert_eq!(
+            placeholders(source),
+            placeholders(translated),
+            "placeholder parity for {key}"
+        );
+    }
+}
+
+#[test]
+fn explicit_stop_does_not_schedule_automatic_recovery() {
+    let source = shipping_source("src/lib.rs");
+    let stop = source
+        .split("fn stop_runtime(")
+        .nth(1)
+        .expect("native stop")
+        .split("fn toggle_start_at_login")
+        .next()
+        .expect("stop body");
+    assert!(stop.contains("BootstrapNoticeCode::RuntimeStopped"));
+    assert!(!stop.contains("spawn_bootstrap("));
+    assert!(!stop.contains("spawn_owned_bootstrap("));
+    let monitor = source
+        .split("fn start_runtime_monitor(")
+        .nth(1)
+        .expect("monitor")
+        .split("fn return_to_bootstrap")
+        .next()
+        .expect("monitor body");
+    assert!(
+        !monitor.contains("get_webview_window"),
+        "status monitoring survives window closure"
+    );
+    assert!(monitor.contains("generation.load(Ordering::SeqCst) != observed_generation"));
+}

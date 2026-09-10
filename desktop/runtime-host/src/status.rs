@@ -41,6 +41,8 @@ pub enum BootstrapNoticeCode {
     RuntimeInstallFailed,
     RuntimeDiscoveryFailed,
     RuntimeSpawnFailed,
+    RuntimeStopped,
+    RuntimeOwnershipLost,
     LauncherExited,
     ReadyTimeout,
     WorkbenchNavigationFailed,
@@ -208,6 +210,8 @@ mod tests {
             (BootstrapNoticeCode::RuntimeInstallFailed, "runtime_install_failed"),
             (BootstrapNoticeCode::RuntimeDiscoveryFailed, "runtime_discovery_failed"),
             (BootstrapNoticeCode::RuntimeSpawnFailed, "runtime_spawn_failed"),
+            (BootstrapNoticeCode::RuntimeStopped, "runtime_stopped"),
+            (BootstrapNoticeCode::RuntimeOwnershipLost, "runtime_ownership_lost"),
             (BootstrapNoticeCode::LauncherExited, "launcher_exited"),
             (BootstrapNoticeCode::ReadyTimeout, "ready_timeout"),
             (
