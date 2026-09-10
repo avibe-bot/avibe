@@ -16,6 +16,7 @@
       "runtime_discovery_failed": "Avibe could not determine the local Runtime address.",
       "runtime_spawn_failed": "Avibe could not start the installed Runtime.",
       "runtime_stopped": "The Runtime was stopped. Choose Try again to start it when you are ready.",
+      "runtime_ownership_lost": "The Runtime changed and this app can no longer stop it. Choose Try again to check the current Runtime.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
       "workbench_navigation_failed": "Avibe could not open the Workbench in this window."

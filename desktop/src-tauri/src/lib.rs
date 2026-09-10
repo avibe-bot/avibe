@@ -23,8 +23,8 @@ use avibe_runtime_host::bundled_runtime_host;
 #[cfg(not(feature = "bundled-runtime"))]
 use avibe_runtime_host::default_runtime_host;
 use avibe_runtime_host::{
-    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LoopbackOrigin,
-    RuntimeHost, StatusSink,
+    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LaunchError,
+    LoopbackOrigin, RuntimeHost, StatusSink,
 };
 use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
@@ -345,7 +345,7 @@ fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
         } else {
             state
         };
-        let owned = stop_is_available(shell.host.has_launched(), activity);
+        let owned = stop_is_available(shell.host.has_owned_runtime(), activity);
         let mut displayed = menus.displayed.lock().expect("native tray state lock");
         if displayed.as_ref() == Some(&(state.clone(), owned)) {
             return;
@@ -446,7 +446,7 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
     if shell.dialog_pending.swap(true, Ordering::SeqCst) {
         return;
     }
-    if quit && !shell.host.has_launched() {
+    if quit && !shell.host.has_owned_runtime() {
         if claim_runtime_stop(&shell.activity) {
             exit_shell(&app);
         } else {
@@ -455,7 +455,7 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
         }
         return;
     }
-    if !shell.host.has_launched() {
+    if !shell.host.has_owned_runtime() {
         shell.dialog_pending.store(false, Ordering::SeqCst);
         return;
     }
@@ -539,6 +539,20 @@ fn stop_runtime(app: AppHandle, quit: bool) {
                     latest: app.state::<Shell>().latest.clone(),
                 }
                 .publish(stopped);
+            }
+            Err(LaunchError::OwnershipLost | LaunchError::NotOwned) => {
+                let _ = return_to_bootstrap(&app);
+                let mut lost = BootstrapStatus::rejected(BootstrapNoticeCode::RuntimeOwnershipLost, true);
+                if let Some(previous) = previous_status {
+                    lost.origin = previous.origin;
+                }
+                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                WindowSink {
+                    app: app.clone(),
+                    latest: app.state::<Shell>().latest.clone(),
+                }
+                .publish(lost);
+                focus_or_restore_main_window(&app);
             }
             Err(_) => {
                 if let Some(origin) = origin {
@@ -980,7 +994,12 @@ fn focus_or_restore_main_window(app: &AppHandle) {
         .lock()
         .ok()
         .and_then(|latest| latest.clone())
-        .filter(|status| status.notice.code == BootstrapNoticeCode::RuntimeStopped);
+        .filter(|status| {
+            matches!(
+                status.notice.code,
+                BootstrapNoticeCode::RuntimeStopped | BootstrapNoticeCode::RuntimeOwnershipLost
+            )
+        });
     if let Some(status) = stopped {
         if window.url().is_ok_and(|url| !is_shell_ui_url(&url)) {
             let _ = return_to_bootstrap(app);

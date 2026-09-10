@@ -16,6 +16,7 @@
       "runtime_discovery_failed": "Avibe 无法确定本地 Runtime 地址。",
       "runtime_spawn_failed": "Avibe 无法启动已安装的 Runtime。",
       "runtime_stopped": "运行时已停止。准备就绪后，点击“重试”即可启动。",
+      "runtime_ownership_lost": "运行时已更换，此应用已无法停止它。点击“重试”以检查当前运行时。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
       "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"

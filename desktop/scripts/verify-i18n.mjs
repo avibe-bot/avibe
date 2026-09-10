@@ -11,6 +11,7 @@ const expectedNoticeCodes = [
   'runtime_discovery_failed',
   'runtime_install_failed',
   'runtime_not_found',
+  'runtime_ownership_lost',
   'runtime_spawn_failed',
   'runtime_stopped',
   'starting',

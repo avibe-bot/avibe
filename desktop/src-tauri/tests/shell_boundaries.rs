@@ -394,6 +394,32 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
 }
 
 #[test]
+fn native_lifecycle_authority_requires_a_receipt_not_a_launch_attempt() {
+    let source = shipping_source("src/lib.rs");
+    assert!(source.contains("shell.host.has_owned_runtime()"));
+    assert!(!source.contains("host.has_launched()"));
+    let stop = source
+        .split("fn stop_runtime(")
+        .nth(1)
+        .expect("native stop")
+        .split("fn toggle_start_at_login")
+        .next()
+        .expect("stop body");
+    let refusal = stop
+        .split("Err(LaunchError::OwnershipLost | LaunchError::NotOwned)")
+        .nth(1)
+        .expect("receipt refusal")
+        .split("Err(_)")
+        .next()
+        .expect("refusal handling");
+    assert!(refusal.contains("BootstrapNoticeCode::RuntimeOwnershipLost"));
+    assert!(refusal.contains("ACTIVITY_IDLE"));
+    assert!(refusal.contains("focus_or_restore_main_window(&app)"));
+    assert!(!refusal.contains("start_runtime_monitor("));
+    assert!(!stop.contains("spawn_bootstrap("));
+}
+
+#[test]
 fn native_tray_copy_has_locale_and_placeholder_parity() {
     let root = crate_dir().join("../../ui/src/i18n");
     let english = read_json(root.join("en.json"));
