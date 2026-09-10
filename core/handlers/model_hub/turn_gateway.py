@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
 
+import aiohttp
 from aiohttp import web
+from packaging.version import Version
 
 from config import paths
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
@@ -40,6 +42,7 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
+from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
     ProtocolSSEState,
@@ -63,7 +66,7 @@ from .service import (
 )
 
 
-_MAX_REQUEST_BYTES: Final = 16 * 1024 * 1024
+_MAX_REQUEST_BYTES: Final = 128 * 1024 * 1024
 _BUFFERED_RESPONSE_MEMORY_BYTES: Final = 256 * 1024
 _RESPONSE_CHUNK_BYTES: Final = 64 * 1024
 _SUPPORTED_PATHS: Final = frozenset(
@@ -490,7 +493,12 @@ class ModelHubTurnGateway:
         async with self._start_lock:
             if self._runner is not None:
                 return
-            app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
+            # Before 3.14, aiohttp's reader rejects at >= instead of >.
+            # Compensate only there so our byte budget stays inclusive.
+            client_max_size = _MAX_REQUEST_BYTES
+            if Version(aiohttp.__version__).release < (3, 14):
+                client_max_size += 1
+            app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
             runner = web.AppRunner(
@@ -758,6 +766,15 @@ class ModelHubTurnGateway:
             )
         try:
             payload = await request.json(loads=json.loads)
+        except web.HTTPRequestEntityTooLarge:
+            terminalizer.fail("invalid_parameter")
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
+                status=413,
+                code="request_too_large",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
         except (json.JSONDecodeError, UnicodeDecodeError):
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
@@ -831,33 +848,19 @@ class ModelHubTurnGateway:
                 translation = translate_opencode_tool_names(payload)
                 payload = translation.request
                 execution.response_tool_aliases = translation.response_aliases
-            for retry in range(2):
-                try:
-                    resolved = await self.service.resolve(
-                        backend=backend,
-                        model_id=resolution_model,
-                        request=ModelHubRequest(
-                            payload,
-                            protocol=_REQUEST_PROTOCOLS[endpoint],
-                            headers=protocol_headers,
-                        ),
-                        stream=stream,
-                        supply_channel="hub",
-                        attempt_observer=observe_attempt,
-                    )
-                    break
-                except ModelHubError as exc:
-                    delay = self._cooldown_retry_delay(exc.turn_outcome)
-                    if (
-                        retry
-                        or delay is None
-                        or exc.turn_outcome is None
-                        or exc.turn_outcome.outcome != "no_candidate"
-                    ):
-                        raise
-                    # Native callers may ignore Retry-After. With no runnable
-                    # hop, wait for one known recovery before admission.
-                    await asyncio.sleep(delay)
+            resolved = await self.service.resolve_with_recovery(
+                backend=backend,
+                model_id=resolution_model,
+                request=ModelHubRequest(
+                    payload,
+                    protocol=_REQUEST_PROTOCOLS[endpoint],
+                    headers=protocol_headers,
+                ),
+                stream=stream,
+                supply_channel="hub",
+                attempt_observer=observe_attempt,
+                recovery_observer=terminalizer.update_recovery,
+            )
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -866,6 +869,22 @@ class ModelHubTurnGateway:
                 terminalizer.engine_down()
             elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
+            if exc.code == RECOVERY_EXHAUSTED_CODE:
+                self._commit_and_render_turn_outcome(execution, terminalizer, turn_outcome)
+                # Native compatibility is keyed by the caller backend. Keep its
+                # transport result separate from actual upstream provenance.
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": RECOVERY_EXHAUSTED_CODE,
+                            "code": RECOVERY_EXHAUSTED_CODE,
+                            "message": RECOVERY_EXHAUSTED_MESSAGE,
+                        },
+                    },
+                    status=400 if backend == "codex" else 424,
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                )
             return self._terminal_error_response(
                 execution,
                 terminalizer,
@@ -878,6 +897,12 @@ class ModelHubTurnGateway:
         if resolved.handle is not None and resolved.handle.stream is not None:
             execution.handle = resolved.handle
             resources.push_async_callback(resolved.handle.close_stream)
+            # The execution boundary must own cleanup before an awaited health
+            # write: cancellation here still settles and meters this handle.
+            await self.service._observe_handle_recovery(
+                resolved.source_id, resolved.settlement_generation, resolved.handle,
+                backend=resolved.backend, model_id=resolved.requested_model_id,
+            )
         return await self._resolved_response(
             request,
             resolved,
@@ -1225,7 +1250,11 @@ class ModelHubTurnGateway:
         copy = project_turn_outcome_copy(turn_outcome) if turn_outcome is not None else None
         message = render_turn_outcome_copy(turn_outcome, language) if turn_outcome is not None else None
         key = copy.key if copy is not None else None
-        if message is None and fallback_code is not None:
+        if fallback_code == "request_too_large":
+            # Refine the local admission error without changing its turn outcome.
+            key = "modelHub.errors.request_too_large"
+            message = i18n_t(key, language, limit_mib=f"{_MAX_REQUEST_BYTES / (1024 * 1024):g}")
+        elif message is None and fallback_code is not None:
             fallback_key = f"modelHub.errors.{fallback_code}"
             fallback_message = i18n_t(fallback_key, language)
             if fallback_message == fallback_key:

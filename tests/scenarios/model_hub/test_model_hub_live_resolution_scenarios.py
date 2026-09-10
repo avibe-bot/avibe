@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import aiohttp
 import pytest
@@ -78,6 +78,25 @@ class AdapterResult:
     code: str | None = None
     body: bytes | None = None
     stream_started: bool = False
+    recovery_verified: bool = False
+
+
+class ScenarioClock:
+    """Advance eligibility and its displayed wall time together."""
+
+    def __init__(self) -> None:
+        self.wall = datetime(2026, 7, 25, tzinfo=timezone.utc)
+        self.elapsed = 0.0
+
+    def now(self) -> datetime:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    def advance(self, duration: timedelta) -> None:
+        self.wall += duration
+        self.elapsed += duration.total_seconds()
 
 
 class InvokeHandle:
@@ -160,6 +179,7 @@ class AdapterBoundaryFake:
             stream_started=result.stream_started,
             model_id=model_id,
             source_id=source_id,
+            recovery_verified=result.recovery_verified,
         )
         return InvokeHandle(outcome, result.body)
 
@@ -232,8 +252,9 @@ def _service(
     adapter: AdapterBoundaryFake,
     *,
     now,
+    monotonic: Callable[[], float] | None = None,
 ) -> ModelHubService:
-    return ModelHubService(
+    service = ModelHubService(
         store=store,
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
@@ -241,6 +262,9 @@ def _service(
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=now,
     )
+    if monotonic is not None:
+        service.recovery.monotonic = monotonic
+    return service
 
 
 async def _post_turn(
@@ -256,7 +280,7 @@ async def _post_turn(
         "messages": [],
         "stream": stream,
     }
-    async with aiohttp.ClientSession(trust_env=False) as client:
+    async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=5)) as client:
         async with client.post(
             f"{launch.gateway_base_url}/v1/{endpoint}",
             headers=headers,
@@ -362,6 +386,7 @@ def test_codex_backend_model_id_survives_until_gateway_resolution(
         (AdapterResult(RawOutcomeKind.NETWORK_ERROR), "network"),
     ],
 )
+@pytest.mark.parametrize("recovery_verified", [False, True], ids=["unverified", "verified"])
 def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
     tmp_path: Path,
     backend: str,
@@ -369,20 +394,32 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
     endpoint: str,
     failed: AdapterResult,
     reason: str,
+    recovery_verified: bool,
 ) -> None:
     """MH-RES-LIVE-001: the real turn gateway completes on candidate two."""
 
     async def exercise() -> None:
-        clock = [datetime(2026, 7, 25, tzinfo=timezone.utc)]
+        clock = ScenarioClock()
+        candidate_body = b'{"recovered":true}' if recovery_verified else b'{"unknown":true}'
         adapter = AdapterBoundaryFake(
             [
                 failed,
-                AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
-                AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"recovered":true}'),
+                AdapterResult(
+                    RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}', recovery_verified=True,
+                ),
+                AdapterResult(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    body=candidate_body,
+                    # Buffered forwarding also sets this legacy flag; it alone
+                    # cannot certify that an unrecognized response recovered.
+                    stream_started=True,
+                    recovery_verified=recovery_verified,
+                ),
             ]
         )
         store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
-        service = _service(tmp_path, store, adapter, now=lambda: clock[0])
+        service = _service(tmp_path, store, adapter, now=clock.now, monotonic=clock.monotonic)
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
@@ -391,7 +428,9 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
                 assert overlay is not None
                 launch = await router.resolve_opencode_overlay_launch(overlay, requested_model)
             else:
-                launch = await router.resolve(backend, requested_model)
+                launch = await router.resolve(
+                    backend, requested_model, process_scope="scenario-fallback", turn_id="turn_fallback",
+                )
             status, body = await _post_turn(launch, endpoint=endpoint)
             assert status == 200
             assert body == b'{"ok":true}'
@@ -399,13 +438,46 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             events = service.list_events(limit=5)
             if failed.kind is RawOutcomeKind.NETWORK_ERROR:
                 assert store.load().sources[0].state.status == "standby"
-                assert [event["kind"] for event in events] == ["switch"]
+                assert store.load().sources[0].state.retry_at is None
+                assert store.load().sources[0].state.detail_key is None
             else:
                 assert store.load().sources[0].state.status == "cooldown"
-                assert [event["kind"] for event in events[:2]] == ["switch", "cooldown"]
-                assert events[1]["reason"] == reason
+            initial_retry_at = store.load().sources[0].state.retry_at
+            initial_detail_key = store.load().sources[0].state.detail_key
+            assert [event["kind"] for event in events] == ["switch", "cooldown"]
+            assert events[1]["reason"] == reason
+            assert events[1]["from_source"] == "src_primary1"
+            # Successful output from the backup cannot recover the primary.
+            assert not any(event["kind"] == "recover" for event in events)
+            if backend != "opencode":
+                router.settle_turn(
+                    "turn_fallback", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=clock.now().isoformat(),
+                )
+                provenance = service.get_turn_provenance("turn_fallback")
+                assert provenance is not None
+                assert provenance["turn_id"] == "turn_fallback"
+                assert provenance["agent"] == backend
+                assert provenance["requested_model_id"] == requested_model
+                assert provenance["outcome"] == "served"
+                assert provenance["served"]["source_id"] == "src_backup01"
+                assert provenance["served"]["configured_model_id"] == _source_model_id(backend)
+                assert provenance["served"]["channel"] == "hub"
+                assert len(provenance["failed_attempts"]) == 1
+                attempt = provenance["failed_attempts"][0]
+                assert attempt["source_id"] == "src_primary1"
+                assert attempt["configured_model_id"] == _source_model_id(backend)
+                assert attempt["channel"] == "hub"
+                assert attempt["reason"] == reason
+                if failed.status is None:
+                    assert "http_status" not in attempt
+                else:
+                    assert type(attempt["http_status"]) is int
+                    assert attempt["http_status"] == failed.status
 
-            clock[0] += timedelta(minutes=6)
+            clock.advance(timedelta(minutes=6))
+            chain = service.agent_chain(backend, requested_model)["chain"]
+            assert chain[0]["source_id"] == "src_primary1"
+            assert chain[0]["recovery"] == "eligible"
             if backend == "opencode":
                 recovered_overlay = await router.prepare_opencode_overlay()
                 assert recovered_overlay is not None
@@ -415,13 +487,32 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
                 )
             else:
                 recovered_launch = await router.resolve(backend, requested_model)
+            assert not any(event["kind"] == "recover" for event in service.list_events(limit=10))
             recovered_status, recovered_body = await _post_turn(
                 recovered_launch,
                 endpoint=endpoint,
             )
             assert recovered_status == 200
-            assert recovered_body == b'{"recovered":true}'
+            assert recovered_body == candidate_body
             assert adapter.invocations[-1][0] == "src_primary1"
+            recovery_events = [
+                event for event in service.list_events(limit=10) if event["kind"] == "recover"
+            ]
+            assert len(recovery_events) == int(recovery_verified)
+            primary = store.load().sources[0]
+            if recovery_verified:
+                assert recovery_events[0]["reason"] == "recovery"
+                assert recovery_events[0]["to_source"] == primary.id == "src_primary1"
+                assert primary.state.status == "standby"
+                assert primary.state.retry_at is None
+                assert primary.state.detail_key is None
+            else:
+                assert primary.state.status == (
+                    "standby" if failed.kind is RawOutcomeKind.NETWORK_ERROR else "cooldown"
+                )
+                assert primary.state.retry_at == initial_retry_at
+                assert primary.state.detail_key == initial_detail_key
+                assert service.agent_chain(backend, requested_model)["chain"][0]["recovery"] == "eligible"
         finally:
             await gateway.close()
 
@@ -571,7 +662,7 @@ def test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn(
     """MH-RES-LIVE-004: a hub subscription quota failure serves the next hop in the same turn and marks the switch as entered_metered."""
 
     async def exercise() -> None:
-        clock = [datetime(2026, 7, 25, tzinfo=timezone.utc)]
+        clock = ScenarioClock()
         subscription = _source("src_primary1", kind="subscription")
         api_key = _source("src_backup01")
         assert subscription.kind == "subscription"
@@ -586,12 +677,23 @@ def test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn(
                     status=429,
                     code="quota_exceeded",
                 ),
-                AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
-                AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"recovered":true}'),
+                AdapterResult(
+                    RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}', recovery_verified=True,
+                ),
+                AdapterResult(
+                    RawOutcomeKind.SUCCESS, status=200, body=b'{"unknown":true}', stream_started=True,
+                ),
+                AdapterResult(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    body=b'{"recovered":true}',
+                    stream_started=True,
+                    recovery_verified=True,
+                ),
             ]
         )
         store = MemoryStore(_config(subscription, api_key))
-        service = _service(tmp_path, store, adapter, now=lambda: clock[0])
+        service = _service(tmp_path, store, adapter, now=clock.now, monotonic=clock.monotonic)
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
@@ -608,7 +710,7 @@ def test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn(
             assert cooled.id == "src_primary1"
             assert cooled.state.status == "cooldown"
             assert cooled.state.detail_key == "models.source.cooldown.quota_exhausted"
-            assert cooled.state.retry_at == (clock[0] + timedelta(seconds=300)).isoformat()
+            assert cooled.state.retry_at == (clock.now() + timedelta(seconds=300)).isoformat()
             events = service.list_events(limit=5)
             assert [event["kind"] for event in events[:2]] == ["switch", "cooldown"]
             assert events[0]["from_source"] == "src_primary1"
@@ -617,7 +719,17 @@ def test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn(
             assert events[0]["billing_note"] == "entered_metered"
             assert events[1]["reason"] == "quota_exhausted"
 
-            clock[0] += timedelta(minutes=6)
+            clock.advance(timedelta(minutes=6))
+            candidate = await router.resolve("claude", _requested_model("claude"))
+            assert candidate.source_id == "src_primary1"
+            assert store.load().sources[0].state.status == "cooldown"
+            assert not any(event["kind"] == "recover" for event in service.list_events(limit=10))
+            unverified_status, unverified_body = await _post_turn(candidate)
+            assert unverified_status == 200
+            assert unverified_body == b'{"unknown":true}'
+            assert adapter.invocations[-1][0] == "src_primary1"
+            assert store.load().sources[0].state.status == "cooldown"
+            assert not any(event["kind"] == "recover" for event in service.list_events(limit=10))
             recovered_status, recovered_body = await _post_turn(
                 await router.resolve("claude", _requested_model("claude"))
             )
@@ -679,16 +791,29 @@ def test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize(
+    ("upstream_status", "upstream_code", "wire_status", "wire_code", "terminal_reason"),
+    [
+        (429, "rate_limited", 429, "stream_interrupted", "stream_interrupted"),
+        (503, "request_too_large", 400, "upstream_request_invalid", "invalid_parameter"),
+    ],
+)
 def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
     tmp_path: Path,
+    upstream_status: int,
+    upstream_code: str,
+    wire_status: int,
+    wire_code: str,
+    terminal_reason: str,
 ) -> None:
     async def exercise() -> None:
+        now = datetime(2026, 7, 25, tzinfo=timezone.utc)
         adapter = AdapterBoundaryFake(
             [
                 AdapterResult(
                     RawOutcomeKind.HTTP_ERROR,
-                    status=429,
-                    code="rate_limited",
+                    status=upstream_status,
+                    code=upstream_code,
                     body=b'{"partial":',
                     stream_started=True,
                 ),
@@ -699,16 +824,36 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
             tmp_path,
             store,
             adapter,
-            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+            now=lambda: now,
         )
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
             status, body = await _post_turn(
-                await router.resolve("claude", _requested_model("claude")),
+                await router.resolve(
+                    "claude", _requested_model("claude"),
+                    process_scope="scenario-buffered-failure", turn_id="turn_buffered_failure",
+                ),
             )
-            assert status == 429
-            assert json.loads(body)["error"]["code"] == "stream_interrupted"
+            assert status == wire_status
+            assert json.loads(body)["error"]["code"] == wire_code
+            assert [call[0] for call in adapter.invocations] == ["src_primary1"]
+            router.settle_turn(
+                "turn_buffered_failure", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=now.isoformat(),
+            )
+            provenance = service.get_turn_provenance("turn_buffered_failure")
+            assert provenance is not None
+            assert provenance["outcome"] == "failed_terminal"
+            assert provenance["served"] is None
+            terminal = provenance["terminal_error"]
+            assert terminal["source_id"] == "src_primary1"
+            assert terminal["configured_model_id"] == _source_model_id("claude")
+            assert terminal["channel"] == "hub"
+            assert terminal["reason"] == terminal_reason
+            assert terminal["stream_started"] is True
+            # Raw upstream status is evidence, not the gateway's projection.
+            assert type(terminal["http_status"]) is int
+            assert terminal["http_status"] == upstream_status
         finally:
             await gateway.close()
 

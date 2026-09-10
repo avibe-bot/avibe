@@ -397,6 +397,7 @@ export const ActivityCard: React.FC<{
   showToolCalls: boolean;
   onToggleTools: () => void;
   onDisableActivity?: () => void;
+  statusLabel?: string | null;
 }> = ({
   rows,
   startedAtMs,
@@ -405,6 +406,7 @@ export const ActivityCard: React.FC<{
   showToolCalls,
   onToggleTools,
   onDisableActivity,
+  statusLabel,
 }) => {
   const { t } = useTranslation();
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -465,7 +467,7 @@ export const ActivityCard: React.FC<{
             className="flex min-w-0 flex-1 items-center gap-2 text-left"
           >
             <Loader2 className="size-3.5 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
-            <span className="text-[12px] font-medium text-mint-ink">{t('chat.agentActivity.running')}</span>
+            <span className="text-[12px] font-medium text-mint-ink">{statusLabel || t('chat.agentActivity.running')}</span>
             {rows.length > 0 && <span className="text-[12px] text-muted">· {stepLabel(t, rows.length)}</span>}
             <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{clock}</span>
           </button>

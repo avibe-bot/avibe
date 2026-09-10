@@ -435,6 +435,7 @@ class ProtocolObservation:
     usage: ProtocolUsageReport | None = None
     error_type_candidates: tuple[str, ...] = ()
     error_code_candidates: tuple[str, ...] = ()
+    recovery_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -483,6 +484,10 @@ class ProtocolStreamTaxonomy:
     terminal_event_name: str | None
     render_terminal_event: Callable[[str, str, int], dict[str, object]]
     usage: ProtocolUsageTaxonomy
+    # Positive buffered recovery evidence, not a response-admission schema.
+    # Project only these finite selectors and the result container's shape.
+    buffered_success_selectors: tuple[tuple[JSONPath, tuple[str, ...]], ...] = ()
+    buffered_output_array_path: JSONPath | None = None
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
@@ -521,6 +526,8 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         success_literal=None,
         sequence_number_path=None,
         buffered_error_envelope_paths=(("error",),),
+        buffered_success_selectors=((("type",), ("message",)),),
+        buffered_output_array_path=("content",),
         terminal_event_name="error",
         render_terminal_event=_anthropic_terminal_event,
         usage=ProtocolUsageTaxonomy(
@@ -627,6 +634,11 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         success_literal=None,
         sequence_number_path=("sequence_number",),
         buffered_error_envelope_paths=(("error",),),
+        buffered_success_selectors=(
+            (("object",), ("response",)),
+            (("status",), ("completed", "incomplete")),
+        ),
+        buffered_output_array_path=("output",),
         terminal_event_name="error",
         render_terminal_event=_responses_terminal_event,
         usage=ProtocolUsageTaxonomy(
@@ -695,6 +707,8 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         success_literal=(None, b"[DONE]"),
         sequence_number_path=None,
         buffered_error_envelope_paths=(("error",),),
+        buffered_success_selectors=((("object",), ("chat.completion",)),),
+        buffered_output_array_path=("choices",),
         terminal_event_name=None,
         render_terminal_event=_chat_terminal_event,
         usage=ProtocolUsageTaxonomy(
@@ -838,6 +852,9 @@ def _usage_from_scalar_paths(
 def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
     taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
     paths: set[JSONPath] = {()}
+    paths.update(path for path, _values in taxonomy.buffered_success_selectors)
+    if taxonomy.buffered_output_array_path is not None:
+        paths.add(taxonomy.buffered_output_array_path)
     for envelope in (*taxonomy.terminal_envelopes, *taxonomy.model_output_envelopes):
         paths.add(envelope.selector_path)
         if isinstance(envelope, ProtocolTerminalEnvelope):
@@ -857,6 +874,20 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
         ):
             paths.update((*container_path, *leaf_path) for leaf_path in leaf_paths)
     return frozenset(paths)
+
+
+def _buffered_recovery_verified(
+    taxonomy: ProtocolStreamTaxonomy,
+    scalars: Mapping[JSONPath, object],
+    arrays: AbstractSet[JSONPath],
+) -> bool:
+    """Recognize a completed native result without validating every body field."""
+
+    return (
+        bool(taxonomy.buffered_success_selectors)
+        and taxonomy.buffered_output_array_path in arrays
+        and all(scalars.get(path) in values for path, values in taxonomy.buffered_success_selectors)
+    )
 
 
 def _protocol_error_paths(taxonomy: ProtocolStreamTaxonomy) -> frozenset[JSONPath]:
@@ -927,7 +958,7 @@ class ProtocolFactProjector:
     ) -> ProtocolObservation:
         literal = None if self._literal_too_long else bytes(self._literal)
         if streamed and self.taxonomy.success_literal == (event_name, literal):
-            return ProtocolObservation(outcome="served")
+            return ProtocolObservation(outcome="served", recovery_verified=True)
         if not self._parser.finish() or () not in self._maps:
             return ProtocolObservation(outcome="served" if not streamed else None)
 
@@ -956,6 +987,10 @@ class ProtocolFactProjector:
                 usage=usage,
                 error_type_candidates=(type_candidates if matched_paths else ()),
                 error_code_candidates=(code_candidates if matched_paths else ()),
+                recovery_verified=(
+                    not matched_paths
+                    and _buffered_recovery_verified(self.taxonomy, self._scalars, self._arrays)
+                ),
             )
 
         for envelope in self.taxonomy.terminal_envelopes:
@@ -1002,11 +1037,13 @@ class ProtocolFactProjector:
                     if envelope.terminal_outcome == "failed_terminal"
                     else ()
                 ),
+                recovery_verified=model_output_started or envelope.terminal_outcome == "served",
             )
         return ProtocolObservation(
             model_output_started=model_output_started,
             sequence_number=sequence_number,
             usage=usage,
+            recovery_verified=model_output_started,
         )
 
     def _visit(
@@ -1158,7 +1195,7 @@ def observe_protocol_response(
     if data is None:
         return ProtocolObservation()
     if streamed and taxonomy.success_literal == (event_name, data):
-        return ProtocolObservation(outcome="served")
+        return ProtocolObservation(outcome="served", recovery_verified=True)
     payload = _try_parse_payload(data)
     if not isinstance(payload, dict):
         if not streamed:
@@ -1166,6 +1203,15 @@ def observe_protocol_response(
         return ProtocolObservation()
 
     usage = extract_protocol_usage(protocol, payload)
+    # This legacy byte helper retains its forwarding policy, but its recovery
+    # evidence shares the incremental reader's handling of malformed JSON.
+    projector = ProtocolFactProjector(protocol)
+    projector.feed(data)
+    recovery_verified = projector.finish(
+        streamed=streamed,
+        event_name=event_name,
+        previous_sequence_number=previous_sequence_number,
+    ).recovery_verified
 
     if not streamed:
         if any(
@@ -1179,7 +1225,11 @@ def observe_protocol_response(
                 error_envelope_paths=taxonomy.buffered_error_envelope_paths,
                 usage=usage,
             )
-        return ProtocolObservation(outcome="served", usage=usage)
+        return ProtocolObservation(
+            outcome="served",
+            usage=usage,
+            recovery_verified=recovery_verified,
+        )
 
     sequence_number: int | None = None
     if taxonomy.sequence_number_path is not None:
@@ -1216,11 +1266,13 @@ def observe_protocol_response(
             ),
             sequence_number=sequence_number,
             usage=usage,
+            recovery_verified=recovery_verified,
         )
     return ProtocolObservation(
         model_output_started=model_output_started,
         sequence_number=sequence_number,
         usage=usage,
+        recovery_verified=recovery_verified,
     )
 
 
@@ -1326,6 +1378,7 @@ class ProtocolSSEState:
                 usage=self.usage,
                 error_type_candidates=self.error_type_candidates,
                 error_code_candidates=self.error_code_candidates,
+                recovery_verified=self.reached_model,
             )
         return None
 

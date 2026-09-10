@@ -1039,7 +1039,6 @@
             "label": "模型",
             "placeholder": "搜索 models.dev 或输入模型 ID",
             "required": "请填写 Backend 模型 ID。",
-            "tooLong": "模型 ID 最多 256 个字符。",
             "duplicate": "列表中已存在相同 ID 的模型。"
           },
           "displayName": {
@@ -1688,6 +1687,7 @@
         "advanced": "高级设置",
         "back": "返回模型供应商列表",
         "close": "关闭供应商详情",
+        "gone": "这个供应商已经不在了。",
         "modelsHeading": "模型",
         "usageSummary_one": "{{count}} 个模型 · 被 {{backends}} 使用",
         "usageSummary_other": "{{count}} 个模型 · 被 {{backends}} 使用",
@@ -2626,6 +2626,7 @@
       "notifications": {
         "checking": "正在检查通知",
         "unsupported": "当前不支持通知",
+        "localOnly": "当前账号无法开启通知",
         "installFirst": "先添加到主屏幕",
         "enable": "开启通知",
         "enabled": "通知已开启",
@@ -2667,6 +2668,14 @@
         "title": "Vaults",
         "description": "secrets 和 API key,Agent 可以直接写进 ENV / .env,不用你复制粘贴。"
       }
+    }
+  },
+  "setup": {
+    "remoteOwner": {
+      "title": "首次设置需在本机完成",
+      "body": "你正通过远程访问连接，Avibe 在这里会跳过首次设置向导。",
+      "hint": "通讯平台、后端和模型都在设置里。向导只能在运行 Avibe 的机器上打开。",
+      "action": "打开设置"
     }
   },
   "wizard": {
@@ -3393,11 +3402,14 @@
     "filterPlaceholder": "搜索用户…",
     "allUsers": "全部用户",
     "showDisabled": "显示已停用",
+    "disabled": "已停用",
     "settingsSaved": "用户设置已保存",
     "settingsSaveFailed": "保存用户设置失败",
     "admin": "管理员",
     "user": "用户",
     "bot": "机器人",
+    "promoteAdminTitle": "设为管理员",
+    "demoteAdminTitle": "取消管理员",
     "boundAt": "绑定于",
     "boundAgo": "绑定于 {{ago}}",
     "removeUser": "移除",
@@ -4138,6 +4150,11 @@
     "scrollToBottom": "回到最新",
     "streaming": "实时输出中",
     "thinking": "思考中…",
+    "modelRecovery": {
+      "waitingSeconds": "等待重试，预计 {{seconds}} 秒",
+      "waiting": "等待重试…",
+      "attempting": "正在重试…"
+    },
     "notifyLabel": "通知",
     "retryRequested": "已请求重试",
     "retryFailed": "未能提交重试，可以再次点击。",
@@ -4896,6 +4913,7 @@
       "implicitTraits": "推断特征",
       "basis": "推断依据",
       "evidence": "相关证据",
+      "entryFallback": "画像条目 {{number}}",
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {

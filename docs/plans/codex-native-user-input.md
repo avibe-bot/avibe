@@ -57,8 +57,10 @@ to an opt-out.
 - Transport unit coverage requires the explicit policy value and verifies
   host overrides follow conflicting backend arguments.
 - The opt-in native prompt contract also checks the model-visible synchronous
-  tool is absent, ordinary execution tools remain, and prompt refresh,
-  process restart, legacy migration, and remote compaction still work.
+  tool is absent and ordinary execution tools remain. The shared native harness
+  applies these checks across all six cases: legacy migration, prompt refresh,
+  process restart, automatic/manual compaction, retention pressure, and forks.
+  The existing baseline/overlay assertions and cleanup are preserved.
   Its fixture is eligible for async input without requiring that upstream
   limitation to persist forever.
 - Native contracts require `CODEX_PROMPT_CONTRACT_BINARY` to select a real

@@ -46,7 +46,7 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.plugins=false",
     "features.recommended_plugins=false",
     "features.remote_plugin=false",
-    # Preserve Avibe's injected developer items in Codex remote compaction v2.
+    # Opt injected updates into budgeted retention, not guaranteed persistence.
     "features.retain_client_developer_messages=true",
     "features.skill_mcp_dependency_install=false",
     "features.terminal_visualization_instructions=false",

@@ -75,18 +75,24 @@ class _Container:
 class SelectiveJSONParser:
     """Parse only selected paths while skipping every unrelated value in place.
 
-    Strings and numbers are bounded lexical tokens. Selected containers retain
-    path state; an unrelated subtree uses a packed grammar stack, so nesting
-    costs bits rather than Python objects without weakening JSON validation.
+    Strings and numbers are bounded lexical tokens by default. Callers may
+    retain complete string values at explicit selected paths for facts such as
+    identifiers. Object keys and unrelated values remain bounded. Selected
+    containers retain path state; an unrelated subtree uses a packed grammar
+    stack without weakening JSON validation.
     """
 
     def __init__(
         self,
         paths: Iterable[JSONPath],
         visitor: JSONVisitor,
+        *,
+        lossless_string_paths: Iterable[JSONPath] = (),
     ) -> None:
-        self._root = _path_tree(paths)
+        selected_paths = frozenset(paths)
+        self._root = _path_tree(selected_paths)
         self._visitor = visitor
+        self._lossless_string_paths = selected_paths.intersection(lossless_string_paths)
         self._stack: list[_Container] = []
         self._root_state = "value"
         self._skip_depth = 0
@@ -97,6 +103,7 @@ class SelectiveJSONParser:
         self._mode: Literal["normal", "string", "number", "literal"] = "normal"
         self._string = bytearray()
         self._string_too_long = False
+        self._string_lossless = False
         self._escaped = False
         self._unicode_escape_digits = 0
         self._string_decoder = codecs.getincrementaldecoder("utf-8")()
@@ -209,6 +216,9 @@ class SelectiveJSONParser:
         if byte in b" \t\r\n":
             return
         if byte == 0x22:
+            # Resolve while the parser still expects a value. Keys and skipped
+            # subtrees have no selected value path and never opt into retention.
+            self._string_lossless = self.next_value_path in self._lossless_string_paths
             self._mode = "string"
             self._string.clear()
             self._string_too_long = False
@@ -317,6 +327,9 @@ class SelectiveJSONParser:
         return offset
 
     def _retain_string_bytes(self, payload: bytes) -> None:
+        if self._string_lossless:
+            self._string.extend(payload)
+            return
         remaining = JSON_STRING_TOKEN_BYTES - len(self._string)
         if remaining > 0:
             self._string.extend(payload[:remaining])
@@ -652,8 +665,10 @@ def project_json_reader(
     reader: BinaryIO,
     paths: Iterable[JSONPath],
     visitor: JSONVisitor,
+    *,
+    lossless_string_paths: Iterable[JSONPath] = (),
 ) -> bool:
-    parser = SelectiveJSONParser(paths, visitor)
+    parser = SelectiveJSONParser(paths, visitor, lossless_string_paths=lossless_string_paths)
     while chunk := reader.read(JSON_IO_CHUNK_BYTES):
         parser.feed(chunk)
     return parser.finish()

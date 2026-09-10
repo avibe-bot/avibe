@@ -6,10 +6,77 @@ import json
 import pytest
 
 from core.handlers.model_hub.json_wire import (
+    JSON_STRING_TOKEN_BYTES,
     SelectiveJSONParser,
     project_json_reader,
     rewrite_json_strings,
 )
+
+
+@pytest.mark.parametrize("ensure_ascii", (True, False))
+@pytest.mark.parametrize("chunk_size", (1, 4093))
+def test_lossless_string_values_preserve_unicode_across_lexical_chunks(
+    ensure_ascii: bool, chunk_size: int,
+) -> None:
+    identity = '模型🧪/e\u0301"\\' * 2000
+    payload = json.dumps({"id": identity}, ensure_ascii=ensure_ascii).encode()
+    observed = []
+    parser = SelectiveJSONParser(
+        {(), ("id",)},
+        lambda path, event, value, scope: observed.append((path, event, value, scope)),
+        lossless_string_paths={("id",)},
+    )
+    for offset in range(0, len(payload), chunk_size):
+        parser.feed(payload[offset : offset + chunk_size])
+    assert parser.finish() is True
+    assert (("id",), "scalar", identity, ()) in observed
+
+
+def test_lossless_opt_in_never_unbounds_keys_or_unselected_values() -> None:
+    oversized = "x" * (JSON_STRING_TOKEN_BYTES * 2)
+    observed = []
+    parser = SelectiveJSONParser(
+        {(), ("id",), ("diagnostic",), (oversized,)},
+        lambda path, event, value, _scope: observed.append((path, event, value)),
+        lossless_string_paths={("id",), (oversized,), ("unselected",)},
+    )
+    parser.feed(b'{"')
+    parser.feed(oversized.encode())
+    assert parser.retained_bytes < JSON_STRING_TOKEN_BYTES + 1024
+    parser.feed(b'":"not a selected key","unselected":"')
+    parser.feed(oversized.encode())
+    assert parser.retained_bytes < JSON_STRING_TOKEN_BYTES + 1024
+    parser.feed(b'","diagnostic":"')
+    parser.feed(oversized.encode())
+    assert parser.retained_bytes < JSON_STRING_TOKEN_BYTES + 1024
+    parser.feed(b'","id":' + json.dumps(oversized).encode() + b"}")
+    assert parser.finish() is True
+    assert (("id",), "scalar", oversized) in observed
+    assert not any(path == (oversized,) for path, _, _ in observed)
+    assert not any(
+        event == "scalar" and value == oversized
+        for path, event, value in observed if path != ("id",)
+    )
+
+
+def test_selected_strings_remain_bounded_without_lossless_opt_in() -> None:
+    observed = []
+    assert project_json_reader(
+        io.BytesIO(json.dumps({"id": "x" * (JSON_STRING_TOKEN_BYTES + 1)}).encode()),
+        {(), ("id",)},
+        lambda path, event, value, _scope: observed.append((path, event, value)),
+    )
+    assert (("id",), "elided_string", None) in observed
+
+
+@pytest.mark.parametrize("suffix", (b'\\q"}', b'\\u000"}', b'\xff"}', b'"', b'"},', b'","other":[,]}'))
+def test_lossless_retention_does_not_relax_json_completion_or_grammar(suffix: bytes) -> None:
+    assert not project_json_reader(
+        io.BytesIO(b'{"id":"' + b"x" * (JSON_STRING_TOKEN_BYTES + 1) + suffix),
+        {(), ("id",)},
+        lambda *_args: None,
+        lossless_string_paths={("id",)},
+    )
 
 
 @pytest.mark.parametrize(

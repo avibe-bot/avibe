@@ -258,7 +258,7 @@ async def _post_stream(launch) -> tuple[int, bytes, BaseException | None]:
 
 
 def test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop(tmp_path: Path) -> None:
-    """MH-TAKEOVER-001: fallback serves in order, or settles exhausted after the same route ends."""
+    """MH-TAKEOVER-001 / D9: ordered fallback or closed exhaustion preserves upstream evidence."""
 
     menu_model = fixed_model("claude")
     first = source("src_takeover01", [menu_model])
@@ -381,16 +381,24 @@ def test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop(tmp_pat
     assert result["provenance"]["failed_attempts"][0]["source_id"] == first.id
     assert result["provenance"]["served"]["source_id"] == second.id
     Draft7Validator(_provenance_schema()).validate(result["provenance"])
-    assert exhausted_result["status"] == 503
-    assert (
-        exhausted_result["body"]["error"]["code"]
-        == "mapping_target_unavailable"
-    )
+    assert exhausted_result["status"] == 424
+    assert exhausted_result["body"] == {
+        "type": "error",
+        "error": {
+            "type": "model_hub_recovery_exhausted",
+            "code": "model_hub_recovery_exhausted",
+            "message": "Automatic recovery has ended. Try again or choose another model.",
+        },
+    }
     assert exhausted_result["provenance"]["outcome"] == "exhausted"
     assert [attempt["source_id"] for attempt in exhausted_result["provenance"]["failed_attempts"]] == [
         exhausted_first.id,
         exhausted_last.id,
     ]
+    for attempt in exhausted_result["provenance"]["failed_attempts"]:
+        assert attempt["reason"] == "quota_exhausted"
+        assert type(attempt["http_status"]) is int
+        assert attempt["http_status"] == 429
     assert exhausted_result["provenance"]["served"] is None
     Draft7Validator(_provenance_schema()).validate(exhausted_result["provenance"])
 

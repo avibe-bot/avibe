@@ -146,7 +146,7 @@
         "checked": {
           "type": "array",
           "description": "Bare canonical model identifiers, stored exactly as the backend emits them.",
-          "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:[\\s\\S]*\\S)?$" },
+          "items": { "type": "string", "minLength": 1, "pattern": "^\\S(?:[\\s\\S]*\\S)?$" },
           "uniqueItems": true
         }
       }

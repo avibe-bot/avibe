@@ -9,6 +9,15 @@ capability:
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
+    - tests/test_model_hub_retry_advice.py
+    - tests/test_model_hub_retry_policy.py
+    - tests/test_model_hub_retry_lifecycle.py
+    - tests/test_model_hub_recovery_evidence.py
+    - tests/test_model_hub_progress.py
+    - tests/test_model_hub_failure_presentation.py
+    - tests/test_opencode_model_hub_retry.py
+    - ui/src/lib/modelHubRecovery.test.ts
+    - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_local_deps.py
@@ -35,6 +44,7 @@ capability:
     - tests/e2e/test_model_hub_mock_upstream.py
     - tests/e2e/test_model_hub_routing.py
     - tests/e2e/test_model_hub_backend_settings.py
+    - tests/e2e/test_model_hub_catalog_consumer.py
     - tests/e2e/test_model_hub_runtime.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
@@ -75,6 +85,90 @@ status_legend:
     expected_fail: false
     priority: false
 scenarios:
+  - id: MH-RETRY-WINDOW-001
+    name: Every fallback pass shares one admission window without replaying output
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_one_window_covers_all_fallback_passes_without_replaying_after_output
+  - id: MH-RETRY-RECOVERY-001
+    name: Real protocol output or empty completion proves recovery while unknown success does not
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
+  - id: MH-RETRY-CONCURRENCY-001
+    name: Concurrent requests share one half-open slot through cancellation and slow inference
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_has_one_half_open_owner_and_interruptible_waiters
+  - id: MH-RETRY-NATIVE-001
+    name: OpenCode consumes the Hub terminal without automatically sending continue
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_opencode_model_hub_retry.py::test_hub_terminal_skips_automatic_continue_and_emits_one_failure
+  - id: MH-RETRY-OWNERSHIP-001
+    name: A production adapter returning without admission releases its provisional half-open claim
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_unavailable_production_client_releases_unadmitted_half_open_claim
+  - id: MH-RETRY-NATIVE-002
+    name: Native CLI settlements retain fixed cooldowns without entering HTTP recovery streaks
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_native_failure_never_enters_http_recovery_streak
+  - id: MH-RETRY-PERSISTENCE-001
+    name: Verified recovery survives failed persistence and fresh reads of the retired cooldown
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_verified_response_survives_failed_recovery_persistence_and_fresh_reads
+  - id: MH-RETRY-EXPIRY-001
+    name: An expired waiter retains its closed terminal when live supply changes
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_expiry_remains_a_closed_terminal_when_live_supply_changes
+  - id: MH-RETRY-EXPIRY-002
+    name: Window expiry does not relabel an observed hard failure as temporary recovery exhaustion
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal
+  - id: MH-RETRY-ADVICE-001
+    name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_retry_advice.py::test_retry_advice_survives_error_body_delays_and_failures
+  - id: MH-RETRY-EVIDENCE-001
+    name: Unknown buffered success passes through without proving recovery
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_recovery_evidence.py::test_unknown_buffered_success_is_forwarded_without_recovery_evidence
+  - id: MH-RETRY-PROGRESS-001
+    name: Recovery progress invalidates only its exact live Session
+    status: covered
+    kind: projection
+    layer: unit
+    test: tests/test_model_hub_progress.py::test_http_recovery_reaches_live_turn_state_and_clears_without_chat
+  - id: MH-RETRY-COPY-001
+    name: Terminal copy says recovery ended instead of promising automatic restoration
+    status: covered
+    kind: copy
+    layer: unit
+    test: tests/test_model_hub_failure_presentation.py::test_gateway_terminal_survives_native_recorder_before_shared_notice
+  - id: MH-RETRY-WEB-001
+    name: The quiet Web label cannot infer recovery from either deadline
+    status: covered
+    kind: projection
+    layer: unit
+    test: ui/src/lib/modelHubRecovery.test.ts::MH-RETRY-WEB-001
   - id: MH-CATALOG-001
     name: Every scenario, observation, and canonical test resolves to discoverable executable evidence
     status: covered
@@ -154,6 +248,20 @@ scenarios:
     kind: mutation
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order
+  # The removal the user performs has a second half the transaction above cannot
+  # state: what the surface they performed it from does next. Keyed to one
+  # selected source, the detail dialog had nothing left to render and stayed open
+  # over a placeholder, so the row states where each ending belongs — a removal
+  # of ours closes, and only a disappearance we did not cause is worth a sentence.
+  - id: MH-SRC-DELETE-002
+    name: A committed removal returns the source detail dialog to the list, leaving the placeholder to a disappearance the user did not cause
+    status: covered
+    kind: presentation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-SRC-DELETE-002
+    related_tests:
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::states in the dialog that a source disappeared with no removal of ours
+      - ui/src/i18n/keyCoverage.test.ts
   - id: MH-SUPPLY-GAP-001
     name: Inventory loss preserves an explicit API-key route target
     status: covered
@@ -229,6 +337,24 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
+  - id: MH-REQUEST-BUDGET-001
+    name: Large multi-image requests retain exact model input through authenticated HTTP ingress
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_large_multi_image_request_is_forwarded_exactly
+  - id: MH-REQUEST-BUDGET-002
+    name: The inclusive request byte budget returns a local structured error without upstream admission or health mutation
+    status: covered
+    kind: boundary
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_request_budget_is_inclusive_and_local
+  - id: MH-REQUEST-BUDGET-003
+    name: Invalid gateway authentication cannot parse or admit a request body
+    status: covered
+    kind: security
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_bad_auth_does_not_parse_or_admit
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered
@@ -254,12 +380,21 @@ scenarios:
     layer: contract
     missing_layer: scenario
     test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
+    partial_evidence:
+      covers: Real Codex catalog and turn consumption preserves unknown image and explicit effort intent; this does not exercise the managed engine
+      test: tests/e2e/test_model_hub_catalog_consumer.py::test_codex_unknown_catalog_preserves_supplied_image_and_effort
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_explicit_catalog_choices_reach_the_consumer
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_native_context_override_wins_over_catalog_planning
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_auto_compaction_consumes_resolved_limits
   - id: MH-CLAUDE-LAUNCH-001
     name: Claude Hub turns preserve the configured Source and model despite native connection settings
     status: covered
     kind: injection
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_claude_consumer_preserves_explicit_limit_settings
   - id: MH-CODEX-LAUNCH-001
     name: Native Codex provider settings preserve the configured Hub Source and upstream model
     status: covered
@@ -364,19 +499,22 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_runtime.py::test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
   - id: MH-USAGE-006
-    name: Every model identifier a persisted config still loads is one the ledger can key
+    # Malformed historical whitespace/surrogate exceptions remain documented in
+    # docs/plans/model-hub-identifier-boundary-assessment.md; these rows do not
+    # claim that every arbitrary loadable legacy string is correctly attributed.
+    name: Supported persisted model identities remain meterable across reload
     status: covered
     kind: compatibility
     layer: unit
     test: tests/test_model_hub_usage.py::test_metering_can_key_exactly_the_identities_a_config_can_hold
   - id: MH-USAGE-007
-    name: Two model identifiers a config holds are never metered onto one ledger row
+    name: Distinct nonblank UTF-8 model identities and folded literals retain separate usage rows
     status: covered
     kind: persistence
     layer: unit
     test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
   - id: MH-USAGE-008
-    name: Every metered row is labelled under the identity it was metered for, however it was keyed
+    name: Configured nonblank UTF-8 identities label their verbatim and folded ledger rows
     status: covered
     kind: compatibility
     layer: unit
@@ -815,11 +953,11 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
   - id: D6
-    name: A server error uses the current flat cooldown
-    status: baseline
+    name: A server error honors later upstream advice through the real engine
+    status: assert
     kind: failover
     layer: e2e-auto
-    test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown
+    test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_preserves_later_retry_after_through_real_engine
   - id: D7
     name: A partial stream terminates without replaying another source
     status: skip
@@ -829,21 +967,17 @@ scenarios:
     owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
   - id: D8
-    name: Cooldown expiry recovers hop zero and emits recovery
-    status: skip
+    name: Cooldown expiry permits a real attempt and verified output proves recovery
+    status: covered
     kind: recovery
-    layer: contract
-    reason: deterministic cooldown expiry requires a controllable clock across resolution and recovery
-    owning_layer: unit/contract suite (controllable-time resolution)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
   - id: D9
-    name: Exhausting every hop returns mapping_target_unavailable
-    status: skip
+    name: Exhausting temporary recovery returns one closed terminal with original upstream provenance
+    status: covered
     kind: failover
-    layer: turn-gateway
-    reason: same-turn route exhaustion requires the private credential issued to a live backend turn
-    owning_layer: future live-turn suite (turn gateway)
-    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
   - id: D10
     name: Reasoning intent survives exact-provider fallback without strip telemetry
     status: assert
@@ -965,7 +1099,6 @@ next_priority:
   - B8
   - B9
   - D1
-  - D6
   - F1
   - G2
   - G3

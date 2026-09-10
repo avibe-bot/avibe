@@ -29,9 +29,9 @@ import pytest
 
 from config.v2_config import ModelHubModelConfig
 from core.handlers.model_hub.identifiers import (
-    MODEL_ID_MAX_LENGTH,
     USAGE_LEDGER_KEY_MAX_LENGTH,
     USAGE_LEDGER_VERBATIM_MAX_LENGTH,
+    canonical_model_id,
     persisted_ledger_key,
     usage_ledger_key,
 )
@@ -1174,27 +1174,27 @@ def test_an_unusable_identifier_is_never_persisted(
             "m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
             id="one-past-the-ledger-verbatim-bound",
         ),
-        pytest.param("m" * MODEL_ID_MAX_LENGTH, id="at-the-admission-bound"),
-        pytest.param("m" * (MODEL_ID_MAX_LENGTH + 1), id="one-past-it"),
+        pytest.param("m" * 256, id="at-the-former-admission-bound"),
+        pytest.param("m" * 257, id="past-the-former-admission-bound"),
         pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 4), id="far-past-it"),
+        pytest.param("模型🧪/e\u0301" * 3000, id="long-unicode"),
         pytest.param("", id="empty"),
         pytest.param(None, id="not-text"),
     ],
 )
 def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: object) -> None:
-    """MH-USAGE-006, review 4965885614: two bounds, and only one of them may refuse.
+    """MH-USAGE-006: loading and metering do not reapply new-ID admission.
 
-    The admission bound is not a load rule, so `from_payload` keeps a longer
-    persisted identifier loadable and routable on purpose. Asking the admission
-    question again at the ledger made that population unmeterable — a turn served
-    without a trace in the tab. So the config constructor, not a list written here,
-    decides which identities exist, and this asserts the ledger can key every one
-    of them: the two halves cannot drift apart without failing.
+    This population covers ordinary, long, padded, and short blank historical
+    text. It is not a proof over every loadable legacy value: long all-whitespace
+    and unencodable historical IDs have known exceptions recorded in the
+    identifier-boundary assessment.
 
     Keying the loaded value and the raw payload alike stops one model from occupying
     two rows. The length assertion is the review-4966041599 property: a key is either
     within the stable verbatim bound or exactly a folded key's length, never in
-    between, so no admitted identifier can occupy the folded form. And the read path
+    between. A literal occupying the folded form is folded again on live derivation.
+    The separate read path
     returns a derived key unchanged, so a row read back after a restart is the row
     that was written — the guarantee that used to be spelled as self-idempotence,
     which is what forced the fold to start too late.
@@ -1231,9 +1231,10 @@ def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: o
             "m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
             id="one-past-the-ledger-verbatim-bound",
         ),
-        pytest.param("m" * MODEL_ID_MAX_LENGTH, id="at-the-admission-bound"),
-        pytest.param("m" * (MODEL_ID_MAX_LENGTH + 1), id="one-past-it"),
+        pytest.param("m" * 256, id="at-the-former-admission-bound"),
+        pytest.param("m" * 257, id="past-the-former-admission-bound"),
         pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 4), id="far-past-it"),
+        pytest.param("模型🧪/e\u0301" * 3000, id="long-unicode"),
     ],
 )
 def test_a_model_a_legacy_file_still_routes_accumulates_one_row_across_restarts(
@@ -1280,31 +1281,37 @@ def test_two_identities_sharing_a_bounded_head_are_metered_apart(tmp_path: Path)
 
 
 def test_no_two_identities_a_config_holds_can_share_one_row(tmp_path: Path) -> None:
-    """MH-USAGE-007, review 4966041599: a key this ledger derives is itself a legal ID.
+    """MH-USAGE-007: folded-looking live literals are not persisted-key reads.
 
-    Nothing stops a config from holding, as one model's literal ID, the exact string
-    the ledger derives for another — `from_payload` accepts any non-empty text, and
-    the assertion below checks that rather than assuming it. So the identities under
-    test are closed under keying: every seed, plus the key that seed folds to. If
-    keying is not injective over that closure, two models a user configured
-    separately are one row and one is billed for the other's calls.
-
-    Stated as the closure rather than as the pair that exposed it, because the pair
-    is only reachable while some legal identifier can occupy a derived key's shape —
-    and any rule that leaves such a shape reachable fails here without being named.
+    Every seed and two generations of its derived keys are admitted as distinct
+    model identities. Live derivation, repeated reloads, aggregation, and full
+    label joins must agree for this nonblank UTF-8 population. This is regression
+    evidence, not a mathematical injectivity claim or a guarantee for malformed
+    legacy text.
     """
 
     seeds = (
         "model-x",
         "m" * USAGE_LEDGER_VERBATIM_MAX_LENGTH,
         "m" * (USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1),
-        "n" * MODEL_ID_MAX_LENGTH,
+        "n" * 256,
+        "n" * 257,
         "z" * (USAGE_LEDGER_KEY_MAX_LENGTH * 3),
+        "模型🧪/e\u0301" * 3000 + "-one",
+        "模型🧪/e\u0301" * 3000 + "-two",
+        "é",
+        "e\u0301",
+        "x" * 16385,
     )
-    identities = sorted({*seeds, *(usage_ledger_key(seed) for seed in seeds)})
+    first_generation = {usage_ledger_key(seed) for seed in seeds}
+    identities = sorted({
+        *seeds, *first_generation, *(usage_ledger_key(key) for key in first_generation),
+    })
 
     ledger = _ledger(tmp_path)
     for identity in identities:
+        assert canonical_model_id(identity) == identity
+        assert persisted_ledger_key(usage_ledger_key(identity)) == usage_ledger_key(identity)
         assert (
             ModelHubModelConfig.from_payload(
                 {"id": identity, "origin": "manual", "reasoning_efforts": []}
@@ -1317,6 +1324,21 @@ def test_no_two_identities_a_config_holds_can_share_one_row(tmp_path: Path) -> N
 
     assert len({usage_ledger_key(identity) for identity in identities}) == len(identities)
     assert [row["requests"] for row in rows] == [1] * len(identities)
+    original_keys = {row["model_id"] for row in rows}
+    for expected_requests in (2, 3):
+        ledger = _ledger(tmp_path)
+        for identity in identities:
+            ledger.record(source_id="src_a", model_id=identity, usage=None, at=NOW)
+        rows = _ledger(tmp_path).window(days=30, now=NOW)
+        assert {row["model_id"] for row in rows} == original_keys
+        assert [row["requests"] for row in rows] == [expected_requests] * len(identities)
+    summary = _ledger(tmp_path).summary(
+        days=30, now=NOW,
+        identities=[SourceIdentity(source_id="src_a", label="source", model_ids=identities)],
+    )
+    assert {model["model_id"]: model["label"] for model in summary["sources"][0]["models"]} == {
+        usage_ledger_key(identity): identity for identity in identities
+    }
 
 
 @pytest.mark.parametrize(
@@ -1487,7 +1509,9 @@ def test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key(tmp_path: 
     """
 
     sources = _keying_populations("src_")
-    models = _keying_populations("model-")
+    long_model = "模型🧪/e\u0301" * 3000
+    folded_literal = usage_ledger_key(long_model)
+    models = (*_keying_populations("model-"), long_model, folded_literal, usage_ledger_key(folded_literal))
     # The test is only the test while the seeds span both populations: an all-verbatim
     # set would pass against a read that never keyed anything.
     assert {identity == usage_ledger_key(identity) for identity in (*sources, *models)} == {
@@ -1499,6 +1523,7 @@ def test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key(tmp_path: 
     for source_id in sources:
         for model_id in models:
             ledger.record(source_id=source_id, model_id=model_id, usage=None, at=NOW)
+    ledger = _ledger(tmp_path)
 
     def summarize(naming: str) -> dict:
         return ledger.summary(

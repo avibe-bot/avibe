@@ -173,7 +173,6 @@ export type BackendModelInputModality = (typeof BACKEND_MODEL_INPUT_MODALITIES)[
  *  future divergence is a contract edit and not a UI condition. */
 export const BACKEND_MODEL_OUTPUT_MODALITIES = ['text', 'image', 'audio', 'video'] as const;
 export type BackendModelOutputModality = (typeof BACKEND_MODEL_OUTPUT_MODALITIES)[number];
-export const BACKEND_MODEL_ID_MAX_LENGTH = 256 as const;
 export const BACKEND_MODEL_EFFORT_MAX_LENGTH = 64 as const;
 export const NATIVE_PROTOCOLS = ['openai_responses', 'anthropic'] as const;
 export type NativeProtocol = (typeof NATIVE_PROTOCOLS)[number];

@@ -465,7 +465,7 @@ def test_g3_settlement_returns_are_consumed() -> None:
 
 def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
     allowed_owners = {
-        SERVICE: {"admitted"},
+        SERVICE: {"_invoke_admitted"},
         ROUTER: {"resolve"},
     }
     for path, expected in allowed_owners.items():
@@ -483,16 +483,24 @@ def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
         }
         assert owners == expected
         if path == SERVICE:
-            admission_owners = set()
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call) or _call_name(node) != "_reserve_settlement_generation":
-                    continue
-                parent = parents[node]
-                while not isinstance(parent, ast.FunctionDef):
-                    parent = parents[parent]
-                assert parent.name == "admitted"
-                admission_owners.add(_owner_name(parent, parents))
-            assert admission_owners == {"_probe_agent_once", "resolve"}
+            admission = _functions(tree)["_invoke_admitted"]
+            source = ast.get_source_segment(path.read_text(encoding="utf-8"), admission)
+            assert source is not None
+            # The generation is reserved under the same mutation exclusion as
+            # candidate revalidation and the half-open claim, before invocation.
+            acquire_at = source.index("await self._mutation_lock.acquire()")
+            revalidate_at = source.index("self._invocation_resolution(", acquire_at)
+            reserve_at = source.index("self._reserve_settlement_generation(", revalidate_at)
+            claim_at = source.index("self.recovery.claim(", reserve_at)
+            invoke_at = source.index("self.adapter.invoke(", claim_at)
+            assert acquire_at < revalidate_at < reserve_at < claim_at < invoke_at
+            admitted = _functions(admission)["admitted"]
+            assert any(
+                isinstance(node, ast.Call)
+                and _call_name(node) == "on_admitted"
+                and [ast.unparse(arg) for arg in node.args] == ["generation"]
+                for node in ast.walk(admitted)
+            )
 
     settlement_owner = _functions(_tree(SERVICE))["_settle_fallback_source"]
     assert not any(
@@ -1371,7 +1379,7 @@ def test_malformed_stream_data_is_transparent_to_a_later_terminal(data: bytes) -
     state.observe(
         b'event: response.completed\ndata: {"type":"response.completed","sequence_number":1}\n\n'
     )
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 @pytest.mark.parametrize("next_sequence", (1, 0))
@@ -1384,7 +1392,7 @@ def test_responses_sequence_order_is_ignored_for_settlement(next_sequence: int) 
         + b"}\n\n"
     )
     state.observe(b'event: response.completed\ndata: {"type":"response.completed"}\n\n')
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 def test_responses_sequence_numbers_accept_a_strictly_increasing_stream() -> None:
@@ -1393,14 +1401,14 @@ def test_responses_sequence_numbers_accept_a_strictly_increasing_stream() -> Non
     state.observe(
         b'event: response.completed\ndata: {"type":"response.completed","sequence_number":1}\n\n'
     )
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 def test_responses_missing_sequence_is_ignored_for_settlement() -> None:
     state = ProtocolSSEState("openai_responses")
     state.observe(b'event: response.created\ndata: {"type":"response.created"}\n\n')
     state.observe(b'event: response.completed\ndata: {"type":"response.completed"}\n\n')
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 @pytest.mark.parametrize(
@@ -1417,7 +1425,7 @@ def test_spec_ignorable_stream_frames_do_not_poison_terminal_proof(prefix: bytes
     state.observe(
         b'event: response.completed\ndata: {"type":"response.completed","sequence_number":0}\n\n'
     )
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 @pytest.mark.parametrize("protocol", tuple(BUFFERED_ERROR_TRUST_ROOT_FIXTURES))
@@ -1519,7 +1527,7 @@ def test_chat_projection_facts_do_not_grow_with_choice_count() -> None:
     )
 
     assert projector.finish(streamed=True).model_output_started is True
-    assert projector._nonempty == {(), ("choices", "*", "delta", "content")}
+    assert projector._nonempty == {(), ("choices",), ("choices", "*", "delta", "content")}
     assert projector._scoped_nonempty == set()
 
 
@@ -1702,7 +1710,7 @@ def test_observer_abandons_large_non_string_metadata_without_affecting_next_fram
     )
 
     assert state.model_output_started is False
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 def test_large_terminal_projects_its_discriminator_after_unrelated_structure() -> None:
@@ -1763,7 +1771,7 @@ def test_initial_utf8_bom_is_normalized_for_terminal_observation(split_at: int) 
     payload = b'\xef\xbb\xbfevent: response.completed\ndata: {"type":"response.completed"}\n\n'
     state.observe(payload[:split_at])
     state.observe(payload[split_at:])
-    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+    assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 def test_complete_frame_after_terminal_cannot_change_the_fact() -> None:
@@ -1775,7 +1783,7 @@ def test_complete_frame_after_terminal_cannot_change_the_fact() -> None:
         state = ProtocolSSEState("openai_responses")
         state.observe(b'event: response.completed\ndata: {"type":"response.completed"}\n\n')
         state.observe(frame)
-        assert state.terminal_observation() == ProtocolObservation(outcome="served")
+        assert state.terminal_observation() == ProtocolObservation(outcome="served", recovery_verified=True)
 
 
 @pytest.mark.parametrize(

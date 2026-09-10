@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -872,12 +872,15 @@ def _assert_probe_cooldown_and_next_request_selection(
     expected_detail: str,
     expected_reason: str,
     expected_delay: int,
+    expected_max_delay: float | None = None,
 ) -> None:
     first, second = _prepare_probe_chain(
         app, first_upstream, second_upstream
     )
     first_upstream.configure(auth=auth_behavior)
+    before_probe = datetime.now(timezone.utc)
     failed = _probe(app)
+    after_probe = datetime.now(timezone.utc)
     failed_body = failed.json()
     assert failed.status == 200, failed_body
     assert failed_body["probe"]["reachable"] is False
@@ -886,8 +889,9 @@ def _assert_probe_cooldown_and_next_request_selection(
     assert first_state["status"] == "cooldown"
     assert first_state["detail_key"] == expected_detail
     retry_at = datetime.fromisoformat(first_state["retry_at"])
-    delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
-    assert expected_delay - 8 <= delay <= expected_delay + 2
+    upper = expected_max_delay if expected_max_delay is not None else expected_delay
+    assert before_probe + timedelta(seconds=expected_delay) <= retry_at
+    assert retry_at <= after_probe + timedelta(seconds=upper)
 
     next_probe = _probe(app)
     next_body = next_probe.json()
@@ -923,6 +927,7 @@ def test_d3_rate_limit_moves_the_next_api_probe_to_hop_one(
                 expected_detail="models.source.cooldown.rate_limited",
                 expected_reason="rate_limited",
                 expected_delay=60,
+                expected_max_delay=72,
             )
 
 
@@ -983,14 +988,14 @@ def test_d5_nonrefreshable_401_marks_the_key_for_repair(
             assert next_probe.json()["probe"]["source_id"] == second["id"]
 
 
-def test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown(
+def test_d6_server_error_preserves_later_retry_after_through_real_engine(
     model_hub_app_factory,
     mock_llm_upstream,
 ) -> None:
-    """D6 API subset: a 5xx uses 30s despite Retry-After: 600."""
+    """D6 API subset: a 5xx preserves Retry-After: 600 through the real engine."""
 
-    # D-4 is open. The current contract deliberately records the flat 30s
-    # server-error cooldown rather than honoring the upstream Retry-After.
+    # D-4 is approved: later upstream advice wins over local backoff/jitter.
+    # This asserts the actual managed-engine header boundary, not just EngineClient.
     with MockLLMUpstream() as second_upstream:
         with _engine_app(model_hub_app_factory) as app:
             _assert_probe_cooldown_and_next_request_selection(
@@ -1000,7 +1005,7 @@ def test_d6_server_error_ignores_retry_after_and_uses_flat_cooldown(
                 auth_behavior="5xx",
                 expected_detail="models.source.cooldown.server_error",
                 expected_reason="server_error",
-                expected_delay=30,
+                expected_delay=600,
             )
 
 

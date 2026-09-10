@@ -71,6 +71,10 @@
             "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory connection throttle before the first user-visible model-output byte and is never persisted on Source or configuration. It is projected only over an otherwise healthy hop whose exact Source/model pair is eligible and not explicitly retired; API-key inventory absence is not a blocker; subscriptions retain existing model membership admission; every durable Source/capability blocker suppresses it."
           },
           "runnable": { "type": "boolean" },
+          "recovery": {
+            "enum": ["eligible", "in_flight"],
+            "description": "Optional live recovery annotation. Eligibility expiry is not verified recovery; in_flight means another real request owns half-open admission. Neither value is persisted in Source state."
+          },
           "reason": {
             "anyOf": [
               { "const": "native_cli_unavailable" },
@@ -96,6 +100,24 @@
           }
         },
         "allOf": [
+          {
+            "if": { "required": ["recovery"] },
+            "then": {
+              "properties": {
+                "health": { "const": "healthy" },
+                "reason": { "type": "null" },
+                "retry_at": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "recovery": { "const": "eligible" } }, "required": ["recovery"] },
+            "then": { "properties": { "runnable": { "const": true } } }
+          },
+          {
+            "if": { "properties": { "recovery": { "const": "in_flight" } }, "required": ["recovery"] },
+            "then": { "properties": { "runnable": { "const": false } } }
+          },
           {
             "if": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] },
             "then": { "properties": { "runnable": { "const": false }, "retry_at": { "type": "null" } } }
@@ -135,7 +157,7 @@
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown or live connection backoff and which has no process blocker; interrupted covers an empty chain or an action/process blocker. A durable blocker cannot be hidden by a simultaneous live backoff."
+      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown, live connection backoff or a half-open owner and which has no process blocker; interrupted covers an empty chain or an action/process blocker. A durable blocker cannot be hidden by simultaneous live recovery."
     }
   },
   "allOf": [
@@ -169,10 +191,13 @@
             "minItems": 1,
             "items": {
               "properties": {
-                "health": { "enum": ["cooldown", "backoff"] },
                 "runnable": { "const": false },
                 "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
               },
+              "anyOf": [
+                { "properties": { "health": { "enum": ["cooldown", "backoff"] } }, "required": ["health"] },
+                { "properties": { "health": { "const": "healthy" }, "recovery": { "const": "in_flight" } }, "required": ["health", "recovery"] }
+              ],
               "required": ["health", "runnable", "reason"]
             }
           }
@@ -186,10 +211,13 @@
             "minItems": 1,
             "items": {
               "properties": {
-                "health": { "enum": ["cooldown", "backoff"] },
                 "runnable": { "const": false },
                 "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
               },
+              "anyOf": [
+                { "properties": { "health": { "enum": ["cooldown", "backoff"] } }, "required": ["health"] },
+                { "properties": { "health": { "const": "healthy" }, "recovery": { "const": "in_flight" } }, "required": ["health", "recovery"] }
+              ],
               "required": ["health", "runnable", "reason"]
             }
           }

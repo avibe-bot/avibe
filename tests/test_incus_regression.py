@@ -1050,17 +1050,26 @@ def test_source_sync_excludes_all_local_env_files(tmp_path: Path, monkeypatch) -
 
 
 @pytest.mark.parametrize("shape", ["file", "directory", "symlink"])
-def test_source_sync_removes_stale_environment_entries_but_preserves_runtime_trees(tmp_path, monkeypatch, shape):
+def test_source_sync_removes_host_artifacts_but_preserves_runtime_trees(tmp_path, monkeypatch, shape):
     source, deployed, outside = (tmp_path / name for name in ("source", "deployed", "outside"))
     for root in (source, deployed, outside):
         root.mkdir()
     sentinel = outside / "sentinel"
     sentinel.write_text("not deployed source")
-    obsolete = [".env", "ui/.env.local", "nested/source/.env.preview.local"]
+    obsolete = [
+        ".env", "ui/.env.local", "nested/source/.env.preview.local",
+        ".DS_Store", "ui/src/.DS_Store", ".bot.pid", ".gstack", ".tmp",
+        "vibe/_version.py", "vibe/show_runtime_manifest.json",
+    ]
+    hosts = []
     for relative in obsolete:
         host = source / relative
         host.parent.mkdir(parents=True, exist_ok=True)
+        if relative in {".gstack", ".tmp"}:
+            host.mkdir()
+            host = host / "tool-state"
         host.write_text("host-only fixture secret")
+        hosts.append(host)
         receiver = deployed / relative
         receiver.parent.mkdir(parents=True, exist_ok=True)
         if shape == "directory":
@@ -1070,18 +1079,97 @@ def test_source_sync_removes_stale_environment_entries_but_preserves_runtime_tre
             receiver.symlink_to(outside, target_is_directory=True)
         else:
             receiver.write_text("old fixture secret")
-    protected = [deployed / "ui/node_modules/pkg/.env", deployed / ".runtime/.env.local"]
+    protected = [
+        deployed / "ui/node_modules/pkg/.env",
+        deployed / "ui/node_modules/pkg/.DS_Store",
+        deployed / ".runtime/.env.local",
+        deployed / ".runtime/.bot.pid",
+    ]
     for path in protected:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("runtime-owned fixture")
-    before = {path: path.stat().st_ctime_ns for path in [sentinel, *protected]}
+    before = {path: path.stat().st_ctime_ns for path in [sentinel, *protected, *hosts]}
 
     local_source_sync(monkeypatch, source, deployed)
 
+    assert all(incus_regression.should_exclude(relative) for relative in obsolete)
     assert all(not os.path.lexists(deployed / relative) for relative in obsolete)
-    assert all((source / relative).read_text() == "host-only fixture secret" for relative in obsolete)
+    assert all(host.read_text() == "host-only fixture secret" for host in hosts)
     assert all(path.stat().st_ctime_ns == timestamp for path, timestamp in before.items())
     assert sentinel.read_text() == "not deployed source"
+
+
+def test_source_sync_keeps_uncommitted_inputs_and_nested_artifact_fixtures(tmp_path, monkeypatch):
+    """Do not turn the host-artifact policy into gitignore or basename filtering."""
+    source, deployed = (tmp_path / name for name in ("source", "deployed"))
+    source.mkdir()
+    deployed.mkdir()
+    inputs = [
+        "draft.py", "新目录/未提交.py",
+        "fixtures/vibe/_version.py", "fixtures/vibe/show_runtime_manifest.json",
+        "fixtures/.bot.pid", "fixtures/.gstack/example", "fixtures/.tmp/example",
+    ]
+    (source / ".gitignore").write_text("draft.py\n")
+    for relative in inputs:
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("source fixture")
+
+    local_source_sync(monkeypatch, source, deployed)
+
+    assert all(not incus_regression.should_exclude(relative) for relative in inputs)
+    assert all((deployed / relative).read_text() == "source fixture" for relative in inputs)
+
+
+def test_source_sync_leaves_only_empty_parents_of_excluded_caches(tmp_path, monkeypatch):
+    source, deployed = (tmp_path / name for name in ("source", "deployed"))
+    source.mkdir()
+    deployed.mkdir()
+    (source / "empty").mkdir()
+    cache = source / "retired/nested/__pycache__/old.pyc"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"host bytecode")
+    target_cache = deployed / "ui/node_modules/pkg/cache"
+    target_cache.parent.mkdir(parents=True)
+    target_cache.write_bytes(b"target dependency")
+    before = target_cache.stat().st_ctime_ns
+    (source / "app.py").write_text("source")
+
+    local_source_sync(monkeypatch, source, deployed)
+
+    # Empty directories have no versioned content; compare files and links,
+    # without changing rsync's deletion traversal or target-cache protection.
+    entries = {
+        path.relative_to(deployed).as_posix()
+        for path in deployed.rglob("*") if path.is_symlink() or not path.is_dir()
+    }
+    assert entries == {"app.py", "ui/node_modules/pkg/cache"}
+    assert (deployed / "app.py").read_text() == "source"
+    assert target_cache.read_bytes() == b"target dependency"
+    assert target_cache.stat().st_ctime_ns == before
+    assert cache.read_bytes() == b"host bytecode"
+    assert (source / "empty").is_dir()
+
+
+def test_synced_source_imports_without_host_generated_version(tmp_path, monkeypatch):
+    source, deployed = (tmp_path / name for name in ("source", "deployed"))
+    (source / "vibe").mkdir(parents=True)
+    deployed.mkdir()
+    shutil.copyfile(SCRIPT_PATH.parent.parent / "vibe/__init__.py", source / "vibe/__init__.py")
+    (source / "vibe/_version.py").write_text("raise RuntimeError('host build must not be imported')\n")
+
+    local_source_sync(monkeypatch, source, deployed)
+    result = subprocess.run(
+        [
+            sys.executable, "-I", "-B", "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); import vibe; print(vibe.__version__)",
+            str(deployed),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+
+    assert not (deployed / "vibe/_version.py").exists()
+    assert result.stdout.strip() == "0.0.0.dev0"
 
 
 def test_source_sync_can_include_existing_ui_dist_when_build_is_skipped(tmp_path: Path, monkeypatch) -> None:

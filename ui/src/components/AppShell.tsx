@@ -282,7 +282,21 @@ export const AppShell: React.FC = () => {
             <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
+            {/* This copy deliberately names no address. Composing one here from
+                `ui.setup_host` / `ui.setup_port` was wrong twice (port, then
+                address family), and delegating to
+                `remote_access.origin_service_for_pairing` was wrong too: that
+                function answers which origin `cloudflared` should dial, which
+                only equals "which address opens this UI" while the cloud tunnel
+                is enabled, because that is the only case where the bind is
+                widened to a wildcard. This card renders before setup is
+                finished — usually with the tunnel off — where the projected
+                `127.0.0.1` is unreachable for every non-loopback `setup_host`.
+                No address means none to get wrong. See issue #1965 for the
+                pre-existing pairing bug that analysis uncovered. */}
+            <p className="text-sm leading-relaxed text-muted">
+              {t('setup.remoteOwner.hint')}
+            </p>
             <Button asChild>
               <Link to="/settings/service">
                 {t('setup.remoteOwner.action')}
@@ -374,10 +388,8 @@ export const AppShell: React.FC = () => {
       )}
     >
       <ConfigRecoveryNotice config={config} />
-      {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
-          layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
-          The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
-          un-maximize to reach it. */}
+      {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
+          above the window layer so app switching remains reachable even when maximized. */}
       {!chromeless && (
       <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col">
@@ -405,8 +417,8 @@ export const AppShell: React.FC = () => {
           </div>
 
           {/* Bottom (design.pen NbPMq): Apps + Settings, then run state + version.
-              Preferences now live with the rest of Settings. The whole bottom cluster sits at the
-              sidebar's level (z-10) and is covered by a maximized window. The
+              Preferences now live with the rest of Settings. AppsLauncher keeps its layout slot
+              here while its interactive surface floats above app windows. The
               outer container no longer owns padding (the brand band is flush to
               the top edge), so this cluster carries its own px-4 + bottom pad. */}
           <div className="relative flex flex-col gap-3 px-4 pb-4">
@@ -557,10 +569,6 @@ export const AppShell: React.FC = () => {
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
-      {/* A maximized window covers the sidebar Apps launcher. We intentionally do NOT float a
-          second launcher on top in full-screen anymore (product: avoid the fullscreen floating
-          button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
-          the sidebar launcher. */}
       {canUseApps && <WindowLayer />}
     </div>
     </ShowPageDragProvider>
