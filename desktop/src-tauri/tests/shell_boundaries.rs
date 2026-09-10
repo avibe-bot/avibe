@@ -101,7 +101,7 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
     for required in [
         "tauri_plugin_deep_link::init()",
         "receive_native_deep_link(app, argv.iter().skip(1))",
-        "receive_native_deep_link(app, urls.iter().map(Url::as_str))",
+        "builder.plugin(macos_deep_link::init())",
         "std::env::args_os()",
         "links.bootstrap_navigation(ready)",
         "links.workbench_navigation(&origin, &current_url)",
@@ -112,6 +112,7 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
     }
     assert!(!build.contains("deep_link") && !build.contains("window_state"));
     assert!(!source.contains("on_open_url") && !source.contains(".eval("));
+    assert!(!source.contains("RunEvent::Opened"));
     let receiver = source
         .split("fn receive_native_deep_link(")
         .nth(1)
@@ -125,6 +126,40 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
         serde_json::json!(["avibe"])
     );
     assert_eq!(config()["identifier"], "bot.avibe.desktop");
+}
+
+#[test]
+fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
+    let native = shipping_source("src/macos_deep_link.rs");
+    for required in [
+        ".setup(|app, _|",
+        "install(move |raw| crate::receive_native_deep_link(&app, [raw]))",
+        "paramDescriptorForKeyword: DIRECT_OBJECT",
+        "descriptor?.stringValue()",
+        "setEventHandler: &*handler",
+        "forEventClass: GET_URL_EVENT",
+        "andEventID: GET_URL_EVENT",
+        "RunEvent::Exit",
+        "removeEventHandlerForEventClass: GET_URL_EVENT",
+    ] {
+        assert!(native.contains(required), "raw native delivery must retain {required}");
+    }
+    for forbidden in [
+        "Url::",
+        "currentAppleEvent",
+        "invoke_handler",
+        "#[tauri::command]",
+        ".emit(",
+    ] {
+        assert!(!native.contains(forbidden), "raw delivery must not use {forbidden}");
+    }
+    let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
+    let (_, macos_dependencies) = cargo
+        .split_once("[target.'cfg(target_os = \"macos\")'.dependencies]")
+        .unwrap();
+    assert!(macos_dependencies.contains("objc2 = \"0.6.4\""));
+    assert!(macos_dependencies.contains("objc2-foundation = { version = \"0.3.2\""));
+    assert!(!cargo.contains("objc2-core-services"));
 }
 
 #[test]

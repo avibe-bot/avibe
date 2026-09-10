@@ -238,6 +238,8 @@ name = "avibe-desktop"
 version = "0.1.0"
 dependencies = [
  "avibe-runtime-host",
+ "objc2",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "sys-locale",

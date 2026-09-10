@@ -20,6 +20,9 @@ use std::time::Duration;
 
 mod native_frame;
 
+#[cfg(target_os = "macos")]
+mod macos_deep_link;
+
 #[cfg(feature = "bundled-runtime")]
 use avibe_runtime_host::bundled_runtime_host;
 use avibe_runtime_host::deep_link::DeepLinks;
@@ -1200,14 +1203,17 @@ fn request_private_runtime_removal(app: AppHandle) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Mutex::new(DeepLinks::default()))
         // Registered first, as the plugin documents: a second launch is handed to
         // the running shell instead of starting a competing Runtime.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             receive_native_deep_link(app, argv.iter().skip(1));
         }))
-        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_deep_link::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(macos_deep_link::init());
+    builder
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(native_frame::state_flags())
@@ -1252,10 +1258,6 @@ pub fn run() {
                     false
                 })
                 .on_event(|app, event| {
-                    #[cfg(target_os = "macos")]
-                    if let RunEvent::Opened { urls } = event {
-                        receive_native_deep_link(app, urls.iter().map(Url::as_str));
-                    }
                     if let RunEvent::WindowEvent {
                         label,
                         event: WindowEvent::CloseRequested { api, .. },
