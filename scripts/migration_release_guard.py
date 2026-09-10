@@ -59,6 +59,7 @@ import ast
 import hashlib
 import itertools
 import json
+import operator
 import re
 import sqlite3
 import string
@@ -67,7 +68,7 @@ import sys
 import tempfile
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
@@ -795,7 +796,7 @@ def describe_schema_gap(db_path: Path) -> str:
 # SQLite names the one constraint an insert tripped, which is what makes the repair below
 # a guided search rather than a guess: the database says what it objected to, and the
 # objection itself carries the values it would have accepted.
-CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
+CHECK_FAILURE = re.compile(r"CHECK constraint failed: (.+)", re.DOTALL)
 
 # Enough attempts to satisfy every constraint a row trips one at a time, and few enough
 # that a table whose constraints cannot be satisfied this way is given up on rather than
@@ -816,14 +817,26 @@ JSON_VARIED_MEMBER = "__seed_step__"
 # `json_type(col,'$.p') = 'array'` both name the column, the path, and what belongs at it,
 # which is the same three things the plain literal form carries -- so both are read the
 # same way rather than treated as unseedable.
-JSON_REQUIREMENT = re.compile(
-    r"json_(extract|type)\s*\(\s*\"?(\w+)\"?\s*,\s*'([^']*)'\s*\)\s*(?:==|=|is)\s*"
-    r"('[^']*'|-?[0-9]+(?:\.[0-9]+)?)",
-    re.IGNORECASE,
-)
-SUBSTRING_REQUIREMENT = re.compile(
-    r'\bsubstr\s*\(\s*"?(\w+)"?\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*"?(\w+)"?',
-    re.IGNORECASE,
+SQL_QUOTED_IDENTIFIER = r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]'
+# SQLite treats non-ASCII characters as identifier characters, not Python's
+# Unicode word/digit/space classes. A BOM is special only at the token's start.
+SQL_IDENTIFIER_CHARS = r'A-Za-z_0-9$\x80-\U0010ffff'
+SQL_FLAGS = re.IGNORECASE | re.ASCII
+SQL_WHITESPACE = " \t\n\r\f"
+SQL_IDENTIFIER_CASE = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+SQL_IDENTIFIER = rf'(?:{SQL_QUOTED_IDENTIFIER}|(?<![{SQL_IDENTIFIER_CHARS}])(?!\ufeff)[A-Za-z_\x80-\U0010ffff][{SQL_IDENTIFIER_CHARS}]*)'
+# These scalar-function results have no column affinity for unary '+' to erase.
+SQL_UNARY_PLUS = r'(?:\+\s*)*'
+SUBSTRING_TERM = rf'(?<![{SQL_IDENTIFIER_CHARS}]){SQL_UNARY_PLUS}substr\s*\(\s*({SQL_IDENTIFIER})\s*,\s*(\d+)\s*,\s*(\d+)\s*\)'
+EQUALITY = rf'\s*(?:==|=(?!=)|(?<![{SQL_IDENTIFIER_CHARS}])is(?![{SQL_IDENTIFIER_CHARS}])(?!\s+not(?![{SQL_IDENTIFIER_CHARS}])))\s*'
+SQL_STRING = r"'(?:[^']|'')*'"
+SQL_INTEGER = rf"(?<![{SQL_IDENTIFIER_CHARS}.])-?[0-9]+(?![{SQL_IDENTIFIER_CHARS}.])"
+JSON_TERM = rf"(?<![{SQL_IDENTIFIER_CHARS}]){SQL_UNARY_PLUS}json_(extract|type)\s*\(\s*({SQL_IDENTIFIER})\s*,\s*'((?:[^']|'')*)'\s*\)"
+JSON_REQUIREMENT = re.compile(JSON_TERM + EQUALITY + rf"({SQL_STRING}|-?[0-9]+(?:\.[0-9]+)?)", SQL_FLAGS)
+GLOB_REQUIREMENT = rf"({SQL_IDENTIFIER})\s+(not\s+)?glob\s*'((?:[^']|'')*)'"
+SQL_OPAQUE = re.compile(
+    SQL_STRING + '|' + SQL_QUOTED_IDENTIFIER + r'|--[^\n]*|/\*[\s\S]*?(?:\*/|$)'
+    + rf'|(?<![{SQL_IDENTIFIER_CHARS}])\ufeff+'
 )
 
 # Every name SQLite's `json_type` can return, against the emptiest document member of that
@@ -832,8 +845,8 @@ SUBSTRING_REQUIREMENT = re.compile(
 # whether the result is admissible either way.
 JSON_TYPE_MEMBERS: dict[str, object] = {
     "null": None,
-    "true": 1,
-    "false": 0,
+    "true": "true",
+    "false": "false",
     "integer": 0,
     "real": 0.0,
     "text": "",
@@ -853,7 +866,92 @@ SEED_ROWS = 2
 RESTORE_STEP = SEED_ATTEMPTS
 
 
-def representative_value(column: str, declared_type: str) -> object:
+def sqlite_affinity(declared_type: str, *, strict: bool = False) -> str:
+    """SQLite's ordered declared-type rules, shared by seed and repair candidates."""
+    kind = declared_type.upper()
+    if strict and kind == "ANY":
+        return "BLOB"
+    if "INT" in kind:
+        return "INTEGER"
+    if any(marker in kind for marker in ("CHAR", "CLOB", "TEXT")):
+        return "TEXT"
+    if not kind or "BLOB" in kind:
+        return "BLOB"
+    if any(marker in kind for marker in ("REAL", "FLOA", "DOUB")):
+        return "REAL"
+    return "NUMERIC"
+
+
+def is_strict_table(connection: sqlite3.Connection, table: str) -> bool:
+    return any(row[5] for row in connection.execute(f'pragma main.table_list({quote_identifier(table)})'))
+
+
+def sql_projection(expression: str, *, literals: bool = False, identifiers: bool = False) -> str:
+    """An offset-preserving code view for the seeder's bounded expression grammar."""
+    def project(match: re.Match) -> str:
+        token = match.group()
+        if token.startswith("'") and literals:
+            return token
+        if identifiers and token[0] in '\"`[':
+            return token
+        return " " * len(token)
+    return SQL_OPAQUE.sub(project, expression)
+
+
+def sql_matches(pattern: str | re.Pattern, expression: str) -> Iterable[re.Match]:
+    """Allow literal operands without interpreting their contents as expressions."""
+    active = sql_projection(expression, identifiers=True)
+    opaque = [(token.start(), token.end()) for token in SQL_OPAQUE.finditer(expression)]
+    searchable = sql_projection(expression, literals=True, identifiers=True)
+    compiled = re.compile(pattern, 0 if isinstance(pattern, re.Pattern) else SQL_FLAGS)
+    position = 0
+    while match := compiled.search(searchable, position):
+        enclosing = next(((start, end) for start, end in opaque if start <= match.start() < end), None)
+        if enclosing and (match.start() > enclosing[0] or not active[match.start()].strip(SQL_WHITESPACE)):
+            # An invalid cross-token match must not consume the following real operand.
+            position = enclosing[1]
+            continue
+        # An identifier can be an operand, but no match can start/end inside its payload.
+        if any(start < match.end() < end for start, end in opaque):
+            position = match.start() + 1
+        else:
+            yield match
+            position = max(match.end(), match.start() + 1)
+
+
+def unquote_identifier(token: str) -> str:
+    if token.startswith('['):
+        return token[1:-1]
+    if token.startswith(('"', '`')):
+        return token[1:-1].replace(token[0] * 2, token[0])
+    return token
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def sql_identifiers(expression: str) -> set[str]:
+    return {identifier_key(unquote_identifier(match.group())) for match in sql_matches(SQL_IDENTIFIER, expression)}
+
+
+def substring_requirements(expression: str, columns: Iterable[str] = ()) -> Iterable[tuple[str, str, str, str]]:
+    """Normalize required whole equalities into (target, start, width, source)."""
+    identifier = f'({SQL_IDENTIFIER})'
+    for term in conjunctive_terms(expression, columns):
+        active = sql_projection(term, identifiers=True)
+        for reverse in (False, True):
+            operands = (identifier, SUBSTRING_TERM) if reverse else (SUBSTRING_TERM, identifier)
+            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', active, SQL_FLAGS)
+            if match is not None:
+                if reverse:
+                    source, target, start, width = match.groups()
+                else:
+                    target, start, width, source = match.groups()
+                yield unquote_identifier(target), start, width, unquote_identifier(source)
+
+
+def representative_value(column: str, declared_type: str, *, strict: bool = False) -> object:
     """A value of ``declared_type`` that SQLite will store in ``column``.
 
     Typed off the declaration rather than off the column's meaning, because meaning is
@@ -863,6 +961,8 @@ def representative_value(column: str, declared_type: str) -> object:
     migration that parses a timestamp, an address, or a JSON document gets something
     parseable rather than ``'x'``.
     """
+    # Affinity governs storage/evaluation, not the established representative family:
+    # flexible DATE/DECIMAL/ANY declarations still admit semantic text seeds.
     kind = declared_type.upper()
     if any(marker in kind for marker in ("INT", "REAL", "NUM", "DOUB", "FLOA", "BOOL")):
         return 0
@@ -881,15 +981,17 @@ def check_expression(ddl: str, name: str) -> str:
     """Constraint ``name``'s expression as ``ddl`` declares it, or ``''`` if it has none."""
     # SQLite stores the DDL as it was written, so the keywords are whatever case the
     # migration that created the table happened to use.
-    marker = re.search(rf'CONSTRAINT\s+"?{re.escape(name)}"?\s+CHECK\s*\(', ddl, re.IGNORECASE)
+    active = sql_projection(ddl)
+    marker = next((match for match in sql_matches(rf'(?<![{SQL_IDENTIFIER_CHARS}])CONSTRAINT\s+({SQL_IDENTIFIER})\s+CHECK\s*\(', ddl)
+                   if identifier_key(unquote_identifier(match.group(1))) == identifier_key(name)), None)
     if marker is None:
         return ""
     depth = 1
     index = marker.end()
     for offset in range(index, len(ddl)):
-        if ddl[offset] == "(":
+        if active[offset] == "(":
             depth += 1
-        elif ddl[offset] == ")":
+        elif active[offset] == ")":
             depth -= 1
             if depth == 0:
                 return ddl[index:offset]
@@ -898,7 +1000,7 @@ def check_expression(ddl: str, name: str) -> str:
 
 def identifier_key(value: str) -> str:
     """SQLite folds ASCII identifier case, not Unicode or JSON member names."""
-    return value.translate(str.maketrans(string.ascii_uppercase, string.ascii_lowercase))
+    return value.translate(SQL_IDENTIFIER_CASE)
 
 
 def bounded_integer(literal: str, lower: int, upper: int) -> int | None:
@@ -910,7 +1012,9 @@ def bounded_integer(literal: str, lower: int, upper: int) -> int | None:
     return value if lower <= value <= upper else None
 
 
-def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, str]]:
+def check_proposals(
+    expression: str, columns: Iterable[str], *, context_columns: Iterable[str] = (),
+) -> list[tuple[str, str]]:
     """``(column, value)`` pairs ``expression`` itself suggests, for the columns it names.
 
     A check the row tripped is a check that says what it wants: ``state in ('waiting',
@@ -922,57 +1026,172 @@ def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, 
     whether the resulting row is admissible, so a bad proposal costs an attempt rather
     than producing a row the schema would have refused.
     """
-    literals = re.findall(r"'([^']*)'", expression)
-    folded = identifier_key(expression)
-    named = [column for column in columns if re.search(rf"\b{re.escape(identifier_key(column))}\b", folded)]
-    return [(column, literal) for column in named for literal in literals]
+    # Semantic operands already belong to their shape/JSON owners; offering them
+    # to ordinary columns can overwrite an otherwise successful repair.
+    columns = tuple(columns)
+    parts = list(sql_projection(expression, literals=True, identifiers=True))
+    for pattern in (JSON_REQUIREMENT, JSON_TERM, GLOB_REQUIREMENT):
+        for match in sql_matches(pattern, expression):
+            parts[match.start():match.end()] = " " * (match.end() - match.start())
+    expression = "".join(parts)
+    if not any(match.group().startswith("'") for match in SQL_OPAQUE.finditer(expression)):
+        return []
+    mentioned = sql_identifiers(expression)
+    named = [column for column in columns if identifier_key(column) in mentioned]
+    names = {identifier_key(column): column for column in named}
+    context_columns = tuple(context_columns)
+    terms = list(conjunctive_terms(expression, (*columns, *context_columns)))
+    preferred = []
+    for term in terms:
+        for reverse in (False, True):
+            operands = (SQL_STRING, SQL_IDENTIFIER) if reverse else (SQL_IDENTIFIER, SQL_STRING)
+            match = re.fullmatch(rf'\s*({operands[0]}){EQUALITY}({operands[1]})\s*', term, SQL_FLAGS)
+            if match is not None:
+                token, literal = reversed(match.groups()) if reverse else match.groups()
+                column = names.get(identifier_key(unquote_identifier(token)))
+                if column is not None:
+                    preferred.append((column, literal[1:-1].replace("''", "'")))
+    # Reuse the semantic owners' connectivity: a literal may help a functional
+    # dependent, but cannot repair a disconnected term's column.
+    recipients = semantic_recipients(expression, named, context_columns=context_columns)
+    scoped = []
+    for term in terms:
+        keys = sql_identifiers(term)
+        targets = set().union(*(recipients[name] for name in named if identifier_key(name) in keys))
+        literals = [match.group()[1:-1].replace("''", "'") for match in SQL_OPAQUE.finditer(term) if match.group().startswith("'")]
+        scoped.extend((name, literal) for name in named if name in targets for literal in literals)
+    return list(dict.fromkeys([*preferred, *scoped]))
+
+
+SeedAssignment = tuple[tuple[str, object], ...]
 
 
 def json_proposals(
-    connection: sqlite3.Connection, expression: str, columns: Iterable[str]
-) -> list[tuple[str, str]]:
-    """``(column, document)`` pairs satisfying every JSON-path clause ``expression`` states.
+    connection: sqlite3.Connection, expression: str, columns: Iterable[str],
+    *, text_constraints: str | None = None, context_columns: Iterable[str] = (),
+    not_null: Iterable[str] = (),
+) -> list[SeedAssignment]:
+    """Whole assignments retaining the documents behind JSON member candidates.
 
     The document is built by SQLite's own ``json_set`` rather than assembled here, so the
-    path syntax is whatever SQLite accepts and not a second reading of it. All clauses for
-    one column are folded into a single document, because a constraint requiring two paths
-    is not satisfied by a document carrying either one.
+    path syntax is whatever SQLite accepts and not a second reading of it. Required whole
+    clauses across CHECKs share a document; speculative clauses from the failing CHECK
+    form a separate alternative. Missing paths remain an alternative too: SQLite can
+    accept NULL comparisons without requiring a member.
     """
     wanted = {identifier_key(column): column for column in columns}
-    required: dict[str, list[tuple[str, str, object]]] = {}
-    for function, column, path, literal in JSON_REQUIREMENT.findall(expression):
-        column = wanted.get(identifier_key(column))
-        if column is None:
-            continue
-        if function.lower() == "type":
-            named = literal.strip("'").lower()
-            if named not in JSON_TYPE_MEMBERS:
-                continue
-            member = JSON_TYPE_MEMBERS[named]
-            # A composite has to be spliced in as a document; anything else is a scalar and
-            # would be stored as one whatever `json_set` is handed.
-            term = "json(?)" if named in {"array", "object"} else "?"
-            required.setdefault(column, []).append((path, term, member))
-        elif literal.startswith("'"):
-            required.setdefault(column, []).append((path, "?", literal[1:-1]))
-        else:
-            required.setdefault(column, []).append((path, "json(?)", str(Decimal(literal))))
-
+    shapes = text_constraints if text_constraints is not None else expression
+    context_columns = tuple(context_columns)
+    terms = [sql_projection(term, literals=True, identifiers=True).strip(SQL_WHITESPACE)
+             for term in conjunctive_terms(shapes, (*wanted.values(), *context_columns))]
+    scopes = [
+        tuple(match.groups() for term in terms if (match := JSON_REQUIREMENT.fullmatch(term))),
+        tuple(match.groups() for match in sql_matches(JSON_REQUIREMENT, expression)),
+    ]
     proposals = []
-    for column, clauses in required.items():
-        document = "'{}'"
-        parameters: list[object] = []
-        for path, term, value in clauses:
-            document = f"json_set({document}, ?, {term})"
-            parameters.extend([path, value])
-        proposals.append((column, str(connection.execute(f"select {document}", parameters).fetchone()[0])))
-    return proposals
+    missing = []
+    for scope in dict.fromkeys(scopes):
+        required: dict[str, list[tuple[str, str, object]]] = {}
+        for function, column, path, literal in scope:
+            path = path.replace("''", "'")
+            column = wanted.get(identifier_key(unquote_identifier(column)))
+            if column is None:
+                continue
+            if function.lower() == "type":
+                named = literal.strip("'").lower()
+                if named not in JSON_TYPE_MEMBERS:
+                    continue
+                member = JSON_TYPE_MEMBERS[named]
+                # Composites and booleans need JSON types, not SQL text/integers.
+                value_term = "json(?)" if named in {"array", "object", "true", "false"} else "?"
+                required.setdefault(column, []).append((path, value_term, member))
+            elif literal.startswith("'"):
+                required.setdefault(column, []).append((path, "?", literal[1:-1].replace("''", "'")))
+            else:
+                required.setdefault(column, []).append((path, "json(?)", str(Decimal(literal))))
+
+        documents = {}
+        for column, clauses in required.items():
+            document = "'{}'"
+            parameters: list[object] = []
+            for path, value_term, value in clauses:
+                document = f"json_set({document}, ?, {value_term})"
+                parameters.extend([path, value])
+            try:
+                documents[column] = str(connection.execute(f"select {document}", parameters).fetchone()[0])
+            except sqlite3.Error:
+                # A speculative clause may be unreachable in the real CHECK.
+                # Reject its document, not the seeding process or native refusal.
+                continue
+        if not documents:
+            continue
+        proposals.extend(json_member_assignments(connection, documents, terms, shapes, wanted, context_columns))
+        missing.extend(((column, "{}"),) for column, document in documents.items() if document != "{}")
+    # Populated documents/dependents precede missing-path alternatives in every scope.
+    # A missing member can leave a CHECK comparison NULL without requiring a
+    # NULL stored column. Keep the document and other useful dependent cells;
+    # do not turn that speculative guess into a terminal NOT NULL refusal.
+    not_null = set(not_null)
+    return list(dict.fromkeys(
+        tuple((name, value) for name, value in assignment if value is not None or name not in not_null)
+        for assignment in [*proposals, *missing]
+    ))
+
+
+def json_member_assignments(
+    connection: sqlite3.Connection, documents: dict[str, str], terms: list[str],
+    shapes: str, wanted: dict[str, str], context_columns: Iterable[str],
+) -> list[SeedAssignment]:
+    """Keep native dependent candidates attached to one constructed document scope."""
+    preferred = dict(documents)
+    recipients = semantic_recipients(shapes, wanted.values(), context_columns=context_columns)
+    identifier = f'({SQL_IDENTIFIER})'
+    alternatives = []
+    for term in terms:
+        for reverse in (False, True):
+            operands = (identifier, JSON_TERM) if reverse else (JSON_TERM, identifier)
+            match = re.fullmatch(rf'\s*{operands[0]}{EQUALITY}{operands[1]}\s*', term, SQL_FLAGS)
+            if match is None:
+                continue
+            if reverse:
+                target, function, source, path = match.groups()
+            else:
+                function, source, path, target = match.groups()
+            source, target = wanted.get(identifier_key(unquote_identifier(source))), wanted.get(identifier_key(unquote_identifier(target)))
+            if source in documents and target is not None and target not in documents:
+                try:
+                    preferred[target] = connection.execute(
+                        f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))
+                    ).fetchone()[0]
+                except sqlite3.Error:
+                    continue
+        # A functional operand is not an alias. Retain the native member as a
+        # guess for that term's dependents, always together with its document.
+        for match in sql_matches(JSON_TERM, term):
+            function, source, path = match.groups()
+            source = wanted.get(identifier_key(unquote_identifier(source)))
+            if source not in documents:
+                continue
+            targets = [name for name in wanted.values() if name in recipients[source] and name not in documents]
+            if not targets:
+                continue
+            try:
+                value = connection.execute(
+                    f"select json_{function.lower()}(?, ?)", (documents[source], path.replace("''", "'"))
+                ).fetchone()[0]
+            except sqlite3.Error:
+                # Dead/optional paths cannot abort an otherwise usable document.
+                continue
+            alternatives.append(tuple({**documents, **dict.fromkeys(targets, value)}.items()))
+            alternatives.extend(tuple({**documents, target: value}.items()) for target in targets)
+    return [tuple(preferred.items()), tuple(documents.items()), *alternatives]
 
 
 def glob_witness(
     connection: sqlite3.Connection,
     patterns: tuple[str, ...],
     *,
+    excluded: tuple[str, ...] = (),
     width: int | None = None,
     alphabet: str = string.printable,
 ) -> str | None:
@@ -981,10 +1200,11 @@ def glob_witness(
     A state retains every possible token position after the current prefix. Stars
     both consume characters and admit an empty transition to the next token.
     """
-    if (width is not None and not 0 <= width <= SEED_TEXT_LIMIT) or sum(map(len, patterns)) > SEED_TEXT_LIMIT:
+    all_patterns = (*patterns, *excluded)
+    if (width is not None and not 0 <= width <= SEED_TEXT_LIMIT) or sum(map(len, all_patterns)) > SEED_TEXT_LIMIT:
         return None
     machines: list[list[str]] = []
-    for pattern in patterns:
+    for pattern in all_patterns:
         tokens = []
         index = 0
         while index < len(pattern):
@@ -997,7 +1217,9 @@ def glob_witness(
                     end += 1
                 closing = pattern.find("]", end)
                 if closing < 0:
-                    return None
+                    # An unterminated SQLite class matches nothing, also when negated.
+                    tokens.append(pattern[index:])
+                    break
                 end = closing + 1
             tokens.append(pattern[index:end])
             index = end
@@ -1033,7 +1255,8 @@ def glob_witness(
         key, depth = queue.popleft()
         states, _ = key
         if (width is None or depth == width) and all(
-            len(tokens) in state for tokens, state in zip(machines, states)
+            (len(tokens) in state) == (index < len(patterns))
+            for index, (tokens, state) in enumerate(zip(machines, states))
         ):
             parts = []
             cursor = key
@@ -1041,7 +1264,10 @@ def glob_witness(
                 cursor, char = parents[cursor]
                 parts.append(char)
             witness = "".join(reversed(parts))
-            if all(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] for pattern in patterns):
+            if all(
+                bool(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0]) == (index < len(patterns))
+                for index, pattern in enumerate(all_patterns)
+            ):
                 return witness
         if depth >= (SEED_TEXT_LIMIT if width is None else width):
             continue
@@ -1054,7 +1280,7 @@ def glob_witness(
                 ))
                 for tokens, state in zip(machines, states)
             )
-            if not all(next_states):
+            if not all(next_states[:len(patterns)]):
                 continue
             next_key = (next_states, depth + 1 if width is not None else 0)
             if next_key in parents:
@@ -1066,6 +1292,191 @@ def glob_witness(
     return None
 
 
+@dataclass
+class ShapeProposals:
+    derived: list[tuple[str, object]]
+    numeric_fallback: list[SeedAssignment]
+    semantic_fallback: list[SeedAssignment] = field(default_factory=list)
+
+
+def conjunctive_terms(expression: str, columns: Iterable[str] = ()) -> Iterable[str]:
+    """Descend through required conjunctions and transparent truth wrappers."""
+    names = {identifier_key(name) for name in columns}
+    truth = r'(?:1|true)' if "true" not in names else '1'
+    is_true = r'is\s+true' if "true" not in names else r'(?!)'
+    not_false = r'|is\s+not\s+false' if "false" not in names else ''
+    zero = r'[+-]?(?:0+(?:\.0*)?|\.0+)'
+    if "false" not in names:
+        zero = rf'(?:{zero}|false)'
+    inequality = r'(?:<>|!=|is\s+not)\s*'
+    nonzero = rf'{inequality}{zero}'
+    reverse_truth = rf'(?:{truth}{EQUALITY}|{zero}\s*{inequality})'
+    positive_suffix = rf'(?:{EQUALITY}{truth}{not_false}|{nonzero})'
+
+    def transparent(before: str, after: str) -> bool:
+        # Only recognized wrapper syntax reaches this constant probe. Keep its
+        # complete composition: BLOB('0') <> 0 accepts false, whereas a direct
+        # BLOB truth CAST rejects it. Do not approximate affinity in Python.
+        probe = sqlite3.connect(":memory:")
+        try:
+            statement = f"select coalesce(cast(({before}?{after}) as numeric), 1) != 0"
+            return [probe.execute(statement, (value,)).fetchone()[0] for value in (0, 1)] == [0, 1]
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            probe.close()
+
+    pending = [(expression, "", "", False)]
+    while pending:
+        term, before, after, verify = pending.pop()
+        start = len(term) - len(term.lstrip(SQL_WHITESPACE))
+        end = len(term.rstrip(SQL_WHITESPACE))
+        before, after = before + term[:start], term[end:] + after
+        term = term[start:end]
+        active = sql_projection(term)
+        depth = case_depth = 0
+        cuts = []
+        between = False
+        outer_start = outer_end = None
+        commas = []
+        cast_as = None
+        for token in re.finditer(rf'\(|\)|,|{SQL_IDENTIFIER}', active, SQL_FLAGS):
+            kind = token.group().lower()
+            if kind == '(':
+                if depth == 0 and outer_start is None:
+                    outer_start = token.start()
+                depth += 1
+            elif kind == ')':
+                depth -= 1
+                if depth == 0 and outer_end is None:
+                    outer_end = token.end()
+            elif kind == 'case':
+                case_depth += 1
+            elif kind == 'end':
+                case_depth -= 1
+            elif kind == ',':
+                if depth == 1 and case_depth == 0:
+                    commas.append(token.start())
+            elif kind == 'as' and depth == 1 and case_depth == 0:
+                cast_as = (token.start(), token.end())
+            elif kind in {"and", "or", "between"} and depth == 0 and case_depth == 0:
+                if kind == 'or':
+                    cuts = []
+                    break  # OR has lower precedence than AND.
+                if kind == 'between':
+                    between = True
+                elif between:
+                    between = False
+                else:
+                    cuts.append((token.start(), token.end()))
+        if cuts:
+            if verify and not transparent(before, after):
+                yield before + term + after
+                continue
+            edges = [0, *(end for _, end in cuts)]
+            ends = [*(start for start, _ in cuts), len(term)]
+            pending.extend(reversed([(term[start:end], "", "", False) for start, end in zip(edges, ends)]))
+        else:
+            inner = None
+            if outer_start is not None and outer_end is not None:
+                prefix = sql_projection(term[:outer_start], identifiers=True).strip(SQL_WHITESPACE)
+                suffix = sql_projection(term[outer_end:], literals=True, identifiers=True).strip(SQL_WHITESPACE)
+                if suffix[:7].lower() == "collate" and (
+                    collations := re.match(rf'(?:collate\s+(?:{SQL_IDENTIFIER}|{SQL_STRING})\s*)+', suffix, SQL_FLAGS)
+                ):
+                    # Only postfixes on this complete operand are transparent.
+                    # Keep comparison-operand collations and the original SQL
+                    # in the native probe of the complete wrapper composition.
+                    suffix = suffix[collations.end():]
+                    verify = True
+                body = (outer_start + 1, outer_end - 1)
+                # These operators wrap the whole parenthesized operand (or hint).
+                # Never strip '+' from an operand of an equality: it removes affinity.
+                unary = re.match(rf'(?:(?:[+-]|not(?![{SQL_IDENTIFIER_CHARS}]))\s*)*', prefix, SQL_FLAGS)
+                negations = len(re.findall('not', unary.group(), SQL_FLAGS))
+                operand = prefix[unary.end():]
+                boolean_suffix = re.fullmatch(
+                    rf'(?:{is_true}{not_false}|{nonzero})', suffix, SQL_FLAGS,
+                )
+                whole_operand = not operand or identifier_key(unquote_identifier(operand)) in {"likely", "unlikely", "likelihood", "cast", "coalesce", "ifnull"}
+                if whole_operand and negations % 2 == 0 and (not suffix or (
+                    not negations and ("-" not in unary.group() or boolean_suffix)
+                )):
+                    prefix = operand
+                verify = verify or bool(re.fullmatch(nonzero, suffix, SQL_FLAGS)
+                                        or re.match(rf'{zero}\s*{inequality}', prefix, SQL_FLAGS))
+                if not prefix and (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)):
+                    inner = body
+                elif not suffix and re.fullmatch(reverse_truth, prefix, SQL_FLAGS):
+                    inner = body
+                elif (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)) and identifier_key(unquote_identifier(prefix)) in {"likely", "unlikely"} and not commas:
+                    inner = body
+                elif (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)) and identifier_key(unquote_identifier(prefix)) == "likelihood" and len(commas) == 1:
+                    probability = sql_projection(term[commas[0] + 1:outer_end - 1]).strip(SQL_WHITESPACE)
+                    if re.fullmatch(r'(?:0(?:\.\d*)?|1(?:\.0*)?|\.\d+)', probability, SQL_FLAGS):
+                        inner = (outer_start + 1, commas[0])
+                elif (not suffix or re.fullmatch(positive_suffix, suffix, SQL_FLAGS)) and (
+                    null_function := re.fullmatch(rf'(?:{reverse_truth})?({SQL_IDENTIFIER})', prefix, SQL_FLAGS)
+                ) and (
+                    (identifier_key(unquote_identifier(null_function.group(1))) == "coalesce" and commas)
+                    or (identifier_key(unquote_identifier(null_function.group(1))) == "ifnull" and len(commas) == 1)
+                ):
+                    # Only the first argument is unconditional. Preserve the
+                    # complete wrapper for native truth/affinity validation;
+                    # fallback arguments never become required CHECK terms.
+                    inner = (outer_start + 1, commas[0])
+                    verify = True
+                elif cast_as is not None and (
+                    (prefix.lower() == "cast" and (not suffix or re.fullmatch(
+                        positive_suffix, suffix, SQL_FLAGS
+                    )))
+                    or (not suffix and re.fullmatch(rf'{reverse_truth}cast', prefix, SQL_FLAGS))
+                ):
+                    target = sql_projection(term[cast_as[1]:outer_end - 1], literals=True, identifiers=True)
+                    verify = verify or sqlite_affinity(target.strip(SQL_WHITESPACE)) in {"TEXT", "BLOB"}
+                    inner = (outer_start + 1, cast_as[0])
+            if inner is None:
+                yield term if not verify or transparent(before, after) else before + term + after
+            else:
+                start, end = inner
+                pending.append((term[start:end], before + term[:start], term[end:] + after, verify))
+
+
+def column_equality_groups(
+    expression: str, columns: Iterable[str], *, context_columns: Iterable[str] = (),
+) -> list[list[str]]:
+    """Group bare column equalities without exposing opaque SQL or function calls."""
+    names = {identifier_key(name): name for name in columns}
+    groups = {name: [name] for name in names.values()}
+    pattern = rf'\s*({SQL_IDENTIFIER}){EQUALITY}({SQL_IDENTIFIER})\s*'
+    for term in conjunctive_terms(expression, (*names.values(), *context_columns)):
+        match = re.fullmatch(pattern, sql_projection(term, identifiers=True), SQL_FLAGS)
+        if match is None:
+            continue
+        left, right = (names.get(identifier_key(unquote_identifier(token))) for token in match.groups())
+        if left is not None and right is not None and groups[left] is not groups[right]:
+            joined, moved = groups[left], groups[right]
+            joined.extend(moved)
+            for name in moved:
+                groups[name] = joined
+    return [members for name, members in groups.items() if name == members[0]]
+
+
+def semantic_recipients(
+    expression: str, columns: Iterable[str], *, context_columns: Iterable[str] = (),
+) -> dict[str, set[str]]:
+    """Bound speculative value propagation to columns connected by CHECK terms."""
+    names = {identifier_key(name): name for name in columns}
+    connected = {name: {name} for name in names.values()}
+    for term in conjunctive_terms(expression, (*names.values(), *context_columns)):
+        identifiers = sql_identifiers(term)
+        mentioned = [name for key, name in names.items() if key in identifiers]
+        joined = set().union(*(connected[name] for name in mentioned))
+        for name in joined:
+            connected[name] = joined
+    return connected
+
+
 def shape_proposals(
     connection: sqlite3.Connection,
     expression: str,
@@ -1075,123 +1486,306 @@ def shape_proposals(
     text_constraints: str | None = None,
     omitted: Iterable[tuple[str, str, str | None]] = (),
     unavailable: Iterable[str] = (),
-) -> list[tuple[str, object]]:
+    strict: bool = False,
+) -> ShapeProposals:
     """Derive bounded text-shape and numeric candidates from the rejected CHECK.
 
     This extends the literal/JSON proposals, not the seeder's coverage claim. Unsupported
     expressions still fail visibly; every proposed value must survive a real insert.
     """
     names = {identifier_key(name): name for name in values}
-    text = {name: value for name, value in values.items() if isinstance(value, str)}
+    omitted, unavailable = tuple(omitted), tuple(unavailable)
+    context_columns = [*values, *(name for name, _, _ in omitted), *unavailable]
+    text_eligible = {name for name, declared in required if not strict or declared.upper() in {"TEXT", "ANY"}}
+    text = {name: value for name, value in values.items() if name in text_eligible and isinstance(value, str)}
     widths = {}
     shapes = text_constraints if text_constraints is not None else expression
-    for name, width in re.findall(r'\blength\s*\(\s*"?(\w+)"?\s*\)\s*=\s*(\d+)', shapes, re.IGNORECASE):
-        name = names.get(identifier_key(name), name)
+    # Only required whole terms may force a shape during an unrelated repair.
+    # Occurrences inside optional/negative branches are not required shapes.
+    shape_terms = [sql_projection(term, literals=True, identifiers=True) for term in conjunctive_terms(shapes, context_columns)]
+    for term in shape_terms:
+        match = re.fullmatch(rf'\s*{SQL_UNARY_PLUS}length\s*\(\s*({SQL_IDENTIFIER})\s*\)\s*=\s*(\d+)\s*', term, SQL_FLAGS)
+        if match is None:
+            continue
+        name, width = match.groups()
+        name = names.get(identifier_key(unquote_identifier(name)), name)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
-        if name in text and size is not None:
+        if name in text_eligible and size is not None:
             widths[name] = size
-            text[name] = text[name][:size].ljust(size, "0")
-    globs = re.findall(
-        r"\b\"?(\w+)\"?\s+(not\s+)?glob\s*'((?:[^']|'')*)'",
-        shapes,
-        re.IGNORECASE,
-    )
+            if isinstance(values[name], str) or connection.execute("select length(?)", (values[name],)).fetchone()[0] != size:
+                text.setdefault(name, "x")
+                text[name] = text[name][:size].ljust(size, "0")
+    globs = (match.groups() for term in shape_terms
+             if (match := re.fullmatch(rf'\s*{GLOB_REQUIREMENT}\s*', term, SQL_FLAGS)) is not None)
     positive: dict[str, list[str]] = defaultdict(list)
-    alphabets = {name: string.printable for name in text}
+    negative: dict[str, list[str]] = defaultdict(list)
     for name, negated, quoted in globs:
-        name = names.get(identifier_key(name), name)
-        if name in text:
+        name = names.get(identifier_key(unquote_identifier(name)), name)
+        if name in text_eligible:
             pattern = quoted.replace("''", "'")
-            alphabets[name] += pattern
-            if not negated:
-                positive[name].append(pattern)
-    alphabets = {name: "".join(dict.fromkeys(alphabet)) for name, alphabet in alphabets.items()}
-    # Restrict the alphabet before generating a witness so later CHECK order cannot
-    # erase a required width or introduce characters forbidden by another CHECK.
-    for name, negated, quoted in globs:
-        name = names.get(identifier_key(name), name)
-        if name not in text:
+            (negative if negated else positive)[name].append(pattern)
+    groups = column_equality_groups(
+        shapes, (name for name, _ in required if name in text_eligible), context_columns=context_columns,
+    )
+    aliases = {name: members for members in groups for name in members}
+    witnesses = []
+    semantic_fallback = []
+    pending_groups = deque(groups)
+    while pending_groups:
+        members = pending_groups.popleft()
+        patterns = tuple(dict.fromkeys(pattern for name in members for pattern in positive[name]))
+        excluded = tuple(dict.fromkeys(pattern for name in members for pattern in negative[name]))
+        if not patterns and not excluded and not any(name in widths for name in members):
+            # Equality without a text shape still carries native alternatives.
+            # Do not force one member's value: collation and affinity may differ.
+            if len(members) > 1:
+                semantic_fallback.extend(tuple((name, values[source]) for name in members) for source in members)
             continue
-        pattern = quoted.replace("''", "'")
-        if negated and pattern.startswith("*[^") and pattern.endswith("]*"):
-            allowed = "".join(
-                char
-                for char in alphabets[name]
-                if not connection.execute("select ? glob ?", (char, pattern)).fetchone()[0]
-            )
-            alphabets[name] = allowed
-            if allowed:
-                text[name] = "".join(char if char in allowed else allowed[0] for char in text[name])
-    for name, patterns in positive.items():
-        if all(connection.execute("select ? glob ?", (text[name], pattern)).fetchone()[0] for pattern in patterns):
+        sizes = {widths[name] for name in members if name in widths}
+        width = next(iter(sizes), None)
+        def fits(value: object) -> bool:
+            return (len(sizes) <= 1
+                    and (width is None or connection.execute("select length(?)", (value,)).fetchone()[0] == width)
+                    and all(connection.execute("select ? glob ?", (value, pattern)).fetchone()[0] for pattern in patterns)
+                    and not any(connection.execute("select ? glob ?", (value, pattern)).fetchone()[0] for pattern in excluded))
+
+        # Already-valid native values need no text promotion, including groups.
+        if all(fits(values[name]) and connection.execute(
+                "select ? is ?", (values[members[0]], values[name])
+        ).fetchone()[0] for name in members):
+            for name in members:
+                if isinstance(values[name], str):
+                    text[name] = values[name]
+                else:
+                    text.pop(name, None)
+            witnesses.extend((name, values[name]) for name in members if isinstance(values[name], str))
             continue
-        witness = glob_witness(connection, tuple(patterns), width=widths.get(name), alphabet=alphabets[name])
+        witness = next((text[name] for name in members if name in text
+                        and fits(text[name])), None)
+        if witness is None and len(sizes) <= 1:
+            alphabet = "".join(dict.fromkeys(string.printable + "".join((*patterns, *excluded))))
+            witness = glob_witness(connection, patterns, excluded=excluded, width=width, alphabet=alphabet)
         if witness is not None:
-            text[name] = witness
-    for name, start, width, other in SUBSTRING_REQUIREMENT.findall(shapes):
+            text.update((name, witness) for name in members)
+            witnesses.extend((name, witness) for name in members)
+        elif len(members) > 1:
+            # Equality may use collation/affinity rather than byte identity.
+            # Reuse independent shape search; the target INSERT decides equality.
+            for name in members:
+                aliases[name] = [name]
+                pending_groups.append([name])
+    substrings = list(substring_requirements(shapes, context_columns))
+    # Retain the containing values' shaped witnesses before the opposite
+    # direction splices their old targets into them. Native slices can flow
+    # through a chain; one scan per relationship bounds even conflicting cycles.
+    sliced = dict(text)
+    for _ in substrings:
+        previous = dict(sliced)
+        for name, start, width, other in substrings:
+            name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
+            position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
+            size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
+            if name in sliced and other in text_eligible and position is not None and size is not None:
+                value = connection.execute("select substr(?, ?, ?)", (sliced[name], position, size)).fetchone()[0]
+                sliced.update((member, value) for member in aliases[other])
+        if sliced == previous:
+            break
+    if sliced != text:
+        semantic_fallback.append(tuple(sliced.items()))
+    for name, start, width, other in substrings:
         name, other = names.get(identifier_key(name), name), names.get(identifier_key(other), other)
         position = bounded_integer(start, 1, SEED_TEXT_LIMIT)
         size = bounded_integer(width, 0, SEED_TEXT_LIMIT)
-        if name in text and isinstance(values.get(other), str) and position is not None and size is not None:
+        if name in text_eligible and isinstance(text.get(other, values.get(other)), str) and position is not None and size is not None:
+            text.setdefault(name, "x")
             offset = position - 1
             source = text.get(other, str(values[other]))
             if len(source) == size:
-                text[name] = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
+                repaired = text[name][:offset].ljust(offset, "0") + source + text[name][offset + size :]
+                text.update((member, repaired) for member in aliases[name])
     proposals: list[tuple[str, object]] = [(name, value) for name, value in text.items() if value != values[name]]
+    active = sql_projection(expression)
+    mentioned = sql_identifiers(expression)
+    # Retain computed values for functional dependents as guesses, not aliases.
+    # Raw pattern operands remain owned by the GLOB matcher.
+    recipients = semantic_recipients(
+        shapes, (name for name, _ in required), context_columns=context_columns,
+    ) if witnesses else {}
+    for source, witness in dict.fromkeys(witnesses):
+        # Keep alternatives atomic across CHECK boundaries. Per-column shapes
+        # constrain each recipient, not the functional relationship between them.
+        targets = [
+            name for name, _ in required if name in text_eligible
+            and name in recipients[source]
+            and (name not in widths or len(witness) == widths[name])
+            and all(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] for pattern in positive[name])
+            and not any(connection.execute("select ? glob ?", (witness, pattern)).fetchone()[0] for pattern in negative[name])
+        ]
+        if targets:
+            semantic_fallback.append(tuple((name, witness) for name in targets))
+            semantic_fallback.extend(((name, witness),) for name in targets)
+    numeric_text = active + " " + " ".join(
+        match.group()[1:-1] for match in re.finditer(SQL_STRING, sql_projection(expression, literals=True))
+        if re.fullmatch(r"-?[0-9]+", match.group()[1:-1])
+    )
     bounds = {
         bound
-        for token in re.findall(r"(?<![\w.])-?[0-9]+(?![\w.])", expression)
+        for token in re.findall(SQL_INTEGER, numeric_text)
         if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None
     }
-    projection = ", ".join(
-        f'cast(? as {declared}) as "{name}"' if declared else f'? as "{name}"'
-        for name, declared in required
-    )
-    for name, declared, default in omitted:
-        term = f"({default})" if default is not None else "NULL"
-        if declared:
-            term = f"cast({term} as {declared})"
-        projection += f', {term} as "{name}"'
     numeric = [
         name for name, declared in required
-        if "INT" in declared.upper() and re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression))
+        if (sqlite_affinity(declared, strict=strict) in {"INTEGER", "REAL", "NUMERIC"}
+            or (strict and declared.upper() == "ANY"))
+        and identifier_key(name) in mentioned
     ]
     candidates = list(dict.fromkeys(
         value for bound in sorted(bounds) for value in (bound, bound + 1, bound - 1)
         if SQLITE_INT_MIN <= value <= SQLITE_INT_MAX
     ))
-    fallback = [(name, candidate) for candidate in candidates for name in numeric if candidate != values[name]]
-    if any(re.search(rf"\b{re.escape(identifier_key(name))}\b", identifier_key(expression)) for name in unavailable):
-        return [*proposals, *fallback]
-    # Reserve half the budget for whole-row boundary assignments before a large
-    # single-column search or Cartesian prefix can starve coordinated moves.
-    domains = [list(dict.fromkeys([values[name], *candidates])) for name in numeric]
-    single_changes = (
-        tuple(candidate if name == changed else values[name] for name in numeric)
-        for changed in numeric for candidate in candidates if candidate != values[changed]
+    if not numeric or not candidates:
+        return ShapeProposals(proposals, [], semantic_fallback)
+    domains = numeric_domains(expression, numeric, values, candidates)
+    assignments = numeric_assignments(domains, tuple(values[name] for name in numeric), candidates)
+    fallback = [tuple(zip(numeric, assignment)) for assignment in itertools.islice(assignments, SEED_ATTEMPTS)]
+    declared_names = {identifier_key(name) for name, _ in required} | {identifier_key(name) for name, _, _ in omitted} | {identifier_key(name) for name in unavailable}
+    implicit = {"rowid", "_rowid_", "oid"} - declared_names
+    if any(identifier_key(name) in mentioned for name in (*unavailable, *implicit)):
+        return ShapeProposals(proposals, fallback, semantic_fallback)
+    # Native typed insertion models affinity, but scratch DML must never change
+    # the fixture connection's changes()/last_insert_rowid()/total_changes().
+    evaluation = sqlite3.connect(":memory:")
+    table = '"seed_candidate"'
+    def declaration(name: str, declared: str) -> str:
+        return quote_identifier(name) + (f' {quote_identifier(declared)}' if declared else '')
+
+    declarations = [declaration(name, declared) for name, declared in required]
+    declarations.extend(
+        declaration(name, declared) + (f' default ({default})' if default is not None else '')
+        for name, declared, default in omitted
     )
-    assignments = itertools.chain(
-        itertools.islice(single_changes, SEED_ATTEMPTS // 2),
-        (tuple(candidate for _ in numeric) for candidate in candidates),
-        single_changes,
-        itertools.product(*domains),
-    ) if numeric else ()
-    for assignment in itertools.islice(assignments, SEED_ATTEMPTS):
-        changes = dict(zip(numeric, assignment))
-        parameters = [changes.get(column, values[column]) for column, _ in required]
-        try:
-            accepted = connection.execute(
-                f"select coalesce(cast(({expression}) as numeric), 1) != 0 from (select {projection})", parameters
+    columns = ', '.join(quote_identifier(name) for name, _ in required)
+    placeholders = ', '.join('?' for _ in required)
+    rejected: list[SeedAssignment] = []
+    try:
+        evaluation.execute(f"create table {table} ({', '.join(declarations)})" + (" STRICT" if strict else ""))
+        # Let SQLite resolve overloads and enforce expression-index determinism.
+        # EXPLAIN compiles without creating an index or evaluating any expression.
+        # Defaults need their own check before scratch INSERT can execute them.
+        for _, _, default in omitted:
+            if default is not None:
+                evaluation.execute(f"explain create index seed_probe on {table} (+({default}\n))").fetchall()
+        evaluation.execute(f"explain create index seed_probe on {table} (+({expression}\n))").fetchall()
+        for assignment in fallback:
+            changes = dict(assignment)
+            parameters = [changes.get(column, values[column]) for column, _ in required]
+            evaluation.execute(f"delete from {table}")
+            try:
+                evaluation.execute(f"insert into {table} ({columns}) values ({placeholders})", parameters)
+            except sqlite3.IntegrityError:
+                # STRICT storage can reject a candidate before its CHECK is evaluated.
+                continue
+            accepted = evaluation.execute(
+                f"select coalesce(cast(({expression}) as numeric), 1) != 0 from {table}"
             ).fetchone()[0]
-        except sqlite3.OperationalError:
-            # Generated columns or unsupported context cannot reject a candidate.
-            # Offer the bounded values to the real INSERT, which supplies that context.
-            proposals.extend(fallback)
-            break
-        if accepted:
-            proposals.extend((name, value) for name, value in changes.items() if value != values[name])
-            break
-    return proposals
+            if accepted:
+                proposals.extend((name, value) for name, value in changes.items() if value != values[name])
+                return ShapeProposals(proposals, [], semantic_fallback)
+            # Not an accepted row, but still a storage-valid origin for another
+            # bounded search. The INSERT loop owns progress, deduplication and
+            # its total budget; do not discard all partial numeric repairs here.
+            rejected.append(assignment)
+    except sqlite3.OperationalError:
+        # Unrepresentable context cannot reject a candidate; actual INSERT decides.
+        return ShapeProposals(proposals, fallback, semantic_fallback)
+    finally:
+        evaluation.close()
+    return ShapeProposals(proposals, rejected, semantic_fallback)
+
+
+def numeric_assignments(
+    domains: list[list[object]], current: tuple[object, ...], candidates: list[int]
+) -> Iterable[tuple[object, ...]]:
+    """Give local repairs and joint guesses turns in the same bounded search."""
+    ranked = tuple(domain[0] for domain in domains)
+
+    def sparse(base: tuple[object, ...]) -> Iterable[tuple[object, ...]]:
+        alternatives = [
+            [value for value in dict.fromkeys([current[index], *domain]) if value != base[index]]
+            for index, domain in enumerate(domains)
+        ]
+        for rank in range(max(map(len, alternatives), default=0)):
+            for index, options in enumerate(alternatives):
+                if rank < len(options):
+                    yield (*base[:index], options[rank], *base[index + 1:])
+
+    seen = set()
+    uniform = [tuple(candidate for _ in domains) for candidate in candidates]
+    if len(domains) > SEED_ATTEMPTS // 2:
+        # A stable anchor prefix survives fallback retries rebasing the sparse
+        # row. Cap it so even a large boundary set leaves room for ranked repair.
+        for assignment in itertools.islice(uniform, SEED_ATTEMPTS // 2):
+            if assignment not in seen:
+                seen.add(assignment)
+                yield assignment
+    if ranked not in seen:
+        seen.add(ranked)
+        yield ranked
+    local = sparse(current)
+    # Finish the first per-column wave before deeper mixed search dilutes it.
+    # Small domains keep their existing reservation for later alternatives.
+    for assignment in itertools.islice(local, max(len(domains), SEED_ATTEMPTS // 2)):
+        if assignment not in seen:
+            seen.add(assignment)
+            yield assignment
+
+    def interleave(*families):
+        for batch in itertools.zip_longest(*families):
+            yield from (assignment for assignment in batch if assignment is not None)
+
+    anchors = dict.fromkeys([ranked, *uniform])
+    neighborhoods = interleave(*(sparse(base) for base in anchors if base != current))
+    anchors = interleave(neighborhoods, iter(uniform))
+    products = itertools.product(*domains)
+    # Cartesian search gets two direct turns; local and anchor repairs get one
+    # each. Nesting Cartesian behind anchors would dilute its finite budget.
+    for assignment in interleave(local, products, products, anchors):
+        if assignment not in seen:
+            seen.add(assignment)
+            yield assignment
+
+
+def numeric_domains(
+    expression: str, numeric: list[str], values: dict[str, object], candidates: list[int]
+) -> list[list[object]]:
+    """Rank finite domains by local predicates; the complete CHECK still decides."""
+    identifier = f'({SQL_IDENTIFIER})'
+    literal = f"({SQL_INTEGER})"
+    comparison = r"\s*(==|!=|<>|<=|>=|=|<|>)\s*"
+    predicates: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    clauses = [match.groups() for match in sql_matches(identifier + comparison + literal, expression)]
+    reverse = {"<": ">", ">": "<", "<=": ">=", ">=": "<=", "=": "=", "==": "==", "!=": "!=", "<>": "<>"}
+    clauses.extend((name, reverse[op], token) for token, op, name in (
+        match.groups() for match in sql_matches(literal + comparison + identifier, expression)
+    ))
+    for name, op, token in clauses:
+        if (bound := bounded_integer(token, SQLITE_INT_MIN, SQLITE_INT_MAX)) is not None:
+            predicates[identifier_key(unquote_identifier(name))].append((op, bound))
+
+    comparisons = {"=": operator.eq, "==": operator.eq, "!=": operator.ne, "<>": operator.ne,
+                   "<": operator.lt, ">": operator.gt, "<=": operator.le, ">=": operator.ge}
+
+    def score(terms: list, value: object) -> int:
+        if not isinstance(value, (int, float)):
+            return -len(terms)
+        return sum(compare(value, bound) for compare, bound in terms)
+
+    domains = []
+    for name in numeric:
+        terms = [(comparisons[op], bound) for op, bound in predicates[identifier_key(name)]]
+        domain = list(dict.fromkeys([values[name], *candidates]))
+        domains.append(sorted(domain, key=lambda value: -score(terms, value)) if terms else domain)
+    return domains
 
 
 def moved_row(base: dict[str, object], step: int, *, held: str | None) -> dict[str, object]:
@@ -1242,7 +1836,7 @@ def resolve_references(connection: sqlite3.Connection, table: str) -> None:
     ``seeded_rows_prove_repetition`` reads back.
     """
     groups: dict[int, list[tuple[str, str, str | None]]] = {}
-    for row in connection.execute(f'pragma foreign_key_list("{table}")'):
+    for row in connection.execute(f'pragma foreign_key_list({quote_identifier(table)})'):
         groups.setdefault(int(row[0]), []).append((str(row[2]), str(row[3]), row[4] and str(row[4])))
     for members in groups.values():
         parent = members[0][0]
@@ -1252,33 +1846,33 @@ def resolve_references(connection: sqlite3.Connection, table: str) -> None:
             keys = [
                 str(column[1])
                 for column in sorted(
-                    (row for row in connection.execute(f'pragma table_info("{parent}")') if row[5]),
+                    (row for row in connection.execute(f'pragma table_info({quote_identifier(parent)})') if row[5]),
                     key=lambda row: row[5],
                 )
             ]
-        selected = ", ".join('"{}"'.format(key) for key in keys)
-        held = connection.execute(f'select distinct {selected} from "{parent}"').fetchall()
+        selected = ", ".join(quote_identifier(key) for key in keys)
+        held = connection.execute(f'select distinct {selected} from {quote_identifier(parent)}').fetchall()
         if not held:
             continue
-        assignments = ", ".join(f'"{name}" = ?' for _, name, _ in members)
+        assignments = ", ".join(f'{quote_identifier(name)} = ?' for _, name, _ in members)
         try:
-            connection.execute(f'update "{table}" set {assignments}', list(held[0]))
+            connection.execute(f'update {quote_identifier(table)} set {assignments}', list(held[0]))
             continue
         except sqlite3.Error:
             pass
         nullable = {
             str(row[1]): not (row[3] or row[5])
-            for row in connection.execute(f'pragma table_info("{table}")')
+            for row in connection.execute(f'pragma table_info({quote_identifier(table)})')
         }
-        blanked = ", ".join(f'"{name}" = null' for _, name, _ in members)
-        rows = [row[0] for row in connection.execute(f'select rowid from "{table}"')]
+        blanked = ", ".join(f'{quote_identifier(name)} = null' for _, name, _ in members)
+        rows = [row[0] for row in connection.execute(f'select rowid from {quote_identifier(table)}')]
         for index, rowid in enumerate(rows):
             # Offsets so two rows start from different parents; the whole rotation because a
             # row already holding a later parent's value is in the way of the earlier one.
             for offset in range(len(held)):
                 try:
                     connection.execute(
-                        f'update "{table}" set {assignments} where rowid = ?',
+                        f'update {quote_identifier(table)} set {assignments} where rowid = ?',
                         [*held[(index + offset) % len(held)], rowid],
                     )
                     break
@@ -1292,11 +1886,11 @@ def resolve_references(connection: sqlite3.Connection, table: str) -> None:
                 remove = not all(nullable[name] for _, name, _ in members)
                 if not remove:
                     try:
-                        connection.execute(f'update "{table}" set {blanked} where rowid = ?', [rowid])
+                        connection.execute(f'update {quote_identifier(table)} set {blanked} where rowid = ?', [rowid])
                     except sqlite3.Error:
                         remove = True
                 if remove:
-                    connection.execute(f'delete from "{table}" where rowid = ?', [rowid])
+                    connection.execute(f'delete from {quote_identifier(table)} where rowid = ?', [rowid])
 
 
 def dangling_references(connection: sqlite3.Connection) -> str:
@@ -1333,8 +1927,8 @@ def seeded_rows_prove_repetition(
     """
     for column in repeated:
         shared = connection.execute(
-            f'select count(*) from (select "{column}" from "{table}" '
-            f'where "{column}" is not null group by "{column}" having count(*) > 1)'
+            f'select count(*) from (select {quote_identifier(column)} from {quote_identifier(table)} '
+            f'where {quote_identifier(column)} is not null group by {quote_identifier(column)} having count(*) > 1)'
         ).fetchone()[0]
         if not shared:
             return f"no two rows share a {column}, though a row repeating it was accepted"
@@ -1414,24 +2008,24 @@ def restore_repeat(
     granted in isolation.
     """
     names = [name for name, _ in offered]
-    selected = ", ".join(f'"{name}"' for name in names)
-    survivor = connection.execute(f'select {selected} from "{table}" limit 1').fetchone()
+    selected = ", ".join(quote_identifier(name) for name in names)
+    survivor = connection.execute(f'select {selected} from {quote_identifier(table)} limit 1').fetchone()
     if survivor is None:
         return "no row is left to copy a reference from", True
     row = {
         name: value if value is None or name == column or name in references else varied(value, RESTORE_STEP)
         for name, value in zip(names, survivor)
     }
-    objection, settled = insert_seed_row(connection, table, ddl, offered, row)
+    objection, settled = insert_seed_row(connection, table, ddl, offered, row, held=(column,))
     if not objection or column in references:
         return objection, settled
     optional = {
         str(info[1])
-        for info in connection.execute(f'pragma table_info("{table}")')
+        for info in connection.execute(f'pragma table_info({quote_identifier(table)})')
         if not (info[3] or info[5]) and str(info[1]) in references
     }
     emptied = {name: None if name in optional else value for name, value in row.items()}
-    return insert_seed_row(connection, table, ddl, offered, emptied)
+    return insert_seed_row(connection, table, ddl, offered, emptied, held=(column,))
 
 
 def insert_seed_row(
@@ -1440,6 +2034,8 @@ def insert_seed_row(
     ddl: str,
     required: list[tuple[str, str]],
     values: dict[str, object],
+    *,
+    held: Iterable[str] = (),
 ) -> tuple[str, bool]:
     """Insert ``values`` into ``table``, repairing what the schema objects to.
 
@@ -1458,25 +2054,28 @@ def insert_seed_row(
     """
     if not required:
         try:
-            connection.execute(f'insert into "{table}" default values')
+            connection.execute(f'insert into {quote_identifier(table)} default values')
         except sqlite3.Error as exc:
             return str(exc), True
         return "", True
 
-    columns = ", ".join(f'"{column}"' for column, _ in required)
+    columns = ", ".join(quote_identifier(column) for column, _ in required)
     placeholders = ", ".join("?" for _ in required)
-    statement = f'insert into "{table}" ({columns}) values ({placeholders})'
+    statement = f'insert into {quote_identifier(table)} ({columns}) values ({placeholders})'
     names = [column for column, _ in required]
     # Related columns may be constrained by a later CHECK. Derive their text shapes
     # together so declaration order does not decide whether a prefix can be offered.
     constraints = [
-        check_expression(ddl, name)
-        for name in re.findall(r'\bconstraint\s+"?(\w+)"?\s+check\s*\(', ddl, re.IGNORECASE)
+        check_expression(ddl, unquote_identifier(match.group(1)))
+        for match in sql_matches(rf'(?<![{SQL_IDENTIFIER_CHARS}])constraint\s+({SQL_IDENTIFIER})\s+check\s*\(', ddl)
     ]
-    text_constraints = "\n".join(constraints)
+    text_constraints = " AND ".join(f"({constraint}\n)" for constraint in constraints)
     omitted = []
     unavailable = []
-    for info in connection.execute(f'pragma table_xinfo("{table}")'):
+    not_null = set()
+    for info in connection.execute(f'pragma table_xinfo({quote_identifier(table)})'):
+        if info[3]:
+            not_null.add(str(info[1]))
         if str(info[1]) in values:
             continue
         if info[6] or (info[5] and str(info[2]).upper() == "INTEGER" and info[4] is None):
@@ -1485,10 +2084,24 @@ def insert_seed_row(
             unavailable.append(str(info[1]))
         else:
             omitted.append((str(info[1]), str(info[2]), info[4]))
-    prefix_sources = {identifier_key(other) for _, _, _, other in SUBSTRING_REQUIREMENT.findall(text_constraints)}
-    proposed: set[tuple[str, object]] = set()
+    context_columns = [*names, *(name for name, _, _ in omitted), *unavailable]
+    prefix_sources = {identifier_key(other) for _, _, _, other in substring_requirements(text_constraints, context_columns)}
+    json_sources = {identifier_key(unquote_identifier(match.group(2)))
+                    for match in sql_matches(JSON_TERM, text_constraints)}
+    strict = is_strict_table(connection, table)
+    def row_identity(row: dict[str, object]) -> tuple:
+        return tuple((name, type(row[name]), row[name]) for name in names)
+
+    proposed: set[tuple] = set()
+    fixed = {name: values[name] for name in held}
+
+    def unseen(assignment: SeedAssignment) -> bool:
+        return row_identity({**values, **dict(assignment), **fixed}) not in proposed
+
+    source_progress: dict[str, tuple[int, list[int]]] = {}
     objection = ""
     for _ in range(SEED_ATTEMPTS):
+        proposed.add(row_identity(values))
         try:
             connection.execute(statement, [values[column] for column in names])
         except sqlite3.Error as exc:
@@ -1500,32 +2113,74 @@ def insert_seed_row(
             if failure is None:
                 return objection, True
             expression = check_expression(ddl, failure.group(1))
-            untried = [
-                pair
-                for pair in [
-                    *shape_proposals(
-                        connection, expression, required, values,
-                        text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
-                    ),
-                    *check_proposals(expression, names),
-                    *json_proposals(connection, expression, names),
-                ]
-                if pair not in proposed and values[pair[0]] != pair[1]
-            ]
+            next_source, source_positions = source_progress.setdefault(expression, (0, [0, 0]))
+            shaped = shape_proposals(
+                connection, expression, required, values,
+                text_constraints=text_constraints, omitted=omitted, unavailable=unavailable,
+                strict=strict,
+            )
+            derived = tuple(shaped.derived)
+            documents = json_proposals(
+                connection, expression, names, text_constraints=text_constraints, context_columns=context_columns,
+                not_null=not_null,
+            )
+            # Only malformed inputs need priority over candidates that can enable
+            # their evaluation. Valid documents retain the semantic source order:
+            # a missing-path alternative must not displace an already-valid one.
+            invalid_documents = {
+                name for name in names if identifier_key(name) in json_sources
+                and not connection.execute("select json_valid(?)", (values[name],)).fetchone()[0]
+            } if documents else set()
+            untried = next((
+                [assignment] for assignment in documents if unseen(assignment) and any(
+                    name in invalid_documents
+                    and connection.execute("select json_valid(?)", (value,)).fetchone()[0]
+                    for name, value in assignment
+                )
+            ), [])
             if not untried:
-                # Follow only prefix-source dependencies into other CHECKs. Unrelated
-                # literals must not overwrite columns that already satisfy their checks.
-                untried = [
+                untried = [derived] if derived and unseen(derived) else []
+            if not untried:
+                # Required prefix sources may be defined by another CHECK. Keep
+                # their existing proposals in the semantic turn, not behind a
+                # numeric source that can remain live for the whole budget.
+                related_proposals = [
                     pair
                     for related in constraints
-                    for pair in [*check_proposals(related, names), *json_proposals(connection, related, names)]
-                    if identifier_key(pair[0]) in prefix_sources and pair not in proposed and values[pair[0]] != pair[1]
+                    for pair in check_proposals(related, names, context_columns=context_columns)
+                    if identifier_key(pair[0]) in prefix_sources
                 ]
+                sources = [
+                    shaped.numeric_fallback,
+                    [*((pair,) for pair in check_proposals(expression, names, context_columns=context_columns)), *shaped.semantic_fallback,
+                     *documents,
+                     *((pair,) for pair in related_proposals)],
+                ]
+                # Finish each source's forward pass before either wraps. Otherwise
+                # a short numeric list restarts with every new text value and
+                # consumes turns owed to the longer source's unvisited tail.
+                # A later pass still permits whole-row repairs in changed context.
+                for _ in range(2):
+                    for offset in range(len(sources)):
+                        source = (next_source + offset) % len(sources)
+                        options = sources[source]
+                        for index in range(source_positions[source], len(options)):
+                            source_positions[source] = index + 1
+                            if unseen(options[index]):
+                                untried = [options[index]]
+                                break
+                        if untried:
+                            source_progress[expression] = ((source + 1) % len(sources), source_positions)
+                            break
+                    if untried:
+                        break
+                    source_positions[:] = [0] * len(sources)
             if not untried:
                 return objection, True
-            column, literal = untried[0]
-            proposed.add((column, literal))
-            values[column] = literal
+            values.update(untried[0])
+            # A repeat offer fixes its held value, not every other cell in a
+            # proposed row. Deduplication above sees this same atomic assignment.
+            values.update(fixed)
         else:
             return "", True
     return f"{SEED_ATTEMPTS} attempts did not produce a row the schema accepts; last was {objection}", False
@@ -1616,7 +2271,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
         for table, ddl in schema:
             info = [
                 (str(row[1]), str(row[2]), bool(row[3] or row[5]))
-                for row in connection.execute(f'pragma table_info("{table}")')
+                for row in connection.execute(f'pragma table_info({quote_identifier(table)})')
             ]
             every = [(column, declared) for column, declared, _ in info]
             mandatory = [(column, declared) for column, declared, required in info if required]
@@ -1625,8 +2280,12 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             # column first and fall back to what the table demands, because a table whose
             # CHECKs make some columns mutually exclusive refuses the maximal row by
             # construction and still has to be seeded.
-            base = {column: representative_value(column, declared) for column, declared in every}
-            objection, settled = insert_seed_row(connection, table, ddl, every, dict(base))
+            strict = is_strict_table(connection, table)
+            base = {column: representative_value(column, declared, strict=strict) for column, declared in every}
+            maximal = dict(base)
+            objection, settled = insert_seed_row(connection, table, ddl, every, maximal)
+            if not objection:
+                base = maximal
             offered = every
             if objection:
                 refused[f"{table}, every column at once"] = objection
@@ -1641,7 +2300,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             steps = 0
             for steps, column in enumerate(() if objection else base, start=1):
                 refusal, decided = insert_seed_row(
-                    connection, table, ddl, offered, moved_row(base, steps, held=column)
+                    connection, table, ddl, offered, moved_row(base, steps, held=column), held=(column,)
                 )
                 if not refusal:
                     repeated.append(column)
@@ -1690,7 +2349,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
             # columns together with a third, so sharing both at once is refused while sharing
             # either alone is fine. What the fixture claims for a reference is that it resolves,
             # and ``dangling_references`` is where that claim is read back.
-            references = {str(row[3]) for row in connection.execute(f'pragma foreign_key_list("{table}")')}
+            references = {str(row[3]) for row in connection.execute(f'pragma foreign_key_list({quote_identifier(table)})')}
             claimed = []
             for column in [name for name in repeated if name not in references]:
                 if not seeded_rows_prove_repetition(connection, table, [column]):
@@ -1709,7 +2368,7 @@ def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, s
                 else:
                     claimed.append(column)
             repeated = claimed
-            rows = connection.execute(f'select count(*) from "{table}"').fetchone()[0]
+            rows = connection.execute(f'select count(*) from {quote_identifier(table)}').fetchone()[0]
             if rows < SEED_ROWS:
                 short[table] = f"{rows} of {SEED_ROWS} rows; {objection or 'the schema accepted no more'}"
                 continue
