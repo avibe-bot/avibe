@@ -1151,6 +1151,37 @@ def test_normalize_response_supports_body_headers_tuple():
     assert response.body == b"ok"
 
 
+@pytest.mark.parametrize("started_at", [None, "2026-07-04T00:00:01+00:00"])
+@pytest.mark.parametrize("completed_at", [None, "2026-07-04T00:00:02+00:00"])
+def test_harness_run_detail_preserves_stored_duration_timestamps(started_at, completed_at):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-duration",
+                "run_type": "agent_run",
+                "status": "succeeded",
+                "created_at": "2026-07-04T00:00:00+00:00",
+                "updated_at": "2026-07-04T00:01:02+00:00",
+                "started_at": started_at,
+                "completed_at": completed_at,
+            }
+        )
+    finally:
+        store.close()
+
+    response = app.test_client().get("/api/harness/runs/run-duration")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["run"]["started_at"] == started_at
+    assert payload["run"]["completed_at"] == completed_at
+
+
 def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 

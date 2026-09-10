@@ -2005,13 +2005,16 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
         if not run_id:
             continue
         try:
+            status = normalize_run_status(row.get("status"))
             payload = run_updated_payload(
                 run_id=run_id,
-                status=normalize_run_status(row.get("status")),
+                status=status,
                 run_type=row.get("run_type"),
                 session_id=row.get("session_id"),
                 definition_id=row.get("definition_id"),
                 updated_at=row.get("updated_at"),
+                started_at=row.get("started_at") if status in TERMINAL_RUN_STATUSES else None,
+                completed_at=row.get("completed_at") if status in TERMINAL_RUN_STATUSES else None,
                 cancel_requested=bool(row.get("cancel_requested")),
             )
             bus.publish(RUNS_UPDATED_EVENT, payload)
