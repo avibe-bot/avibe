@@ -495,6 +495,152 @@ def test_cmd_restart_schedules_supervisor_by_default(monkeypatch):
     assert calls == [{"delay_seconds": 0.0, "vibe_path": "/usr/local/bin/vibe", "trigger": "cli"}]
 
 
+def _startup_receipt_payload():
+    return {
+        "schema_version": 1, "outcome": "started",
+        "service_pid": 1234, "ui_pid": 5678,
+        "service_create_unix_ms": 1789010100.1235 * 1000,
+        "ui_create_unix_ms": 1789010100.4565 * 1000,
+    }
+
+
+@pytest.fixture
+def receipt_shutdown(monkeypatch):
+    pid_path = paths.get_runtime_pid_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("1234\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 1789010100.1235)
+    monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: True)
+    monkeypatch.setattr(runtime, "stop_service", lambda: calls.append("service") or True)
+    monkeypatch.setattr(runtime, "stop_ui", lambda: calls.append("ui") or True)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: calls.append("opencode") or True)
+    monkeypatch.setattr(cli, "_write_status", lambda *args: calls.append(args))
+    return SimpleNamespace(pid_path=pid_path, calls=calls)
+
+
+@pytest.mark.parametrize("delta_ms", [-2, -1.999, 0, 1.999, 2])
+@pytest.mark.parametrize("outcome", ["started", "reused"])
+def test_cmd_stop_receipt_matches_with_inclusive_tolerance(capsys, receipt_shutdown, delta_ms, outcome):
+    receipt = _startup_receipt_payload()
+    receipt["service_create_unix_ms"] += delta_ms
+    receipt["outcome"] = outcome
+
+    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 0
+
+    assert receipt_shutdown.calls == ["service", "ui", "opencode", ("stopped",)]
+    output = capsys.readouterr()
+    assert output.out == "OpenCode server stopped\n"
+    assert output.err == ""
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("replaced", "service_pid_mismatch"),
+        ("missing", "service_pid_mismatch"),
+        ("unreadable_pid", "service_pid_mismatch"),
+        ("recycled", "service_create_time_mismatch"),
+        ("older_time", "service_create_time_mismatch"),
+        ("dead", "service_identity_unavailable"),
+        ("unreadable_time", "service_identity_unavailable"),
+        ("invalid_live_time", "service_create_time_mismatch"),
+    ],
+)
+def test_cmd_stop_receipt_refuses_without_any_shutdown_side_effect(
+    monkeypatch, capsys, receipt_shutdown, state, reason,
+):
+    receipt = _startup_receipt_payload()
+    if state == "replaced":
+        receipt_shutdown.pid_path.write_text("9012\n", encoding="utf-8")
+    elif state == "missing":
+        receipt_shutdown.pid_path.unlink()
+    elif state == "unreadable_pid":
+        receipt_shutdown.pid_path.write_bytes(b"\xff")
+    elif state in ("recycled", "older_time"):
+        receipt["service_create_unix_ms"] += 2.001 if state == "recycled" else -2.001
+    elif state == "dead":
+        monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
+    else:
+        monkeypatch.setattr(runtime, "process_create_time", lambda pid: None if state == "unreadable_time" else float("nan"))
+    before = receipt_shutdown.pid_path.read_bytes() if receipt_shutdown.pid_path.exists() else None
+
+    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 3
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"reason": reason}
+    assert receipt_shutdown.calls == []
+    assert (receipt_shutdown.pid_path.read_bytes() if receipt_shutdown.pid_path.exists() else None) == before
+
+
+@pytest.mark.parametrize("field", list(_startup_receipt_payload()))
+def test_cmd_stop_rejects_incomplete_receipt(capsys, receipt_shutdown, field):
+    receipt = _startup_receipt_payload()
+    del receipt[field]
+
+    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 3
+
+    assert json.loads(capsys.readouterr().err) == {"reason": "invalid_receipt"}
+    assert receipt_shutdown.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True), ("schema_version", 1.0), ("schema_version", 2),
+        ("outcome", "unknown"), ("outcome", ["started"]),
+        ("service_pid", True), ("service_pid", -1234), ("service_pid", 1234.0),
+        ("ui_pid", 0), ("ui_pid", "5678"),
+        ("service_create_unix_ms", None), ("service_create_unix_ms", "1789010100123.5"),
+        ("service_create_unix_ms", float("nan")), ("service_create_unix_ms", float("inf")),
+        ("ui_create_unix_ms", -1), ("ui_create_unix_ms", True),
+        ("ui_create_unix_ms", float("-inf")), ("ui_create_unix_ms", 10 ** 400),
+    ],
+)
+def test_cmd_stop_rejects_invalid_receipt_values(capsys, receipt_shutdown, field, value):
+    receipt = _startup_receipt_payload()
+    receipt[field] = value
+
+    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 3
+
+    assert json.loads(capsys.readouterr().err) == {"reason": "invalid_receipt"}
+    assert receipt_shutdown.calls == []
+
+
+@pytest.mark.parametrize("receipt", ["", "{", "null", "[]", '"receipt"', "[" * 2000 + "]" * 2000])
+def test_cmd_stop_rejects_malformed_receipt(capsys, receipt_shutdown, receipt):
+    assert cli.cmd_stop(receipt=receipt) == 3
+
+    assert json.loads(capsys.readouterr().err) == {"reason": "invalid_receipt"}
+    assert receipt_shutdown.calls == []
+
+
+def test_cmd_stop_without_receipt_keeps_legacy_full_stop(monkeypatch, capsys, receipt_shutdown):
+    def unexpected_identity_read(pid):
+        raise AssertionError("Unscoped stop must not inspect receipt identity")
+
+    monkeypatch.setattr(runtime, "process_create_time", unexpected_identity_read)
+    receipt_shutdown.pid_path.unlink()
+
+    assert cli.cmd_stop() == 0
+
+    assert receipt_shutdown.calls == ["service", "ui", "opencode", ("stopped",)]
+    output = capsys.readouterr()
+    assert output.out == "OpenCode server stopped\n"
+    assert output.err == ""
+
+
+def test_cmd_stop_matched_receipt_preserves_stop_failure_exit_code(monkeypatch, capsys, receipt_shutdown):
+    monkeypatch.setattr(runtime, "stop_service", lambda: receipt_shutdown.calls.append("service") or False)
+
+    assert cli.cmd_stop(receipt=json.dumps(_startup_receipt_payload())) == 2
+
+    assert receipt_shutdown.calls == ["service", "ui", "opencode", ("error", "service stop failed")]
+    assert capsys.readouterr().err == "ERROR: Avibe service did not stop; preserving pidfile and aborting.\n"
+
+
 def test_cmd_stop_ignores_absent_services(monkeypatch):
     status = []
 
@@ -654,6 +800,183 @@ def _no_live_runtime_processes(monkeypatch):
     monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
 
 
+def _fake_start_result(pid, kwargs, *, reused=False):
+    start_info = kwargs.get("start_info")
+    if start_info is not None:
+        start_info.pid = pid
+        start_info.create_unix_ms = 1789010100000.5 + pid
+        start_info.reused = reused
+    return pid
+
+
+@pytest.fixture
+def receipt_runtime(monkeypatch):
+    service_path = paths.get_runtime_pid_path()
+    ui_path = paths.get_runtime_ui_pid_path()
+    service_path.parent.mkdir(parents=True, exist_ok=True)
+    process_times = {1234: 1789010100.1235, 5678: 1789010100.4565, 9012: 1789010100.7895}
+    spawned = []
+    captured = []
+    opened = []
+
+    def fake_process(pid):
+        captured.append(pid)
+        return SimpleNamespace(create_time=lambda: process_times[pid])
+
+    def spawn_service(*args, **kwargs):
+        spawned.append("service")
+        return SimpleNamespace(pid=1234, poll=lambda: None)
+
+    def spawn_ui(args, pid_path, *logs, **kwargs):
+        spawned.append("ui")
+        pid_path.write_text("5678", encoding="utf-8")
+        return 5678
+
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=True),
+    ))
+    monkeypatch.setattr(cli, "_write_status", lambda *args: None)
+    monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
+    monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(runtime, "_SERVICE_START_PROCESSES", {})
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in process_times)
+    monkeypatch.setattr(runtime.psutil, "Process", fake_process)
+    monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: False)
+    monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: True)
+    monkeypatch.setattr(runtime, "_ui_server_compatible", lambda host, port: True)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "extra_service_process_pids", lambda **kwargs: [])
+    monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: [])
+    monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: True)
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: True)
+    monkeypatch.setattr(runtime, "spawn_service_background_process", spawn_service)
+    monkeypatch.setattr(runtime, "spawn_background", spawn_ui)
+    return SimpleNamespace(
+        service_path=service_path, ui_path=ui_path, process_times=process_times,
+        spawned=spawned, captured=captured, opened=opened,
+    )
+
+
+@pytest.mark.parametrize("reused", [False, True])
+@pytest.mark.parametrize("open_browser", [None, False])
+def test_cmd_start_receipt_uses_launch_provenance_and_psutil_identity(
+    monkeypatch, capsys, receipt_runtime, reused, open_browser,
+):
+    if reused:
+        receipt_runtime.service_path.write_text("1234", encoding="utf-8")
+        receipt_runtime.ui_path.write_text("5678", encoding="utf-8")
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: None if reused else 1234)
+
+    assert cli.cmd_start(open_browser=open_browser) == 0
+
+    output = capsys.readouterr().out
+    receipts = [line for line in output.splitlines() if line.startswith("@avibe-start-receipt:")]
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].split(":", 1)[1]) == {
+        "schema_version": 1, "outcome": "reused" if reused else "started",
+        "service_pid": 1234, "ui_pid": 5678,
+        "service_create_unix_ms": receipt_runtime.process_times[1234] * 1000,
+        "ui_create_unix_ms": receipt_runtime.process_times[5678] * 1000,
+    }
+    assert receipt_runtime.spawned == ([] if reused else ["service", "ui"])
+    assert receipt_runtime.captured == [1234, 5678]
+    assert bool(receipt_runtime.opened) == (open_browser is None)
+    assert "Web UI:\n  http://127.0.0.1:5123\n" in output
+    assert "Run: vibe remote" in output
+
+
+@pytest.mark.parametrize("reused", [False, True])
+def test_start_ui_captures_its_own_provenance_before_readiness(monkeypatch, receipt_runtime, reused):
+    if reused:
+        receipt_runtime.ui_path.write_text("5678", encoding="utf-8")
+    before = receipt_runtime.process_times[5678] * 1000
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: receipt_runtime.process_times.update({5678: 9999}) or True)
+    info = runtime.ProcessStartInfo()
+
+    assert runtime.start_ui("127.0.0.1", 5123, start_info=info) == 5678
+
+    assert info.reused is reused
+    assert info.create_unix_ms == before
+    assert receipt_runtime.spawned == ([] if reused else ["ui"])
+
+
+@pytest.mark.parametrize("branch", ["recorded", "starting", "ready_owner", "mismatched_command", "lock_owner"])
+def test_start_service_receipt_marks_every_existing_return_as_reused(monkeypatch, receipt_runtime, branch):
+    receipt_runtime.service_path.write_text("1234", encoding="utf-8")
+    alive_checks = iter([False, True]) if branch == "lock_owner" else None
+    if alive_checks is not None:
+        monkeypatch.setattr(runtime, "pid_alive", lambda pid: next(alive_checks))
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: branch == "recorded")
+    monkeypatch.setattr(runtime, "_pid_reservation_is_fresh", lambda *args: True)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 9012)
+    monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: branch == "mismatched_command")
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, 1234))
+    info = runtime.ProcessStartInfo()
+    expected_pid = 9012 if branch == "ready_owner" else 1234
+
+    assert runtime.start_service(wait_for_ready=branch != "starting", start_info=info) == expected_pid
+
+    assert info.reused is True
+    assert info.pid == expected_pid
+    assert info.create_unix_ms == receipt_runtime.process_times[expected_pid] * 1000
+    assert receipt_runtime.spawned == []
+
+
+def test_start_service_receipt_adopts_scoped_owner(monkeypatch, receipt_runtime):
+    monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: ["systemd-run", "--scope"])
+    monkeypatch.setattr(runtime, "_start_scoped_service_result", lambda *args, **kwargs: 9012)
+    info = runtime.ProcessStartInfo()
+
+    assert runtime.start_service(start_info=info) == 9012
+
+    assert info.reused is False
+    assert info.create_unix_ms == receipt_runtime.process_times[9012] * 1000
+    assert receipt_runtime.captured == [1234, 9012]
+    assert receipt_runtime.spawned == ["service"]
+
+
+def test_start_service_receipt_keeps_identity_captured_before_readiness(monkeypatch, receipt_runtime):
+    before = receipt_runtime.process_times[1234] * 1000
+    monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: receipt_runtime.process_times.update({1234: 9999}) or True)
+    info = runtime.ProcessStartInfo()
+
+    assert runtime.start_service(start_info=info) == 1234
+
+    assert info.reused is False
+    assert info.create_unix_ms == before
+    assert receipt_runtime.captured == [1234]
+
+
+def test_cmd_start_receipt_tracks_late_authoritative_service_pid(monkeypatch, capsys, receipt_runtime):
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: False)
+    monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: False)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 9012)
+
+    assert cli.cmd_start(open_browser=False) == 0
+
+    receipt_line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("@avibe-start-receipt:"))
+    receipt = json.loads(receipt_line.split(":", 1)[1])
+    assert receipt["service_pid"] == 9012
+    assert receipt["service_create_unix_ms"] == receipt_runtime.process_times[9012] * 1000
+    assert receipt["outcome"] == "started"
+    assert receipt_runtime.captured == [1234, 5678, 9012]
+
+
+def test_cmd_start_does_not_emit_a_receipt_with_unreadable_identity(monkeypatch, capsys, receipt_runtime):
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: None)
+
+    with pytest.raises(ValueError, match="service_create_unix_ms"):
+        cli.cmd_start(open_browser=False)
+
+    assert "@avibe-start-receipt:" not in capsys.readouterr().out
+
+
 def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     calls = []
     config = SimpleNamespace(
@@ -670,12 +993,12 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
         lambda: calls.append(("handover",)),
     )
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(
         cli.runtime,
         "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
+        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or _fake_start_result(5678, kwargs),
     )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
@@ -758,12 +1081,13 @@ def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):
     )
     opened = []
 
+    _no_live_runtime_processes(monkeypatch)
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
@@ -784,12 +1108,12 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(
         cli.runtime,
         "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
+        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or _fake_start_result(5678, kwargs),
     )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
@@ -817,9 +1141,9 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
@@ -849,7 +1173,7 @@ def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(m
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
     monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
     monkeypatch.setattr(
         cli.runtime,
         "stop_ui",
@@ -859,7 +1183,7 @@ def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(m
     monkeypatch.setattr(
         cli.runtime,
         "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
+        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or _fake_start_result(9012, kwargs),
     )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
@@ -895,7 +1219,7 @@ def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
     monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs, reused=True))
     monkeypatch.setattr(
         cli.runtime,
         "stop_ui",
@@ -905,7 +1229,7 @@ def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
     monkeypatch.setattr(
         cli.runtime,
         "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
+        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or _fake_start_result(9012, kwargs),
     )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
@@ -928,7 +1252,7 @@ def test_cmd_start_keeps_a_reused_pair_untouched(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
     monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs, reused=True))
     monkeypatch.setattr(
         cli.runtime,
         "stop_ui",
@@ -938,7 +1262,7 @@ def test_cmd_start_keeps_a_reused_pair_untouched(monkeypatch, capsys):
     monkeypatch.setattr(
         cli.runtime,
         "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 5678,
+        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or _fake_start_result(5678, kwargs, reused=True),
     )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
@@ -2053,6 +2377,24 @@ def test_start_parser_accepts_no_open_browser():
 
     assert args.command == "start"
     assert args.open_browser is False
+
+
+@pytest.mark.parametrize("receipt", [None, json.dumps(_startup_receipt_payload())])
+def test_stop_parser_and_main_preserve_optional_receipt(monkeypatch, receipt):
+    arguments = ["stop"] if receipt is None else ["stop", "--receipt", receipt]
+    parsed = cli.build_parser().parse_args(arguments)
+    assert parsed.command == "stop"
+    assert parsed.receipt == receipt
+    calls = []
+    monkeypatch.setattr(cli.sys, "argv", ["vibe", *arguments])
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    monkeypatch.setattr(cli, "cmd_stop", lambda **kwargs: calls.append(kwargs) or 3)
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+
+    assert exited.value.code == 3
+    assert calls == ([{}] if receipt is None else [{"receipt": receipt}])
 
 
 def test_remote_parser_accepts_pairing_command():
