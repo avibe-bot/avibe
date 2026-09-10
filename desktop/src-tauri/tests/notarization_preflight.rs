@@ -58,8 +58,9 @@ fn entitlements_cover_what_the_hardened_runtime_denies_wkwebview() {
     // the exception. Stated as a property over the plist text so an added
     // entitlement cannot silently drop the load-bearing one.
     assert!(
-        entitlements.contains("<key>allow-unsigned-executable-memory</key>") && entitlements.contains("<true/>"),
-        "entitlements must grant allow-unsigned-executable-memory"
+        entitlements.contains("<key>com.apple.security.cs.allow-unsigned-executable-memory</key>")
+            && entitlements.contains("<true/>"),
+        "entitlements must grant the fully-namespaced com.apple.security.cs.allow-unsigned-executable-memory: macOS ignores the unnamespaced spelling, so the hardened runtime would deny WKWebView's executable-memory allocation"
     );
 }
 

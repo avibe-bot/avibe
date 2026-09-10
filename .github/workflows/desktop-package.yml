@@ -131,6 +131,7 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -eu
@@ -144,9 +145,17 @@ jobs:
           else
             echo "apple_signing=absent" >> "$GITHUB_ENV"
           fi
-          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ]; then
+          # The ApiKey notarization auth needs the .p8 private key ON DISK at
+          # APPLE_API_KEY_PATH; without it tauri-bundler falls back to
+          # searching ./private_keys and $HOME, which the runner never has,
+          # and notarization is skipped with only a warning.
+          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+            key_dir="$(mktemp -d)"
+            key_file="$key_dir/AuthKey_${APPLE_API_KEY}.p8"
+            printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_file"
             echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
             echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_PATH=$key_file" >> "$GITHUB_ENV"
           fi
 
       - name: Build self-contained installer
@@ -192,6 +201,9 @@ jobs:
 
       - name: Record artifact hashes
         shell: bash
+        env:
+          # Shell default on GitHub-hosted runners is uppercase RUNNER_OS.
+          RUNNER_OS: ${{ runner.os }}
         run: |
           mkdir -p desktop-package
           cp ${{ matrix.artifact_glob }} desktop-package/
@@ -200,7 +212,7 @@ jobs:
           # hashes so an acceptance build can never be mistaken for a signed
           # release artifact downstream. Non-macOS targets have no macOS
           # signature; the Windows signing path is not yet implemented.
-          if [ "${runner_os}" = "macOS" ]; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             printf '%s\n' "${signature_state:-unsigned-acceptance}" > desktop-package/SIGNATURE
           else
             printf '%s\n' "unsigned-acceptance" > desktop-package/SIGNATURE

@@ -6,7 +6,7 @@
 	     writable+executable memory. Apple's hardened runtime denies that by
 	     default; this exception is what every WKWebView app ships with, and
 	     notarization rejects a hardened-runtime bundle that lacks it. -->
-	<key>allow-unsigned-executable-memory</key>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
 	<true/>
 </dict>
 </plist>
