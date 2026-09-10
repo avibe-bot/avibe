@@ -141,12 +141,29 @@ jobs:
           # Developer-ID-signed but unnotarized; notarization credentials
           # without the certificate would submit the unsigned acceptance
           # build to Apple. All-or-nothing.
-          have_cert=0
-          have_api=0
-          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then have_cert=1; fi
-          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then have_api=1; fi
+          # Any-set implies all-set within each group; then the two groups
+          # must agree. A partially populated group is an operator error and
+          # fails loudly instead of silently passing as "absent".
+          cert_vars="APPLE_CERTIFICATE:$APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD:$APPLE_CERTIFICATE_PASSWORD"
+          api_vars="APPLE_API_KEY:$APPLE_API_KEY APPLE_API_ISSUER:$APPLE_API_ISSUER APPLE_API_PRIVATE_KEY:$APPLE_API_PRIVATE_KEY"
+          check_group() {
+            group_name="$1"; shift
+            set_count=0; total=0; missing=""
+            for pair in "$@"; do
+              name="${pair%%:*}"; value="${pair#*:}"
+              total=$((total + 1))
+              if [ -n "$value" ]; then set_count=$((set_count + 1)); else missing="$missing $name"; fi
+            done
+            if [ "$set_count" -gt 0 ] && [ "$set_count" -ne "$total" ]; then
+              echo "::error::${group_name} credential group is partially configured; missing:$missing. Set the whole group, or none of it."
+              exit 1
+            fi
+            [ "$set_count" -eq "$total" ]
+          }
+          if check_group "Apple signing" $cert_vars; then have_cert=1; else have_cert=0; fi
+          if check_group "Apple notarization" $api_vars; then have_api=1; else have_api=0; fi
           if [ "$have_cert" != "$have_api" ]; then
-            echo "::error::Apple credentials are half-configured: signing and notarization secrets must be set together (APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD, and APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_PRIVATE_KEY), or omitted together for an unsigned acceptance build."
+            echo "::error::Apple credentials are half-configured: the signing group (APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD) and the notarization group (APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_PRIVATE_KEY) must be set together or omitted together."
             exit 1
           fi
           if [ "$have_cert" = "1" ]; then

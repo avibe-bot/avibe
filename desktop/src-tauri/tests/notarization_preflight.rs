@@ -50,42 +50,52 @@ fn the_macos_bundle_declares_the_hardened_runtime_and_entitlements() {
 }
 
 #[test]
-fn entitlements_cover_what_the_hardened_runtime_denies_wkwebview() {
+fn entitlements_grant_no_executable_memory_exception() {
     let entitlements = read_to_string(&entitlements_path());
-    // WKWebView's JavaScript runtime allocates writable-and-executable
-    // memory; the hardened runtime denies that by default and the notary
-    // rejects the bundle while the app crashes at first navigation without
-    // the exception. Stated as a property over the plist text so an added
-    // entitlement cannot silently drop the load-bearing one.
+    // WKWebView's JavaScript engine JITs inside WebKit-owned helper
+    // processes; the embedding Tauri process itself needs no
+    // executable-memory exception, and the notary does not require one.
+    // Granting it would weaken the hardened runtime for the whole process,
+    // so its absence is the invariant: any re-add must come with evidence
+    // that the app process itself needs it.
     assert!(
-        entitlements.contains("<key>com.apple.security.cs.allow-unsigned-executable-memory</key>")
-            && entitlements.contains("<true/>"),
-        "entitlements must grant the fully-namespaced com.apple.security.cs.allow-unsigned-executable-memory: macOS ignores the unnamespaced spelling, so the hardened runtime would deny WKWebView's executable-memory allocation"
+        !entitlements.contains("<key>"),
+        "entitlements must stay empty; in particular no executable-memory exception for the embedding process"
     );
 }
 
 #[test]
 fn the_dmg_script_never_re_signs_an_identity_signed_app() {
     let script = read_to_string(&crate_dir().join("..").join("scripts").join("create-macos-dmg.sh"));
-    // The script must branch on signature state: ad-hoc or unsigned inputs
-    // keep the disposable-copy ad-hoc signing, while an identity signature is
-    // copied verbatim. The branch condition and the re-sign must both be
-    // present, and the re-sign must stay inside the ad-hoc branch — asserted
-    // by ordering: the branch test appears before the unconditional-looking
-    // fallback, and the ad-hoc `--sign -` appears exactly once.
-    let branch = script
-        .find("not set")
-        .expect("the script tests for an ad-hoc/absent signature before re-signing");
+    // The guard must bind to executable logic, not comment prose. The
+    // ad-hoc re-sign may only run inside the branch whose `if` condition
+    // tests the ad-hoc/absent signature markers; stripping that condition
+    // to re-sign unconditionally must fail this test even with every
+    // comment left intact.
+    let if_line = script
+        .lines()
+        .find(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("if ") && (trimmed.contains("adhoc") || trimmed.contains("signature"))
+        })
+        .expect("the script branches on signature state before re-signing");
+    assert!(
+        if_line.contains("adhoc") && if_line.contains("identity"),
+        "the branch condition must test the ad-hoc/absent markers: {if_line}"
+    );
+    let if_offset = script.find(if_line.trim()).expect("if line offset");
     let resign = script
         .find("--sign -")
         .expect("the script re-signs disposable ad-hoc copies");
     assert!(
-        branch < resign,
-        "ad-hoc re-signing must only run for ad-hoc or unsigned inputs"
+        if_offset < resign,
+        "the ad-hoc re-sign must appear after (inside) the signature-state branch"
     );
+    // The re-sign appears exactly once and no second signing site exists
+    // outside the branch.
     assert_eq!(
-        script.matches("--sign -").count(),
+        script.matches("--sign ").count(),
         1,
-        "exactly one ad-hoc re-sign site: an identity-signed app is never re-signed"
+        "exactly one re-sign site: an identity-signed app is never re-signed"
     );
 }
