@@ -155,20 +155,26 @@ are not the desktop OS and cannot route the scheme.
 
 - Parser: every row in the mapping table produces the exact
   Workbench path; every rejected shape (wrong scheme, extra
-  segment, bad id, complete `.` / `..` path id, authority) produces
-  `None` and never includes the raw input in a UI string. An id that
-  merely contains a dot still maps.
-- Hot path: a second-instance argv containing a valid link focuses
-  the main window and requests in-window navigation to the mapped
-  path on the **currently adopted origin**, not on `devUrl` / port
-  1420.
-- Cold path: a stashed valid target is applied on the first
-  successful Workbench navigation and then cleared; a failed
-  bootstrap leaves the stash dropped and the window on bootstrap.
+  segment, bad id, complete `.` / `..` path id, authority, explicit
+  port) produces `None` and never includes the raw input in a UI
+  string. An id that merely contains a dot still maps.
+- Hot path: a valid link focuses the main window and requests
+  in-window navigation to the mapped path on the **currently adopted
+  origin**, not on `devUrl` / port 1420 — whether the link arrived as
+  second-instance argv **or** as a macOS native open-URL / GURL
+  Apple Event (raw string into the same parser/stash). An
+  implementation that only wires argv does not satisfy this.
+- Cold path: a stashed valid target (from argv **or** the first
+  macOS open-URL event) is applied on the first successful Workbench
+  navigation and then cleared; a failed bootstrap leaves the stash
+  dropped and the window on bootstrap.
 - Boundary: no new command appears in `src-tauri/build.rs`;
   `shell_boundaries.rs` still forbids `remote` grants. Deep-link
-  handling lives in the single-instance callback / argv path, which
-  is not WebView-callable.
+  handling lives in argv, the single-instance callback, and the
+  macOS native open-URL adapter — none of which are
+  WebView-callable. The adapter must feed the shared parser/stash;
+  it must not reintroduce a `Url::as_str()` path after Tao has
+  normalized the URL.
 - Capability: a Workbench origin (remote after navigation) still
   cannot invoke bootstrap commands after a deep link is consumed.
 

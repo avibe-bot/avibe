@@ -143,7 +143,12 @@ Python does not grow a "please notify" flag or a `visibility` field in v1.
 - `approval.requested`: key = `request_id`. The same pending request
   is never notified twice per shell lifetime. Status transitions away
   from `pending` drop the key so a later re-open can notify again.
-- `run.terminal`: key = `run_id`. Terminal is once.
+- `run.terminal`: key = `run_id`. Terminal is once per key while the
+  key is retained. Retention is **bounded** (LRU or TTL, frozen
+  default: 512 entries or 24 hours, whichever hits first). The bound
+  only needs to cover repeated terminal publications of the same run
+  (SSE bursts / reconnect duplicates), not process lifetime. A
+  tray-resident shell must not grow this set without bound.
 
 A notification is suppressed (not queued) when:
 
