@@ -45,6 +45,25 @@
       "stopFailure": "The Runtime could not be stopped safely. Avibe remains open. Try again after checking the Runtime.",
       "loginFailure": "The login setting could not be read or changed. Check your operating system's login settings and try again."
     },
+    "notifications": {
+      "toggle": "Notifications",
+      "approvalRequested": {
+        "title": "Approval needed",
+        "body": "A Vault request is waiting for your approval."
+      },
+      "runSucceeded": {
+        "title": "Run completed",
+        "body": "Background work has finished successfully."
+      },
+      "runFailed": {
+        "title": "Run failed",
+        "body": "Background work could not finish. Open the Workbench to review it."
+      },
+      "runCanceled": {
+        "title": "Run canceled",
+        "body": "Background work was canceled."
+      }
+    },
     "uninstall": {
       "menuLabel": "Uninstall Avibe…",
       "confirmTitle": "Uninstall Avibe",

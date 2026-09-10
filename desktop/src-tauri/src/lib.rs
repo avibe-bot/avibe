@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod native_frame;
+mod notifications;
 
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
@@ -87,6 +88,7 @@ struct ProductCatalog {
 #[derive(Deserialize)]
 struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
+    notifications: notifications::NativeNotificationCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
 }
@@ -270,6 +272,7 @@ struct NativeMenus {
     status: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
     login: CheckMenuItem<tauri::Wry>,
+    notifications: CheckMenuItem<tauri::Wry>,
     stop_present: AtomicBool,
     displayed: Mutex<Option<(TrayRuntimeState, bool)>>,
 }
@@ -290,6 +293,16 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, &catalog.quit, true, None::<&str>)?;
+    let notifications = CheckMenuItem::with_id(
+        app,
+        notifications::MENU_ID,
+        native_catalog_for_locales(sys_locale::get_locales())
+            .notifications
+            .toggle,
+        true,
+        app.state::<notifications::Notifications>().enabled(),
+        None::<&str>,
+    )?;
     let tray = Menu::with_items(
         app,
         &[
@@ -297,6 +310,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &status,
             &PredefinedMenuItem::separator(app)?,
             &login,
+            &notifications,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -321,6 +335,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         status,
         stop,
         login,
+        notifications,
         stop_present: AtomicBool::new(false),
         displayed: Mutex::new(None),
     });
@@ -439,6 +454,7 @@ fn quit_choice(result: MessageDialogResult, catalog: &NativeTrayCatalog) -> Quit
 }
 
 fn exit_shell(app: &AppHandle) {
+    notifications::stop(app);
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
     app.exit(0);
 }
@@ -530,6 +546,7 @@ fn stop_runtime(app: AppHandle, quit: bool) {
         return;
     }
     refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
+    notifications::stop(&app);
     tauri::async_runtime::spawn(async move {
         match host.stop_owned_runtime().await {
             Ok(()) if quit => exit_shell(&app),
@@ -790,6 +807,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         return;
     };
+    notifications::start(app, origin.clone());
     let window_generation = app.state::<Shell>().window_generation.clone();
     loop {
         let observed_generation = window_generation.load(Ordering::SeqCst);
@@ -857,6 +875,7 @@ fn workbench_navigation_failure_status(ready: &BootstrapStatus, origin: &Loopbac
 /// Watches the exact origin that bootstrap proved ready. The caller owns the
 /// shell's single monitor activity until this task exits or begins recovery.
 fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<AtomicU8>) {
+    notifications::start(&app, origin.clone());
     let host = app.state::<Shell>().host.clone();
     let generation = app.state::<Shell>().monitor_generation.clone();
     let observed_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -897,6 +916,7 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 }
                 // This only releases retained launch ownership. The desktop
                 // shell never sends a stop signal to the old Runtime.
+                notifications::stop(&app);
                 host.reset_after_confirmed_runtime_loss();
                 if return_to_bootstrap(&app) {
                     spawn_owned_bootstrap(app);
@@ -934,6 +954,7 @@ fn return_to_bootstrap(app: &AppHandle) -> bool {
     if window.navigate(bootstrap_url).is_err() {
         return false;
     }
+    notifications::stop(app);
     let _ = set_active_origin(app, None);
     true
 }
@@ -1202,6 +1223,7 @@ fn request_private_runtime_removal(app: AppHandle) {
                 return;
             }
 
+            notifications::stop(&confirmation_app);
             tauri::async_runtime::spawn(async move {
                 match host.remove_private_runtime(active_origin.as_ref()).await {
                     Ok(true) => {
@@ -1248,12 +1270,20 @@ pub fn run() {
         .plugin(native_frame::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
                 QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
+                notifications::MENU_ID => {
+                    let notifications = app.state::<notifications::Notifications>();
+                    notifications.toggle();
+                    if let Some(menus) = app.try_state::<NativeMenus>() {
+                        let _ = menus.notifications.set_checked(notifications.enabled());
+                    }
+                }
                 _ => {}
             }
             #[cfg(feature = "bundled-runtime")]
@@ -1347,6 +1377,9 @@ pub fn run() {
                 }
             };
             app.manage(Shell::new(host, bootstrap_url));
+            app.manage(notifications::Notifications::new(
+                app.path().app_local_data_dir()?.join("notifications.json"),
+            ));
             if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
                 links.receive(
                     std::env::args_os()

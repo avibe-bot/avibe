@@ -25,9 +25,9 @@ Default on. The tray has a checkable "Notifications" item that persists
 the preference. System Focus / Do Not Disturb is left to the OS; Avibe
 does not reimplement it.
 
-Clicking a notification focuses the Avibe window. Deep-link navigation
-into a specific session (`avibe://session/<id>`) is G5 and is **not**
-in this slice — the click is "come back to Avibe", not "open this row".
+Notification activation follows the OS-default behavior described in
+**Click** below. Deep-link navigation into a specific session
+(`avibe://session/<id>`) is G5 and is **not** in this slice.
 
 ## Why SSE, not polling
 
@@ -202,9 +202,14 @@ notification path does not grant any `remote` capability.
 
 ### Click
 
-Click = `show` + `unminimize` + `set_focus` on the main window.
-No Workbench navigation in v1 (that is G5). If the window was hidden
-to tray, this is the same path as the tray "Open Avibe" item.
+v1 ships **OS-default activation**, not a shell click callback: on macOS,
+clicking a banner activates the sending app by default (approximately
+show + focus); on Windows, unpackaged-toast click behavior is OS/backend
+dependent and may only dismiss. The notification plugin's desktop API
+does not expose an action callback. Explicit cross-platform click =
+`show` + `unminimize` + `set_focus` is **v2 with native activation adapter
+(macOS UNUserNotificationCenter delegate + Windows toast activation)**.
+No Workbench navigation or simulated click wiring is included in v1.
 
 ## Frozen architecture split
 
@@ -280,5 +285,5 @@ the state in which notifications matter.
 
 Does not depend on G1 signing or G2 auto-update.
 
-Does not block G5; G5 should reuse the same notification click
-once deep links exist (swap `show window` for `show + navigate`).
+Does not block G5. A notification-specific deep-link target follows the
+native activation adapter rather than assuming a v1 click callback exists.

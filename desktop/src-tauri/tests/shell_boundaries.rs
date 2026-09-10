@@ -95,6 +95,94 @@ fn the_shell_enables_no_capability_beyond_bootstrap() {
 }
 
 #[test]
+fn notifications_are_native_only_without_remote_capabilities_or_workbench_callable_commands() {
+    let source = shipping_source("src/lib.rs");
+    let native = shipping_source("src/notifications.rs");
+    let build = shipping_source("build.rs");
+    assert!(source.contains(".plugin(tauri_plugin_notification::init())"));
+    assert!(native.contains("NotificationExt"));
+    assert!(native.contains(".notification()"));
+    assert!(native.contains("sink.gate().allows()"));
+    assert!(!build.contains("notification"));
+    let commands = source
+        .split(".invoke_handler(tauri::generate_handler![")
+        .nth(1)
+        .unwrap()
+        .split("])")
+        .next()
+        .unwrap();
+    assert!(!commands.contains("notification"));
+    for forbidden in ["#[tauri::command]", "invoke_handler", ".listen(", ".emit(", ".eval("] {
+        assert!(
+            !native.contains(forbidden),
+            "notification path must not use {forbidden}"
+        );
+    }
+    for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "json") {
+            let capability = read_json(path);
+            assert!(capability.get("remote").is_none());
+            assert!(!capability["permissions"].to_string().contains("notification:"));
+        }
+    }
+}
+
+#[test]
+fn notification_lifecycle_follows_runtime_ownership_not_webview_visibility_or_sse_health() {
+    let source = shipping_source("src/lib.rs");
+    for (function, next_function, required) in [
+        (
+            "fn open_workbench(",
+            "fn workbench_navigation_failure_status",
+            "notifications::start(app, origin.clone())",
+        ),
+        (
+            "fn start_runtime_monitor(",
+            "fn return_to_bootstrap",
+            "notifications::stop(&app)",
+        ),
+        (
+            "fn stop_runtime(",
+            "fn toggle_start_at_login",
+            "notifications::stop(&app)",
+        ),
+        (
+            "fn exit_shell(",
+            "fn request_runtime_lifecycle",
+            "notifications::stop(app)",
+        ),
+        (
+            "fn request_private_runtime_removal(",
+            "pub fn run()",
+            "notifications::stop(&confirmation_app)",
+        ),
+    ] {
+        let body = source
+            .split(function)
+            .nth(1)
+            .unwrap()
+            .split(next_function)
+            .next()
+            .unwrap();
+        assert!(body.contains(required), "{function} must retain {required}");
+    }
+    let close = source
+        .split("event: WindowEvent::CloseRequested")
+        .nth(1)
+        .unwrap()
+        .split("if let RunEvent::ExitRequested")
+        .next()
+        .unwrap();
+    assert!(!close.contains("notifications::stop"));
+    let native = shipping_source("src/notifications.rs");
+    assert!(native.contains("previous.task.abort()"));
+    assert!(native.contains("current.origin == origin"));
+    assert!(native.contains("observed_generation"));
+    assert!(!native.contains("/ready") && !native.contains("bootstrap"));
+}
+
+#[test]
 fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
     let source = shipping_source("src/lib.rs");
     let build = shipping_source("build.rs");
