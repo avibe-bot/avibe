@@ -113,6 +113,8 @@ def run_updated_payload(
     session_id: str | None = None,
     definition_id: str | None = None,
     updated_at: str | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
     cancel_requested: bool | None = None,
 ) -> dict[str, Any]:
     """Minimal run-lifecycle payload for browser refetch-on-event consumers."""
@@ -126,6 +128,10 @@ def run_updated_payload(
         payload["definition_id"] = definition_id
     if updated_at:
         payload["updated_at"] = updated_at
+    if started_at:
+        payload["started_at"] = started_at
+    if completed_at:
+        payload["completed_at"] = completed_at
     if cancel_requested is not None:
         payload["cancel_requested"] = cancel_requested
     return payload

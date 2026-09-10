@@ -275,15 +275,27 @@ def test_get_run_enriches_identically_to_the_list(tmp_path: Path) -> None:
             }
         )
         store.enqueue_run(
-            _run("run_detail", run_type="watch", definition_id="watch_detail", session_id=session_id)
+            _run(
+                "run_detail",
+                run_type="watch",
+                definition_id="watch_detail",
+                session_id=session_id,
+                started_at="2026-07-25T23:59:20Z",
+                completed_at=NOW,
+            )
         )
         listed = store.list_runs_page(page_request=None).items[0]
         detail = store.get_run("run_detail")
     finally:
         store.close()
 
-    projected = ("session_title", "session_label", "session_is_workbench", "definition_name", "definition_kind")
+    projected = (
+        "session_title", "session_label", "session_is_workbench", "definition_name", "definition_kind",
+        "started_at", "completed_at",
+    )
     assert {key: detail[key] for key in projected} == {key: listed[key] for key in projected}
+    assert detail["started_at"] == "2026-07-25T23:59:20Z"
+    assert detail["completed_at"] == NOW
 
 
 def test_run_enrichment_is_batched(tmp_path: Path) -> None:
