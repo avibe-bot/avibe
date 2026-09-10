@@ -74,7 +74,6 @@ class PromptModule:
 # Change this only to deliberately change prompt order, never for a UI-only sort.
 PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("runtime-snapshot-open", "Codex Runtime Snapshot Start", "runtime-snapshot-open.md", trailing_newlines=2),
-    PromptModule("agent-instructions", "Agent Custom Instructions", "agent-instructions.md", trailing_newlines=2, placeholders=("agent_instructions",)),
     PromptModule("base-capabilities-intro", "Base Capabilities Intro", "base-capabilities-intro.md", trailing_newlines=2),
     PromptModule("agent-working-principles", "Agent Working Principles", "agent-working-principles.md", trailing_newlines=2),
     PromptModule("session-start-prompt", "Session Start Prompt", "session-start.md", trailing_newlines=2, placeholders=("default_session_id",)),
@@ -95,6 +94,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("skills-catalog", "Available Skills", "skills-catalog.md", placeholders=("skill_rows",)),
     PromptModule("skills-more-notice", "Skills Next Page", "skills-more.md", placeholders=("next_page",)),
     PromptModule("session-title-prompt", "Session Title Prompt", "session-title.md", leading_newlines=1, trailing_newlines=1),
+    PromptModule("agent-instructions", "Agent Custom Instructions", "agent-instructions.md", leading_newlines=2, placeholders=("agent_instructions",)),
     PromptModule("runtime-snapshot-close", "Codex Runtime Snapshot End", "runtime-snapshot-close.md", leading_newlines=1),
 )
 

@@ -679,6 +679,8 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
     prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
     assert captured["connected"] is True
     assert "Use the release-reviewer Vibe Agent policy." in prompt
+    assert prompt.endswith("\n\nUse the release-reviewer Vibe Agent policy.")
+    assert prompt.count("Use the release-reviewer Vibe Agent policy.") == 1
 
 
 def test_session_handler_includes_show_pages_despite_legacy_opt_out(

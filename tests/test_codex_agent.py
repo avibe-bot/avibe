@@ -1963,6 +1963,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         load_subagent.assert_called_once_with("reviewer", project_root=Path("/tmp/work"))
         transport.send_request.assert_not_awaited()
         self.assertIn("Focus on regressions.", developer_instructions)
+        self.assertTrue(developer_instructions.endswith("\n\nFocus on regressions."))
+        self.assertEqual(developer_instructions.count("Focus on regressions."), 1)
         self.assertIn("# Avibe", developer_instructions)
         self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
         self.assertNotIn("## Quick-reply buttons", developer_instructions)
@@ -4826,10 +4828,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             agent._render_developer_prompt_snapshot("prompt two"),
         )
         latest = calls[2].args[1]["items"][0]["content"][0]["text"]
-        self.assertIn("Only the most recent snapshot is active", latest)
-        self.assertIn("including untagged versions", latest)
-        self.assertIn("omitted from this snapshot no longer apply", latest)
-        self.assertNotIn("prompt one", latest)
+        self.assertEqual(latest, "<avibe_runtime_instructions>\n\nprompt two\n</avibe_runtime_instructions>")
 
     async def test_start_turn_does_not_reinject_when_explicit_model_reset_is_unsupported(self):
         agent = object.__new__(CodexAgent)
@@ -6035,6 +6034,32 @@ class CodexPromptSnapshotRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(self.marker["strategy"], "fallback")
                     self.assertEqual(self.marker["sha256"], CodexAgent._prompt_fingerprint("stable prompt"))
+
+    async def test_previous_envelope_migrates_once_without_changing_prompt_body(self):
+        agent = self._setup("fallback")
+        old_snapshot = (
+            "<avibe_runtime_instructions>\n"
+            "Previous snapshot replacement declaration.\n\n"
+            "stable prompt\n</avibe_runtime_instructions>"
+        )
+        self.marker["sha256"] = hashlib.sha256(old_snapshot.encode()).hexdigest()
+        for restart in (False, False, True):
+            if restart:
+                agent = self._agent()
+            await agent._start_turn(
+                self.transport, self.request, "thread-1",
+                developer_instructions="stable prompt",
+            )
+        injections = [
+            entry for entry in self.transport.send_request.await_args_list
+            if entry.args[0] == "thread/inject_items"
+        ]
+        self.assertEqual(len(injections), 1)
+        self.assertEqual(
+            injections[0].args[1]["items"][0]["content"][0]["text"],
+            "<avibe_runtime_instructions>\n\nstable prompt\n</avibe_runtime_instructions>",
+        )
+        self.assertEqual(self.marker["sha256"], CodexAgent._prompt_fingerprint("stable prompt"))
 
     async def test_rejected_injection_restores_marker_and_retries_before_dispatch(self):
         for strategy in (None, "fallback", "collaboration", "fallback_pending_clear"):

@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 #   must consume the same ordered rendered blocks; Studio never assembles prose.
 # - The registry owns composition order. Keep static Skill usage guidance after
 #   the base capabilities and dynamic Skill rows near the end to protect caches.
+# - Agent-authored instructions are the final content block, after all Avibe
+#   guidance and catalogs; backends must not prepend or append their own copy.
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,7 @@ def _context_block(
 
 def build_system_prompt_blocks(
     *,
+    agent_instructions: str = "",
     include_quick_replies: bool = True,
     include_codex_generated_images: bool = False,
     include_context_guidance: bool = True,
@@ -263,6 +266,8 @@ def build_system_prompt_blocks(
         platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
         if _is_web_platform(platform):
             blocks.append(render_prompt_block("session-title-prompt"))
+    if agent_instructions:
+        blocks.append(render_prompt_block("agent-instructions", agent_instructions=agent_instructions))
     return order_prompt_blocks(blocks)
 
 

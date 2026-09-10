@@ -13,7 +13,7 @@ from markdown_it import MarkdownIt
 from pydantic import TypeAdapter, ValidationError
 
 from core.managed_skills import builtin_skills_source, parse_skill_file
-from core.prompt_registry import export_prompt_catalog, join_prompt_blocks, render_prompt_block, runtime_snapshot_blocks
+from core.prompt_registry import export_prompt_catalog, join_prompt_blocks, runtime_snapshot_blocks
 
 
 PROMPT_STUDIO_CATALOG_SCHEMA = "avibe-prompt-studio-catalog/1"
@@ -197,7 +197,8 @@ def _render_options(raw: object) -> dict[str, Any]:
     options: dict[str, Any] = {}
     for name, value in raw.items():
         field = f"options.{name}"
-        if name not in parameters:
+        # Agent text has one JSON owner: the existing top-level field.
+        if name not in parameters or name == "agent_instructions":
             raise PromptRenderInputError("unknownField", field=field)
         if name == "context" and isinstance(value, dict):
             unknown = set(value) - set(MessageContext.__dataclass_fields__)
@@ -238,9 +239,7 @@ def render_prompt_context(request: dict[str, Any]) -> dict[str, Any]:
         raise PromptRenderInputError("invalidField", field="agent_instructions")
     options = _render_options(request.get("options", {}))
     options.setdefault("include_codex_generated_images", backend == "codex")
-    blocks = build_system_prompt_blocks(**options)
-    if agent_instructions:
-        blocks.insert(0, render_prompt_block("agent-instructions", agent_instructions=agent_instructions))
+    blocks = build_system_prompt_blocks(agent_instructions=agent_instructions, **options)
     if backend == "codex":
         blocks = runtime_snapshot_blocks(blocks)
     text = join_prompt_blocks(blocks)

@@ -1563,6 +1563,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             skill_catalog_sink: list[dict] = []
             system_prompt_injection = await asyncio.to_thread(
                 build_system_prompt_injection,
+                agent_instructions=request.vibe_agent_system_prompt or "",
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 memory_enabled=bool(
@@ -1578,13 +1579,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 ),
                 skill_catalog_sink=skill_catalog_sink,
             )
-            if request.vibe_agent_system_prompt:
-                from core.prompt_registry import render_prompt
-
-                system_prompt_injection = render_prompt(
-                    "agent-instructions", agent_instructions=request.vibe_agent_system_prompt,
-                ) + system_prompt_injection
-
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
             logical_turn_id = str(platform_payload.get("turn_token") or "").strip()

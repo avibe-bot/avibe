@@ -4,9 +4,9 @@
 
 Avibe-owned instructions must enter model-visible developer messages independently
 of model-owned collaboration text. A complete native baseline must survive
-context reconstruction. Changed prompts on loaded threads use an injected
-snapshot that instructs the model to supersede earlier Avibe snapshots; this is
-not a guarantee of history cleanup or latest-version retention. Unchanged
+context reconstruction. Changed prompts on loaded threads use a tagged injected
+snapshot without a replacement declaration. Tags delimit Avibe content; they do
+not guarantee rule revocation, history cleanup, or latest-version retention. Unchanged
 instructions must not accumulate on normal turns or process restart. Prompt
 delivery must not change model routing or reasoning effort, and ambiguous native
 mutations must retain at-most-once recovery.
@@ -26,17 +26,28 @@ the last delivered fingerprint because restored history may still contain an
 older baseline, even when the new native configuration was accepted.
 
 Avibe uses `thread/inject_items` with explicit developer messages for changes on
-loaded threads. Each message declares complete-snapshot replacement semantics,
-including superseding legacy untagged snapshots. History is retained, but removed
-rules and capability, Agent, and Skill declarations must not remain active. User
-and project instructions are outside this replacement boundary.
+loaded threads. Each new message contains the current Avibe content between
+`<avibe_runtime_instructions>` tags, with no explanatory preamble. Prior messages
+remain in native history. Removing a rule or catalog entry from the new snapshot
+does not explicitly revoke its old occurrence; this is an intentional wording
+choice, not an implemented replacement API. No user or project history is rewritten.
 The existing durable `fallback` marker name and write-ahead states
 remain unchanged. Legacy `collaboration` threads migrate through the existing
 pending-clear path, even when their model and prompt fingerprint are unchanged.
-Fingerprints cover the rendered snapshot, including its replacement declaration.
-Legacy raw-prompt hashes therefore migrate once through resume or fork, while
+Fingerprints cover the rendered snapshot, including its envelope.
+Legacy raw-prompt hashes and earlier prose-bearing envelopes therefore migrate
+once through resume or fork, while
 unchanged current snapshots remain deduplicated across restarts.
 Model and reasoning overrides remain top-level turn parameters.
+
+All backends use the shared block builder to place Agent custom instructions
+after Avibe guidance, capabilities, Agent/Skill catalogs, and session-title rules.
+Only the Codex closing tag follows that final content block in a live overlay.
+The source registry, debug export, and Studio use this same order. Empty custom
+instructions add no block or separator; nonempty text is preserved verbatim after
+a top-level `# Agent` heading and its boundary newlines, so an unheaded custom
+prompt cannot inherit the preceding Avibe subsection. Other source blocks retain
+their bytes and relative order.
 
 Protocol validation rejections (`-32600`, `-32601`, `-32602`) restore the durable
 pre-injection marker and fail the turn before model dispatch, allowing a later
@@ -82,7 +93,7 @@ prompt composition are unchanged.
 No existing scenario catalog owns prompt delivery. This change adds a native
 contract rather than assigning an unrelated capability's scenario ID.
 
-## Review Scope Decision
+## Earlier Review Scope Decision
 
 Head `22a948af70` had one finding: historical prompt snapshots lacked supersession.
 Head `d96c18a115` had two findings: legacy-marker migration in that same class,
@@ -92,3 +103,8 @@ covered marker production, resume, fork, cached recovery, and the native consume
 test. The smallest complete decision is to fingerprint actual snapshot bytes and
 restore prior state only for protocol-level rejection. No new thread lifecycle,
 marker schema, storage migration, backend routing, or broad retry policy is needed.
+
+The September 10, 2026 owner-requested removal of the replacement declaration
+supersedes only that wording requirement. Rendered-byte fingerprints and
+at-most-once recovery remain necessary and unchanged. The new format applies on
+future delivery; previously stored snapshots are not edited or removed.

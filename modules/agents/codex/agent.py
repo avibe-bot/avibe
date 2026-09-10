@@ -27,7 +27,7 @@ from core.managed_skills import (
 )
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
-from core.prompt_registry import prompt_text, render_prompt
+from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -2595,39 +2595,34 @@ class CodexAgent(BaseAgent):
             or self.controller.config.platform
         )
 
-        instruction_parts: list[str] = []
-        if agent_instructions:
-            instruction_parts.append(render_prompt("agent-instructions", agent_instructions=agent_instructions))
-
         # Resolve admission once: it associates or clears this turn's Memory CLI
         # session scope as a side effect, so a second call per turn would repeat
         # that write.
         configure_memory_cli_access(self.controller, request.context)
 
         skill_catalog_sink: list[dict] = []
-        instruction_parts.append(
-            await asyncio.to_thread(
-                build_system_prompt_injection,
-                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
-                and platform != "wechat",
-                include_codex_generated_images=True,
-                memory_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
-                ),
-                context=request.context,
-                fallback_platform=platform,
-                enabled_agents=get_enabled_agents_for_prompt(self.controller),
-                skills_cwd=getattr(request, "working_path", None),
-                skills_project_base=managed_skill_project_base(request.context),
-                skills_claude_cli_path=managed_skill_claude_cli_path(
-                    getattr(getattr(self, "controller", None), "config", None)
-                ),
-                skill_catalog_sink=skill_catalog_sink,
-            )
+        instructions = await asyncio.to_thread(
+            build_system_prompt_injection,
+            agent_instructions=agent_instructions or "",
+            include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
+            and platform != "wechat",
+            include_codex_generated_images=True,
+            memory_enabled=bool(
+                getattr(getattr(self.controller.config, "memory", None), "enabled", False)
+            ),
+            context=request.context,
+            fallback_platform=platform,
+            enabled_agents=get_enabled_agents_for_prompt(self.controller),
+            skills_cwd=getattr(request, "working_path", None),
+            skills_project_base=managed_skill_project_base(request.context),
+            skills_claude_cli_path=managed_skill_claude_cli_path(
+                getattr(getattr(self, "controller", None), "config", None)
+            ),
+            skill_catalog_sink=skill_catalog_sink,
         )
 
         request.skill_catalog_observation = skill_catalog_sink[0] if skill_catalog_sink else None
-        return "".join(part for part in instruction_parts if part) or None
+        return instructions or None
 
     async def _inject_forked_session_correction(
         self,

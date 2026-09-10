@@ -20,6 +20,7 @@ import pytest
 
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.transport import CodexTransport
+from modules.im import MessageContext
 
 
 BINARY = os.environ.get("CODEX_PROMPT_CONTRACT_BINARY")
@@ -227,7 +228,47 @@ def _request(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy", [None, "collaboration", "fallback"])
+async def test_production_agent_instructions_are_last_in_native_baseline_and_overlay(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
+    async with _native_server(tmp_path) as harness:
+        agent = _agent({})
+        agent.controller.config = SimpleNamespace(platform="avibe", reply_enhancements=True)
+        request = _request(tmp_path)
+        request.context = MessageContext(
+            user_id="reviewer", channel_id="review", platform="avibe",
+            platform_specific={"agent_session_id": "contract-session"},
+        )
+        custom = "Custom Agent：保留 {instructions}。"
+        agent._resolve_codex_agent_settings = Mock(return_value=(None, MODEL, "high", custom))
+        baseline = await agent._build_thread_developer_instructions(request)
+        assert baseline.startswith("# Avibe")
+        assert baseline.endswith("\n\n" + custom)
+        assert baseline.count(custom) == 1
+        assert "## Session Title" in baseline
+        thread_id = await agent._start_or_resume_thread(
+            harness.native, request, developer_instructions=baseline,
+        )
+        await agent._start_turn(harness.native, request, thread_id, developer_instructions=baseline)
+        await harness.finish_turn()
+        native_text = "\n".join(_developer_texts(harness.requests[-1]))
+        assert native_text.count(baseline) == 1
+        assert "<avibe_runtime_instructions>" not in native_text
+
+        updated_custom = "Updated Agent：保留 {new}。"
+        agent._resolve_codex_agent_settings.return_value = (None, MODEL, "high", updated_custom)
+        updated = await agent._build_thread_developer_instructions(request)
+        assert updated == baseline.removesuffix(custom) + updated_custom
+        for _ in range(2):
+            await agent._start_turn(harness.native, request, thread_id, developer_instructions=updated)
+            await harness.finish_turn()
+        text = "\n".join(_developer_texts(harness.requests[-1]))
+        snapshot = "<avibe_runtime_instructions>\n\n" + updated + "\n</avibe_runtime_instructions>"
+        assert text.count(snapshot) == 1
+        assert text.count(baseline) == 1  # Delivery is not destructive history replacement.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [None, "collaboration", "fallback", "snapshot"])
 async def test_native_model_receives_injected_prompt_once_across_turns_and_restart(tmp_path, legacy):
     async with _native_server(tmp_path) as harness:
         native, requests, finish_turn = harness.native, harness.requests, harness.finish_turn
@@ -260,6 +301,20 @@ async def test_native_model_receives_injected_prompt_once_across_turns_and_resta
                 ],
             })
             marker.update(thread_id=thread_id, strategy="fallback", sha256=hashlib.sha256(PROMPT.encode()).hexdigest())
+        elif legacy == "snapshot":
+            previous = (
+                "<avibe_runtime_instructions>\n"
+                "Previous snapshot replacement declaration.\n\n"
+                + PROMPT + "\n</avibe_runtime_instructions>"
+            )
+            await native.send_request("thread/inject_items", {
+                "threadId": thread_id,
+                "items": [{
+                    "type": "message", "role": "developer",
+                    "content": [{"type": "input_text", "text": previous}],
+                }],
+            })
+            marker.update(thread_id=thread_id, strategy="fallback", sha256=hashlib.sha256(previous.encode()).hexdigest())
 
         request = _request(tmp_path)
         agent = _agent(marker)
@@ -277,16 +332,15 @@ async def test_native_model_receives_injected_prompt_once_across_turns_and_resta
         await finish_turn()
         assert _developer_texts(requests[-1]).count(CodexAgent._render_developer_prompt_snapshot(PROMPT)) == 1
 
-        # Removing a prompt source must revoke its earlier positive rules,
-        # including when retained history still contains the old snapshot.
+        # The new snapshot contains only current source content. Old messages
+        # remain in native history; tags alone do not promise rule revocation.
         changed = (Path(__file__).resolve().parents[1] / "core/prompts/session-title.md").read_text()
         changed_snapshot = CodexAgent._render_developer_prompt_snapshot(changed)
         await agent._start_turn(native, request, thread_id, developer_instructions=changed)
         await finish_turn()
         assert _developer_texts(requests[-1]).count(changed_snapshot) == 1
         assert "## Quick-reply buttons" not in changed_snapshot
-        assert "omitted from this snapshot no longer apply" in changed_snapshot
-        assert "including untagged versions" in changed_snapshot
+        assert changed_snapshot == "<avibe_runtime_instructions>\n\n" + changed + "\n</avibe_runtime_instructions>"
 
         await native.send_request("thread/compact/start", {"threadId": thread_id})
         await finish_turn()

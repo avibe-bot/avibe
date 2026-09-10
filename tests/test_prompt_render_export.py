@@ -68,7 +68,9 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     result = render_prompt_context(request)
     options = dict(request["options"])
     options["context"] = MessageContext(**options["context"])
-    production = request["agent_instructions"] + "\n\n" + build_system_prompt_injection(**options)
+    common = build_system_prompt_injection(**options)
+    production = build_system_prompt_injection(agent_instructions=request["agent_instructions"], **options)
+    assert production == common + "\n\n# Agent\n\n" + request["agent_instructions"]
     if backend == "codex":
         production = CodexAgent._render_developer_prompt_snapshot(production)
 
@@ -81,6 +83,7 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     catalog = {module.id: module for module in PROMPT_MODULES}
     ids = [block["id"] for block in result["blocks"]]
     assert ids == [module_id for module_id in catalog if module_id in ids]
+    assert ids[-2 if backend == "codex" else -1] == "agent-instructions"
     for block in result["blocks"]:
         assert block["source_path"] == catalog[block["id"]].source_path
     assert result == render_prompt_context(request)
@@ -93,6 +96,40 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
         assert "- skill-00: Description skill-00" in production
     assert ("## Personal Memory" in production) == memory
     assert ("preferences.md" in production) != memory
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("custom", ["", "中文 {verbatim}\n\nKeep my spacing.\n"])
+def test_custom_instructions_only_change_the_final_content_block(monkeypatch, backend, custom):
+    _environment(monkeypatch)
+    request = _inputs(backend)
+    request["agent_instructions"] = ""
+    common = render_prompt_context(request)
+    request["agent_instructions"] = custom
+    rendered = render_prompt_context(request)
+    custom_blocks = [block for block in rendered["blocks"] if block["id"] == "agent-instructions"]
+    assert len(custom_blocks) == bool(custom)
+    assert [block for block in rendered["blocks"] if block["id"] != "agent-instructions"] == common["blocks"]
+    if custom:
+        assert custom_blocks[0]["text"] == "\n\n# Agent\n\n" + custom
+        tokens = MarkdownIt().parse(rendered["text"])
+        headings = [
+            (token.tag, tokens[index + 1].content)
+            for index, token in enumerate(tokens) if token.type == "heading_open"
+        ]
+        assert headings[-1] == ("h1", "Agent")
+    catalog = export_prompt_studio_catalog()["documents"][0]["blocks"]
+    assert [block["id"] for block in catalog][-2:] == [
+        "runtime-agent-instructions", "runtime-runtime-snapshot-close",
+    ]
+
+
+def test_runtime_snapshot_has_only_tags_and_verbatim_content():
+    prompt = "User-authored 内容 {unchanged}\n"
+    assert prompt_text("runtime-snapshot-open") == "<avibe_runtime_instructions>\n\n"
+    assert CodexAgent._render_developer_prompt_snapshot(prompt) == (
+        "<avibe_runtime_instructions>\n\n" + prompt + "\n</avibe_runtime_instructions>"
+    )
 
 
 @pytest.mark.parametrize("backend,memory,history,skill_mode", itertools.product(
@@ -287,6 +324,7 @@ def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys
     ({"context": {"user_id": "u"}}, "options.context.channel_id", "invalidField"),
     ({"memory_enabled": "false"}, "options.memory_enabled", "invalidField"),
     ({"include_show_pages": False}, "options.include_show_pages", "unknownField"),
+    ({"agent_instructions": "second owner"}, "options.agent_instructions", "unknownField"),
     ({"enabled_agents": 123}, "options.enabled_agents", "invalidField"),
     ({"unknown": True}, "options.unknown", "unknownField"),
 ])
@@ -384,12 +422,9 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
     assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
 
 
-def test_companion_principles_and_history_move_preserve_all_other_injection_bytes(monkeypatch):
+def test_agent_tail_and_snapshot_cleanup_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
-    changed = {
-        "agent-working-principles", "show-pages-prompt",
-        "show-history-heading", "show-history-managed", "show-history-self-managed",
-    }
+    changed = {"runtime-snapshot-open", "agent-instructions"}
     for backend, memory, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
@@ -397,6 +432,6 @@ def test_companion_principles_and_history_move_preserve_all_other_injection_byte
         blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
         outputs.append("".join(block["text"] for block in blocks if block["id"] not in changed))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
-    # Captured independently from 627ed97aebe26f4cc01cca3ffe159433d721ebdf,
-    # omitting only this change's approved principles, routing, and history blocks.
-    assert digest == "6dae9db6263a2dd4aec5e6be5b545ea5ed3daeb7140a4f228dc749f8247b3915"
+    # Captured independently from 03e42c205f3da668c3ef8580d68d6cead2a00410,
+    # omitting only the approved snapshot preamble and relocated Agent block.
+    assert digest == "8a6403a158b7fba7d0164ae40ceac7d1945935e9612d79b5588de4ef9d1e0dfe"
