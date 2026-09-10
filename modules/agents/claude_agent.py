@@ -7,6 +7,7 @@ from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
+from core.handlers.session_handler import ClaudeSessionNotFoundError
 from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -16,7 +17,7 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.native_dispatch_phase import mark_backend_dispatch_attempted, mark_prewrite_recovery_required
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.runtime_activation import RuntimeActivationIdentity
@@ -142,6 +143,13 @@ class ClaudeAgent(BaseAgent):
 
     def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
         """Return the durable notify text for Claude terminal errors."""
+        if isinstance(error, ClaudeSessionNotFoundError):
+            detail = self._translate_error(
+                "error.claudeSessionNotFound",
+                sessionId=error.session_id,
+                path=error.working_path,
+            )
+            return f"❌ {detail}"
         if is_claude_sdk_buffer_error(error):
             return f"❌ {self._translate_error('error.sessionConnectionLost')}"
         client = self.claude_sessions.get(composite_key) if composite_key else None
@@ -255,6 +263,9 @@ class ClaudeAgent(BaseAgent):
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
+            missing_session = isinstance(e, ClaudeSessionNotFoundError)
+            if missing_session:
+                mark_prewrite_recovery_required(context, "native_session_not_found")
             diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
             # Classify BEFORE recording: ``record_model_hub_native_failure``
             # turns the pending native/hub attempt into a failed one, so a
@@ -272,13 +283,17 @@ class ClaudeAgent(BaseAgent):
             await self._remove_ack_reaction(request)
             error_notify = self._format_error_notify(e, composite_key=runtime_session_key)
             try:
-                handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
-                    context,
-                    "claude",
-                    error_notify,
-                    output=terminal_output_for(request),
-                    terminal_error=diagnostic,
-                )
+                # A typed local resume failure takes precedence over incidental
+                # auth words in the working path or captured process diagnostic.
+                handled = False
+                if not missing_session:
+                    handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                        context,
+                        "claude",
+                        error_notify,
+                        output=terminal_output_for(request),
+                        terminal_error=diagnostic,
+                    )
                 if handled and client is not None and get_claude_client_returncode(client) is not None:
                     # Auth recovery owns the visible settlement, but a query can
                     # fail after the cached CLI has already exited. Retire that
@@ -329,7 +344,7 @@ class ClaudeAgent(BaseAgent):
                                 context,
                                 "notify",
                                 error_notify,
-                                metadata=notification.metadata,
+                                metadata=notification.provenance(context),
                                 native_message_id=notification.idempotency_key,
                             )
                         except Exception:

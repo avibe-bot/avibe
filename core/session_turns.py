@@ -38,6 +38,7 @@ from core.message_context import (
 from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     mark_prewrite_user_stop,
+    prewrite_failure_evidence,
 )
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
@@ -1890,6 +1891,7 @@ class SessionTurnManager:
         deliveries: list[dict[str, Any]],
         dispatch_text: str,
         attempt_id: str | None = None,
+        explicit_retry: bool = False,
     ) -> dict[str, Any] | None:
         """Claim a Delivery batch and all linked Agent Runs atomically."""
 
@@ -1907,6 +1909,11 @@ class SessionTurnManager:
                 cls._retire_delivery_not_written(
                     conn, session_id, str(delivery["id"]), reason=reason
                 )
+            return None
+        if not explicit_retry and any(
+            delivery_store.requires_explicit_start_retry(delivery)
+            for delivery in deliveries
+        ):
             return None
         binding = conn.execute(
             select(
@@ -3175,6 +3182,7 @@ class SessionTurnManager:
                     backend=backend,
                     deliveries=delivery_rows,
                     dispatch_text=dispatch_text,
+                    explicit_retry=True,
                 )
                 if claimed is None:
                     turn_id = None
@@ -5072,6 +5080,7 @@ class SessionTurnManager:
         turn_id: str,
         *,
         outcome: str,
+        failure_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Settle definitive no-write evidence at the terminal chokepoint."""
         return self._terminalize_durable_turn(
@@ -5079,7 +5088,7 @@ class SessionTurnManager:
             "not_written",
             settled_by=outcome,
             evidence_kind="definitive_prewrite_failure",
-            evidence={"reason": outcome},
+            evidence={"reason": outcome, **(failure_evidence or {})},
         )
 
     def _reconcile_durable_runner_release(
@@ -5093,6 +5102,7 @@ class SessionTurnManager:
         settled_by: str | None,
         terminal_is_error: bool,
         cancel_defers_queue_resume: bool = False,
+        failure_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Contain post-native ownership writes so runner cleanup always finishes."""
 
@@ -5172,6 +5182,7 @@ class SessionTurnManager:
                 return self._settle_durable_prewrite_failure(
                     turn_id,
                     outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+                    failure_evidence=failure_evidence,
                 )
             if settled_by is not None:
                 return self._terminalize_durable_turn(
@@ -7451,6 +7462,7 @@ class SessionTurnManager:
                             settled_by=settled_by,
                             terminal_is_error=terminal_is_error,
                             cancel_defers_queue_resume=cancel_defers_queue_resume,
+                            failure_evidence=prewrite_failure_evidence(context),
                         )
                     # Only definitive pre-write failure may synthesize an empty
                     # terminal result. Once native work may have produced output, a

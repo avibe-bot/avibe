@@ -407,7 +407,7 @@
     "claudeProcessExitCode": "exit code {code}",
     "claudeProcessTerminated": "Claude Code process terminated ({reason}); the session was reset. Please try your message again.",
     "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
-    "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Switch back to the original working directory to continue that session, or start a new Claude Code session from the current directory.",
+    "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Restore the original session in its original working directory, then explicitly retry the pending input; or start a new conversation from the current directory.",
     "sessionGeneric": "An error occurred: {error}",
     "codexPromptRefreshUnavailable": "Codex could not confirm that it can safely refresh Avibe's instructions for this existing session. Check or update Codex, then retry this turn.",
     "opencodeModelHubOverlayRequired": "OpenCode is still preparing for Gateway mode. Retry in a moment.",

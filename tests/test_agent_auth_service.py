@@ -2377,6 +2377,65 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
 
 class ClassifyAuthErrorTests(unittest.TestCase):
+    def test_status_evidence_requires_reset_for_every_backend(self):
+        diagnostics = (
+            "401",
+            "HTTP 401",
+            "HTTP/1.1 401",
+            "HTTP/2 401",
+            "HTTPError: 401",
+            "unexpected status 401",
+            "status code: 401",
+            'response {"status_code": 401}',
+            'response {"statusCode":401}',
+            'response {"status":"401"}',
+            "API Error: 401",
+            "Error code: 401",
+            "401 Client Error for url: https://example.test",
+            "Failed to send message: 401",
+            "Failed to start async prompt: 401",
+        )
+        for backend in ("claude", "codex", "opencode"):
+            for diagnostic in diagnostics:
+                with self.subTest(backend=backend, diagnostic=diagnostic):
+                    self.assertTrue(classify_auth_error(backend, diagnostic))
+
+    def test_identifiers_paths_and_numbers_are_not_http_statuses(self):
+        diagnostics = (
+            "Claude Code session not found in current working directory: "
+            "11111111-2222-4016-8444-555555555555 (/Users/example/ai-work)",
+            "Claude Code session not found in current working directory: "
+            "11111111-2222-5016-8444-555555555555 (/Users/example/ai-work)",
+            "session job-401-missing could not resume",
+            "file /tmp/401/session.jsonl not found",
+            "file /tmp/error:401/session.jsonl not found",
+            "connect failed at http://localhost:401",
+            "processed 401 records before failure",
+            "request_id=401",
+            "request_id=ab401cd",
+            "exit code 1401",
+            "API Error: 4016",
+            "status: 401.5",
+            "status: 401-session",
+            "temporary network timeout",
+        )
+        for backend in ("claude", "codex", "opencode"):
+            for diagnostic in diagnostics:
+                with self.subTest(backend=backend, diagnostic=diagnostic):
+                    self.assertFalse(classify_auth_error(backend, diagnostic))
+
+    def test_auth_messages_without_http_status_remain_supported(self):
+        diagnostics = {
+            "claude": ("OAuth token expired", "Please login", "logged out"),
+            "codex": ("not logged in", "login required", "authentication failed"),
+            "opencode": ("missing provider credential", "invalid api key", "authentication failed"),
+        }
+        for backend, messages in diagnostics.items():
+            for diagnostic in messages:
+                with self.subTest(backend=backend, diagnostic=diagnostic):
+                    self.assertTrue(classify_auth_error(backend, diagnostic))
+        self.assertFalse(classify_auth_error("unknown", "HTTP 401"))
+
     def test_codex_401_requires_reset(self):
         self.assertTrue(classify_auth_error("codex", "unexpected status 401 Unauthorized"))
 

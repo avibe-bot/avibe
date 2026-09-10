@@ -355,6 +355,19 @@ def failure_retry_state(delivery: dict[str, Any]) -> str:
     return state
 
 
+def requires_explicit_start_retry(delivery: dict[str, Any]) -> bool:
+    """An unwritten permanent failure stays queued until its owner retries it."""
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            return False
+        if event.get("kind") == "start":
+            return (
+                event.get("outcome") == "not_written"
+                and (event.get("receipt") or {}).get("requires_explicit_retry") is True
+            )
+    return False
+
+
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,

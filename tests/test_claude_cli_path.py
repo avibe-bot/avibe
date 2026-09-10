@@ -1890,8 +1890,11 @@ def test_session_handler_expands_tilde_in_claude_cli_path(monkeypatch, tmp_path:
     assert captured["options"].cli_path == str(Path("~/bin/claude").expanduser())
 
 
-def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp_path: Path) -> None:
-    stale_session_id = "11111111-1111-1111-1111-111111111111"
+@pytest.mark.parametrize(
+    "stale_session_id",
+    ["11111111-2222-4016-8444-555555555555", "11111111-2222-5016-8444-555555555555"],
+)
+def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp_path: Path, stale_session_id) -> None:
     captured: dict[str, Any] = {}
 
     class _StaleSessions:
@@ -1932,6 +1935,8 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
     assert exc_info.value.working_path == str(tmp_path)
     assert stale_session_id in exc_info.value.stderr
     assert captured["options"].resume == stale_session_id
+    assert controller.settings_manager.sessions.get_claude_session_id("test::C123", "slack_C123") == stale_session_id
+    assert handler.claude_sessions == {}
 
 
 def test_claude_startup_failure_is_recorded_before_scope_retirement(

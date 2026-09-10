@@ -71,3 +71,23 @@ def mark_backend_dispatch_attempted(context: Any) -> None:
     """Record the boundary immediately before an adapter's native write."""
 
     set_dispatch_phase(context, DISPATCH_PHASE_ATTEMPTING)
+
+
+def mark_prewrite_recovery_required(context: Any, reason: str) -> None:
+    """Retain a definitive startup failure for an explicit user retry."""
+
+    if backend_dispatch_attempted(context) is not False:
+        return
+    evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    evidence["failure"] = {"reason": reason, "requires_explicit_retry": True}
+
+
+def prewrite_failure_evidence(context: Any) -> dict[str, Any]:
+    """Copy adapter-owned failure evidence into the durable start receipt."""
+
+    if backend_dispatch_attempted(context) is not False:
+        return {}
+    payload = getattr(context, "platform_specific", None) or {}
+    evidence = payload.get(DISPATCH_EVIDENCE_KEY)
+    failure = evidence.get("failure") if isinstance(evidence, dict) else None
+    return dict(failure) if isinstance(failure, dict) else {}
