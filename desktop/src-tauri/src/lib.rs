@@ -18,8 +18,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod native_frame;
+
+#[cfg(target_os = "macos")]
+mod macos_deep_link;
+
 #[cfg(feature = "bundled-runtime")]
 use avibe_runtime_host::bundled_runtime_host;
+use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
 use avibe_runtime_host::default_runtime_host;
 use avibe_runtime_host::{
@@ -617,6 +623,9 @@ struct WindowSink {
 
 impl StatusSink for WindowSink {
     fn publish(&self, status: BootstrapStatus) {
+        if let Ok(mut links) = self.app.state::<Mutex<DeepLinks>>().lock() {
+            links.observe_bootstrap(&status);
+        }
         if let Ok(mut latest) = self.latest.lock() {
             *latest = Some(status.clone());
         }
@@ -782,7 +791,6 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         return;
     };
     let window_generation = app.state::<Shell>().window_generation.clone();
-
     loop {
         let observed_generation = window_generation.load(Ordering::SeqCst);
         let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
@@ -795,6 +803,15 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         if window_generation.load(Ordering::SeqCst) != observed_generation {
             continue;
         }
+        let Some(navigation) = app
+            .state::<Mutex<DeepLinks>>()
+            .lock()
+            .ok()
+            .and_then(|mut links| links.bootstrap_navigation(ready))
+        else {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            return;
+        };
         // A recreated window clears the previous navigation grant. Restore the
         // exact ready origin for each generation immediately before navigating
         // that generation's window.
@@ -802,7 +819,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
             return;
         }
-        if window.navigate(origin.navigation_url()).is_err() {
+        if window.navigate(navigation.url().clone()).is_err() {
             if window_generation.load(Ordering::SeqCst) != observed_generation {
                 continue;
             }
@@ -817,6 +834,8 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         }
         match complete_workbench_handoff(&activity, &window_generation, observed_generation) {
             WorkbenchHandoff::Monitor => {
+                commit_deep_link_navigation(app, &navigation, true, observed_generation);
+                apply_pending_deep_link(app);
                 start_runtime_monitor(app.clone(), origin, activity);
                 return;
             }
@@ -986,6 +1005,7 @@ fn focus_or_restore_main_window(app: &AppHandle) {
         return;
     };
     let _ = window.unminimize();
+    let _ = native_frame::clamp(&window.as_ref().window());
     let _ = window.show();
     let _ = window.set_focus();
     let stopped = app
@@ -1031,6 +1051,65 @@ fn focus_or_restore_main_window(app: &AppHandle) {
             }
             spawn_owned_bootstrap(app.clone());
         }
+    }
+}
+
+fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.receive(arguments);
+    }
+    if app.try_state::<Shell>().is_none() {
+        return;
+    }
+    focus_or_restore_main_window(app);
+    apply_pending_deep_link(app);
+}
+
+fn apply_pending_deep_link(app: &AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    if shell.activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR {
+        return;
+    }
+    let observed_generation = shell.window_generation.load(Ordering::SeqCst);
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let Some(origin) = shell.active_origin.lock().ok().and_then(|origin| origin.clone()) else {
+        return;
+    };
+    let Ok(current_url) = window.url() else {
+        return;
+    };
+    let navigation = app
+        .state::<Mutex<DeepLinks>>()
+        .lock()
+        .ok()
+        .and_then(|links| links.workbench_navigation(&origin, &current_url));
+    if let Some(navigation) = navigation {
+        if shell.window_generation.load(Ordering::SeqCst) != observed_generation {
+            return;
+        }
+        let succeeded = window.navigate(navigation.url().clone()).is_ok();
+        commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+    }
+}
+
+fn commit_deep_link_navigation(
+    app: &AppHandle,
+    navigation: &DeepLinkNavigation,
+    navigation_succeeded: bool,
+    issuing_generation: u64,
+) {
+    let shell = app.state::<Shell>();
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.commit_navigation(
+            navigation,
+            navigation_succeeded,
+            issuing_generation,
+            shell.window_generation.load(Ordering::SeqCst),
+        );
     }
 }
 
@@ -1149,12 +1228,24 @@ fn request_private_runtime_removal(app: AppHandle) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        .manage(Mutex::new(DeepLinks::default()))
         // Registered first, as the plugin documents: a second launch is handed to
         // the running shell instead of starting a competing Runtime.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            focus_or_restore_main_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            receive_native_deep_link(app, argv.iter().skip(1));
         }))
+        .plugin(tauri_plugin_deep_link::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(macos_deep_link::init());
+    builder
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(native_frame::state_flags())
+                .with_filter(|label| label == MAIN_WINDOW)
+                .build(),
+        )
+        .plugin(native_frame::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .on_menu_event(|app, event| {
@@ -1172,6 +1263,11 @@ pub fn run() {
         })
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
+                .on_page_load(|webview, payload| {
+                    if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                        apply_pending_deep_link(webview.app_handle());
+                    }
+                })
                 .on_navigation(|webview, url| {
                     let active_origin = webview
                         .try_state::<Shell>()
@@ -1251,6 +1347,13 @@ pub fn run() {
                 }
             };
             app.manage(Shell::new(host, bootstrap_url));
+            if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+                links.receive(
+                    std::env::args_os()
+                        .skip(1)
+                        .filter_map(|argument| argument.into_string().ok()),
+                );
+            }
             install_native_tray(app.handle())?;
             let _ = spawn_bootstrap(app.handle().clone());
             Ok(())
@@ -1404,26 +1507,45 @@ mod tests {
     fn a_navigation_failure_is_retryable_without_losing_the_ready_origin() {
         let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
         let ready = BootstrapStatus::ready(&origin, 4, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive(["avibe://session/retry"]);
+        let navigation = links.bootstrap_navigation(&ready).unwrap();
 
         let failed = workbench_navigation_failure_status(&ready, &origin);
+        links.observe_bootstrap(&failed);
 
         assert_eq!(failed.phase, BootstrapPhase::Failed);
         assert_eq!(failed.origin, origin.as_str());
         assert_eq!(failed.attempt, ready.attempt);
         assert_eq!(failed.notice.code, BootstrapNoticeCode::WorkbenchNavigationFailed);
         assert!(failed.retryable);
+        assert_eq!(links.bootstrap_navigation(&ready).unwrap().url(), navigation.url());
     }
 
     #[test]
     fn a_recreated_window_keeps_bootstrap_ownership_during_handoff() {
         let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
         let generation = AtomicU64::new(2);
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+        let ready = BootstrapStatus::ready(&origin, 1, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive(["avibe://session/recreated"]);
+        let navigation = links.bootstrap_navigation(&ready).unwrap();
 
         assert_eq!(
             complete_workbench_handoff(&activity, &generation, 1),
             WorkbenchHandoff::RetryCurrentWindow
         );
         assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+        assert!(!links.commit_navigation(&navigation, true, 1, generation.load(Ordering::SeqCst)));
+        let replacement = links.bootstrap_navigation(&ready).unwrap();
+        assert_eq!(replacement.url(), navigation.url());
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 2),
+            WorkbenchHandoff::Monitor
+        );
+        assert!(links.commit_navigation(&replacement, true, 2, generation.load(Ordering::SeqCst)));
+        assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
     }
 
     #[test]

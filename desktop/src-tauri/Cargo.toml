@@ -26,8 +26,17 @@ serde_json.workspace = true
 sys-locale.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
 tokio.workspace = true
 url.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "NSAppleEventDescriptor",
+  "NSAppleEventManager",
+] }

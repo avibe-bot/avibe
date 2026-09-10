@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use avibe_runtime_host::deep_link::DeepLinks;
 use avibe_runtime_host::{
     BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime,
     LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, RuntimeReadiness,
@@ -279,6 +280,76 @@ fn immediate_timeout_settings() -> RuntimeHostSettings {
 
 fn host(probe: Arc<FakeProbe>, launcher: Arc<FakeLauncher>, settings: RuntimeHostSettings) -> RuntimeHost {
     RuntimeHost::new(probe, launcher, settings)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cold_link_is_consumed_only_after_ready_navigation_commits_and_never_replayed() {
+    let launcher = FakeLauncher::working();
+    let host = host(FakeProbe::healthy_from(3), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+    let mut links = DeepLinks::default();
+    links.receive(["avibe", "avibe://show/cold.session"]);
+    let ready = host.bootstrap(&recorder).await;
+    for status in recorder
+        .statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|status| status.phase != BootstrapPhase::Ready)
+    {
+        assert!(links.bootstrap_navigation(status).is_none());
+    }
+    assert_eq!(ready.phase, BootstrapPhase::Ready);
+    let destination = links.bootstrap_navigation(&ready).unwrap();
+    assert_eq!(
+        destination.url().as_str(),
+        format!("{}/apps/show/cold.session", ready.origin)
+    );
+    assert_eq!(links.bootstrap_navigation(&ready).unwrap().url(), destination.url());
+    assert!(links.commit_navigation(&destination, true, 1, 1));
+    assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
+    assert_eq!(launcher.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bootstrap_failure_discards_the_link_without_navigating_or_replaying_on_retry() {
+    let host = host(FakeProbe::never_healthy(), FakeLauncher::working(), fast_settings());
+    let recorder = Recorder::default();
+    let mut links = DeepLinks::default();
+    links.receive(["avibe://session/failed"]);
+    let failed = host.bootstrap(&recorder).await;
+    assert_eq!(failed.phase, BootstrapPhase::Failed);
+    assert!(links.bootstrap_navigation(&failed).is_none());
+    links.receive(["avibe://session/arrived-after-failure"]);
+    let healthy = RuntimeHost::new(FakeProbe::healthy_from(1), FakeLauncher::working(), fast_settings());
+    let ready = healthy.bootstrap(&recorder).await;
+    assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_link_survives_failed_handoffs_until_the_current_window_accepts_it() {
+    let host = host(FakeProbe::healthy_from(1), FakeLauncher::working(), fast_settings());
+    let mut links = DeepLinks::default();
+    links.receive(["avibe://session/retry"]);
+    let ready = host.bootstrap(&Recorder::default()).await;
+    let origin = LoopbackOrigin::parse(&ready.origin).unwrap();
+    let first = links.bootstrap_navigation(&ready).unwrap();
+    assert!(!links.commit_navigation(&first, false, 1, 1));
+    let handoff_failed = BootstrapStatus::failed(
+        &origin,
+        ready.attempt,
+        avibe_runtime_host::BootstrapNotice::new(BootstrapNoticeCode::WorkbenchNavigationFailed),
+        true,
+    );
+    assert!(links.bootstrap_navigation(&handoff_failed).is_none());
+    let retried = host.bootstrap(&Recorder::default()).await;
+    let replacement = links.bootstrap_navigation(&retried).unwrap();
+    assert_eq!(replacement.url(), first.url());
+    assert!(!links.commit_navigation(&replacement, true, 1, 2));
+    let current = links.bootstrap_navigation(&retried).unwrap();
+    assert_eq!(current.url(), first.url());
+    assert!(links.commit_navigation(&current, true, 2, 2));
+    assert_eq!(links.bootstrap_navigation(&retried).unwrap().url().path(), "/");
 }
 
 #[tokio::test(start_paused = true)]

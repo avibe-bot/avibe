@@ -95,6 +95,159 @@ fn the_shell_enables_no_capability_beyond_bootstrap() {
 }
 
 #[test]
+fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
+    let source = shipping_source("src/lib.rs");
+    let build = shipping_source("build.rs");
+    for required in [
+        "tauri_plugin_deep_link::init()",
+        "receive_native_deep_link(app, argv.iter().skip(1))",
+        "builder.plugin(macos_deep_link::init())",
+        "std::env::args_os()",
+        "links.bootstrap_navigation(ready)",
+        "links.workbench_navigation(&origin, &current_url)",
+        "links.observe_bootstrap(&status)",
+        "PageLoadEvent::Finished",
+    ] {
+        assert!(source.contains(required), "native deep-link path is missing {required}");
+    }
+    assert!(!build.contains("deep_link") && !build.contains("window_state"));
+    assert!(!source.contains("on_open_url") && !source.contains(".eval("));
+    assert!(!source.contains("RunEvent::Opened"));
+    let receiver = source
+        .split("fn receive_native_deep_link(")
+        .nth(1)
+        .unwrap()
+        .split("fn apply_pending_deep_link")
+        .next()
+        .unwrap();
+    assert!(receiver.contains("focus_or_restore_main_window(app)"));
+    assert_eq!(
+        config()["plugins"]["deep-link"]["desktop"]["schemes"],
+        serde_json::json!(["avibe"])
+    );
+    assert_eq!(config()["identifier"], "bot.avibe.desktop");
+}
+
+#[test]
+fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
+    let native = shipping_source("src/macos_deep_link.rs");
+    for required in [
+        ".setup(|app, _|",
+        "install(move |raw| crate::receive_native_deep_link(&app, [raw]))",
+        "paramDescriptorForKeyword: DIRECT_OBJECT",
+        "descriptor?.stringValue()",
+        "setEventHandler: &*handler",
+        "forEventClass: GET_URL_EVENT",
+        "andEventID: GET_URL_EVENT",
+        "RunEvent::Exit",
+        "removeEventHandlerForEventClass: GET_URL_EVENT",
+    ] {
+        assert!(native.contains(required), "raw native delivery must retain {required}");
+    }
+    for forbidden in [
+        "Url::",
+        "currentAppleEvent",
+        "invoke_handler",
+        "#[tauri::command]",
+        ".emit(",
+    ] {
+        assert!(!native.contains(forbidden), "raw delivery must not use {forbidden}");
+    }
+    let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
+    let (_, macos_dependencies) = cargo
+        .split_once("[target.'cfg(target_os = \"macos\")'.dependencies]")
+        .unwrap();
+    assert!(macos_dependencies.contains("objc2 = \"0.6.4\""));
+    assert!(macos_dependencies.contains("objc2-foundation = { version = \"0.3.2\""));
+    assert!(!cargo.contains("objc2-core-services"));
+}
+
+#[test]
+fn native_link_consumption_uses_one_success_and_window_generation_commit_boundary() {
+    let source = shipping_source("src/lib.rs");
+    for line_ending in ["\n", "\r\n"] {
+        let source = source.lines().collect::<Vec<_>>().join(line_ending);
+        assert_native_link_consumption_boundary(&source);
+    }
+}
+
+fn assert_native_link_consumption_boundary(source: &str) {
+    let cold = source
+        .split("fn open_workbench(")
+        .nth(1)
+        .unwrap()
+        .split("fn workbench_navigation_failure_status")
+        .next()
+        .unwrap();
+    assert!(cold.find("let Some(window)").unwrap() < cold.find("links.bootstrap_navigation(ready)").unwrap());
+    assert!(
+        cold.find("window.navigate(navigation.url().clone())").unwrap()
+            < cold.find("commit_deep_link_navigation(").unwrap()
+    );
+    let (_, monitoring) = cold.split_once("WorkbenchHandoff::Monitor => {").unwrap();
+    assert!(monitoring.trim_start().starts_with("commit_deep_link_navigation("));
+    let hot = source
+        .split("fn apply_pending_deep_link(")
+        .nth(1)
+        .unwrap()
+        .split("fn commit_deep_link_navigation")
+        .next()
+        .unwrap();
+    assert!(hot.contains("let succeeded = window.navigate(navigation.url().clone()).is_ok()"));
+    assert!(hot.contains("commit_deep_link_navigation(app, &navigation, succeeded, observed_generation)"));
+    let commit = source
+        .split("fn commit_deep_link_navigation(")
+        .nth(1)
+        .unwrap()
+        .split("fn application_menu")
+        .next()
+        .unwrap();
+    assert!(commit.contains("links.commit_navigation("));
+    assert!(commit.contains("shell.window_generation.load(Ordering::SeqCst)"));
+    assert!(!commit.contains(".navigate("));
+}
+
+#[test]
+fn window_frames_are_restored_before_show_without_document_or_remote_authority() {
+    let source = shipping_source("src/lib.rs");
+    let native_frame = shipping_source("src/native_frame.rs");
+    let window = &config()["app"]["windows"][0];
+    assert_eq!(window["visible"], false);
+    assert_eq!(window["width"], 1200);
+    assert_eq!(window["height"], 800);
+    assert_eq!(window["minWidth"], 880);
+    assert_eq!(window["minHeight"], 600);
+    assert_eq!(window["center"], true);
+    assert!(
+        source.find("tauri_plugin_window_state::Builder::new()").unwrap()
+            < source.find("native_frame::init()").unwrap()
+    );
+    assert!(source.contains(".with_filter(|label| label == MAIN_WINDOW)"));
+    assert!(source.contains(".with_state_flags(native_frame::state_flags())"));
+    assert!(native_frame.contains("StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED"));
+    assert_eq!(native_frame.matches("StateFlags::").count(), 3);
+    assert!(native_frame.contains(".on_window_ready("));
+    assert!(native_frame.find("clamp(&window)").unwrap() < native_frame.find("window.show()").unwrap());
+    assert!(native_frame.contains("tokio::time::sleep("));
+    assert!(native_frame.contains("save_app.save_window_state(state_flags())"));
+    assert!(!native_frame.contains("#[tauri::command]") && !native_frame.contains("invoke_handler"));
+    assert!(!native_frame.contains("on_page_load") && !native_frame.contains("std::fs"));
+    let handoff = source
+        .split("fn open_workbench(")
+        .nth(1)
+        .unwrap()
+        .split("fn workbench_navigation_failure_status")
+        .next()
+        .unwrap();
+    for mutation in ["set_size", "set_position", ".center(", "restore_state"] {
+        assert!(
+            !handoff.contains(mutation),
+            "content handoff must not alter the restored frame"
+        );
+    }
+}
+
+#[test]
 fn product_bundles_have_an_explicit_private_runtime_gate() {
     let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
     let source = shipping_source("src/lib.rs");
@@ -323,7 +476,7 @@ fn every_navigation_stays_on_the_shell_or_the_proved_runtime_listener() {
 fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "window.navigate(origin.navigation_url()).is_err()",
+        "window.navigate(navigation.url().clone()).is_err()",
         "workbench_navigation_failure_status(ready, &origin)",
         "BootstrapNoticeCode::WorkbenchNavigationFailed",
     ] {
