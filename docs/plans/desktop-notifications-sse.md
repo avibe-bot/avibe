@@ -111,7 +111,14 @@ event type never becomes a notification by accident.
 
 ### "Background" for `run.terminal`
 
-A terminal `runs.updated` notifies only if **either**:
+A terminal `runs.updated` notifies iff **at least one** of the two
+properties below holds. This is not an allow-list of product verbs
+and is not extended in v1 (a new always-background kind is a contract
+revision). `run_type=agent_run` — including default async
+`vibe agent run` — is not a special case: it follows the duration
+rule only. v1 does not add `visibility` to the SSE payload.
+
+A terminal `runs.updated` notifies if **either**:
 
 1. the run's wall time since it **started** is ≥ 30 seconds. The
    clock is the run's durable `started_at`, not "when this shell first
@@ -126,14 +133,10 @@ A terminal `runs.updated` notifies only if **either**:
 2. the run was started in a way the product already treats as
    background. Stored `run_type` values (from `core/scheduled_tasks.py` /
    `core/watches.py`) are `scheduled` and `watch` — not the user-facing
-   definition kind `task`. Notify when `run_type` is in `{scheduled, watch}`.
-   Interactive Workbench turns
-   (`run_type` absent or `agent_run` / session-bound chat) that
-   finish in under 30 seconds never notify.
+   definition kind `task`. Notify when `run_type` is in `{scheduled, watch}` even under 30s.
 
-The 30-second threshold is measured by the shell from SSE
-observations, not by Python. Python does not grow a
-"please notify" flag in v1.
+The duration clock is durable `started_at`, not SSE observation time.
+Python does not grow a "please notify" flag or a `visibility` field in v1.
 
 ### Dedup
 
@@ -227,13 +230,13 @@ plugin and reads window-focus / tray-pref state.
 - Dedup: two identical `request_id` pendings → one intent; a
   non-pending transition then a new pending with the same id → a
   second intent.
-- Background rule: a `runs.updated` that reaches `succeeded` in under
-  30s with no `run_type` of `{scheduled, watch}` produces no intent;
-  the same run after 30s, or with `run_type=scheduled`, does.
-  Mid-flight attach: a terminal event for an interactive run whose
-  `started_at` is ≥ 30s in the past produces an intent even if the
-  shell never saw `running`; a terminal event with no `started_at` and
-  a refetch that also lacks it produces none.
+- Background rule (property): a short `agent_run` / missing `run_type`
+  with `started_at` < 30s → no intent; the same row with `started_at`
+  ≥ 30s → intent; `run_type=scheduled` (or `watch`) → intent even
+  when < 30s. Mid-flight attach uses `started_at`, not first-seen.
+  Terminal event without `started_at` and a refetch that also lacks
+  it → no intent. Adding a new run_type to the fixture must not
+  notify unless it is `scheduled`/`watch` or the duration rule hits.
 - Focus gate: window focused + visible → no intent even on a matching
   event.
 - Reconnect: stream drop then restore does not panic, does not

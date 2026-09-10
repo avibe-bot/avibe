@@ -42,8 +42,10 @@ spelling (`avibe:session/...`); one form only.
 | `avibe://settings`                | `/admin/settings/service`                    |
 | `avibe://vaults/request/<request_id>` | `/vaults?request_id=<request_id>`        |
 
-Parse as a URL. Accept only when `scheme == avibe` and `host` is one of
-`session`, `show`, `settings`, `vaults`. Path/id rules:
+Parse as a URL. Accept only when `scheme == avibe`, `host` is one of
+`session`, `show`, `settings`, `vaults`, **and `port` is absent**
+(`avibe://session:443/<id>` is malformed even though `host_str()`
+would look allow-listed). Userinfo is rejected. Path/id rules:
 
 - `session` / `show`: path is exactly one segment, the id.
 - `settings`: path empty.
