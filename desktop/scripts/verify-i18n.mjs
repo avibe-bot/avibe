@@ -12,6 +12,7 @@ const expectedNoticeCodes = [
   'runtime_install_failed',
   'runtime_not_found',
   'runtime_spawn_failed',
+  'runtime_stopped',
   'starting',
   'workbench_navigation_failed',
 ]

@@ -106,7 +106,13 @@ pub struct RuntimeHost {
     probe: Arc<dyn HealthProbe>,
     launcher: Arc<dyn RuntimeLauncher>,
     settings: RuntimeHostSettings,
-    launched_runtime: Mutex<Option<LaunchedRuntime>>,
+    launched_runtime: Mutex<Option<OwnedRuntime>>,
+}
+
+struct OwnedRuntime {
+    runtime: LaunchedRuntime,
+    launcher: Arc<dyn ResolvedRuntimeLauncher>,
+    stopping: bool,
 }
 
 impl RuntimeHost {
@@ -126,6 +132,38 @@ impl RuntimeHost {
     /// Whether this host has already started a Runtime that it must not start again.
     pub fn has_launched(&self) -> bool {
         self.launched_runtime().is_some()
+    }
+
+    pub async fn stop_owned_runtime(&self) -> Result<(), LaunchError> {
+        let launcher = {
+            let mut launched = self.launched_runtime();
+            let owned = launched
+                .as_mut()
+                .filter(|owned| !owned.runtime.watch.failed())
+                .ok_or(LaunchError::NotOwned)?;
+            if owned.stopping {
+                return Err(LaunchError::RuntimeStop);
+            }
+            owned.stopping = true;
+            owned.launcher.clone()
+        };
+        let stopping = launcher.clone();
+        let result = tokio::task::spawn_blocking(move || stopping.stop())
+            .await
+            .map_err(|_| LaunchError::RuntimeStop)
+            .and_then(|result| result);
+        let mut owned = self.launched_runtime();
+        if owned
+            .as_ref()
+            .is_some_and(|owned| Arc::ptr_eq(&owned.launcher, &launcher))
+        {
+            if result.is_ok() {
+                *owned = None;
+            } else if let Some(owned) = owned.as_mut() {
+                owned.stopping = false;
+            }
+        }
+        result
     }
 
     /// Probes the exact validated origin using the same readiness contract as bootstrap.
@@ -384,7 +422,7 @@ impl RuntimeHost {
         .map_err(|_| LaunchError::EndpointOutput)?
     }
 
-    fn launched_runtime(&self) -> MutexGuard<'_, Option<LaunchedRuntime>> {
+    fn launched_runtime(&self) -> MutexGuard<'_, Option<OwnedRuntime>> {
         self.launched_runtime
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -392,10 +430,13 @@ impl RuntimeHost {
 
     fn launch_if_needed(&self, resolved_launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>) -> Result<(), LaunchError> {
         let mut launched = self.launched_runtime();
+        if launched.as_ref().is_some_and(|owned| owned.stopping) {
+            return Err(LaunchError::RuntimeStop);
+        }
         // A previous `vibe start` may have exited zero without producing a
         // ready UI. Check and replace it under one lock so a just-completed
         // helper cannot strand this Retry between inspection and launch.
-        if launched.as_ref().is_some_and(|runtime| runtime.watch.succeeded()) {
+        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.succeeded()) {
             *launched = None;
         }
         if launched.is_none() {
@@ -403,7 +444,11 @@ impl RuntimeHost {
                 Some(resolved) => resolved,
                 None => self.launcher.resolve()?,
             };
-            *launched = Some(resolved_launcher.launch()?);
+            *launched = Some(OwnedRuntime {
+                runtime: resolved_launcher.launch()?,
+                launcher: resolved_launcher,
+                stopping: false,
+            });
         }
         Ok(())
     }
@@ -415,7 +460,7 @@ impl RuntimeHost {
     /// launch contract across retries.
     fn clear_failed_launch(&self) -> bool {
         let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|runtime| runtime.watch.failed()) {
+        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.failed()) {
             *launched = None;
             return true;
         }
@@ -429,7 +474,7 @@ impl RuntimeHost {
     /// otherwise unobservable remains retained, so attempts never overlap.
     fn clear_successful_launch(&self) -> bool {
         let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|runtime| runtime.watch.succeeded()) {
+        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.succeeded()) {
             *launched = None;
             return true;
         }
@@ -472,6 +517,93 @@ fn publish(sink: &dyn StatusSink, status: BootstrapStatus) -> BootstrapStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ReadyProbe;
+
+    #[async_trait::async_trait]
+    impl HealthProbe for ReadyProbe {
+        async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingLauncher {
+        resolutions: AtomicUsize,
+        stops: AtomicUsize,
+        fail_stop: AtomicBool,
+    }
+
+    impl RuntimeLauncher for RecordingLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(RecordingLauncher::default()))
+        }
+    }
+
+    impl ResolvedRuntimeLauncher for RecordingLauncher {
+        fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+            Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").expect("test origin"))
+        }
+
+        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+            Ok(LaunchedRuntime::default())
+        }
+
+        fn stop(&self) -> Result<(), LaunchError> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            if self.fail_stop.load(Ordering::SeqCst) {
+                Err(LaunchError::RuntimeStop)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_adopted_runtime_can_never_be_stopped_by_the_host() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+        assert_eq!(
+            host.bootstrap(&DiscardStatus).await.notice.code,
+            BootstrapNoticeCode::Adopted
+        );
+        assert!(!host.has_launched());
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launcher.resolutions.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stop_uses_the_retained_launcher_and_releases_only_successful_ownership() {
+        let resolver = Arc::new(RecordingLauncher::default());
+        let launched = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), resolver.clone(), RuntimeHostSettings::default());
+        host.launch_if_needed(Some(launched.clone())).expect("fake launch");
+        launched.fail_stop.store(true, Ordering::SeqCst);
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::RuntimeStop)));
+        assert!(host.has_launched());
+        launched.fail_stop.store(false, Ordering::SeqCst);
+        host.stop_owned_runtime().await.expect("explicit retry succeeds");
+        assert!(!host.has_launched());
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launched.stops.load(Ordering::SeqCst), 2);
+        assert_eq!(resolver.resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(resolver.stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirmed_loss_revokes_stop_authority() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+        host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
+        host.reset_after_confirmed_runtime_loss();
+        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn production_discovers_the_origin_from_the_installed_runtime() {

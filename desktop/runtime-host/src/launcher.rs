@@ -86,6 +86,10 @@ pub enum LaunchError {
     Spawn(#[source] std::io::Error),
     #[error("failed to stop the superseded desktop-managed Runtime")]
     Handover,
+    #[error("the Runtime was not launched by this host")]
+    NotOwned,
+    #[error("failed to stop the shell-started Runtime")]
+    RuntimeStop,
 }
 
 /// What the shell proved about a Runtime before removing app-private files.
@@ -116,7 +120,9 @@ impl LaunchError {
                 BootstrapNoticeCode::RuntimeDiscoveryFailed
             }
             Self::InvalidOrigin => BootstrapNoticeCode::InvalidOrigin,
-            Self::Spawn(_) | Self::Handover => BootstrapNoticeCode::RuntimeSpawnFailed,
+            Self::Spawn(_) | Self::Handover | Self::NotOwned | Self::RuntimeStop => {
+                BootstrapNoticeCode::RuntimeSpawnFailed
+            }
         }
     }
 }
@@ -142,6 +148,10 @@ pub trait RuntimeLauncher: Send + Sync {
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError>;
+
+    fn stop(&self) -> Result<(), LaunchError> {
+        Err(LaunchError::RuntimeStop)
+    }
 
     fn expected_runtime_id(&self) -> Option<&str> {
         None
@@ -372,6 +382,10 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
 
     fn handover(&self) -> Result<(), LaunchError> {
         run_handover(&self.command)
+    }
+
+    fn stop(&self) -> Result<(), LaunchError> {
+        run_handover(&self.command).map_err(|_| LaunchError::RuntimeStop)
     }
 
     fn prune_superseded(&self) {
@@ -613,10 +627,14 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 fn spawn_detached(runtime: &RuntimeCommand) -> std::io::Result<std::process::Child> {
+    lifecycle_command(runtime, &START_ARGS).spawn()
+}
+
+fn lifecycle_command(runtime: &RuntimeCommand, args: &[&str]) -> Command {
     let mut command = Command::new(&runtime.executable);
     runtime.apply(&mut command);
     command
-        .args(START_ARGS)
+        .args(args)
         // Nothing the Runtime prints may reach the shell, and therefore the WebView.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -638,27 +656,14 @@ fn spawn_detached(runtime: &RuntimeCommand) -> std::io::Result<std::process::Chi
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
-    command.spawn()
+    command
 }
 
 fn run_handover(runtime: &RuntimeCommand) -> Result<(), LaunchError> {
-    let mut command = Command::new(&runtime.executable);
-    runtime.apply(&mut command);
-    command
-        .args(STOP_ARGS)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env(DESKTOP_SHELL_ENV, "1");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     // `vibe stop` owns the component-specific graceful and forced-stop budgets.
     // A shorter outer deadline would kill this coordinator while its children
     // are still shutting down and then start a successor against live services.
-    let status = command
+    let status = lifecycle_command(runtime, &STOP_ARGS)
         .spawn()
         .and_then(|mut child| child.wait())
         .map_err(|_| LaunchError::Handover)?;
@@ -673,6 +678,46 @@ fn run_handover(runtime: &RuntimeCommand) -> Result<(), LaunchError> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn stop_arguments_preserve_the_frozen_interpreter_and_private_environment() {
+        let runtime = RuntimeCommand {
+            executable: PathBuf::from("/test-owned/Runtime Root/python"),
+            prefix_args: vec![OsString::from("-m"), OsString::from("vibe")],
+            environment: vec![(OsString::from("AVIBE_DESKTOP_MANAGED_RUNTIME"), OsString::from("1"))],
+        };
+        let command = lifecycle_command(&runtime, &STOP_ARGS);
+        assert_eq!(command.get_program(), runtime.executable.as_os_str());
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["-m", "vibe", "stop"]);
+        let environment: Vec<_> = command.get_envs().collect();
+        assert!(environment.contains(&(OsStr::new(DESKTOP_SHELL_ENV), Some(OsStr::new("1")))));
+        assert!(environment.contains(&(OsStr::new("AVIBE_DESKTOP_MANAGED_RUNTIME"), Some(OsStr::new("1")))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_stop_invokes_the_resolved_executable_without_rediscovery() {
+        let dir = scratch_dir("owned-stop");
+        let recording = dir.join("stop-argv");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" \"shell=$AVIBE_DESKTOP_SHELL\" > \"{}\"\n",
+                recording.display()
+            ),
+        );
+        let resolved = InstalledVibeLauncher {
+            candidates: vec![executable],
+        }
+        .resolve()
+        .expect("fake resolve");
+        resolved.stop().expect("fake stop");
+        assert_eq!(
+            wait_for_file(&recording).lines().collect::<Vec<_>>(),
+            ["stop", "shell=1"]
+        );
+        std::fs::remove_dir_all(dir).expect("remove test-owned state");
+    }
 
     fn executable_name() -> String {
         format!("vibe{}", env::consts::EXE_SUFFIX)
