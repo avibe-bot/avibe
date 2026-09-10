@@ -273,19 +273,11 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<(), PrivateRunt
 }
 
 fn current_os() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "macos",
-        "windows" => "windows",
-        other => other,
-    }
+    std::env::consts::OS
 }
 
 fn current_arch() -> &'static str {
-    match std::env::consts::ARCH {
-        "aarch64" => "aarch64",
-        "x86_64" => "x86_64",
-        other => other,
-    }
+    std::env::consts::ARCH
 }
 
 fn safe_segment(value: &str) -> bool {
