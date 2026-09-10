@@ -1,8 +1,11 @@
 name: desktop-self-contained-package
 
-# Manual acceptance artifacts. Production publishing remains blocked on code
-# signing/notarization, but every artifact produced here contains Python, Avibe,
-# Node, and npm and can be tested on a machine with none of them installed.
+# Manual acceptance artifacts. Signing and notarization are gated on secrets:
+# with APPLE_CERTIFICATE (+ password) and APPLE_API_* present the macOS bundle
+# is Developer ID signed and notarized; without them the artifact stays an
+# unsigned acceptance build, exactly as before. Every artifact produced here
+# contains Python, Avibe, Node, and npm and can be tested on a machine with
+# none of them installed.
 on:
   workflow_dispatch:
     inputs:
@@ -116,6 +119,36 @@ jobs:
         shell: bash
         run: rm -rf desktop/target/release/bundle
 
+      # Secrets that are unset expand to the empty string, which tauri-bundler
+      # would read as a present-but-empty certificate and fail on. Export each
+      # variable only when its secret is non-empty, so absence keeps the
+      # unsigned acceptance path exactly as before.
+      - name: Export Apple signing credentials when configured
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+            if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            fi
+            echo "apple_signing=enabled" >> "$GITHUB_ENV"
+          else
+            echo "apple_signing=absent" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ]; then
+            echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+          fi
+
       - name: Build self-contained installer
         working-directory: desktop
         run: >
@@ -124,6 +157,30 @@ jobs:
           --bundles "${{ matrix.bundle }}"
           --features bundled-runtime
           --config tauri.release.conf.json
+
+      # Assert the artifact matches the credentials that were exported: with a
+      # certificate configured the bundle must be identity-signed and verify
+      # strictly; without one it must remain an ad-hoc acceptance build.
+      - name: Verify macOS signature matches the signing path
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -eu
+          app="target/release/bundle/macos/Avibe.app"
+          [ -d "$app" ] || { echo "Avibe.app not found at $app" >&2; exit 1; }
+          signature="$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=//p' || true)"
+          team="$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' || true)"
+          if [ "${apple_signing:-absent}" = "enabled" ]; then
+            if [ -z "$signature" ] || [ "$signature" = "adhoc" ] || [ "$team" = "not set" ]; then
+              echo "signing credentials were exported but Avibe.app is not identity-signed" >&2
+              exit 1
+            fi
+            codesign --verify --deep --strict "$app"
+            echo "signature_state=identity-signed (${team})" >> "$GITHUB_ENV"
+          else
+            echo "signature_state=unsigned-acceptance" >> "$GITHUB_ENV"
+          fi
 
       - name: Create headless-safe DMG
         if: runner.os == 'macOS'
@@ -139,6 +196,15 @@ jobs:
           mkdir -p desktop-package
           cp ${{ matrix.artifact_glob }} desktop-package/
           cp desktop/src-tauri/resources/runtime/runtime-manifest.json desktop-package/
+          # Signature state is evidence about the artifact, recorded beside the
+          # hashes so an acceptance build can never be mistaken for a signed
+          # release artifact downstream. Non-macOS targets have no macOS
+          # signature; the Windows signing path is not yet implemented.
+          if [ "${runner_os}" = "macOS" ]; then
+            printf '%s\n' "${signature_state:-unsigned-acceptance}" > desktop-package/SIGNATURE
+          else
+            printf '%s\n' "unsigned-acceptance" > desktop-package/SIGNATURE
+          fi
           python - <<'PY'
           import hashlib
           from pathlib import Path
