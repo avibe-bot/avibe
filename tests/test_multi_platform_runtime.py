@@ -836,7 +836,11 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
     assert wechat.sent == [("clear_typing", "wechat", "user-1", "ctx-1")]
 
 
-def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
+@pytest.mark.parametrize("custom_prompt", ["", "Custom Agent：保留 {text}。"])
+def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, custom_prompt):
+    from core.system_prompt_injection import build_system_prompt_injection
+
+    monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
     snapshot_id = "f" * 64
     snapshot_root = f"/old-avibe-home/builtin-skills/{snapshot_id}"
     monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", snapshot_id)
@@ -855,7 +859,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
     def build_prompt(**kwargs):
         prompt_skill_cwds.append(kwargs.get("skills_cwd"))
         prompt_memory_modes.append(kwargs.get("memory_enabled"))
-        return "system prompt"
+        return build_system_prompt_injection(**kwargs)
 
     monkeypatch.setattr(
         "modules.agents.opencode.agent.build_system_prompt_injection",
@@ -1010,12 +1014,17 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch):
             base_session_id="base",
             composite_session_id="base:/tmp/work",
             session_key="avibe::c",
+            vibe_agent_system_prompt=custom_prompt,
         )
         await agent._process_message(request)
 
     asyncio.run(_run())
 
     assert calls
+    assert calls[0]["system"].startswith("# Avibe")
+    if custom_prompt:
+        assert calls[0]["system"].endswith("\n\n" + custom_prompt)
+        assert calls[0]["system"].count(custom_prompt) == 1
     assert calls[0]["tools"] == {"question": False, "skill": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"

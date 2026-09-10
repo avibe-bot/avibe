@@ -1767,6 +1767,7 @@ class SessionHandler(BaseHandler):
 
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
+            agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
             memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
             context=context,
@@ -1779,9 +1780,7 @@ class SessionHandler(BaseHandler):
         )
 
         if base_prompt:
-            from core.prompt_registry import render_prompt
-
-            return render_prompt("agent-instructions", agent_instructions=base_prompt) + system_prompt_injection
+            return system_prompt_injection
         return {
             "type": "preset",
             "preset": "claude_code",
