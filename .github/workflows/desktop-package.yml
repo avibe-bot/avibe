@@ -1,8 +1,11 @@
 name: desktop-self-contained-package
 
-# Manual acceptance artifacts. Production publishing remains blocked on code
-# signing/notarization, but every artifact produced here contains Python, Avibe,
-# Node, and npm and can be tested on a machine with none of them installed.
+# Manual acceptance artifacts. Signing and notarization are gated on secrets:
+# with APPLE_CERTIFICATE (+ password) and APPLE_API_* present the macOS bundle
+# is Developer ID signed and notarized; without them the artifact stays an
+# unsigned acceptance build, exactly as before. Every artifact produced here
+# contains Python, Avibe, Node, and npm and can be tested on a machine with
+# none of them installed.
 on:
   workflow_dispatch:
     inputs:
@@ -116,6 +119,74 @@ jobs:
         shell: bash
         run: rm -rf desktop/target/release/bundle
 
+      # Secrets that are unset expand to the empty string, which tauri-bundler
+      # would read as a present-but-empty certificate and fail on. Export each
+      # variable only when its secret is non-empty, so absence keeps the
+      # unsigned acceptance path exactly as before.
+      - name: Export Apple signing credentials when configured
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          # Validate the credential set atomically. Half-configured sets must
+          # fail the build rather than silently produce a lesser artifact:
+          # certificate without notarization credentials would ship
+          # Developer-ID-signed but unnotarized; notarization credentials
+          # without the certificate would submit the unsigned acceptance
+          # build to Apple. All-or-nothing.
+          # Any-set implies all-set within each group; then the two groups
+          # must agree. A partially populated group is an operator error and
+          # fails loudly instead of silently passing as "absent".
+          cert_vars="APPLE_CERTIFICATE:$APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD:$APPLE_CERTIFICATE_PASSWORD"
+          api_vars="APPLE_API_KEY:$APPLE_API_KEY APPLE_API_ISSUER:$APPLE_API_ISSUER APPLE_API_PRIVATE_KEY:$APPLE_API_PRIVATE_KEY"
+          check_group() {
+            group_name="$1"; shift
+            set_count=0; total=0; missing=""
+            for pair in "$@"; do
+              name="${pair%%:*}"; value="${pair#*:}"
+              total=$((total + 1))
+              if [ -n "$value" ]; then set_count=$((set_count + 1)); else missing="$missing $name"; fi
+            done
+            if [ "$set_count" -gt 0 ] && [ "$set_count" -ne "$total" ]; then
+              echo "::error::${group_name} credential group is partially configured; missing:$missing. Set the whole group, or none of it."
+              exit 1
+            fi
+            [ "$set_count" -eq "$total" ]
+          }
+          if check_group "Apple signing" $cert_vars; then have_cert=1; else have_cert=0; fi
+          if check_group "Apple notarization" $api_vars; then have_api=1; else have_api=0; fi
+          if [ "$have_cert" != "$have_api" ]; then
+            echo "::error::Apple credentials are half-configured: the signing group (APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD) and the notarization group (APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_PRIVATE_KEY) must be set together or omitted together."
+            exit 1
+          fi
+          if [ "$have_cert" = "1" ]; then
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+            if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            fi
+            # The ApiKey notarization auth needs the .p8 private key ON DISK at
+            # APPLE_API_KEY_PATH; without it tauri-bundler falls back to
+            # searching ./private_keys and $HOME, which the runner never has,
+            # and notarization is skipped with only a warning.
+            key_dir="$(mktemp -d)"
+            key_file="$key_dir/AuthKey_${APPLE_API_KEY}.p8"
+            printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_file"
+            echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_PATH=$key_file" >> "$GITHUB_ENV"
+            echo "apple_signing=enabled" >> "$GITHUB_ENV"
+          else
+            echo "apple_signing=absent" >> "$GITHUB_ENV"
+          fi
+
       - name: Build self-contained installer
         working-directory: desktop
         run: >
@@ -124,6 +195,36 @@ jobs:
           --bundles "${{ matrix.bundle }}"
           --features bundled-runtime
           --config tauri.release.conf.json
+
+      # Assert the inner app matches the credentials that were exported. NOTE
+      # the layer boundary recorded here: this describes the .app INSIDE the
+      # DMG only. The DMG image itself and the Mach-O binaries inside the
+      # embedded runtime.zip are NOT signed/notarized by this workflow yet —
+      # those layers are tracked in the distribution-signing-completion issue
+      # and remain release gates.
+      - name: Verify macOS app signature matches the signing path
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -eu
+          app="target/release/bundle/macos/Avibe.app"
+          [ -d "$app" ] || { echo "Avibe.app not found at $app" >&2; exit 1; }
+          # Same detection as create-macos-dmg.sh: identity signatures print
+          # `Signature size=...` and Authority lines (verbose=4); only ad-hoc
+          # prints `Signature=adhoc`.
+          adhoc="$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=adhoc$/p' || true)"
+          authority="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
+          if [ "${apple_signing:-absent}" = "enabled" ]; then
+            if [ -n "$adhoc" ] || [ -z "$authority" ]; then
+              echo "signing credentials were exported but Avibe.app is not identity-signed" >&2
+              exit 1
+            fi
+            codesign --verify --deep --strict "$app"
+            echo "signature_state=app-identity-signed (${authority})" >> "$GITHUB_ENV"
+          else
+            echo "signature_state=unsigned-acceptance" >> "$GITHUB_ENV"
+          fi
 
       - name: Create headless-safe DMG
         if: runner.os == 'macOS'
@@ -135,10 +236,26 @@ jobs:
 
       - name: Record artifact hashes
         shell: bash
+        env:
+          # Shell default on GitHub-hosted runners is uppercase RUNNER_OS.
+          RUNNER_OS: ${{ runner.os }}
         run: |
           mkdir -p desktop-package
           cp ${{ matrix.artifact_glob }} desktop-package/
           cp desktop/src-tauri/resources/runtime/runtime-manifest.json desktop-package/
+          # Signature state is evidence about the artifact, recorded beside the
+          # hashes so an acceptance build can never be mistaken for a signed
+          # release artifact downstream. The state names the LAYER it proved:
+          # "app-identity-signed" means the .app inside the DMG is Developer ID
+          # signed and notarized; the DMG image itself and the embedded
+          # runtime's Mach-O contents remain unsigned layers tracked in the
+          # distribution-signing-completion issue. Non-macOS targets have no
+          # macOS signature; the Windows signing path is not yet implemented.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            printf '%s\n' "${signature_state:-unsigned-acceptance}" > desktop-package/SIGNATURE
+          else
+            printf '%s\n' "unsigned-acceptance" > desktop-package/SIGNATURE
+          fi
           python - <<'PY'
           import hashlib
           from pathlib import Path

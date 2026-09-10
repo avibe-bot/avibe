@@ -81,16 +81,34 @@ shell removes superseded private Runtime trees; reopening an older app reinstall
 its own immutable payload for rollback. User state stays under `~/.avibe` and
 is not part of the application or private Runtime.
 
-`desktop-self-contained-package` creates unsigned acceptance artifacts for:
+`desktop-self-contained-package` builds per-target artifacts for:
 
 - Apple silicon macOS (`aarch64-apple-darwin`);
 - Intel macOS (`x86_64-apple-darwin`);
 - Windows x64 (`x86_64-pc-windows-msvc`).
 
-Production distribution additionally requires Apple signing/notarization or
-Windows signing. The test DMG uses an ad-hoc signature only so macOS can verify
-its complete app/resource structure; it has no trusted developer identity.
-Windows ARM64 stays outside the current product gate.
+The macOS path is credential-gated; whichever state it produces is recorded in
+a `SIGNATURE` file next to the artifact hashes:
+
+- **With repository secrets configured** (`APPLE_CERTIFICATE` +
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY` + `APPLE_API_ISSUER` +
+  `APPLE_API_PRIVATE_KEY`, optional `APPLE_SIGNING_IDENTITY`) the workflow
+  Developer ID signs the .app, notarizes it through the App Store Connect
+  API key, staples the ticket, and verifies the produced signature
+  (`SIGNATURE: app-identity-signed`). The credential set must be complete —
+  a partially populated set fails the build rather than silently producing a
+  signed-but-unnotarized artifact.
+- **Without those secrets** the workflow produces unsigned acceptance
+  artifacts, exactly as before: the DMG carries an ad-hoc signature only so
+  macOS can verify its complete app/resource structure; it has no trusted
+  developer identity.
+
+Two signing layers are deliberately NOT in this workflow yet and remain
+tracked release gates (see the distribution-signing-completion issue):
+signing/notarizing the outer DMG image itself, and signing the Mach-O
+binaries inside the embedded `runtime.zip` before archiving. Windows
+signing is likewise not yet implemented; NSIS artifacts remain unsigned
+acceptance builds. Windows ARM64 stays outside the current product gate.
 
 ### Uninstalling a product package
 
@@ -223,6 +241,8 @@ runtime.
 `npm run test:i18n`, `npm run build`, `cargo fmt --check`,
 `cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
 sign. `.github/workflows/desktop-package.yml` manually builds
-architecture-specific, self-contained DMG and NSIS acceptance artifacts. Its
+architecture-specific, self-contained DMG and NSIS artifacts; on macOS it
+signs and notarizes when the repository secrets are configured (see "Product
+packages" above) and otherwise produces unsigned acceptance artifacts. Its
 required SemVer input is stamped into both application metadata and artifact
-names. Signing, notarization, and publication remain release gates.
+names. Publication remains a release gate.
