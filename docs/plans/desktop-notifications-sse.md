@@ -219,8 +219,8 @@ plugin and reads window-focus / tray-pref state.
   non-pending transition then a new pending with the same id → a
   second intent.
 - Background rule: a `runs.updated` that reaches `succeeded` in under
-  30s with no `run_type` of `{task, watch}` produces no intent; the
-  same run after 30s, or with `run_type=task`, does.
+  30s with no `run_type` of `{scheduled, watch}` produces no intent;
+  the same run after 30s, or with `run_type=scheduled`, does.
 - Focus gate: window focused + visible → no intent even on a matching
   event.
 - Reconnect: stream drop then restore does not panic, does not

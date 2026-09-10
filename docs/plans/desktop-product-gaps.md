@@ -4,7 +4,9 @@
 
 - Owner: Avibe core
 - Date: 2026-09-10
-- Baseline: `desktop` branch @ `b2ed55f11` (post master-sync 2026-08-11)
+- Baseline: `desktop` branch after #1975 / #1977 / #1971 / #1972
+  (tray + start-receipt + notarization preflight; local docs head
+  tracks origin/desktop @ `937d23e35` plus this planning slice)
 - Scope: what the desktop product still lacks to read as a first-class desktop
   application, not a windowed browser. The shell engineering base (loopback
   adoption, capability boundary, private Runtime, lazy backends) is sound and
@@ -22,9 +24,10 @@ of the installed private Runtime on every launch. Self-contained packages
 embed CPython, the Avibe wheel, locked Python dependencies, Node, and npm.
 CI produces unsigned acceptance artifacts for macOS arm/x64 and Windows x64.
 
-What the baseline deliberately does **not** have: any distribution signing,
-auto-update, tray, notifications, deep links, multi-window, or persisted
-window state. That is the gap list below.
+What the baseline deliberately does **not** have: production distribution
+signing (G1 remaining layers), auto-update, notifications, deep links,
+native multi-window, or persisted window state. Tray / Runtime lifecycle
+visibility and launch-at-login **shipped** in #1975.
 
 ## P0 — distribution and trust (the release gate)
 
@@ -61,22 +64,10 @@ window state. That is the gap list below.
 
 ### G3. Tray / Runtime lifecycle visibility
 
-- Problem: the Runtime outlives the window by design, but the user has no
-  visible handle on that. A closed window with a running process reads as a
-  bug or a privacy concern; Activity Monitor is the only exit.
-- Work: menu-bar tray (macOS) / notification-area icon (Windows) showing
-  Runtime state (adopted/private, version, port), a "quit Runtime" action with
-  confirmation, and an explicit quit semantics decision: quit-app vs
-  quit-runtime, surfaced both in the tray and the first application menu.
-  Align with the existing Uninstall flow, which already stops a private
-  Runtime it owns.
-- Acceptance: with the window closed, the tray shows live Runtime state; the
-  user can stop the Runtime from the tray without opening a terminal; quitting
-  the app never silently kills an adopted Runtime.
-- Estimate: M. New tray plugin + state bridge; the Runtime already exposes
-  `/ready` and status commands to poll.
-- Note: this is the visible half of a decision the architecture already made;
-  it converts a silent behavior into a product statement.
+- **Shipped** in #1975 (`install_native_tray`: live Runtime state, Open /
+  Stop / Quit with receipt-gated stop, Start at Login default off).
+  Remaining work is real-OS verification on a signed build, not a new
+  feature. G4's Notifications toggle lands on this same menu.
 
 ## P1 — system integration (the native feel)
 
@@ -183,7 +174,7 @@ window state. That is the gap list below.
 
 - `vibe doctor` and logs exist; the desktop has no "open logs / run
   diagnostics" affordance in-app. Pairs naturally with the tray menu (G3).
-- Estimate: S once G3 lands.
+- Estimate: S (tray menu already exists).
 
 ## Explicit non-goals for this phase
 
@@ -195,11 +186,11 @@ window state. That is the gap list below.
 
 ## Suggested sequencing
 
-1. G1 signing (start certificate procurement immediately — longest lead time)
-2. G3 tray + lifecycle (product meaning of the architecture, no dependencies)
-3. G2 auto-update (needs G1; ship together with the first signed release)
-4. G6 + G4 + G7 (small system-integration wins, parallelizable)
-5. G5 deep links, then P2 items by demand
+1. G1 remaining signing layers + certificate procurement (longest lead)
+2. G2 auto-update (needs G1; ship with the first signed release)
+3. G6 window state + G5 deep links (in flight; no G1 dependency)
+4. G4 notifications (depends on shipped tray)
+5. P2 items by demand; G8 stays deferred until a Show Page needs another display
 
 The deliberate observation from the review: every gap is shell-layer. The
 thin-shell bet held — the missing work is breadth on one boundary, not
