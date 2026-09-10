@@ -53,6 +53,26 @@ assert.deepEqual(
 )
 assert.deepEqual(Object.keys(zh.notices).sort(), expectedNoticeCodes)
 
+const notificationKeys = [
+  'approvalRequested.body',
+  'approvalRequested.title',
+  'runCanceled.body',
+  'runCanceled.title',
+  'runFailed.body',
+  'runFailed.title',
+  'runSucceeded.body',
+  'runSucceeded.title',
+  'toggle',
+]
+assert.deepEqual(leafShape(en.notifications), notificationKeys)
+assert.deepEqual(leafShape(zh.notifications), notificationKeys)
+for (const key of notificationKeys) {
+  const english = key.split('.').reduce((value, segment) => value[segment], en.notifications)
+  const chinese = key.split('.').reduce((value, segment) => value[segment], zh.notifications)
+  assert.ok(english.length > 0 && chinese.length > 0)
+  assert.deepEqual(placeholders(chinese), placeholders(english), `placeholder mismatch for notifications.${key}`)
+}
+
 for (const code of expectedNoticeCodes) {
   assert.deepEqual(
     placeholders(zh.notices[code]),

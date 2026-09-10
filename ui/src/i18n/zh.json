@@ -45,6 +45,25 @@
       "stopFailure": "无法安全停止运行时，应用将保持打开。请检查运行时后重试。",
       "loginFailure": "无法读取或更改登录启动设置。请检查操作系统的登录设置后重试。"
     },
+    "notifications": {
+      "toggle": "通知",
+      "approvalRequested": {
+        "title": "需要授权",
+        "body": "有一项密钥库请求正等待你的授权。"
+      },
+      "runSucceeded": {
+        "title": "运行已完成",
+        "body": "后台工作已成功完成。"
+      },
+      "runFailed": {
+        "title": "运行失败",
+        "body": "后台工作未能完成，请打开工作台查看详情。"
+      },
+      "runCanceled": {
+        "title": "运行已取消",
+        "body": "后台工作已取消。"
+      }
+    },
     "uninstall": {
       "menuLabel": "卸载 Avibe…",
       "confirmTitle": "卸载 Avibe",
