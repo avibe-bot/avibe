@@ -165,6 +165,13 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
 #[test]
 fn native_link_consumption_uses_one_success_and_window_generation_commit_boundary() {
     let source = shipping_source("src/lib.rs");
+    for line_ending in ["\n", "\r\n"] {
+        let source = source.lines().collect::<Vec<_>>().join(line_ending);
+        assert_native_link_consumption_boundary(&source);
+    }
+}
+
+fn assert_native_link_consumption_boundary(source: &str) {
     let cold = source
         .split("fn open_workbench(")
         .nth(1)
@@ -177,7 +184,8 @@ fn native_link_consumption_uses_one_success_and_window_generation_commit_boundar
         cold.find("window.navigate(navigation.url().clone())").unwrap()
             < cold.find("commit_deep_link_navigation(").unwrap()
     );
-    assert!(cold.contains("WorkbenchHandoff::Monitor => {\n                commit_deep_link_navigation"));
+    let (_, monitoring) = cold.split_once("WorkbenchHandoff::Monitor => {").unwrap();
+    assert!(monitoring.trim_start().starts_with("commit_deep_link_navigation("));
     let hot = source
         .split("fn apply_pending_deep_link(")
         .nth(1)
