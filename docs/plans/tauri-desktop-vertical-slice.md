@@ -527,14 +527,17 @@ interactive shell startup file.
 
 Development builds retain the installed-`vibe` resolver. A distributable build
 must enable the Rust `bundled-runtime` feature; producing a consumer installer
-without it is a release failure. Manual unsigned acceptance artifacts are built
-by `desktop-self-contained-package`; their macOS app copy receives only an
-ad-hoc structural signature. The manual workflow requires a SemVer input and
-stamps it into Tauri metadata and artifact names. Production release CI must
-sign executable code inside the private Runtime before archiving it, sign and
-notarize the outer app and DMG, and apply the corresponding Authenticode
-coverage on Windows. Signing, notarization, and publication are separate
-release gates.
+without it is a release failure. `desktop-self-contained-package` builds the
+artifacts and signs them credential-gated: with the Apple secrets configured it
+Developer ID signs and notarizes the macOS app (`SIGNATURE:
+app-identity-signed`); without them the macOS app copy receives only an ad-hoc
+structural signature and all artifacts remain unsigned acceptance builds. The
+manual workflow requires a SemVer input and stamps it into Tauri metadata and
+artifact names. Remaining signing layers are tracked release gates (see the
+distribution-signing-completion issue): sign executable code inside the
+private Runtime before archiving it, sign and notarize the outer DMG, and
+apply the corresponding Authenticode coverage on Windows. Signing,
+notarization, and publication are separate release gates.
 
 The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and all
 Agent backends absent from `PATH`. It must prove:
