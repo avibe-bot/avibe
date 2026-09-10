@@ -120,29 +120,34 @@ rule only. v1 does not add `visibility` to the SSE payload.
 
 A terminal `runs.updated` notifies if **either**:
 
-1. the run's wall time since it **started** is ≥ 30 seconds. The
-   clock is the run's durable `started_at`, not "when this shell first
-   saw a `running` event" — the broker has no replay, so attaching
-   mid-flight or reconnecting can miss that transition. Terminal
-   `runs.updated` events therefore include `started_at` (ISO-8601). If
-   a terminal event omits it, the shell refetches `GET /api/harness/runs/<run_id>`
-   once and reads `started_at` there before applying the threshold.
-   A missing timestamp after refetch fails closed (no notify) rather
-   than treating "first seen at terminal" as zero duration.
+1. **Duration ≥ 30s**, measured as
+   `completed_at − started_at` (both durable, ISO-8601 on the
+   terminal event). `completed_at` is the event's `completed_at` if
+   present, otherwise the terminal `updated_at`. Never "receipt time
+   minus started_at" — a two-second run delivered a minute later
+   (sleep, stall, reconnect) must not cross the threshold. If the
+   terminal event omits `started_at` or the completion timestamp, the
+   shell refetches `GET /api/harness/runs/<run_id>` once. Still
+   missing either stamp → fail closed (no notify).
    or
-2. the run was started in a way the product already treats as
-   background. Stored `run_type` values (from `core/scheduled_tasks.py` /
-   `core/watches.py`) are `scheduled` and `watch` — not the user-facing
-   definition kind `task`. Notify when `run_type` is in `{scheduled, watch}` even under 30s.
+2. **`run_type` ∈ `{scheduled, watch}`** even under 30s (stored
+   values from `core/scheduled_tasks.py` / `core/watches.py`; `task`
+   is a definition kind, not a run_type).
 
-The duration clock is durable `started_at`, not SSE observation time.
-Python does not grow a "please notify" flag or a `visibility` field in v1.
+Python adds `started_at` and `completed_at` (or always-populated
+terminal `updated_at`) on terminal `runs.updated`. No "please
+notify" flag, no `visibility` field in v1.
 
 ### Dedup
 
-- `approval.requested`: key = `request_id`. The same pending request
-  is never notified twice per shell lifetime. Status transitions away
-  from `pending` drop the key so a later re-open can notify again.
+- `approval.requested`: key = `request_id`. Same pending request is
+  never notified twice **while the key is retained**. Non-pending
+  transitions drop the key when observed. Because the broker has no
+  replay, a reconnect can miss that transition — so this set is
+  **bounded the same way as run keys** (LRU or TTL; default 512 or
+  24h). Do not rely on seeing a later status to bound memory. A
+  dropped key may notify again if the same request is still pending;
+  that is acceptable (at-least-once), not a leak.
 - `run.terminal`: key = `run_id`. Terminal is once per key while the
   key is retained. Retention is **bounded** (LRU or TTL, frozen
   default: 512 entries or 24 hours, whichever hits first). The bound
@@ -215,11 +220,11 @@ SSEBroker ──GET /api/events──►         attention filter
 /ready probe (existing, 2s)  liveness only, never attention
 ```
 
-Python changes in v1: include `started_at` on terminal `runs.updated`
-payloads (`run_updated_payload` / `publish_run_updated`). The two
-event types already flow to `/api/events`; this is an additive field
-on an existing payload, not a new route. Interactive Workbench refetch
-consumers ignore unknown fields.
+Python changes in v1: include `started_at` and `completed_at` (or
+guarantee terminal `updated_at`) on terminal `runs.updated` payloads
+(`run_updated_payload` / `publish_run_updated`). Additive fields on
+the existing payload, not a new route. Workbench refetch consumers
+ignore unknown fields.
 
 Rust changes live in `desktop/runtime-host` (filter, dedup, reconnect
 — Tauri-free, testable) and a thin `src-tauri` adapter that fires the
@@ -235,13 +240,15 @@ plugin and reads window-focus / tray-pref state.
 - Dedup: two identical `request_id` pendings → one intent; a
   non-pending transition then a new pending with the same id → a
   second intent.
-- Background rule (property): a short `agent_run` / missing `run_type`
-  with `started_at` < 30s → no intent; the same row with `started_at`
-  ≥ 30s → intent; `run_type=scheduled` (or `watch`) → intent even
-  when < 30s. Mid-flight attach uses `started_at`, not first-seen.
-  Terminal event without `started_at` and a refetch that also lacks
-  it → no intent. Adding a new run_type to the fixture must not
-  notify unless it is `scheduled`/`watch` or the duration rule hits.
+- Duration property: `completed_at − started_at` (or terminal
+  `updated_at − started_at`) ≥ 30s → intent for a non-scheduled run;
+  a 2s run whose event arrives 60s later does **not**. Missing either
+  stamp after one refetch → no intent. `run_type=scheduled`/`watch`
+  → intent even under 30s. A new run_type in the fixture must not
+  notify unless it is those two or the duration property hits.
+- Dedup bound: both approval and run key sets stay within 512
+  entries / 24h; inserting past the bound drops the oldest, and a
+  later duplicate of a dropped key may notify again.
 - Focus gate: window focused + visible → no intent even on a matching
   event.
 - Reconnect: stream drop then restore does not panic, does not
