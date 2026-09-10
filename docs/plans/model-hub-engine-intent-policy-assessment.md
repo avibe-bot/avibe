@@ -1,13 +1,15 @@
 # Model Hub engine reasoning-intent assessment
 
-Status: inactive, unshipped **source-only fifth-head candidate**, not accepted
+Status: **locally qualified inactive source**, unshipped and not accepted
 for Linux/macOS execution or PR delivery. The orchestrator accepted the earlier
 configured-storage/preparation and nested private-context functionality only
 for its exact historical snapshot: 1,076 pure tests, one bounded Linux context
 diagnostic and independent native original-file readback. Those results and
 the successful CI on `e2d9c6361350` do not validate the new recipe bytes.
-The current scope is local implementation and HOST-only consuming validation;
-independent source inspection and new exact-head review remain required.
+The orchestrator independently inspected the sixth-head correction and accepted
+its bounded source mechanisms. The current scope is final prose qualification
+and a conditional local-only commit, not remote delivery or thread closure.
+Final-byte validation and a later clean exact-head review remain separate gates.
 The orchestrator explicitly adjusted its supplementary source-evidence
 criterion; the old Watch's raw outer streams remain unavailable and complete
 original transport accounting remains UNMET. No new recipe Linux/privileged/
@@ -51,7 +53,68 @@ with a reproducible local build and HTTP fixture. Do not ship an Avibe manifest
 change until an authorized, truthful source/release route exists and all
 required assets are published and verified.
 
-## Fifth reviewed-head candidate — pure HOST evidence; OS gates UNMET
+## Sixth reviewed-head correction — source inspected; OS gates UNMET
+
+The September 10, 2026 Asia/Shanghai root circuit decision first released a
+bounded local source correction and finite HOST qualification, then independent
+source inspection accepted that candidate for final prose qualification and
+a conditional local-only commit. Reviewed head
+`90cfc9b3dc99d54607561eb91783c69690c4888e` has terminal findings review
+`5160886376`: macOS service IPC (`3973908442`) and multiply-linked source
+closure (`3973908447`). The complete history contains six findings-bearing
+heads and eighteen originals: twelve resolved, six unresolved. The four
+preceding findings remain open. All seventeen exact90 CI jobs succeeded;
+there is no clean Codex verdict, closure, merge or OS acceptance.
+
+The existing macOS policy owner now starts from default-deny. Its only
+positive non-file operations are process-exec and process-fork; no Mach/XPC,
+POSIX/System V IPC, IOKit, job, signal or sysctl grants are introduced.
+Explicit network/file denies and finite task/input file grants retain the
+same original StorageContext and home/protected/alias exclusions. Process
+grants do not grant file paths. Missing startup operations fail closed:
+constructed policy and intercepted argv do not demonstrate kernel enforcement,
+inherited-port confinement or a supported startup closure.
+
+The existing execution-input regular-file owner admits a single-link regular
+inode via no-follow/nonblocking descriptor, reads those bytes and checks
+observed pathname/descriptor and metadata continuity on entry and completion,
+closing partial acquisitions and failed reads. Source/fixture/recipe digests
+and verify's actual input/candidate reads reuse it; public apply also admits
+the complete source closure before a patch write. Sorted relative names,
+kind tags, length-prefixed encoding and supported internal symlink rules are
+unchanged; normal single-link trees keep their original digests and pins.
+Preexisting writable hardlink aliases and observed drift are refused, not
+repaired. This is not an atomic snapshot or protection against an unconstrained
+outside writer creating a later alias or changing bytes. Trusted preparation
+and content custody throughout the interval, and the intended readonly mount
+boundary, remain explicit independent prerequisites.
+
+New consuming regressions cover policy grants/argv/refusals, real task-only
+hardlinks, direct source/candidate reads, complete apply admission, phase
+pre-command and wire pre-import refusal, observed replacement/link-count/type
+changes, nonblocking FIFO rejection and descriptor closure. Before this final
+prose update, the lane passed 1,001 focused cases in 24.27 seconds and 1,457
+complete pure cases in 17.63 seconds; the orchestrator independently passed
+1,457 in 17.54 seconds. Each run exited zero without skips, warnings or
+deselections. Lane Ruff 0.4.9 checked all fifteen Python files; fifteen ASTs,
+all ten fenced blocks, nine shell and six embedded Python syntax checks
+reconciled. Precisely scoped whitespace checks had empty diagnostic streams;
+their raw content-difference exits remain one, not rewritten zero.
+These are overlapping source checks on the inspected pre-final-prose bytes,
+using the CURRENT readonly 23-file layout described below, not OS evidence.
+Final-prose validation and any local commit have separate external records;
+neither is predeclared, and remote delivery and thread closure remain held.
+The namespace/filter/bootstrap/ownership-fixture contracts and native patch
+remain unchanged.
+
+The preceding final exact90 source separately passed lane/root 1,420-case
+pure runs (17.16/16.15 seconds), Ruff 0.4.9 and static/whitespace checks before
+inactive-source acceptance and renewed review. These and the earlier
+pre-document 1,420/335 results below remain historical, not validation of
+this correction. Both failed macOS routes, all Linux execution gates,
+provenance/four-platform limits and OLD Watch raw transport UNMET persist.
+
+## Historical fifth reviewed-head candidate — pure HOST evidence; OS gates UNMET
 
 The September 10, 2026 Asia/Shanghai circuit decision permits one local
 candidate directly after `10b1bdd80e20eea300c97baeda9fb120522e9a33`, not
@@ -67,7 +130,7 @@ with findings on `10b1`; no pending review or genuine exact-head clean verdict
 exists. Sole lint `34380925809`, attempt 1, and all seventeen expected jobs
 succeeded. OPEN/non-draft/CLEAN does not establish readiness.
 
-| Current original | Thread | Boundary |
+| Fifth-head original | Thread | Boundary |
 | --- | --- | --- |
 | 3971583274 | PRRT_kwDOPbFPYs6gxv_t | Invoking UID's kernel keyrings |
 | 3971583287 | PRRT_kwDOPbFPYs6gxv_2 | Shared host IPC namespace |
@@ -175,8 +238,8 @@ fork/exec inheritance and harmless task-owned-key denial, IPC identity/resource
 separation, proc-FD mount/overmount/remount/chroot/cleanup continuity, and the
 macOS startup closure plus enforced synthetic positive/negative access.
 No new driver, synthetic kernel object, dependency or installed-state change
-is prepared by this candidate. Independent root source inspection is still
-required, and root alone can release later OS work or delivery.
+was prepared by that candidate. At that checkpoint, independent root source
+inspection was still required; root alone can release later OS work or delivery.
 
 All historical Linux/fullphase/Go/338/macOS/uv/watcher, raw-versus-tracked/cache,
 observer-versus-verifier and publication/four-platform qualifications below

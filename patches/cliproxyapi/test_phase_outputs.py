@@ -1,6 +1,7 @@
 """Real verifier phase/output consumers with only compiler/wire processes faked."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -184,6 +185,20 @@ def test_substituted_same_version_compiler_refuses_before_any_go_execution(phase
     with pytest.raises(RuntimeError, match="extraction"):
         phases.invoke("build", "refused-compiler.json")
     assert not phases.calls and not (phases.output / "bin").exists()
+
+
+@pytest.mark.parametrize("resource", ["source", "fixture", "recipe"])
+def test_actual_phase_identity_refuses_hardlink_closure_before_command(phases, monkeypatch, resource):
+    root = getattr(phases, resource)
+    target = root / {"source": "main.go", "fixture": "uv.lock", "recipe": "prerequisites.json"}[resource]
+    os.link(target, phases.state / "writable-alias")
+    monkeypatch.setattr(verify.subprocess, "check_output",
+                        lambda *_a, **_kw: pytest.fail("Rejected closure reached compiler version."))
+    with pytest.raises(ValueError, match="single-link regular"):
+        phases.invoke("build", "refused-hardlink.json")
+    assert not phases.calls and not (phases.output / "bin").exists()
+    assert not (phases.output / "inputs-before.json").exists()
+    assert not (phases.output / "build.json").exists()
 
 
 def test_inputs_are_rechecked_after_failed_command(phases):

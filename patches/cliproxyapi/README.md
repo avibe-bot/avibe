@@ -36,14 +36,36 @@ all egress and is only for pure-source diagnostics. Executing the pinned
 Linux arm64 Go toolchain, including compilation, requires the Linux envelope;
 there is no macOS engine-build or network-suite fallback.
 
-Current acceptance boundary: **source-only candidate, not OS-accepted and not
-released for delivery or execution**. The fifth findings-bearing head,
-`10b1bdd80e20eea300c97baeda9fb120522e9a33`, has four unresolved findings:
-UID keyrings, shared IPC, privileged child filesystem custody and complete
-captured-home read isolation on macOS. Review `5158126460` is terminal with
-findings. The full circuit has sixteen originals across five reviewed heads;
-the first twelve threads are resolved. Successful seventeen-job CI, CLEAN
-merge state and historical source acceptance do not override those findings.
+Current acceptance boundary: **locally qualified inactive source; remote
+delivery and OS execution remain held**. The sixth findings-bearing head,
+`90cfc9b3dc99d54607561eb91783c69690c4888e`, received terminal review
+`5160886376` with two additional findings: macOS service IPC and multiply-linked
+source files. The full circuit has eighteen originals across six reviewed
+heads: twelve resolved and six unresolved, including the preceding UID-keyring,
+Linux IPC, privileged child-custody and complete-home findings. Successful
+seventeen-job CI, CLEAN merge state and historical inactive-source acceptance
+do not override those findings. The orchestrator independently inspected and
+accepted the bounded correction as inactive source. Before this final prose
+update, the lane passed 1,001 focused cases and 1,457 complete pure cases;
+the orchestrator independently passed the same 1,457-case suite. Lane Ruff
+0.4.9, all fifteen Python ASTs, nine shell and six embedded Python syntax
+checks, and precisely scoped whitespace checks also passed on those bytes.
+Final-prose qualification and any conditional local-only commit require their
+own records; neither is predeclared here. Review-thread closure remains held.
+
+The macOS helper now constructs default-deny policy. Only process-exec and
+process-fork are positive non-file operations; no Mach/XPC, POSIX/System V IPC
+or other service exceptions are granted. Finite file grants and explicit
+network/file denies remain; process authority does not grant a file path.
+The existing regular-file owner now binds reads to a no-follow, nonblocking
+single-link descriptor and rejects observed pathname/descriptor or metadata
+drift at admission and completion. Source digests and actual input/candidate
+reads reuse it; apply checks the complete source tree before patch writes.
+Unchanged single-link trees retain the same digest encoding. These checks
+reject preexisting hardlink aliases, not all future concurrent changes:
+trusted preparation/content custody throughout the diagnostic interval and
+the intended read-only mount boundary remain separate prerequisites, not an
+atomic snapshot guarantee.
 
 The candidate extends the existing namespace/storage owners, not the engine
 intent patch. Its Linux libc mount/proc-FD/overmount behavior, native ABI and
@@ -54,10 +76,12 @@ The macOS finite input policy's supported interpreter/system startup closure
 and positive/negative enforcement also remain UNMET. Do not execute the
 commands below on these bytes without the orchestrator's later release.
 
-The current candidate, including the corrected synthetic ownership fixture,
-passed 335 focused HOST cases. The orchestrator independently passed all 1,420
-cases in the seven-file pure suite on these same candidate inputs. That run
-used a hash-admitted, readonly 23-file current-input view outside real homes,
+The preceding fifth candidate, including the corrected synthetic ownership
+fixture, passed 335 focused HOST cases. Its pre-final-document input view
+passed the orchestrator's 1,420-case pure run. Final exact90 inputs separately
+passed lane/root 1,420-case runs and Ruff/static/whitespace qualification.
+Those results remain historical, not validation of the sixth correction.
+The proven HOST route used a hash-admitted, readonly 23-file view outside real homes,
 preserving relative layout, with files 0444 and directories 0555. A separate
 task-writable execution subtree, fresh task storage and an independent outer
 HOST policy denied network, production writes and all real-home reads/metadata.
@@ -67,9 +91,9 @@ The lane's earlier complete run remains failed: 1,071 passed before documented
 preparation hit denied home-ancestor resolution. The earlier focused failure
 remains 120 passed/one failed on inconsistent synthetic GID metadata; the
 original collection failure exited 2 with zero tests. None is relabeled by
-the later input-layout or fixture correction. Current pure passes establish
-only intercepted source consumers, not lint/static qualification, independent
-source acceptance, OS enforcement or delivery. The maintained emitted-program
+the later input-layout or fixture correction. Pure passes establish only
+intercepted source consumers; exact90's inactive-source acceptance never
+established OS enforcement or acceptance of these new omissions. The emitted-program
 case contains 5,140 internal decode assertions in ONE test, not result rows
 or Linux execution.
 
@@ -124,10 +148,12 @@ and their lexical/canonical aliases, not merely product/configuration children.
 staged recipe/source/interpreter/system inputs outside those roots. Every
 grant, including sandbox-exec, `/dev/null` and system/tool inputs, goes through
 the same storage admission. Whole home/project/task ancestors and broad
-`/usr`, `/System` or `/Library` grants refuse. The generated policy permits
-only finite admitted reads and task writes, denies network, and has no global
+`/usr`, `/System` or `/Library` grants refuse. The default-deny policy permits
+only finite admitted reads, task writes and the two named process operations,
+denies network, and has no global
 read/metadata or unsandboxed fallback. Policy-construction tests are not
-sandbox enforcement evidence; the startup input closure remains an execution
+sandbox enforcement or inherited-port confinement evidence; the startup
+input/operation closure remains an execution
 gate, not a reason to widen access.
 
 Begin from the invoking user's original environment, not `env -i`, a task HOME,

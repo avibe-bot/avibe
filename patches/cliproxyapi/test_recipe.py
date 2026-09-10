@@ -32,6 +32,7 @@ def frozen_repository(tmp_path: Path) -> tuple[Path, dict]:
 
     safe_git(repository, "init")
     (repository / "fixture_model.py").write_text("MODEL = 'frozen-模型'\n")
+    (repository / "unchanged.go").write_text("package unchanged\n")
     (repository / "facts").mkdir()
     (repository / "facts/config.json").write_text('{"model":"frozen-模型"}')
     git("add", ".")
@@ -96,6 +97,71 @@ def test_fixture_source_digest_is_path_independent(tmp_path: Path) -> None:
     assert source_digest(first) == source_digest(second)
 
 
+def test_single_link_digest_keeps_independent_encoding_and_internal_symlinks(tmp_path):
+    root = tmp_path / "source"
+    (root / "facts").mkdir(parents=True)
+    (root / "facts/模型.txt").write_bytes(b"exact task-only bytes")
+    (root / "internal-link").symlink_to("facts/模型.txt")
+    expected = hashlib.sha256()
+    # Independent named records preserve the preexisting sorted/length encoding.
+    for record in ((b"facts", b"dir", b""),
+                   ("facts/模型.txt".encode(), b"file", b"exact task-only bytes"),
+                   (b"internal-link", b"link", "facts/模型.txt".encode())):
+        for field in record:
+            expected.update(len(field).to_bytes(8, "big"))
+            expected.update(field)
+    assert source_digest(root) == expected.hexdigest()
+    verify_fixture(root, expected.hexdigest())
+
+
+@pytest.mark.parametrize("alias_location", ["inside", "outside", "writable-state"])
+def test_complete_source_digest_rejects_real_hardlink_aliases(tmp_path, alias_location):
+    root = tmp_path / "source"
+    root.mkdir()
+    target = root / "unchanged.go"
+    target.write_bytes(b"normal unpatched source")
+    expected = source_digest(root)
+    parent = root if alias_location == "inside" else tmp_path / alias_location
+    if parent != root:
+        parent.mkdir()
+    alias = parent / "alias"
+    os.link(target, alias)
+    with pytest.raises(ValueError, match="single-link regular"):
+        verify_fixture(root, expected)
+    assert target.read_bytes() == alias.read_bytes() == b"normal unpatched source"
+
+
+@pytest.mark.parametrize("mutation", ["replacement", "hardlink", "fifo"])
+def test_actual_digest_refuses_leaf_drift_at_consumed_open(tmp_path, monkeypatch, mutation):
+    root = tmp_path / "source"
+    root.mkdir()
+    target = root / "file"
+    target.write_bytes(b"unchanged content")
+    original_open, original_fstat = os.open, os.fstat
+    opened = []
+
+    def opening(path, flags, *args, **kwargs):
+        assert path == target and flags & os.O_NONBLOCK
+        if mutation == "hardlink":
+            os.link(target, tmp_path / "alias")
+        else:
+            target.rename(tmp_path / "preserved")
+            if mutation == "replacement":
+                target.write_bytes(b"unchanged content")
+            else:
+                os.mkfifo(target)
+        fd = original_open(path, flags, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", opening)
+    with pytest.raises(ValueError):
+        source_digest(root)
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        original_fstat(opened[0])
+
+
 def apply_fixture(repository, receipt, tmp_path, monkeypatch):
     """Actual apply/status/candidate consumers, with a harmless exact-base patch."""
     recipe = tmp_path / "apply-recipe"
@@ -118,6 +184,41 @@ def apply_fixture(repository, receipt, tmp_path, monkeypatch):
         "verify.py", "apply", "--source", str(repository), "--state", str(tmp_path / "apply-state"),
     ])
     return after
+
+
+@pytest.mark.parametrize("name", ["facts/config.json", "fixture_model.py"])
+def test_actual_verify_input_and_candidate_reads_reject_hardlinks(tmp_path, monkeypatch, name):
+    repository, receipt = frozen_repository(tmp_path)
+    expected = apply_fixture(repository, receipt, tmp_path, monkeypatch)
+    verify.main()  # Actual task-only Git apply, before installing the alias.
+    target = repository / name
+    os.link(target, tmp_path / "state-alias")
+    consumer = verify.verify_inputs if name == "facts/config.json" else verify.verify_candidate
+    with pytest.raises(ValueError, match="single-link regular"):
+        consumer(repository)
+    assert (repository / "fixture_model.py").read_bytes() == expected
+
+
+@pytest.mark.parametrize("name", ["facts/config.json", "fixture_model.py", "unchanged.go"])
+def test_actual_apply_refuses_complete_hardlinked_source_before_patch_write(tmp_path, monkeypatch, name):
+    repository, receipt = frozen_repository(tmp_path)
+    apply_fixture(repository, receipt, tmp_path, monkeypatch)
+    before = (repository / "fixture_model.py").read_bytes()
+    os.link(repository / name, tmp_path / "writable-state-alias")
+    original_git = verify.safe_git
+    calls = []
+
+    def git(source, *arguments):
+        calls.append(arguments)
+        assert arguments[0] != "apply", "Rejected closure reached patch effect."
+        return original_git(source, *arguments)
+
+    monkeypatch.setattr(verify, "safe_git", git)
+    with pytest.raises(ValueError, match="single-link regular"):
+        verify.main()
+    assert (repository / "fixture_model.py").read_bytes() == before
+    assert not (tmp_path / "apply-state").exists()
+    assert not any(command[0] == "apply" for command in calls)
 
 
 def git_poison(tmp_path, monkeypatch, source):

@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 
 from isolation import safe_git, validate_state_root
+from execution_inputs import regular_file
 
 
 def source_digest(root: Path) -> str:
@@ -24,7 +25,8 @@ def source_digest(root: Path) -> str:
                 raise ValueError(f"Fixture link leaves its source root: {name!r}")
             kind, content = b"link", os.readlink(path).encode()
         elif stat.S_ISREG(mode):
-            kind, content = b"file", path.read_bytes()
+            with regular_file(path) as source:
+                kind, content = b"file", source.read()
         elif stat.S_ISDIR(mode):
             kind, content = b"dir", b""
         else:

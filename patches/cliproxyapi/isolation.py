@@ -419,7 +419,10 @@ def sandbox_prefix(root: Path, *, required_inputs: tuple[Path, ...] | None = Non
 
     boundaries = sorted(set((*context.homes, *context.protected)))
     exclusions = " ".join(f"(require-not (subpath {quote(path)}))" for path in boundaries)
-    policy = '(version 1) (allow default) (deny network*) (deny file-write*) (deny file-read*) '
+    # No Mach/XPC/POSIX/System V service is required by this diagnostic.
+    # Missing startup authority must fail closed, never inherit allow-default.
+    policy = ('(version 1) (deny default) (deny network*) (deny file-write*) (deny file-read*) '
+              '(allow process-exec) (allow process-fork) ')
     for path in sorted(set(inputs)):
         matcher = "literal" if path == Path("/dev/null") else "subpath"
         policy += f"(allow file-read* (require-all ({matcher} {quote(path)}) {exclusions})) "

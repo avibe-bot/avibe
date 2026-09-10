@@ -1,13 +1,57 @@
 """Pure recipe consumers; actual lifecycle regressions run in isolated wire."""
 
 import copy
+import builtins
 import json
+import os
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 import wire_matrix
+from fixture import source_digest
+
+
+def test_actual_wire_refuses_hardlinked_fixture_before_import_or_effect(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    target = fixture / "unpatched.py"
+    target.write_bytes(b"raise RuntimeError('must never import')\n")
+    expected = source_digest(fixture)
+    build = tmp_path / "prior-build"
+    (build / "bin").mkdir(parents=True)
+    binary = build / "bin/cli-proxy-api"
+    binary.write_bytes(b"task-only binary sentinel; never executed")
+    output = tmp_path / "output"
+    output.mkdir()
+    state = output / "wire"
+    os.link(target, output / "writable-alias")
+    proof = {"network": "loopback", "fixture": str(fixture), "output": str(output),
+             "selected_build": {"output": str(build)}}
+    monkeypatch.setattr(wire_matrix, "namespace_receipt", lambda: proof)
+    monkeypatch.setattr(sys, "argv", ["wire_matrix.py", "--binary", str(binary),
+        "--state", str(state), "--fixture", str(fixture), "--fixture-sha256", expected])
+    original_import = builtins.__import__
+    imports = []
+
+    def importing(name, *args, **kwargs):
+        if name.startswith("vibe."):
+            imports.append(name)
+            pytest.fail("Rejected fixture reached Avibe import.")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", importing)
+    monkeypatch.setattr(wire_matrix.importlib.util, "spec_from_file_location",
+                        lambda *_a, **_kw: pytest.fail("Rejected fixture reached dynamic import."))
+    monkeypatch.setattr(wire_matrix.subprocess, "run",
+                        lambda *_a, **_kw: pytest.fail("Rejected fixture reached process effect."))
+    original_path = list(sys.path)
+    with pytest.raises(ValueError, match="single-link regular"):
+        wire_matrix.main()
+    assert sys.path == original_path and not imports and not state.exists()
+    assert target.read_bytes() == b"raise RuntimeError('must never import')\n"
 
 
 @pytest.mark.parametrize("section", ["claude-api-key", "codex-api-key", "openai-compatibility"])

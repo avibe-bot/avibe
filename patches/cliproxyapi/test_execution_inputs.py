@@ -6,10 +6,105 @@ import os
 import shutil
 import sys
 import tarfile
+from pathlib import Path
 
 import pytest
 
 import execution_inputs
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "symlink", "hardlink"])
+def test_regular_file_rejects_unadmitted_types_without_opening(tmp_path, monkeypatch, kind):
+    target = tmp_path / "input"
+    if kind == "directory":
+        target.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(target)
+    else:
+        original = tmp_path / "original"
+        original.write_bytes(b"task-only input")
+        if kind == "symlink":
+            target.symlink_to(original)
+        else:
+            os.link(original, target)
+    monkeypatch.setattr(os, "open", lambda *_a, **_kw: pytest.fail("Rejected input must not be opened."))
+    with pytest.raises(ValueError, match="single-link regular"):
+        execution_inputs.file_sha256(target)
+
+
+@pytest.mark.parametrize("when", ["admission", "completion"])
+@pytest.mark.parametrize("mutation", ["replacement", "symlink", "fifo", "hardlink", "mode", "content"])
+def test_regular_file_binds_actual_descriptor_and_closes_on_observed_drift(tmp_path, monkeypatch, when, mutation):
+    target = tmp_path / "input"
+    target.write_bytes(b"original task-only bytes")
+    target.chmod(0o644)
+    original_open, original_fstat = os.open, os.fstat
+    opened = []
+
+    def mutate():
+        if mutation in ("replacement", "symlink", "fifo"):
+            preserved = tmp_path / "preserved"
+            target.rename(preserved)
+            if mutation == "replacement":
+                target.write_bytes(preserved.read_bytes())
+            elif mutation == "symlink":
+                target.symlink_to(preserved)
+            else:
+                os.mkfifo(target)
+        elif mutation == "hardlink":
+            os.link(target, tmp_path / "writable-alias")
+        elif mutation == "mode":
+            target.chmod(0o600)
+        else:
+            target.write_bytes(b"modified task-only bytes")
+
+    def opening(path, flags, *args, **kwargs):
+        assert Path(path) == target
+        assert all(flags & flag for flag in (os.O_NOFOLLOW, os.O_NONBLOCK, os.O_CLOEXEC))
+        if when == "admission":
+            mutate()
+        fd = original_open(path, flags, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", opening)
+    with pytest.raises((ValueError, OSError)):
+        with execution_inputs.regular_file(target) as stream:
+            assert when == "completion", "Admission drift reached the consuming body."
+            assert stream.read() == b"original task-only bytes"
+            mutate()
+    for fd in opened:
+        with pytest.raises(OSError):
+            original_fstat(fd)
+
+
+@pytest.mark.parametrize("failure", ["fdopen", "consumer", "none"])
+def test_regular_file_closes_partial_and_successful_acquisitions(tmp_path, monkeypatch, failure):
+    target = tmp_path / "input"
+    target.write_bytes(b"stable task-only bytes")
+    original_open, original_fstat = os.open, os.fstat
+    opened = []
+
+    def opening(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", opening)
+    if failure == "fdopen":
+        def refused(*_args, **_kwargs):
+            raise RuntimeError("finite fdopen failure")
+        monkeypatch.setattr(os, "fdopen", refused)
+    if failure == "none":
+        assert execution_inputs.file_sha256(target) == hashlib.sha256(b"stable task-only bytes").hexdigest()
+    else:
+        with pytest.raises(RuntimeError, match="finite"):
+            with execution_inputs.regular_file(target) as stream:
+                assert stream.read() == b"stable task-only bytes"
+                raise RuntimeError("finite consumer failure")
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        original_fstat(opened[0])
 
 
 def fake_go(tmp_path, monkeypatch):

@@ -15,12 +15,32 @@ import tarfile
 
 @contextmanager
 def regular_file(path: Path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
+    """Consume one admitted inode; reject observed replacement or metadata drift.
+
+    This is not a snapshot or a lock against concurrent outside writers. Input
+    preparation/content custody and the read-only execution view remain required.
+    """
+    def identity(info):
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ValueError(f"Expected a single-link regular file: {path.name}")
-        yield stream
+        return tuple(getattr(info, "st_" + field) for field in (
+            "dev", "ino", "mode", "uid", "gid", "rdev", "nlink", "size", "mtime_ns", "ctime_ns",
+        ))
+
+    admitted = identity(path.lstat())
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            def check():
+                if identity(os.fstat(fd)) != admitted or identity(path.lstat()) != admitted:
+                    raise ValueError(f"Execution input changed during its read: {path.name}")
+            check()
+            try:
+                yield stream
+            finally:
+                check()
+    finally:
+        os.close(fd)
 
 
 def file_sha256(path: Path) -> str:

@@ -25,7 +25,7 @@ def verify_inputs(source: Path) -> dict:
     if head != receipt["source_sha"]:
         raise RuntimeError(f"Wrong engine base: {head}")
     for name, expected in receipt["sha256"].items():
-        if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
+        if file_sha256(source / name) != expected:
             raise RuntimeError(f"Frozen input changed: {name}")
     return receipt
 
@@ -39,7 +39,7 @@ def verify_candidate(source: Path) -> str:
     if changed != set(receipt):
         raise RuntimeError("Candidate has missing/extra edits or untracked files; preserve and inspect it.")
     for name, expected in receipt.items():
-        if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
+        if file_sha256(source / name) != expected:
             raise RuntimeError(f"Candidate file differs from the maintained patch: {name}")
     return hashlib.sha256((HERE / "native-intent.patch").read_bytes()).hexdigest()
 
@@ -112,6 +112,9 @@ def main() -> None:
     proof = namespace_receipt() if args.phase != "apply" else None
     verify_inputs(source)
     if args.phase == "apply":
+        # Apply has no input_identity call: admit the COMPLETE original tree
+        # before Git can write, including unchanged/nonpatched source files.
+        source_digest(source)
         status = safe_git(source, "status", "--porcelain")
         if status:
             raise RuntimeError("Checkout is dirty; preserve it and use a fresh exact-base checkout.")

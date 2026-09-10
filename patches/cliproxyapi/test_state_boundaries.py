@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -296,6 +297,10 @@ def test_macos_read_policy_uses_all_original_configured_and_canonical_locations(
     context = isolation.storage_context()
     prefix = isolation.sandbox_prefix(tmp_path / "task", required_inputs=(tmp_path / "staged-input",))
     assert prefix[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert "(deny default)" in prefix[2] and "(allow default)" not in prefix[2]
+    assert set(re.findall(r"\(allow ([^\s()]+)", prefix[2])) == {
+        "file-read*", "file-write*", "process-exec", "process-fork",
+    }
     for boundary in (*context.homes, *context.protected):
         assert f"(deny file-read* (subpath {json.dumps(str(boundary))}))" in prefix[2]
 
@@ -535,9 +540,11 @@ def test_macos_finite_input_refusals_are_before_effects(tmp_path, original_stora
     assert not (tmp_path / "task").exists()
 
 
-def test_macos_disjoint_unicode_inputs_reach_actual_argv_without_policy_widening(tmp_path, original_storage, monkeypatch):
+@pytest.mark.parametrize("name", ["normal", "task-唯一", 'staged-"quoted"'])
+def test_macos_disjoint_unicode_inputs_reach_actual_argv_without_policy_widening(
+        tmp_path, original_storage, monkeypatch, name):
     monkeypatch.setattr(sys, "platform", "darwin")
-    task, inputs = tmp_path / "task-唯一", tmp_path / 'staged-"quoted"'
+    task, inputs = tmp_path / ("task-" + name), tmp_path / ("inputs-" + name)
     inputs.mkdir()
     sentinel = inputs / "approved.txt"
     sentinel.write_bytes(b"synthetic approved input")
@@ -551,6 +558,16 @@ def test_macos_disjoint_unicode_inputs_reach_actual_argv_without_policy_widening
     def consume(command, **kwargs):
         assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
         policy = command[2]
+        assert policy.startswith("(version 1) (deny default)")
+        assert "(allow default)" not in policy and "(import " not in policy
+        # Inspect the actual entire positive operation set, not an SBPL emulator.
+        assert set(re.findall(r"\(allow ([^\s()]+)", policy)) == {
+            "file-read*", "file-write*", "process-exec", "process-fork",
+        }
+        assert policy.count("(allow process-exec)") == policy.count("(allow process-fork)") == 1
+        assert not any(token in policy for token in (
+            "mach", "ipc", "iokit", "sysctl", "signal", "job-creation", "process*",
+        ))
         assert "(deny network*)" in policy and "(deny file-read*)" in policy and "(deny file-write*)" in policy
         assert "(allow file-read*)" not in policy and "(allow file-read-metadata)" not in policy
         for boundary in (*context.homes, *context.protected):
