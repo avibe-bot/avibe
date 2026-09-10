@@ -93,16 +93,21 @@ a `SIGNATURE` file next to the artifact hashes:
 - **With repository secrets configured** (`APPLE_CERTIFICATE` +
   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY` + `APPLE_API_ISSUER` +
   `APPLE_API_PRIVATE_KEY`, optional `APPLE_SIGNING_IDENTITY`) the workflow
-  Developer ID signs the bundle, notarizes it through the App Store Connect
-  API key, staples the ticket, and verifies the produced signature. The
-  credential set must be complete — a half-configured set fails the build
-  rather than silently producing a signed-but-unnotarized artifact.
+  Developer ID signs the .app, notarizes it through the App Store Connect
+  API key, staples the ticket, and verifies the produced signature
+  (`SIGNATURE: app-identity-signed`). The credential set must be complete —
+  a partially populated set fails the build rather than silently producing a
+  signed-but-unnotarized artifact.
 - **Without those secrets** the workflow produces unsigned acceptance
   artifacts, exactly as before: the DMG carries an ad-hoc signature only so
   macOS can verify its complete app/resource structure; it has no trusted
   developer identity.
 
-Windows signing is not yet implemented; NSIS artifacts remain unsigned
+Two signing layers are deliberately NOT in this workflow yet and remain
+tracked release gates (see the distribution-signing-completion issue):
+signing/notarizing the outer DMG image itself, and signing the Mach-O
+binaries inside the embedded `runtime.zip` before archiving. Windows
+signing is likewise not yet implemented; NSIS artifacts remain unsigned
 acceptance builds. Windows ARM64 stays outside the current product gate.
 
 ### Uninstalling a product package

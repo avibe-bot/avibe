@@ -196,10 +196,13 @@ jobs:
           --features bundled-runtime
           --config tauri.release.conf.json
 
-      # Assert the artifact matches the credentials that were exported: with a
-      # certificate configured the bundle must be identity-signed and verify
-      # strictly; without one it must remain an ad-hoc acceptance build.
-      - name: Verify macOS signature matches the signing path
+      # Assert the inner app matches the credentials that were exported. NOTE
+      # the layer boundary recorded here: this describes the .app INSIDE the
+      # DMG only. The DMG image itself and the Mach-O binaries inside the
+      # embedded runtime.zip are NOT signed/notarized by this workflow yet —
+      # those layers are tracked in the distribution-signing-completion issue
+      # and remain release gates.
+      - name: Verify macOS app signature matches the signing path
         if: runner.os == 'macOS'
         working-directory: desktop
         shell: bash
@@ -218,7 +221,7 @@ jobs:
               exit 1
             fi
             codesign --verify --deep --strict "$app"
-            echo "signature_state=identity-signed (${authority})" >> "$GITHUB_ENV"
+            echo "signature_state=app-identity-signed (${authority})" >> "$GITHUB_ENV"
           else
             echo "signature_state=unsigned-acceptance" >> "$GITHUB_ENV"
           fi
@@ -242,8 +245,12 @@ jobs:
           cp desktop/src-tauri/resources/runtime/runtime-manifest.json desktop-package/
           # Signature state is evidence about the artifact, recorded beside the
           # hashes so an acceptance build can never be mistaken for a signed
-          # release artifact downstream. Non-macOS targets have no macOS
-          # signature; the Windows signing path is not yet implemented.
+          # release artifact downstream. The state names the LAYER it proved:
+          # "app-identity-signed" means the .app inside the DMG is Developer ID
+          # signed and notarized; the DMG image itself and the embedded
+          # runtime's Mach-O contents remain unsigned layers tracked in the
+          # distribution-signing-completion issue. Non-macOS targets have no
+          # macOS signature; the Windows signing path is not yet implemented.
           if [ "$RUNNER_OS" = "macOS" ]; then
             printf '%s\n' "${signature_state:-unsigned-acceptance}" > desktop-package/SIGNATURE
           else
