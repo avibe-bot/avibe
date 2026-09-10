@@ -1,0 +1,17 @@
+{
+  "internal/runtime/executor/helps/model_capabilities.go": "f7fa213a5abad5612fdfb1e74e081f184d2f6e2a36b930c3af8281b6f1b572cb",
+  "internal/runtime/executor/helps/thinking.go": "f20d0276d83ada0970f0e128a10ccc747e7e5a95c2c4a6a243d9ee1e47474917",
+  "internal/runtime/executor/native_intent_test.go": "9c499039cfbdae871126a44418db651c11ca110de10fee1c51da50431a56f470",
+  "internal/runtime/executor/xai_executor_request.go": "04970082bc305c620386cf7098c04336eb939a2f029d65fb5de813df2ed2af4f",
+  "internal/runtime/executor/xai_executor_response.go": "d5c0667254b06a811377073257903c7d37fa9b17bb1fd3aee3525e19a1d375b1",
+  "internal/runtime/executor/xai_executor_test.go": "1b4956e0e5810611fd7232ec48e4e8ab37c78f8a4ead4f21b9e8f48213550394",
+  "internal/thinking/apply.go": "0bfbb1cf2678de98620f12489059c0acd73835e326e6a506e4593cd3b334ed3b",
+  "internal/thinking/apply_configured_api_key_test.go": "c24f05f8412ae07501a6ce16268a70013fce0481c9893ab72368e2a1a00d843b",
+  "internal/thinking/kimi_max_clamp_repro_test.go": "5cac7a075d13fcbbc605cdb35163b58cdf6a870268719af17fb995f25333cde5",
+  "internal/thinking/native_intent_test.go": "15970e6065a97ca8291995365822835cdd56e67a08b60a473b91856b84e07b9d",
+  "internal/thinking/provider/claude/apply.go": "5fa5f404f71dd6b484b59d55ba62ad5cda9a2c59186149768dab174b20725d19",
+  "internal/thinking/provider/codex/apply.go": "8a1a42bcbfca731fab2ba827c59fa31fd4a8c320a0300d9e25e15c7b5e0e5400",
+  "internal/thinking/provider/kimi/apply.go": "8f031dc04f5915a3f5e347bbc195d076ac36987fb3a9740781c45b7f3cd9969d",
+  "internal/thinking/provider/openai/apply.go": "d532b8f4c06d8f48be3454a44ad1811b9010e7d14a3934b89d369f0a54a2c572",
+  "test/thinking_conversion_test.go": "73c3eee316082aacc1f5de537aac5e8f00f2884b0b2dbcf6c618869f35e522ad"
+}
