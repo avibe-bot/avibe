@@ -89,7 +89,7 @@ window state. That is the gap list below.
   connection to the existing `GET /api/events` (not a new route, not polling
   `/ready`); filters an allow-list (`vaults.updated` pending →
   `approval.requested`; terminal `runs.updated` that ran ≥30s or has
-  `run_type` in `{task, watch}` → `run.terminal`); fires
+  `run_type` in `{scheduled, watch}` → `run.terminal`); fires
   `tauri-plugin-notification`. Connection survives window-close-to-tray.
   Default on, tray toggle, OS DND untouched. Click focuses the window (deep
   links are G5).

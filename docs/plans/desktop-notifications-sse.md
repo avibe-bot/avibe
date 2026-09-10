@@ -117,9 +117,10 @@ A terminal `runs.updated` notifies only if **either**:
    shell first observed it, if it joined mid-flight) is ≥ 30 seconds;
    or
 2. the run was started in a way the product already treats as
-   background (Harness scheduled/watched runs: `run_type` in
-   `{task, watch}` — the existing `run_updated_payload` already
-   carries `run_type`). Interactive Workbench turns
+   background. Stored `run_type` values (from `core/scheduled_tasks.py` /
+   `core/watches.py`) are `scheduled` and `watch` — not the user-facing
+   definition kind `task`. Notify when `run_type` is in `{scheduled, watch}`.
+   Interactive Workbench turns
    (`run_type` absent or `agent_run` / session-bound chat) that
    finish in under 30 seconds never notify.
 

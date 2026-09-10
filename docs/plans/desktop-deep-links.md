@@ -29,15 +29,25 @@ window for a Show Page is G8 and is not this contract.
 Scheme: `avibe` (no `+` / no vendor prefix). Registered for the
 packaged app identifier `bot.avibe.desktop`.
 
-v1 paths, each a single host-less URL of the form `avibe://<kind>/<id>`
-or `avibe://<kind>`:
+v1 URLs use the `avibe://` form users type and OS scheme handlers
+deliver. A WHATWG parser therefore treats `<kind>` as the **authority
+(host)**, not as a path segment. That is the frozen grammar: kind **is**
+the allow-listed authority. Do not also accept a second, host-less
+spelling (`avibe:session/...`); one form only.
 
-| Link                              | Workbench navigation                         |
+| Link (kind = authority)           | Workbench navigation                         |
 | --------------------------------- | -------------------------------------------- |
 | `avibe://session/<session_id>`    | `/chat/<session_id>`                         |
 | `avibe://show/<session_id>`       | `/apps/show/<session_id>`                    |
 | `avibe://settings`                | `/admin/settings/service`                    |
 | `avibe://vaults/request/<request_id>` | `/vaults?request_id=<request_id>`        |
+
+Parse as a URL. Accept only when `scheme == avibe` and `host` is one of
+`session`, `show`, `settings`, `vaults`. Path/id rules:
+
+- `session` / `show`: path is exactly one segment, the id.
+- `settings`: path empty.
+- `vaults`: path is exactly `request/<request_id>`.
 
 `<session_id>` and `<request_id>` are the product's existing identifiers
 (Workbench session ids, vault request ids). They are accepted only when
@@ -47,16 +57,20 @@ the complete path segments `.` or `..`. Ordinary dots inside an id
 
 Rejected complete `.` / `..` because WHATWG URL path normalization
 would turn `/chat/.` into `/chat/` and `/chat/..` into `/`, so the
-in-window navigation could not land on the mapped session route. Percent-
-encoded `%2E` / `%2E%2E` are not those segments and stay subject only
-to the character/length rule (they do not normalize as dot-segments).
+in-window navigation could not land on the mapped session route. Percent-encoded `%2E` / `%2E%2E` **do** normalize as dot-segments under
+WHATWG (`/chat/%2E` → `/chat/`, `/chat/%2E%2E` → `/`). They are still
+rejected, but by the character-class rule (`%` is not in
+`[A-Za-z0-9._-]`), not by a special encoded-dot exception. Do not
+document them as surviving the parser.
 
 Rejected (no navigation, no quoted echo into the WebView):
 
 - any scheme other than `avibe`;
-- unknown kind / extra path segments / unexpected query or fragment;
-- an id that fails the character/length rule;
-- anything that looks like a host (`avibe://session@…`, `//` authority).
+- host/authority not in `{session, show, settings, vaults}`
+  (this is what "reject unknown authority" means — userinfo,
+  non-allow-listed hosts, `avibe://session@…`);
+- extra path segments, query, or fragment other than the table;
+- an id that fails the character/length rule or is complete `.` / `..`.
 
 The mapping table is the contract. A new kind is a contract revision,
 not a silent addition in the parser.
@@ -65,16 +79,22 @@ not a silent addition in the parser.
 
 Two launch shapes, one Workbench mechanism.
 
-1. **Hot path** (app already running). `tauri-plugin-single-instance`
-   already hands a second launch to the live process and focuses the
-   main window (`desktop/src-tauri/src/lib.rs`). v1 extends that
-   callback to read argv, parse one `avibe://` URL, and — after the
-   window is showing the Workbench origin — ask the WebView to
-   navigate **in-window** to `{origin}{path}{query}` from the table
-   above. Same origin as the currently adopted Runtime; never a
-   different host.
+1. **Hot path** (app already running). Every OS delivery of an
+   `avibe://` URL is parsed by the **same** function and applied to
+   the live window. On Windows a second launch typically arrives as
+   single-instance argv (already wired to focus the main window in
+   `desktop/src-tauri/src/lib.rs`). On macOS, Launch Services delivers
+   custom-scheme activations as a native open-URL event
+   (`RunEvent::Opened` / the deep-link plugin's current-URL /
+   `on_open_url` **Rust** callback) — **not** as a second-process
+   argv. Feed that native event into the same parser/stash as argv.
+   Never handle it in WebView JavaScript, never add an IPC command.
+   After the window is showing the Workbench origin, navigate
+   **in-window** to `{origin}{path}{query}` from the table. Same
+   origin as the currently adopted Runtime; never `devUrl` / port 1420.
 2. **Cold path** (app was not running). OS starts the packaged app
-   with the URL in argv. The shell stashes the parsed target, runs
+   with the URL in argv **or** (macOS) as the first open-URL event.
+   The shell stashes the parsed target, runs
    the existing bootstrap/adopt flow unchanged, and on the first
    successful Workbench navigation includes the target path so the
    SPA lands on it instead of the default session list.
