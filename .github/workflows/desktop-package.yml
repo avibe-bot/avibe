@@ -135,27 +135,39 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -eu
-          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+          # Validate the credential set atomically. Half-configured sets must
+          # fail the build rather than silently produce a lesser artifact:
+          # certificate without notarization credentials would ship
+          # Developer-ID-signed but unnotarized; notarization credentials
+          # without the certificate would submit the unsigned acceptance
+          # build to Apple. All-or-nothing.
+          have_cert=0
+          have_api=0
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then have_cert=1; fi
+          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then have_api=1; fi
+          if [ "$have_cert" != "$have_api" ]; then
+            echo "::error::Apple credentials are half-configured: signing and notarization secrets must be set together (APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD, and APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_PRIVATE_KEY), or omitted together for an unsigned acceptance build."
+            exit 1
+          fi
+          if [ "$have_cert" = "1" ]; then
             echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
             echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
             if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
               echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
             fi
-            echo "apple_signing=enabled" >> "$GITHUB_ENV"
-          else
-            echo "apple_signing=absent" >> "$GITHUB_ENV"
-          fi
-          # The ApiKey notarization auth needs the .p8 private key ON DISK at
-          # APPLE_API_KEY_PATH; without it tauri-bundler falls back to
-          # searching ./private_keys and $HOME, which the runner never has,
-          # and notarization is skipped with only a warning.
-          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+            # The ApiKey notarization auth needs the .p8 private key ON DISK at
+            # APPLE_API_KEY_PATH; without it tauri-bundler falls back to
+            # searching ./private_keys and $HOME, which the runner never has,
+            # and notarization is skipped with only a warning.
             key_dir="$(mktemp -d)"
             key_file="$key_dir/AuthKey_${APPLE_API_KEY}.p8"
             printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_file"
             echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
             echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
             echo "APPLE_API_KEY_PATH=$key_file" >> "$GITHUB_ENV"
+            echo "apple_signing=enabled" >> "$GITHUB_ENV"
+          else
+            echo "apple_signing=absent" >> "$GITHUB_ENV"
           fi
 
       - name: Build self-contained installer
@@ -178,15 +190,18 @@ jobs:
           set -eu
           app="target/release/bundle/macos/Avibe.app"
           [ -d "$app" ] || { echo "Avibe.app not found at $app" >&2; exit 1; }
-          signature="$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=//p' || true)"
-          team="$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' || true)"
+          # Same detection as create-macos-dmg.sh: identity signatures print
+          # `Signature size=...` and Authority lines (verbose=4); only ad-hoc
+          # prints `Signature=adhoc`.
+          adhoc="$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=adhoc$/p' || true)"
+          authority="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
           if [ "${apple_signing:-absent}" = "enabled" ]; then
-            if [ -z "$signature" ] || [ "$signature" = "adhoc" ] || [ "$team" = "not set" ]; then
+            if [ -n "$adhoc" ] || [ -z "$authority" ]; then
               echo "signing credentials were exported but Avibe.app is not identity-signed" >&2
               exit 1
             fi
             codesign --verify --deep --strict "$app"
-            echo "signature_state=identity-signed (${team})" >> "$GITHUB_ENV"
+            echo "signature_state=identity-signed (${authority})" >> "$GITHUB_ENV"
           else
             echo "signature_state=unsigned-acceptance" >> "$GITHUB_ENV"
           fi

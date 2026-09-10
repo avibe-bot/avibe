@@ -19,8 +19,15 @@ fi
 # the DMG would ship unsigned. An ad-hoc or absent signature means the bundle
 # is an acceptance artifact, and the disposable copy is ad-hoc signed so macOS
 # can still verify its structure.
-signature=$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=//p' || true)
-team=$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' || true)
+#
+# Detection: `codesign -dv` prints `Signature=adhoc` ONLY for ad-hoc
+# signatures — identity signatures print `Signature size=...` and one or more
+# `Authority=...` lines instead, so `Signature=` alone never matches them.
+# Authority lines are the identity-bearing signal; `TeamIdentifier=not set`
+# covers self-signed identities without a team. verbose=4 is required for
+# Authority output.
+identity=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)
+adhoc=$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=adhoc$/p' || true)
 
 staging=$(mktemp -d "${TMPDIR:-/tmp}/avibe-dmg.XXXXXX")
 trap 'rm -rf "$staging"' EXIT HUP INT TERM
@@ -30,7 +37,7 @@ ln -s /Applications "$staging/Applications"
 mkdir -p "$(dirname "$output")"
 rm -f "$output"
 
-if [ "$signature" = "adhoc" ] || [ -z "$signature" ] || [ "$team" = "not set" ]; then
+if [ -n "$adhoc" ] || [ -z "$identity" ]; then
   # A linker-signed executable does not seal the resources copied into the app
   # bundle. Ad-hoc sign the disposable DMG copy so macOS can verify its
   # structure. This is not Developer ID signing and does not bypass
