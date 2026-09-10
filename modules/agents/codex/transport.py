@@ -54,6 +54,9 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.tool_suggest=false",
     "features.workspace_dependencies=false",
     "skills.include_instructions=false",
+    # Host-owned questions. Codex 0.153.2 gates the synchronous tool only;
+    # asynchronous exposure still needs upstream support (openai/codex#43821).
+    "tools.experimental_request_user_input.enabled=false",
 )
 
 

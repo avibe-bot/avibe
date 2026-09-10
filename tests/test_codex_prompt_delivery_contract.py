@@ -71,6 +71,16 @@ def _developer_texts(body):
     ]
 
 
+def _tool_names(tools):
+    names = set()
+    for tool in tools:
+        if tool.get("type") == "namespace":
+            names.update(_tool_names(tool.get("tools", [])))
+        elif name := tool.get("name"):
+            names.add(name)
+    return names
+
+
 @asynccontextmanager
 async def _native_server(tmp_path, *, configured_instructions=None):
     requests = []
@@ -132,7 +142,9 @@ async def _native_server(tmp_path, *, configured_instructions=None):
                         "supported_in_api": True,
                         "priority": 1,
                         "support_verbosity": False,
-                        "experimental_supported_tools": [],
+                        # Eligible for the independent async path: the host's
+                        # synchronous opt-out must not depend on catalog edits.
+                        "experimental_supported_tools": ["request_user_input_async"],
                         "truncation_policy": {"mode": "tokens", "limit": 10000},
                         "base_instructions": "You are a test assistant.",
                         "model_messages": {"collaboration_modes": {"default": CATALOG_PROMPT}},
@@ -189,6 +201,11 @@ async def _native_server(tmp_path, *, configured_instructions=None):
     try:
         await harness.native.start()
         yield harness
+        for model_request in requests:
+            names = _tool_names(model_request["tools"])
+            assert "request_user_input" not in names
+            if not any(item.get("type") == "compaction_trigger" for item in model_request["input"]):
+                assert {"exec_command", "write_stdin"} <= names
     finally:
         await harness.native.stop()
         server.close()

@@ -62,6 +62,8 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "features.plugins=true",
                 "-c",
                 "features.multi_agent=true",
+                "-c",
+                "tools.experimental_request_user_input.enabled=true",
             ],
         )
 
@@ -107,6 +109,8 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "features.plugins=true",
                 "-c",
                 "features.multi_agent=true",
+                "-c",
+                "tools.experimental_request_user_input.enabled=true",
                 *_forced_config_args(),
             ),
         )
@@ -208,6 +212,7 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "features.plugins=false",
                 "features.terminal_visualization_instructions=false",
                 "skills.include_instructions=false",
+                "tools.experimental_request_user_input.enabled=false",
             }.issubset(disabled)
         )
         # ``agents`` is a role-definition table in older supported Codex
