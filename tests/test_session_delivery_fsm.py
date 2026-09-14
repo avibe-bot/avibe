@@ -50,6 +50,7 @@ from core.session_turns import (
 )
 from core.agent_input import AgentInputMetadata
 from core.handlers.message_handler import MessageHandler
+from core.message_context import resolve_turn_sink_key
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
@@ -4361,7 +4362,7 @@ def test_stopped_agent_initiated_holder_starts_already_activated_successor(
 
         monkeypatch.setattr(manager, "_start_persisted_turn", record_start)
         holder = manager.in_flight["ses_fsm"].task
-        sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+        sink = manager.get_turn_sink(resolve_turn_sink_key(manager.controller, context))
         assert sink is not None
         if cancel_holder:
             holder.cancel()
@@ -8170,7 +8171,7 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
     assert row["text"] == "Agent 主动发起的续接"
     assert transcript["messages"] == []
 
-    sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+    sink = manager.get_turn_sink(resolve_turn_sink_key(manager.controller, context))
     assert sink is not None
     manager.on_terminal_result(
         context,

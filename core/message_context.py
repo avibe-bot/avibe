@@ -145,6 +145,11 @@ def build_context_turn_sink_key(
     stop's rebuilt context all land on the same key.
     """
 
+    spec = getattr(context, "platform_specific", None) or {}
+    fixed_key = str(spec.get("turn_sink_key") or "").strip()
+    if fixed_key:
+        return fixed_key
+
     base = session_key if session_key is not None else build_context_session_key(context)
     # ``getattr`` because this is reached from every turn-lifecycle context, including
     # the lookalike namespaces the workbench/stop paths build. A context without the
@@ -157,7 +162,6 @@ def build_context_turn_sink_key(
     # targets the same delivery channel as every other run. Without this
     # dimension, those distinct Sessions still share one sink when delivery is
     # unthreaded (for example, a Discord channel).
-    spec = getattr(context, "platform_specific", None) or {}
     target = spec.get("agent_session_target")
     target = target if isinstance(target, dict) else {}
     agent_session_id = str(
@@ -180,6 +184,11 @@ def resolve_turn_sink_key(controller: object, context: MessageContext) -> str:
     Always returns a key. A key with no sink registered simply misses in
     ``get_turn_sink``, which is what every caller already handles.
     """
+
+    payload = getattr(context, "platform_specific", None) or {}
+    fixed_key = str(payload.get("turn_sink_key") or "").strip()
+    if fixed_key:
+        return fixed_key
 
     getter = getattr(controller, "_get_turn_sink_key", None)
     if callable(getter):

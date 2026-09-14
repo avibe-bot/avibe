@@ -3215,7 +3215,9 @@ class Controller:
         when an agent turn is genuinely in flight (the result emit releases it)."""
         if context is None:
             return
-        sink = self.get_turn_sink(self._get_turn_sink_key(context))
+        from core.message_context import resolve_turn_sink_key
+
+        sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
         if sink is None:
             return
         # Turn-token guard (mirrors ``_stream_chunk`` / ``_is_active_turn``): a
