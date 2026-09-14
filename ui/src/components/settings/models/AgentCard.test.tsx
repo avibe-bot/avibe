@@ -359,6 +359,8 @@ describe('AgentCard', () => {
     expect(screen.getByText(/Backup/)).toBeTruthy();
     expect(screen.getByTitle(mappingCopy)).toBeTruthy();
     expect(screen.getByRole('button', { name: accessibleName })).toBeTruthy();
+    const takeover = screen.getByText(localeInstance(lng).t('settings.models.takeover.chip'));
+    expect(takeover.closest('.model-hub-agent-head-controls')).toBeTruthy();
   });
 
   it.each([
@@ -479,10 +481,15 @@ describe('AgentCard', () => {
     expect(direct.querySelector('.lucide-power')).toBeTruthy();
     expect(gateway.querySelector('svg')).toBeTruthy();
     expect(order.parentElement?.className).toContain('model-hub-agent-head-actions');
-    expect(order.parentElement?.parentElement?.className).toContain('flex-wrap');
-    expect(order.parentElement?.parentElement?.className).toContain('min-w-0');
-    expect(order.parentElement?.parentElement?.parentElement?.className).toContain('sm:flex-row');
-    expect(order.parentElement?.parentElement?.parentElement?.parentElement?.className).toContain('min-h-[52px]');
+    const header = order.closest('[data-agent-group-head]')!;
+    const summary = header.querySelector('.model-hub-agent-head-summary')!;
+    const controls = header.querySelector('.model-hub-agent-head-controls')!;
+    expect(summary.querySelector('h2')).toBeTruthy();
+    expect(summary.querySelector('.model-hub-agent-mode-trigger')).toBeTruthy();
+    expect(summary.querySelector('.model-hub-pill')).toBeNull();
+    expect(controls.querySelector('.model-hub-pill')).toBeTruthy();
+    expect(controls.contains(order)).toBe(true);
+    expect(gateway.closest('.model-hub-agent-head-controls')).toBeTruthy();
     expect(gateway.className).toContain('bg-primary');
   });
 

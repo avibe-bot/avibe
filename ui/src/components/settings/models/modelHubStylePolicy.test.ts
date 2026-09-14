@@ -113,7 +113,7 @@ describe('Model Hub visual token policy', () => {
     expect(declarations('.model-hub-order-identity')).toMatchObject({ flex: '1', 'min-width': '0' });
   });
 
-  it('keeps gateway header actions together when the header wraps', () => {
+  it('keeps gateway header actions together on the controls row', () => {
     const root = postcss.parse(surfaceCss);
     const actions: Record<string, string> = {};
     root.walkRules('.model-hub-agent-head-actions', (rule) => {
@@ -121,10 +121,18 @@ describe('Model Hub visual token policy', () => {
     });
     expect(actions).toMatchObject({
       display: 'flex',
-      'flex-shrink': '0',
+      'min-width': '0',
       'flex-wrap': 'nowrap',
-      'align-items': 'center',
+      'align-items': 'stretch',
       gap: '8px',
+    });
+    const button: Record<string, string> = {};
+    root.walkRules('.model-hub-agent-head-actions > .model-hub-agent-head-action', (rule) => {
+      rule.walkDecls((decl) => { button[decl.prop] = decl.value; });
+    });
+    expect(button).toMatchObject({
+      'min-width': '0', 'min-height': 'var(--model-hub-agent-head-action-height, 36px)',
+      height: 'auto', 'white-space': 'normal',
     });
   });
 
