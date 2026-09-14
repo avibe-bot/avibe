@@ -780,3 +780,14 @@ async def test_wake_reopens_store_after_environmental_fault_is_corrected(
 
     assert result == {"ok": True, "state": "running"}
     assert runtime.available is True
+
+@pytest.mark.asyncio
+async def test_reconcile_profile_toggle_restarts_supervisor_with_false(tmp_path: Path, memory_runtime_factory) -> None:
+    processes = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(_config(), artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)), process_factory=processes, effective_home=tmp_path)
+    await runtime.reconcile(_config())
+    off = _config(); off.profile_enabled = False
+    result = await runtime.reconcile(off)
+    assert result["ok"] is True
+    assert processes.supervised
+    assert processes.supervised[-1].settings.profile_enabled is False
