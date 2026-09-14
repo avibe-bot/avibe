@@ -818,7 +818,8 @@ async def test_disabled_capture_is_closed(tmp_path: Path) -> None:
     assert await module.capture(_request()) == CaptureSkipped(reason="memory_disabled")
 
 @pytest.mark.asyncio
-async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_path: Path) -> None:
+@pytest.mark.parametrize("enabled_after_wait", [False, True])
+async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_path: Path, enabled_after_wait: bool) -> None:
     module, store, provider = _module(tmp_path)
     enabled = True
     module._profile_enabled_source = lambda: enabled
@@ -831,7 +832,7 @@ async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_pat
     await module._lifecycle_lock.acquire()
     task = asyncio.create_task(module.recall("q", policy=RecallPolicy(mode="keyword", include_profile=True), principal_id=PRINCIPAL, project_id="default"))
     await asyncio.sleep(0)
-    enabled = False
+    enabled = enabled_after_wait
     module._lifecycle_lock.release()
     await task
-    assert seen == [False, False]
+    assert seen == [enabled_after_wait, enabled_after_wait]

@@ -820,7 +820,6 @@ class MemoryModule:
             return OperationFailed(error="memory_disabled")
         if not isinstance(policy, RecallPolicy):
             return OperationFailed(error="memory_invalid_input")
-        policy = replace(policy, include_profile=bool(policy.include_profile and self._is_profile_enabled()))
         normalized_query = self._normalize_text(query)
         if _utf8_bytes(normalized_query) is None or not normalized_query.strip():
             return OperationFailed(error="memory_invalid_input")
