@@ -122,7 +122,16 @@ describe('MemorySettingsPanel', () => {
   });
 
 
-  it('does not submit profile toggle immediately', async () => {
+  it('hosted profile-only toggle exposes Save and submits exact patch', async () => {
+    const user = userEvent.setup(); renderPanel({ settings: { ...settings, mode: 'platform', profile_enabled: true } });
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    const save = screen.getByRole('button', { name: 'memory.settings.save' });
+    expect(save).toBeEnabled();
+    await user.click(save);
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ profile_enabled: false }));
+  });
+
+  it('does not submit profile toggle immediately' , async () => {
     const user = userEvent.setup(); renderPanel();
     await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
     expect(api.saveMemorySettings).not.toHaveBeenCalled();
