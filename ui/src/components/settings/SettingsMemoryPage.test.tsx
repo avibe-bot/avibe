@@ -45,7 +45,7 @@ vi.mock('../ui/confirm-dialog', () => ({
 }));
 
 vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
-  MemoryProcessingRecordPanel: () => null,
+  MemoryProcessingRecordPanel: () => <div data-testid="processing-record-panel">processing-record</div>,
 }));
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
@@ -168,9 +168,13 @@ describe('SettingsMemoryPage profile transition', () => {
     await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
     expect(savedSettings.current).toBeTruthy();
     await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
-    act(() => savedSettings.current?.({ ...settings, profile_enabled: false }));
-    await waitFor(() => expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull());
-    expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
+    const off = { ...settings, profile_enabled: false };
+    api.getMemorySettings.mockResolvedValue(off);
+    act(() => savedSettings.current?.(off));
+    await waitFor(() => {
+      expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull();
+      expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }).getAttribute('aria-checked')).toBe('true');
+    });
   });
 });
 
