@@ -394,7 +394,7 @@ export const MemorySettingsPanel: React.FC<{
 
   const setMemoryEnabled = (checked: boolean) => {
     setEnabledDraft(checked);
-    if (!customMode) void submitPatch({ enabled: checked });
+    if (!customMode) void submitPatch({ enabled: checked, ...(profileEnabledDraft !== settings.profile_enabled ? { profile_enabled: profileEnabledDraft } : {}) });
   };
 
   const setProfileEnabled = (checked: boolean) => {
