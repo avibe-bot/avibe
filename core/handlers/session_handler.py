@@ -1770,6 +1770,7 @@ class SessionHandler(BaseHandler):
             agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
             memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
+            profile_enabled=bool(getattr(getattr(self.config, "memory", None), "profile_enabled", True)),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),

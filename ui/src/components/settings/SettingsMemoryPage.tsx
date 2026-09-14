@@ -188,10 +188,10 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const tabs = useMemo(() => [
     { id: 'processingRecord' as const, label: t('memory.tabs.processingRecord') },
-    { id: 'profile' as const, label: t('memory.tabs.profile') },
+    ...(settings?.profile_enabled !== false ? [{ id: 'profile' as const, label: t('memory.tabs.profile') }] : []),
     { id: 'search' as const, label: t('memory.tabs.search') },
     ...(canAdminister ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }] : []),
-  ], [canAdminister, t]);
+  ], [canAdminister, settings?.profile_enabled, t]);
   const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'processingRecord';
   const runtimeAction = runtimeRequired === false && !remoteUnavailable && canAdminister && settings?.enabled === true
     ? runtimeState === 'degraded' ? (

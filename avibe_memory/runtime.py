@@ -434,6 +434,7 @@ class MemoryRuntime:
                 opened,
                 self._provider,
                 enabled=lambda: self._config.enabled,
+                profile_enabled=lambda: self._config.profile_enabled,
                 provider_root=self._provider_root,
                 provider_root_owner=self._provider_root_owner,
                 runtime_active=self._runtime_active,
@@ -3000,6 +3001,7 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
     rerank = processing.rerank
     multimodal = processing.multimodal
     return {
+        "profile_enabled": config.profile_enabled,
         "llm_base_url": processing.llm.base_url,
         "llm_model": processing.llm.model,
         "llm_api_key": processing.llm.api_key,

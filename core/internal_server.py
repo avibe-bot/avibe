@@ -1503,10 +1503,13 @@ def create_app(
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         verified_user_key, cli_scope = owner
         try:
-            return await controller.memory_profile_payload(
+            payload = await controller.memory_profile_payload(
                 verified_user_key=verified_user_key,
                 cli_scope=cli_scope,
             )
+            if isinstance(payload, dict) and payload.get("error") == "memory_disabled":
+                return JSONResponse(status_code=409, content=payload)
+            return payload
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,

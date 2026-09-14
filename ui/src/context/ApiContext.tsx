@@ -1940,6 +1940,7 @@ export type MemoryProcessingConfig = {
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  profile_enabled: boolean;
   mode: 'organization' | 'platform' | 'custom';
   cloud_available?: boolean;
   managed?: boolean;
@@ -1961,6 +1962,7 @@ export type MemoryEndpointPatch = {
 
 export type MemorySettingsPatch = {
   enabled?: boolean;
+  profile_enabled?: boolean;
   mode?: 'platform' | 'custom';
   acknowledge_transition?: true;
   processing?: {
