@@ -463,6 +463,13 @@
   padding-block: 0;
   line-height: var(--model-hub-agent-head-action-leading, 17px);
 }
+.model-hub-agent-head-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+}
 .model-hub-agent-head-status { line-height: var(--model-hub-agent-head-status-height, 16px); }
 .model-hub-agent-mode-trigger {
   height: var(--model-hub-agent-head-action-height, 28px);
@@ -531,7 +538,6 @@
 .model-hub-route-origin--passthrough { color: var(--gold-ink); background: var(--model-hub-gold-1a); border-color: var(--model-hub-gold-4d); }
 .model-hub-route-origin:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
 .model-hub-model-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.model-hub-model-row > span > span:first-child { flex: 0 1 28%; }
 .model-hub-origin-help { width: 340px; max-width: calc(100vw - 32px); white-space: pre-line; font-size: 12px; line-height: 1.6; }
 .model-hub-route-origin-line { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; }
 .model-hub-route-preview { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 8px; background: var(--model-hub-mint-1a); color: var(--mint-ink); font-size: 12px; }
@@ -546,9 +552,6 @@
 .model-hub-recorded-turn strong { color: var(--destructive-ink); }
 @media (max-width: 640px) {
   .model-hub-model-row { height: 72px; }
-  .model-hub-model-row > span { flex-wrap: wrap; padding-bottom: 24px; }
-  .model-hub-model-row > span > span:first-child { flex: 1; }
-  .model-hub-model-row .model-hub-model-current { position: absolute; left: 12px; right: 32px; bottom: 10px; text-align: left; }
 }
 .model-hub-model-row {
   border-radius: 8px;

@@ -93,25 +93,25 @@ const ModelRow: React.FC<{
     <div
       data-route-backend={agent.backend}
       data-route-model={modelId}
-      className="model-hub-model-row relative flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md border border-border px-3 text-left"
+      className="model-hub-model-row relative flex h-[52px] w-full min-w-0 items-center gap-2.5 rounded-md border border-border px-3 text-left"
     >
       <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
-      <span className="pointer-events-none flex min-w-0 flex-1 items-center justify-between gap-2.5">
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
-        <span className="flex min-w-0 flex-1 items-center justify-end gap-[7px]">
+      <span className="pointer-events-none flex min-w-0 flex-1 flex-col justify-center gap-0.5 pr-1">
+        <span className="flex min-w-0 items-center gap-[7px]">
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
           <span className="pointer-events-auto relative shrink-0"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
-          {hasCurrentMapping ? (
-            <span
-              className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
-              title={currentCopy}
-              data-route-mapping
-            >
-              {currentCopy}
-            </span>
-          ) : (
-            <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>
-          )}
         </span>
+        {hasCurrentMapping ? (
+          <span
+            className={cn('model-hub-model-current min-w-0 truncate text-left text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
+            title={currentCopy}
+            data-route-mapping
+          >
+            {currentCopy}
+          </span>
+        ) : (
+          <span className={cn('model-hub-model-current min-w-0 truncate text-left text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>
+        )}
       </span>
       <ChevronRight className="model-hub-overview-chevron pointer-events-none size-[15px] shrink-0" aria-hidden="true" />
     </div>
@@ -295,8 +295,10 @@ const AgentModelCard: React.FC<{
                   </button>
                 </div>
               </ResponsiveMenu>
-              <ManageModelsButton className="model-hub-agent-head-action" disabled={pending} onClick={() => onOpenModels(agent)} />
-              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
+              <div className="model-hub-agent-head-actions">
+                <ManageModelsButton className="model-hub-agent-head-action" disabled={pending} onClick={() => onOpenModels(agent)} />
+                <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
+              </div>
             </div>
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-2.5 text-[11px] font-semibold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t('settings.models.gateway.switchToGateway')}</Button>}
         </div>

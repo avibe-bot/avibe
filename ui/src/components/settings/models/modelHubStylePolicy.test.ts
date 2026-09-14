@@ -113,6 +113,21 @@ describe('Model Hub visual token policy', () => {
     expect(declarations('.model-hub-order-identity')).toMatchObject({ flex: '1', 'min-width': '0' });
   });
 
+  it('keeps gateway header actions together when the header wraps', () => {
+    const root = postcss.parse(surfaceCss);
+    const actions: Record<string, string> = {};
+    root.walkRules('.model-hub-agent-head-actions', (rule) => {
+      rule.walkDecls((decl) => { actions[decl.prop] = decl.value; });
+    });
+    expect(actions).toMatchObject({
+      display: 'flex',
+      'flex-shrink': '0',
+      'flex-wrap': 'nowrap',
+      'align-items': 'center',
+      gap: '8px',
+    });
+  });
+
   it('lets the actual narrow footer grow after the complete surface cascade while preserving body scroll', () => {
     // This checks CSS ownership and source order, not browser geometry.
     const root = postcss.parse(surfaceCss);

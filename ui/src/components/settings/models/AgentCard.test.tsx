@@ -395,8 +395,11 @@ describe('AgentCard', () => {
 
     const routeButton = screen.getByRole('button', { name: accessibleName });
     const mapping = screen.getByTitle(mappingCopy);
-    expect(routeButton.parentElement?.contains(mapping)).toBe(true);
-    expect(mapping.parentElement?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
+    const row = routeButton.closest('.model-hub-model-row');
+    expect(row).not.toBeNull();
+    expect(row?.contains(mapping)).toBe(true);
+    expect(mapping.closest('.model-hub-model-current')).toBe(mapping);
+    expect(row?.querySelector('.model-hub-route-origin')?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
     expect(modeCopy).toBeTruthy();
     expect(mapping.textContent).toBe(mappingCopy);
   });
@@ -475,10 +478,11 @@ describe('AgentCard', () => {
     expect(order.querySelector('svg')).toBeTruthy();
     expect(direct.querySelector('.lucide-power')).toBeTruthy();
     expect(gateway.querySelector('svg')).toBeTruthy();
-    expect(order.parentElement?.parentElement?.className).toContain('sm:flex-wrap');
-    expect(order.parentElement?.className).toContain('items-center');
-    expect(order.parentElement?.className).toContain('min-w-0');
-    expect(order.parentElement?.parentElement?.parentElement?.className).toContain('min-h-[52px]');
+    expect(order.parentElement?.className).toContain('model-hub-agent-head-actions');
+    expect(order.parentElement?.parentElement?.className).toContain('flex-wrap');
+    expect(order.parentElement?.parentElement?.className).toContain('min-w-0');
+    expect(order.parentElement?.parentElement?.parentElement?.className).toContain('sm:flex-row');
+    expect(order.parentElement?.parentElement?.parentElement?.parentElement?.className).toContain('min-h-[52px]');
     expect(gateway.className).toContain('bg-primary');
   });
 
