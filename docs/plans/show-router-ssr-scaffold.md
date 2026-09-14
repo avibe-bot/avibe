@@ -33,11 +33,18 @@ Fingerprint the exact source being transformed, rather than rereading a path
 whose contents may change. Reuse the authored Runtime template without copying
 its implementation or creating temporary workspaces.
 
-This compatibility applies only to SSR of the ordinary workspace router module.
-Browser HTML/client modules and files on disk remain unchanged. Unknown/custom,
+This compatibility applies only to the Markdown SSR environment of the ordinary
+workspace router module. Ordinary API SSR, browser HTML/client modules, and files
+on disk remain unchanged. Unknown/custom,
 hash, routerless, and symlink routers retain existing behavior. Module
 invalidation must observe later custom edits. Exercise HTML-first and
 Markdown-first requests, LF/CRLF, non-ASCII routes, and concurrent edits.
+Retain the legacy router's existing exported fields and semantics, including
+`routes[].dynamic`, when adding SSR support. Legacy-compatible root renders keep
+their existing request-scoped read-only location facade and static Motion
+configuration; genuinely modern providers do not acquire browser globals.
+An internal compatibility variant may extend the shared Runtime author without
+changing its default fresh-scaffold output or creating another implementation.
 Avibe's fresh scaffold works with the existing default-branch Runtime contract;
 old-stock SSR compatibility additionally requires Runtime companion PR #70.
 
@@ -52,6 +59,19 @@ Runtime preserves the intended old-page SSR outcome without mutation, and
 removes the other two findings at their source. No database or public protocol
 changes are required. Runtime owns the compatibility implementation; Avibe owns
 the generated resource, packaging, and cross-repository acceptance.
+
+The Runtime compatibility rewrite subsequently received findings on two reviewed
+heads: `17637f8477` changed ordinary API router exports, and `0c9d99c0a7` still
+changed those exports for Markdown consumers and removed the legacy root location
+facade. These share a root cause: treating a legacy-compatible router as a wholly
+modern router. The repeated-class circuit breaker stopped further edits/pushes.
+Independent HTTP comparison additionally found that the same transition removed
+the legacy static Motion configuration. The orchestrator's scope decision retains
+all three existing contracts inside the shared template and entry/worker flow,
+without filesystem migration, a second module graph, broader sandbox globals, or
+new invalidation behavior. Real legacy page consumers in the combined integration
+test verify route fields, root location, and static rendering against the released
+producer as well as the Runtime companion.
 
 ## Runtime error boundary
 
@@ -98,6 +118,9 @@ the matching generated manifest. No Node process is needed to create a page.
   while retaining their bytes and metadata. Initialization and requests never
   rewrite existing routers, including unknown/custom/legacy/symlink routers.
 - Custom non-SSR routers receive an actionable, sanitized error for subpages.
+- Legacy pages consuming exported route fields and the root-only location facade
+  keep working; root Motion rendering remains static. Private/public requests do
+  not reuse another request's location. Fresh scaffold output remains unchanged.
 - Wheel and sdist contain the generated router resource.
 - Release export and integration checks detect future template drift.
 

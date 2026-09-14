@@ -60,11 +60,30 @@ try {
     originalRouters.set(sessionId, await routerSnapshot(workspace))
     // Exercise initialization for LF; CRLF is a Markdown-first legacy access.
     if (sessionId === "seslegacylf") initialize(sessionId)
+    if (sessionId !== "sesfresh") {
+      // Stock routers can have pages that consume the released exports and
+      // root fallback. Compatibility must preserve those existing callers.
+      await writeFile(join(workspace, "src/pages/index.tsx"), `
+import { useContext } from "react"
+import { MotionConfigContext } from "motion/react"
+import { routes } from "../router"
+export default function Home() {
+  const motion = useContext(MotionConfigContext)
+  return <main><h1>Building your Show Page</h1>
+    <p>Dynamic routes: {routes.filter((route) => route.dynamic).length}</p>
+    <p>Root location: {window.location.pathname}</p>
+    <p>Root query: {new URLSearchParams(window.location.search).get("period")}</p>
+    <p>Read-only location: {String(Object.isFrozen(window) && Object.isFrozen(window.location))}</p>
+    <p>Static motion: {String(motion.isStatic)}</p></main>
+}
+`)
+    }
     await mkdir(join(workspace, "src/pages/items"), { recursive: true })
     await writeFile(join(workspace, "src/pages/items/[id].tsx"), `
-import { Link, type PageProps } from "../../router"
+import { Link, ${sessionId === "sesfresh" ? "" : "routes, "}type PageProps } from "../../router"
 export default function Item({ params, query }: PageProps) {
   return <main><h1>Item {params.id}</h1><p>View {query.get("view")}</p>
+    ${sessionId === "sesfresh" ? "" : '<p>Legacy dynamic field: {String(routes.find((route) => route.path === "/items/:id")?.dynamic)}</p>'}
     <Link to="/second?from=detail">Second page</Link></main>
 }
 `)
@@ -82,8 +101,9 @@ export default function Item({ params, query }: PageProps) {
         "x-avibe-show-protocol": "1",
         "x-avibe-show-context": basePath.startsWith("/p/") ? "shared" : "private"
       }
+      const rootPeriod = basePath.startsWith("/p/") ? "一季度" : "四季度"
       const targets = [
-        ["/", "Building your Show Page"],
+        [`/?period=${encodeURIComponent(rootPeriod)}`, "Building your Show Page"],
         ["/second", "# A second page"],
         ["/items/%E4%B8%AD%E6%96%87?view=%E5%91%A8&vibe-embed=1", "# Item 中文"]
       ]
@@ -98,9 +118,19 @@ export default function Item({ params, query }: PageProps) {
         assert.equal(response.status, 200, markdown)
         assert.match(response.headers.get("content-type"), /^text\/markdown/)
         assert(markdown.includes(expected), markdown)
+        if (sessionId !== "sesfresh" && target.startsWith("/?")) {
+          assert(markdown.includes("Dynamic routes: 1"), markdown)
+          assert(markdown.includes(`Root location: ${basePath}`), markdown)
+          assert(markdown.includes(`Root query: ${rootPeriod}`), markdown)
+          assert(markdown.includes("Read-only location: true"), markdown)
+          assert(markdown.includes("Static motion: true"), markdown)
+        }
         if (target.startsWith("/items/")) {
           assert(markdown.includes("View 周"), markdown)
           assert(markdown.includes(`${basePath}second?from=detail&vibe-embed=1`), markdown)
+          if (sessionId !== "sesfresh") {
+            assert(markdown.includes("Legacy dynamic field: true"), markdown)
+          }
         }
       }
       const html = await fetch(`${server.url}/sessions/${sessionId}/app/second`, {
@@ -112,7 +142,7 @@ export default function Item({ params, query }: PageProps) {
     assert.deepEqual(await routerSnapshot(join(workspaceRoot, sessionId)), originalRouters.get(sessionId),
       `${sessionId}: initialization or rendering changed the editable router`)
   }
-  console.log(`Show router integration passed: fresh nested SSR, Unicode, queries, links, HTML, private + public; legacy LF/CRLF ${values["legacy-router-ssr"] ? "nested SSR" : "root fallback"}; source files unchanged.`)
+  console.log(`Show router integration passed: fresh nested SSR, Unicode, queries, links, HTML, private + public; legacy LF/CRLF ${values["legacy-router-ssr"] ? "nested SSR" : "root fallback"}, route fields, read-only root location + static motion; source files unchanged.`)
 } finally {
   await server?.close()
   await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
