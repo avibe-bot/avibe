@@ -9,6 +9,9 @@ export function GatewayFixture() {
   const params = new URLSearchParams(location.search);
   const long = params.has('long');
   const status = params.get('status') ?? 'available';
+  const requestedBackend = params.get('backend');
+  const backend = requestedBackend === 'claude' || requestedBackend === 'codex' ? requestedBackend : 'opencode';
+  const direct = params.get('mode') === 'direct';
   const ids = ['claude-fable-5', 'claude-opus-4-8', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5'];
   const source: Source = {
     id: 'src_fixture', display_name: 'Primary', kind: 'api_key', vendor: 'anthropic',
@@ -17,7 +20,7 @@ export function GatewayFixture() {
     models: ids.map((id) => ({ id, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null })),
   };
   const agent: AgentSupply = {
-    backend: 'opencode', cli_present: true, mode: 'hub', menu_kind: 'open',
+    backend, cli_present: true, mode: direct ? 'direct' : 'hub', menu_kind: 'open',
     catalog_models: status === 'empty' ? [] : ids.map((id) => ({ ...blankBackendModel(), id })),
     sources: { order: [source.id], eligibility: [{ source_id: source.id, eligible: true }] },
     model_supply: status === 'unknown' ? [] : ids.map((model_id, index) => ({
@@ -30,8 +33,8 @@ export function GatewayFixture() {
       route_reason: 'route_unconfigured', supply_status: 'interrupted',
     }],
   };
-  const chains = Object.fromEntries(ids.map((model_id) => [modelChainKey('opencode', model_id), readyRegion<AgentChain>({
-    contract_version: 10, backend: 'opencode', model_id, route_origin: 'automatic', manual_override: null,
+  const chains = Object.fromEntries(ids.map((model_id) => [modelChainKey(backend, model_id), readyRegion<AgentChain>({
+    contract_version: 10, backend, model_id, route_origin: 'automatic', manual_override: null,
     current: { source_id: source.id, model_id }, supply_state: 'ok',
     chain: [{ source_id: source.id, model_id, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
   })]));
@@ -40,7 +43,7 @@ export function GatewayFixture() {
     manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
     status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
   }));
-  return <main className="model-hub-shell mx-auto min-w-0 max-w-3xl p-4">
+  return <main className="model-hub-shell model-hub-overview mx-auto min-w-0 max-w-3xl p-4">
     <AgentCard agents={[agent]} sources={[source]} chains={chains} runtime={runtime}
       pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null}
       onConnectHub={() => {}} onSwitchDirect={() => {}} onOpenModels={() => {}}

@@ -31,6 +31,12 @@ footer. Every localized route status fits the existing compact control, includin
 a wider fallback-font check. These are browser layout contracts, not live routing
 or backend acceptance.
 
+`gateway-layout.spec.ts` extends `MH-GATEWAY-STATUS-001` with fixed header rows:
+backend title/status above model count/two horizontal actions, and route mappings
+below model IDs. It checks all three backends in EN/ZH, narrow desktop columns
+and mobile viewports (320–418px), plus the unchanged direct-mode entry point.
+The fixture inherits the production overview action-size tokens.
+
 `route-direct-edit.spec.ts` consumes `MH-ROUTING-007` through the production
 route dialog. All backends and origins open directly editable without writing;
 Cancel changes rereads saved intent in place, nested picker dismissal preserves

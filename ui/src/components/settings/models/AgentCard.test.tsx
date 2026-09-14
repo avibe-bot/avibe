@@ -359,6 +359,8 @@ describe('AgentCard', () => {
     expect(screen.getByText(/Backup/)).toBeTruthy();
     expect(screen.getByTitle(mappingCopy)).toBeTruthy();
     expect(screen.getByRole('button', { name: accessibleName })).toBeTruthy();
+    const takeover = screen.getByText(localeInstance(lng).t('settings.models.takeover.chip'));
+    expect(takeover.closest('.model-hub-agent-head-controls')).toBeTruthy();
   });
 
   it.each([
@@ -395,8 +397,11 @@ describe('AgentCard', () => {
 
     const routeButton = screen.getByRole('button', { name: accessibleName });
     const mapping = screen.getByTitle(mappingCopy);
-    expect(routeButton.parentElement?.contains(mapping)).toBe(true);
-    expect(mapping.parentElement?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
+    const row = routeButton.closest('.model-hub-model-row');
+    expect(row).not.toBeNull();
+    expect(row?.contains(mapping)).toBe(true);
+    expect(mapping.closest('.model-hub-model-current')).toBe(mapping);
+    expect(row?.querySelector('.model-hub-route-origin')?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
     expect(modeCopy).toBeTruthy();
     expect(mapping.textContent).toBe(mappingCopy);
   });
@@ -475,10 +480,16 @@ describe('AgentCard', () => {
     expect(order.querySelector('svg')).toBeTruthy();
     expect(direct.querySelector('.lucide-power')).toBeTruthy();
     expect(gateway.querySelector('svg')).toBeTruthy();
-    expect(order.parentElement?.parentElement?.className).toContain('sm:flex-wrap');
-    expect(order.parentElement?.className).toContain('items-center');
-    expect(order.parentElement?.className).toContain('min-w-0');
-    expect(order.parentElement?.parentElement?.parentElement?.className).toContain('min-h-[52px]');
+    expect(order.parentElement?.className).toContain('model-hub-agent-head-actions');
+    const header = order.closest('[data-agent-group-head]')!;
+    const summary = header.querySelector('.model-hub-agent-head-summary')!;
+    const controls = header.querySelector('.model-hub-agent-head-controls')!;
+    expect(summary.querySelector('h2')).toBeTruthy();
+    expect(summary.querySelector('.model-hub-agent-mode-trigger')).toBeTruthy();
+    expect(summary.querySelector('.model-hub-pill')).toBeNull();
+    expect(controls.querySelector('.model-hub-pill')).toBeTruthy();
+    expect(controls.contains(order)).toBe(true);
+    expect(gateway.closest('.model-hub-agent-head-controls')).toBeTruthy();
     expect(gateway.className).toContain('bg-primary');
   });
 
