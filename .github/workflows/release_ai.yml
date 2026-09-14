@@ -75,12 +75,26 @@ jobs:
           node-version: "22.14.0"
           cache: "npm"
       - name: Build Show Runtime bundle
+        shell: bash
         run: |
           npm ci
           npm run build
           npm run bundle:vibe-remote
           cp dist/vibe-show-runtime-node-*.tgz .
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
+          node --input-type=module <<'JS'
+          import { mkdtemp, copyFile, rm } from "node:fs/promises"
+          import { tmpdir } from "node:os"
+          import { join } from "node:path"
+          import { ensureSessionTemplate } from "./packages/runtime/dist/templates.js"
+          const workspace = await mkdtemp(join(tmpdir(), "show-router-export-"))
+          try {
+            await ensureSessionTemplate(workspace)
+            await copyFile(join(workspace, "src/router.tsx"), "show-router-${{ matrix.artifact }}.tsx")
+          } finally {
+            await rm(workspace, { recursive: true, force: true })
+          }
+          JS
       - name: Upload Show Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
@@ -88,6 +102,7 @@ jobs:
           path: |
             vibe-show-runtime-node-*.tgz
             show-runtime-ref-${{ matrix.artifact }}.txt
+            show-router-${{ matrix.artifact }}.tsx
 
   memory-runtime-bundles:
     runs-on: ${{ matrix.os }}
@@ -170,7 +185,8 @@ jobs:
             --tag "${{ github.event.inputs.tag || github.ref_name }}" \
             --repo "${{ github.repository }}" \
             --runtime-ref-file 'runtime-artifacts/show-runtime-ref-*.txt' \
-            --output vibe/show_runtime_manifest.json
+            --output vibe/show_runtime_manifest.json \
+            --router-output vibe/show_router.tsx
 
       - name: Download Memory Runtime bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8

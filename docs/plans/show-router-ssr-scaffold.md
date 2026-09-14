@@ -38,6 +38,24 @@ The structured failure log records the same code and message. Never expose an
 arbitrary workspace error or stack. Root-only fallback remains supported. The
 Runtime error improvement is independently deployable; the Python scaffold fix
 works with the already released SSR provider contract.
+Avibe's HTTP error allowlist also recognizes `router_not_ssr_capable`, so the
+fixed Runtime message reaches both private and public callers unchanged.
+
+## Regenerating and checking the source resource
+
+The checked-in resource was generated from Runtime commit
+`5a9a6a52f2ae03611d617a659bfd0c1c32389478`. After building the Runtime checkout:
+
+```sh
+node scripts/sync_show_router.mjs --runtime-module ../vibe-show-runtime/packages/runtime/dist/templates.js
+node scripts/check_show_router.mjs --runtime-root ../vibe-show-runtime --python .venv/bin/python
+```
+
+The `show-router-integration` CI job pins that producer and checks byte parity,
+then runs the real HTTP renderer. When intentionally refreshing this resource,
+update that producer pin too. Official and GitHub-only releases export the router
+from each actual platform build, verify parity, and package that output alongside
+the matching generated manifest. No Node process is needed to create a page.
 
 ## Acceptance
 
