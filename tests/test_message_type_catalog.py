@@ -250,6 +250,15 @@ def test_detached_completion_classification_is_catalog_owned() -> None:
         )
 
 
+def test_replayed_failure_is_not_foreground_activity() -> None:
+    metadata = {"event": "backend_failure", "replayed": True, "detached": False}
+    assert activity_role_for("notify", metadata) == "none"
+    assert not is_detached_completion("notify", metadata)
+    assert not agent_activity_service._is_terminal("notify", "agent", metadata)
+    assert activity_role_for("notify", {**metadata, "replayed": False}) == "terminal"
+    assert activity_role_for("result", metadata) == "terminal"
+
+
 def test_web_push_candidate_exact_and_unread_sets_match_current_service() -> None:
     expected_candidates = {"result", "error", "notify"}
     expected_unread = {"result"}

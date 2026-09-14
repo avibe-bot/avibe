@@ -1,6 +1,19 @@
 version: 1
 capability: message_delivery
 observations:
+  - id: OBS-MESSAGE-DELIVERY-007
+    source: user_feedback
+    related_scenarios:
+      - MESSAGE-DELIVERY-030
+    summary: Service-restart interruption notifications lacked the Retry action offered for backend failures.
+    previous_assumption: All accepted failed Turns emitted the shared failure-notice metadata.
+    observed_behavior: Restart recovery settled the correct durable Turn but emitted an unlinked text-only notification.
+    required_updates:
+      - preserve the original Turn and backend through transport readiness and failed-send retries
+      - emit the existing non-settling failure-notice contract rather than a second retry mechanism
+      - mark already-ended recovery notices as replayed so delayed delivery cannot settle newer UI Activity or hide thinking
+      - exercise recovery, real message persistence, Web admission, draft preservation, and duplicate clicks together
+      - keep unknown acceptance, user Stop, restored live runtimes, and unlinked historical notices unchanged
   - id: OBS-MESSAGE-DELIVERY-006
     source: user_feedback
     related_scenarios:

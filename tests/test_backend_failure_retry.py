@@ -19,6 +19,166 @@ from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isol
 from tests.ui_server_test_helpers import csrf_headers
 
 
+@pytest.fixture(autouse=True)
+def _isolate_web_push(monkeypatch):
+    # Real notice persistence is in scope; asynchronous external push delivery
+    # is not. Do not let its worker outlive a test's temporary state directory.
+    monkeypatch.setattr("core.web_push_notifications.maybe_notify_inbox_message", lambda *_args: None)
+
+
+def _restart_failure_notice(tmp_path, *, backend, delivery="ready"):
+    """Recover an accepted Turn through the real notice dispatcher and storage."""
+    from core.message_dispatcher import ConsolidatedMessageDispatcher
+    from core.session_turns import SessionTurnManager
+    from tests.scenario_harness.message_delivery import MessageDeliveryController
+    from tests.test_internal_server import _bind_test_native_start
+
+    _scope_id, session_id = _make_session(tmp_path, agent_backend=backend)
+    engine = create_sqlite_engine()
+    controller = MessageDeliveryController(platform="avibe")
+    controller.config.language = "zh"
+
+    def context(sid):
+        value = _context(sid)
+        value.platform_specific["agent_session_target"]["agent_backend"] = backend
+        return value
+
+    manager = SessionTurnManager(controller, build_context=context)
+    manager._engine = engine
+    controller.session_turns = manager
+    dispatcher = ConsolidatedMessageDispatcher(controller)
+    controller.emit_agent_message = dispatcher.emit_agent_message
+    if delivery == "send_failed":
+        controller.im_client.send_message = AsyncMock(side_effect=[OSError("transport offline"), "msg-recovered"])
+    starts = []
+
+    async def accepted(sid, ctx, text, **_kwargs):
+        starts.append((sid, text))
+        _bind_test_native_start(engine, ctx)
+
+    manager._run = accepted
+    original = asyncio.run(manager.deliver(
+        DeliveryRequest(session_id=session_id, priority="p3", content="完成剩余工作，不要重复提交"),
+        context=context(session_id),
+    ))
+    starts.clear()
+    manager._active_identity = lambda *_args: None
+    manager._transport_can_deliver = lambda _platform: delivery != "unready"
+    asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
+    assert starts == []
+    if delivery != "ready":
+        with engine.connect() as conn:
+            assert not any(
+                row["type"] == "notify"
+                for row in messages_service.list_session_messages(conn, session_id=session_id)["messages"]
+            )
+        assert asyncio.run(manager.notify_transport_ready("avibe")) == 1
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, str(original.turn_id))
+        notices = [
+            row for row in messages_service.list_session_messages(conn, session_id=session_id)["messages"]
+            if row["type"] == "notify"
+        ]
+    assert turn["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert turn["start_receipt_outcome"] == "accepted"
+    assert len(notices) == 1
+    notice = notices[0]
+    assert "服务在它运行期间重启" in notice["text"]
+    assert notice["metadata"]["event"] == "backend_failure"
+    assert notice["metadata"]["turn_id"] == turn["id"]
+    assert notice["metadata"]["failure_id"] == f"turn:{turn['id']}"
+    assert notice["metadata"]["backend"] == backend
+    assert notice["metadata"]["detached"] is False
+    assert notice["metadata"]["replayed"] is True
+    # Neither another recovery pass nor another readiness hook emits a duplicate.
+    asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
+    assert asyncio.run(manager.notify_transport_ready("avibe")) == 0
+    return session_id, notice
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("delivery", ["ready", "unready", "send_failed"])
+def test_restart_notice_retries_through_web_and_controller(isolated_state, tmp_path, monkeypatch, backend, delivery):
+    """MESSAGE-DELIVERY-030: restart -> persisted notice -> Web -> one continuation."""
+    import httpx
+    from core import internal_server
+    from tests.test_internal_server import _bind_test_native_start, _build_controller_double
+    from vibe import ui_server
+
+    session_id, notice = _restart_failure_notice(tmp_path, backend=backend, delivery=delivery)
+    engine = create_sqlite_engine()
+    controller = _build_controller_double()
+    internal_app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    starts = []
+
+    async def capture_run(sid, context, text, *, logical_turn_id=None, **_kwargs):
+        starts.append((sid, text))
+        _bind_test_native_start(engine, context)
+        manager._terminalize_durable_turn(
+            logical_turn_id, "completed", settled_by="terminal_result", evidence_kind="test_terminal",
+        )
+
+    manager._run = capture_run
+    transport = httpx.ASGITransport(app=internal_app)
+
+    async def dispatch(payload):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as internal:
+            response = await internal.post("/internal/dispatch_async", json=payload)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", dispatch)
+    client = ui_server.app.test_client()
+    headers = csrf_headers(client)
+    draft = client.put(
+        f"/api/sessions/{session_id}/draft", headers=headers,
+        json={"text": "未发送的草稿", "expected_updated_at": None},
+    ).get_json()["draft"]
+    url = f"/api/sessions/{session_id}/messages"
+    first = client.post(url, json={"retry_for": notice["id"], "text": "repeat everything"}, headers=headers)
+    duplicate = client.post(url, json={"retry_for": notice["id"]}, headers=headers)
+    assert first.status_code == duplicate.status_code == 201
+    assert first.get_json()["id"] == duplicate.get_json()["id"]
+    assert first.get_json()["draft"] == draft
+    assert first.get_json()["draft_advanced"] is False
+    assert first.get_json()["retry_notice"]["content"]["failure_retry"]["state"] == "accepted"
+    assert starts == [(session_id, "continue")]
+    with engine.connect() as conn:
+        reloaded = messages_service.get_message(conn, notice["id"])
+    assert reloaded["text"] == notice["text"]
+    assert reloaded["content"]["failure_retry"]["state"] == "accepted"
+
+
+@pytest.mark.parametrize("change", ["newer", "busy", "unlinked"])
+def test_restart_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, change):
+    from vibe.ui_server import app
+
+    session_id, notice = _restart_failure_notice(tmp_path, backend="codex")
+    with create_sqlite_engine().begin() as conn:
+        if change == "newer":
+            seed_failed_notice(conn, session_id=session_id, scope_id=notice["scope_id"])
+        elif change == "busy":
+            message_deliveries.insert_delivery(
+                conn, delivery_id=message_deliveries.new_delivery_id(),
+                session_id=session_id, priority="p3", state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=notice["scope_id"], session_id=session_id, platform="avibe",
+                    author="user", source="user", text="另一个请求",
+                ),
+                dispatch_text="另一个请求",
+            )
+        else:
+            conn.execute(update(messages).where(messages.c.id == notice["id"]).values(metadata_json="{}"))
+    client = app.test_client()
+    with patch("vibe.internal_client.dispatch_async", AsyncMock()) as dispatch:
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", headers=csrf_headers(client),
+            json={"retry_for": notice["id"]},
+        )
+    assert response.status_code == 409
+    dispatch.assert_not_awaited()
+
+
 def _retry_notice(tmp_path, *, backend="claude", not_written=False, content=None):
     scope_id, session_id = _make_session(tmp_path, agent_backend=backend)
     with create_sqlite_engine().begin() as conn:

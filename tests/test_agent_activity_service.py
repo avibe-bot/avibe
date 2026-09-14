@@ -1756,6 +1756,44 @@ def test_backend_failure_notify_is_failed(isolated_state):
     assert [g["status"] for g in groups] == ["failed"]
 
 
+def test_replayed_failure_preserves_newer_activity_on_readback(isolated_state):
+    """MESSAGE-DELIVERY-030: a delayed recovery notice is not a new terminal."""
+    engine = create_sqlite_engine()
+    sid = "ses_replayed_failure"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="old-input", mtype="user", author="user",
+             created_at="2026-06-01T10:00:00Z", metadata={"turn_id": "old-turn"})
+        _msg(conn, scope, sid, mid="old-step", mtype="assistant", author="agent",
+             created_at="2026-06-01T10:00:01Z", text="old work", metadata={"turn_id": "old-turn"})
+        _evt(conn, scope, sid, eid="old-terminal", created_at="2026-06-01T10:00:02Z",
+             event_type="silent_terminal", text="", turn_id="old-turn",
+             metadata={"terminal_outcome": "failed"})
+        _msg(conn, scope, sid, mid="new-input", mtype="user", author="user",
+             created_at="2026-06-01T10:01:00Z", metadata={"turn_id": "new-turn"})
+        _msg(conn, scope, sid, mid="new-step-1", mtype="assistant", author="agent",
+             created_at="2026-06-01T10:01:01Z", text="new work before notice", metadata={"turn_id": "new-turn"})
+        _msg(conn, scope, sid, mid="old-notice", mtype="notify", author="agent",
+             created_at="2026-06-01T10:01:02Z", text="服务重启导致上一轮中断",
+             metadata={"event": "backend_failure", "replayed": True, "turn_id": "old-turn",
+                       "failure_id": "turn:old-turn", "detached": False})
+        _msg(conn, scope, sid, mid="new-step-2", mtype="assistant", author="agent",
+             created_at="2026-06-01T10:01:03Z", text="new work after notice", metadata={"turn_id": "new-turn"})
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        assert len(groups) == 2
+        assert groups[0]["status"] == "failed"
+        assert groups[0]["anchor_message_id"] == "old-input"
+        assert groups[0]["open"] is False
+        assert groups[1]["id"] == "new-step-1"
+        assert groups[1]["anchor_message_id"] == "new-input"
+        assert groups[1]["open"] is True
+        assert groups[1]["steps"] == 2
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=groups[1]["id"])
+        assert [row["text"] for row in detail["rows"]] == ["new work before notice", "new work after notice"]
+
+
 def test_stop_without_terminal_stays_interrupted(isolated_state):
     """Cancel/Stop writes NO marker (no visible terminal, no silent marker), so a
     turn with activity and no terminal before the next turn stays ``interrupted``."""

@@ -5,6 +5,7 @@ import {
   isBoundaryMessage,
   isDetachedCompletionMessage,
   isNotifyMessageType,
+  isRetryableFailureNotice,
   isTerminalAgentMessage,
   isTranscriptMessage,
   shouldRefreshAgentActivityForMessage,
@@ -85,6 +86,26 @@ describe('isTerminalAgentMessage', () => {
     for (const type of ['result', 'error', 'notify']) {
       expect(isTerminalAgentMessage({ author: 'agent', type, metadata: { detached: true } }), type).toBe(false);
     }
+  });
+
+  it('keeps replayed failure notices retryable without granting foreground authority', () => {
+    const message = {
+      author: 'agent', source: 'agent', type: 'notify',
+      metadata: {
+        event: 'backend_failure', replayed: true, detached: false,
+        turn_id: 'interrupted-turn', failure_id: 'turn:interrupted-turn',
+      },
+    };
+    expect(isTerminalAgentMessage(message)).toBe(false);
+    expect(isAgentActivityBoundaryMessage(message)).toBe(false);
+    expect(isDetachedCompletionMessage(message)).toBe(false);
+    expect(isTranscriptMessage(message)).toBe(true);
+    expect(isRetryableFailureNotice(message)).toBe(true);
+    expect(shouldRefreshAgentActivityForMessage(message)).toBe(true);
+    expect(isTerminalAgentMessage({
+      ...message, metadata: { ...message.metadata, replayed: false },
+    })).toBe(true);
+    expect(isTerminalAgentMessage({ author: 'agent', type: 'result', metadata: { replayed: true } })).toBe(true);
   });
 });
 

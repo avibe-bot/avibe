@@ -409,7 +409,17 @@ describe('ChatPage transcript hydration', () => {
     expect(screen.queryByText(projected.text)).toBeNull();
   });
 
-  it('refreshes detached Activity without settling the current live generation', async () => {
+  it.each([
+    { kind: 'detached', type: 'result', metadata: { detached: true, activity_id: 'background-1' } },
+    {
+      kind: 'replayed restart', type: 'notify',
+      metadata: {
+        event: 'backend_failure', replayed: true, detached: false,
+        turn_id: 'interrupted-turn', failure_id: 'turn:interrupted-turn',
+      },
+    },
+  ])('refreshes $kind Activity without settling the current live generation', async ({ type, metadata }) => {
+    // MESSAGE-DELIVERY-030: the old notice must not retire newer live UI work.
     mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
     mocks.api.getSessionBootstrap.mockResolvedValue({
       ...bootstrapPayload('session-new'),
@@ -438,11 +448,11 @@ describe('ChatPage transcript hydration', () => {
         source: 'agent',
       });
       mocks.events?.onMessageNew({
-        ...projectedMessage('detached-result', 'background completed'),
+        ...projectedMessage('old-completion', 'earlier work ended'),
         author: 'agent',
-        type: 'result',
+        type,
         source: 'agent',
-        metadata: { detached: true, activity_id: 'background-1' },
+        metadata,
       });
       mocks.events?.onMessageNew({
         ...projectedMessage('active-step-2', 'second active step'),
@@ -455,6 +465,48 @@ describe('ChatPage transcript hydration', () => {
     await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalledTimes(1));
     expect(screen.getByText('first active step')).toBeTruthy();
     expect(screen.getByText('second active step')).toBeTruthy();
+  });
+
+  describe.each([false, true])('restart notice with Activity enabled=%s', (activityEnabled) => {
+    it.each(['live', 'bootstrap'])('keeps newer work thinking after a %s notice', async (delivery) => {
+      // MESSAGE-DELIVERY-030: cover both message.new and a persisted reload.
+      const notice = {
+        ...projectedMessage('restart-notice', '服务重启导致上一轮中断'),
+        author: 'agent', source: 'agent', type: 'notify',
+        metadata: {
+          event: 'backend_failure', replayed: true, detached: false,
+          turn_id: 'interrupted-turn', failure_id: 'turn:interrupted-turn',
+        },
+      };
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        config: { ui: { show_agent_activity: activityEnabled } },
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+        messages: delivery === 'bootstrap' ? [notice] : [],
+      });
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await screen.findByText('chat.thinking');
+      if (delivery === 'live') act(() => mocks.events?.onMessageNew(notice));
+      expect(screen.getByText(notice.text, { exact: false })).toBeTruthy();
+      expect(screen.getByText('chat.thinking')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'common.retry' })).toBeTruthy();
+      expect(mocks.composer?.busy).toBe(true);
+
+      // A real foreground failure still ends its visible response immediately.
+      act(() => mocks.events?.onMessageNew({
+        ...notice, id: 'zz-current-failure', created_at: '2026-08-15T00:01:00Z', metadata: {
+          event: 'backend_failure', turn_id: 'current-turn', failure_id: 'current-failure',
+        },
+      }));
+      expect(screen.queryByText('chat.thinking')).toBeNull();
+    });
   });
 
   it('does not render an open activity group as interrupted before the switched chat turn state is known', async () => {

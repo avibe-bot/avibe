@@ -1375,8 +1375,9 @@ def test_fork_source_state_treats_backend_failure_notify_anchor_as_terminal(
         engine.dispose()
 
 
-def test_fork_source_state_keeps_detached_failure_outside_current_turn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("provenance", [{"detached": True}, {"replayed": True, "detached": False}])
+def test_fork_source_state_keeps_historical_failure_outside_current_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provenance: dict
 ) -> None:
     from config import paths
     from storage.importer import ensure_sqlite_state
@@ -1400,7 +1401,7 @@ def test_fork_source_state_keeps_detached_failure_outside_current_turn(
                 metadata={
                     "event": "backend_failure",
                     "failure_id": "failure_detached",
-                    "detached": True,
+                    **provenance,
                 },
             )
 
@@ -1413,8 +1414,12 @@ def test_fork_source_state_keeps_detached_failure_outside_current_turn(
         engine.dispose()
 
 
-def test_fork_source_state_keeps_terminal_visible_past_later_detached_completion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("historical_type,provenance", [
+    ("result", {"detached": True}),
+    ("notify", {"event": "backend_failure", "replayed": True, "detached": False}),
+])
+def test_fork_source_state_keeps_terminal_visible_past_later_historical_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical_type: str, provenance: dict
 ) -> None:
     from config import paths
     from storage.importer import ensure_sqlite_state
@@ -1452,9 +1457,9 @@ def test_fork_source_state_keeps_terminal_visible_past_later_detached_completion
                 session_id=source_id,
                 platform="avibe",
                 author="agent",
-                message_type="result",
+                message_type=historical_type,
                 text="Older background work completed",
-                metadata={"detached": True, "turn_id": "turn-background"},
+                metadata={**provenance, "turn_id": "turn-background"},
             )
 
         state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})

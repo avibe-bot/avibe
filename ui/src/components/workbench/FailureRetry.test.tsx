@@ -31,6 +31,23 @@ function mount(props: Partial<Parameters<typeof FailureRetry>[0]> = {}) {
 }
 
 describe('failed-turn retry action', () => {
+  it('offers retry for a restart interruption with authoritative Turn metadata', async () => {
+    const onRetry = mount({
+      message: {
+        ...notice,
+        text: '⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如果这项工作仍然需要完成，请重新发送请求。',
+        metadata: {
+          event: 'backend_failure', backend: 'codex',
+          failure_id: 'turn:interrupted-turn', turn_id: 'interrupted-turn', detached: false,
+          replayed: true,
+        },
+      },
+    });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '重试' })); });
+    expect(onRetry).toHaveBeenCalledExactlyOnceWith('notice');
+    expect(screen.getByRole('button', { name: '已请求重试' })).toBeTruthy();
+  });
+
   it('locks a click burst and reports only an admitted retry', async () => {
     let finish!: (value: boolean) => void;
     const pending = new Promise<boolean>((resolve) => { finish = resolve; });
@@ -88,6 +105,7 @@ describe('failed-turn retry action', () => {
     { message: { ...notice, metadata: { ...notice.metadata, event: 'progress' } } },
     { message: { ...notice, metadata: { ...notice.metadata, detached: true } } },
     { message: { ...notice, metadata: { event: 'backend_failure' } } },
+    { message: { ...notice, text: 'Avibe 服务重启，本轮执行被中断', metadata: {} } },
     { message: { ...notice, author: 'user' } as WorkbenchMessage },
   ])('does not offer an ineligible action', (props) => {
     mount(props);

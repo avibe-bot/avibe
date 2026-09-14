@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
+from core.backend_failure import backend_failure_notification_output
 from core.message_context import (
     resolve_turn_sink_key,
 )
@@ -80,7 +81,7 @@ from storage.models import (
     session_turns as session_turn_rows,
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
-from core.message_output import terminal_turn_output
+from core.message_output import MessageOutput, terminal_turn_output
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -641,7 +642,7 @@ class SessionTurnManager:
         ] = weakref.WeakValueDictionary()
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
-        self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
+        self._pending_lost_turn_reports: dict[str, list[tuple[str, str, str, str]]] = {}
         # One in-flight retry task per platform for the reports above.
         self._lost_turn_retry_tasks: dict[str, asyncio.Task[None]] = {}
         # The live turn sink per TURN SINK KEY. Each is
@@ -6251,6 +6252,8 @@ class SessionTurnManager:
         self,
         session_id: str,
         origin_native_message_id: str,
+        turn_id: str,
+        backend: str,
     ) -> None:
         """Tell an IM turn's author that its runtime died with the service.
 
@@ -6288,11 +6291,11 @@ class SessionTurnManager:
             return
         platform = str(getattr(context, "platform", "") or "")
         if self._transport_can_deliver(platform) and await self._emit_lost_turn_report(
-            context, session_id, origin_native_message_id
+            context, session_id, origin_native_message_id, turn_id, backend
         ):
             return
         self._pending_lost_turn_reports.setdefault(platform, []).append(
-            (session_id, str(origin_native_message_id or ""))
+            (session_id, str(origin_native_message_id or ""), turn_id, backend)
         )
         logger.info(
             "lost turn report held until %s transport can deliver (session=%s)",
@@ -6336,8 +6339,8 @@ class SessionTurnManager:
         if not pending or self.controller is None:
             return 0
         reported = 0
-        unsent: list[tuple[str, str]] = []
-        for session_id, origin_native_message_id in pending:
+        unsent: list[tuple[str, str, str, str]] = []
+        for session_id, origin_native_message_id, turn_id, backend in pending:
             try:
                 context = self._delivery_context(session_id)
             except Exception:
@@ -6348,7 +6351,7 @@ class SessionTurnManager:
                 )
                 continue
             if await self._emit_lost_turn_report(
-                context, session_id, origin_native_message_id
+                context, session_id, origin_native_message_id, turn_id, backend
             ):
                 reported += 1
             else:
@@ -6356,7 +6359,7 @@ class SessionTurnManager:
                 # transient API error still loses the notice. Popping happened
                 # first, so an unsent report has to be put BACK or the only
                 # record of the interruption is gone for the process's lifetime.
-                unsent.append((session_id, str(origin_native_message_id or "")))
+                unsent.append((session_id, str(origin_native_message_id or ""), turn_id, backend))
         if unsent:
             self._pending_lost_turn_reports.setdefault(platform, []).extend(unsent)
             logger.info(
@@ -6423,6 +6426,8 @@ class SessionTurnManager:
         context: "MessageContext",
         session_id: str,
         origin_native_message_id: str,
+        turn_id: str,
+        backend: str,
     ) -> bool:
         """Emit one interruption notice. ``False`` means it did NOT reach the user.
 
@@ -6438,6 +6443,16 @@ class SessionTurnManager:
                 context,
                 "notify",
                 i18n_t("turn.interrupted.serviceRestart", self._controller_language()),
+                # Recovery already settled this Turn. Carry its exact identity
+                # through delayed sends without granting another settlement or
+                # guessing the target from the Session's current Turn.
+                output=backend_failure_notification_output(
+                    context,
+                    backend,
+                    output=MessageOutput(metadata={"turn_id": turn_id, "replayed": True}),
+                    failure_id=f"turn:{turn_id}",
+                    failure_id_authoritative=True,
+                ),
             )
         except Exception:
             logger.warning(
@@ -6657,7 +6672,7 @@ class SessionTurnManager:
                 continue
             recovered.append(target_session)
             if not owning_run_ids:
-                await self._report_lost_im_turn(target_session, origin_message_id)
+                await self._report_lost_im_turn(target_session, origin_message_id, turn_id, backend)
             successor_turn_id = str(terminal.get("successor_turn_id") or "")
             if successor_turn_id:
                 await self._start_persisted_turn(successor_turn_id)

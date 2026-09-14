@@ -572,6 +572,15 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         )
                         == 1,
                     ),
+                    ~and_(
+                        messages.c.type == "notify",
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.event"), ""
+                        ) == "backend_failure",
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.replayed"), 0
+                        ) == 1,
+                    ),
                 )
                 .order_by(transcript_order_value().desc(), messages.c.id.desc())
                 .limit(1)
