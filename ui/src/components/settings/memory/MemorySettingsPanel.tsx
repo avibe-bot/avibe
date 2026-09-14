@@ -225,6 +225,7 @@ export const MemorySettingsPanel: React.FC<{
   const api = useApi();
   const { showToast } = useToast();
   const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
+  const profileBaseline = useRef(settings.profile_enabled);
   const [profileEnabledDraft, setProfileEnabledDraft] = useState(settings.profile_enabled);
   const [modeDraft, setModeDraft] = useState<MemorySettings['mode']>(settings.mode);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
@@ -239,7 +240,8 @@ export const MemorySettingsPanel: React.FC<{
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
   useEffect(() => {
     setEnabledDraft(settings.enabled);
-    setProfileEnabledDraft((current) => current === settings.profile_enabled ? settings.profile_enabled : current);
+    setProfileEnabledDraft((current) => current === profileBaseline.current ? settings.profile_enabled : current);
+    profileBaseline.current = settings.profile_enabled;
     setModeDraft(settings.mode);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
@@ -307,6 +309,7 @@ export const MemorySettingsPanel: React.FC<{
       const res = await api.saveMemorySettings(patch);
       if (isMemoryOk(res)) {
         onSaved(res);
+        profileBaseline.current = res.profile_enabled;
         const runtime = res.runtime as { ok?: boolean; error?: string } | undefined;
         if (patch.confirm_loss && runtime && typeof runtime.ok === 'boolean') {
           showToast(
