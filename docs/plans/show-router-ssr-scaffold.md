@@ -79,7 +79,12 @@ node scripts/check_show_router.mjs --runtime-root ../vibe-show-runtime --python 
 ```
 
 The `show-router-integration` CI job pins that producer and checks byte parity,
-then runs the real HTTP renderer. When intentionally refreshing this resource,
+then runs the real HTTP renderer for fresh nested SSR and legacy root/HTML
+fallback while asserting that no source files change. Combined acceptance
+against Runtime companion PR #70 adds `--legacy-router-ssr` to the same command
+to require legacy LF/CRLF nested SSR as well. The default-branch CI does not
+pretend that the old producer implements this new compatibility behavior.
+When intentionally refreshing this resource,
 update that producer pin too. Official and GitHub-only releases export the router
 from each actual platform build, verify parity, and package that output alongside
 the matching generated manifest. No Node process is needed to create a page.

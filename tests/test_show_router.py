@@ -1,24 +1,15 @@
 from __future__ import annotations
 
-import hashlib
-import os
+import errno
 from pathlib import Path
 
 import pytest
 
 from core.show_pages import ensure_show_page_dir, show_page_dir
-from core.show_router import _LEGACY_ROUTER_SHA256, default_show_router, upgrade_default_show_router
+from core.show_router import default_show_router
 
 
 LEGACY_ROUTER = Path(__file__).parent / "fixtures" / "show_pages" / "router-history-pre-ssr.tsx"
-
-
-def test_released_fixture_is_the_exact_migration_target():
-    original = LEGACY_ROUTER.read_bytes()
-    assert {
-        hashlib.sha256(original).hexdigest(),
-        hashlib.sha256(original.replace(b"\n", b"\r\n")).hexdigest(),
-    } == _LEGACY_ROUTER_SHA256
 
 
 def test_fresh_router_comes_from_the_packaged_runtime_template():
@@ -28,11 +19,13 @@ def test_fresh_router_comes_from_the_packaged_runtime_template():
 
 
 @pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "windows-crlf"])
-def test_ensure_upgrades_only_the_old_router_and_is_idempotent(newline):
+def test_ensure_never_rewrites_the_old_router(newline):
     page = ensure_show_page_dir("sesupgrade")
     router = page / "src" / "router.tsx"
-    router.write_bytes(LEGACY_ROUTER.read_bytes().replace(b"\n", newline))
+    original = LEGACY_ROUTER.read_bytes().replace(b"\n", newline)
+    router.write_bytes(original)
     router.chmod(0o640)
+    before = router.stat()
     others = {
         path.relative_to(page): path.read_bytes()
         for path in page.rglob("*")
@@ -40,11 +33,11 @@ def test_ensure_upgrades_only_the_old_router_and_is_idempotent(newline):
     }
 
     assert ensure_show_page_dir("sesupgrade") == page
-    assert router.read_text() == default_show_router()
-    assert router.stat().st_mode & 0o777 == 0o640
-    updated = router.stat()
+    assert router.stat() == before
+    assert router.read_bytes() == original
     ensure_show_page_dir("sesupgrade")
-    assert router.stat() == updated
+    assert router.stat().st_mtime_ns == before.st_mtime_ns
+    assert router.stat().st_ino == before.st_ino
     assert all((page / path).read_bytes() == content for path, content in others.items())
 
 
@@ -61,23 +54,22 @@ def test_unknown_routers_are_never_rewritten(contents):
     page = ensure_show_page_dir("sescustom")
     router = page / "src" / "router.tsx"
     router.write_bytes(contents)
-    assert not upgrade_default_show_router(page)
     assert ensure_show_page_dir("sescustom") == page
     assert router.read_bytes() == contents
 
 
-def test_routerless_workspace_is_not_migrated():
+def test_routerless_workspace_is_not_rewritten():
     page = show_page_dir("sesrouterless")
     (page / "src").mkdir(parents=True)
     (page / "src" / "App.tsx").write_text("export default function App() { return null }\n")
-    assert not upgrade_default_show_router(page)
     ensure_show_page_dir("sesrouterless")
     assert not (page / "src" / "router.tsx").exists()
 
 
 @pytest.mark.parametrize("linked_component", ["router", "src", "workspace"])
-def test_migration_does_not_follow_symlinks(tmp_path, linked_component):
-    page = tmp_path / "workspace"
+def test_initialization_does_not_rewrite_symlink_routers(tmp_path, linked_component):
+    page = show_page_dir("seslinked")
+    page.parent.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / "outside"
     (outside / "src").mkdir(parents=True)
     target = outside / "src" / "router.tsx"
@@ -90,7 +82,7 @@ def test_migration_does_not_follow_symlinks(tmp_path, linked_component):
     else:
         (page / "src").mkdir(parents=True)
         (page / "src" / "router.tsx").symlink_to(target)
-    assert not upgrade_default_show_router(page)
+    ensure_show_page_dir("seslinked")
     assert target.read_bytes() == LEGACY_ROUTER.read_bytes()
 
 
@@ -100,40 +92,47 @@ def test_concurrent_edit_is_preserved(monkeypatch):
     router.write_bytes(LEGACY_ROUTER.read_bytes())
     authored = b"// Editor saved while migration was preparing\n" + LEGACY_ROUTER.read_bytes()
 
-    def template_during_edit():
+    from core import show_pages
+    write_defaults = show_pages._write_default_runtime_files
+
+    def defaults_during_edit(*args):
+        write_defaults(*args)
         router.write_bytes(authored)
-        return default_show_router()
 
-    monkeypatch.setattr("core.show_router.default_show_router", template_during_edit)
-    assert not upgrade_default_show_router(page)
+    monkeypatch.setattr(show_pages, "_write_default_runtime_files", defaults_during_edit)
+    ensure_show_page_dir("sesediting")
     assert router.read_bytes() == authored
-    assert not list(router.parent.glob(".router-*.tmp"))
 
 
-def test_failed_publish_preserves_old_router_and_cleans_temporary_file(monkeypatch):
-    page = ensure_show_page_dir("sesfailure")
+def test_fresh_scaffold_does_not_replace_a_concurrently_created_router(monkeypatch):
+    page = show_page_dir("sescreation")
     router = page / "src" / "router.tsx"
-    router.write_bytes(LEGACY_ROUTER.read_bytes())
+    authored = b"// Created by the editor during initialization\n"
+    original_open = Path.open
 
-    def fail_replace(*args):
-        raise OSError("fixture disk failure")
+    def create_before_open(path, mode="r", *args, **kwargs):
+        if path == router and mode == "x":
+            with original_open(path, "wb") as handle:
+                handle.write(authored)
+        return original_open(path, mode, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", fail_replace)
-    with pytest.raises(OSError, match="fixture disk failure"):
-        upgrade_default_show_router(page)
-    assert router.read_bytes() == LEGACY_ROUTER.read_bytes()
-    assert not list(router.parent.glob(".router-*.tmp"))
+    monkeypatch.setattr(Path, "open", create_before_open)
+    ensure_show_page_dir("sescreation")
+    assert router.read_bytes() == authored
 
 
-def test_readonly_workspace_still_initializes_without_a_migration(monkeypatch, caplog):
+@pytest.mark.parametrize("error", [PermissionError("fixture permission"), OSError(errno.EROFS, "fixture read-only mount")])
+def test_existing_router_is_not_opened_for_migration(monkeypatch, error):
     page = ensure_show_page_dir("sesreadonly")
     router = page / "src" / "router.tsx"
     router.write_bytes(LEGACY_ROUTER.read_bytes())
 
-    def readonly_directory(*args, **kwargs):
-        raise PermissionError("fixture read-only workspace")
+    original_open = Path.open
 
-    monkeypatch.setattr("core.show_router.tempfile.mkstemp", readonly_directory)
+    def readonly_router(path, *args, **kwargs):
+        if path == router:
+            raise error
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", readonly_router)
     assert ensure_show_page_dir("sesreadonly") == page
-    assert router.read_bytes() == LEGACY_ROUTER.read_bytes()
-    assert "read-only workspace" in caplog.text

@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from config.v2_config import V2Config, config_file_lock
 from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
-from core.show_router import default_show_router, upgrade_default_show_router
+from core.show_router import default_show_router
 from core.show_runtime_failures import (
     ShowRuntimeFailureClass,
     ShowRuntimeRecoveryAction,
@@ -621,7 +621,6 @@ def ensure_show_page_dir(session_id: str) -> Path:
     page_dir = show_page_dir(session_id)
     page_dir.mkdir(parents=True, exist_ok=True)
     _write_default_runtime_files(page_dir, validate_session_id(session_id))
-    upgrade_default_show_router(page_dir)
     return page_dir
 
 
@@ -2220,7 +2219,13 @@ def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
         if target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(contents, encoding="utf-8")
+        try:
+            # An editor may create a source after the existence check. Seeding
+            # is create-only, never permission to replace authored content.
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(contents)
+        except FileExistsError:
+            continue
 
 
 def _default_index_html(session_id: str) -> str:

@@ -1952,11 +1952,9 @@ def _markdown_runtime_manager(
 
 @pytest.mark.parametrize("surface", ["private", "public"])
 @pytest.mark.parametrize("customized", [False, True])
-def test_markdown_first_read_upgrades_only_the_stock_router_before_runtime_load(
+def test_markdown_first_read_never_rewrites_the_router_before_runtime_load(
     monkeypatch, tmp_path, surface, customized
 ):
-    from core.show_router import default_show_router
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", surface)
@@ -1964,12 +1962,14 @@ def test_markdown_first_read_upgrades_only_the_stock_router_before_runtime_load(
     old = (Path(__file__).parent / "fixtures/show_pages/router-history-pre-ssr.tsx").read_bytes()
     authored = b"// User customization\n" + old if customized else old
     router.write_bytes(authored)
-    expected = authored if customized else default_show_router().encode()
+    before = router.stat()
     manager = _markdown_runtime_manager()
     original_request = manager.request
 
     async def assert_router_ready(*args, **kwargs):
-        assert router.read_bytes() == expected
+        assert router.stat().st_ino == before.st_ino
+        assert router.stat().st_mtime_ns == before.st_mtime_ns
+        assert router.read_bytes() == authored
         return await original_request(*args, **kwargs)
 
     manager.request = assert_router_ready
@@ -1986,7 +1986,7 @@ def test_markdown_first_read_upgrades_only_the_stock_router_before_runtime_load(
 
     assert response.status_code == 200
     assert len(manager.calls) == 1
-    assert router.read_bytes() == expected
+    assert router.read_bytes() == authored
 
 
 def _assert_markdown_response_headers(response, *, success: bool) -> None:

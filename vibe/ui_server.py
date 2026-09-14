@@ -14785,7 +14785,6 @@ async def _show_page_markdown_runtime_response(
     external_prefix: str | None = None,
     runtime_retry_authorized: bool = False,
 ):
-    from core.show_router import upgrade_default_show_router
     from core.show_runtime import (
         SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS,
         ShowRuntimeContext,
@@ -14818,9 +14817,6 @@ async def _show_page_markdown_runtime_response(
     envelope = ShowRuntimeProtocolEnvelope(context)
     render_target = _show_page_markdown_render_target(asset_path, starlette_request)
     forwarded_headers = _show_runtime_forwarded_headers(starlette_request.headers)
-    # Markdown-first reads bypass ensure_show_page_dir(), but must repair the
-    # same known stock router before the Runtime fingerprints or loads it.
-    upgrade_default_show_router(paths.get_show_page_dir(session_id))
     try:
         proxied = await manager.request(
             "GET",

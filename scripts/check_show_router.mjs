@@ -2,7 +2,7 @@
 // Exercise the real Python initializer against the real Runtime HTTP renderer.
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile, mkdir, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -12,7 +12,8 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const { values } = parseArgs({
   options: {
     "runtime-root": { type: "string" },
-    python: { type: "string", default: "python3" }
+    python: { type: "string", default: "python3" },
+    "legacy-router-ssr": { type: "boolean", default: false }
   }
 })
 if (!values["runtime-root"]) throw new Error("--runtime-root is required")
@@ -20,7 +21,19 @@ const runtimeRoot = resolve(values["runtime-root"])
 const { startShowRuntimeServer } = await import(pathToFileURL(join(runtimeRoot, "packages/runtime/dist/server.js")).href)
 const temporary = await mkdtemp(join(tmpdir(), "avibe-python-router-check-"))
 const workspaceRoot = join(temporary, "show")
+const sessions = ["sesfresh", "seslegacylf", "seslegacycrlf"]
+const originalRouters = new Map()
 let server
+async function routerSnapshot(workspace) {
+  const path = join(workspace, "src/router.tsx")
+  const info = await stat(path)
+  return {
+    source: await readFile(path, "utf8"),
+    inode: info.ino,
+    mode: info.mode,
+    mtimeMs: info.mtimeMs
+  }
+}
 function initialize(sessionId) {
   execFileSync(values.python, [
     "-c",
@@ -34,15 +47,19 @@ try {
     "--runtime-module", join(runtimeRoot, "packages/runtime/dist/templates.js"),
     "--check"
   ], { stdio: "inherit" })
-  for (const sessionId of ["sesfresh", "sesmigrated"]) {
+  for (const sessionId of sessions) {
     initialize(sessionId)
     const workspace = join(workspaceRoot, sessionId)
-    if (sessionId === "sesmigrated") {
-      await writeFile(join(workspace, "src/router.tsx"), await readFile(
-        join(repository, "tests/fixtures/show_pages/router-history-pre-ssr.tsx")
-      ))
-      initialize(sessionId)
+    if (sessionId !== "sesfresh") {
+      const legacy = await readFile(
+        join(repository, "tests/fixtures/show_pages/router-history-pre-ssr.tsx"), "utf8"
+      )
+      await writeFile(join(workspace, "src/router.tsx"),
+        sessionId === "seslegacycrlf" ? legacy.replaceAll("\n", "\r\n") : legacy)
     }
+    originalRouters.set(sessionId, await routerSnapshot(workspace))
+    // Exercise initialization for LF; CRLF is a Markdown-first legacy access.
+    if (sessionId === "seslegacylf") initialize(sessionId)
     await mkdir(join(workspace, "src/pages/items"), { recursive: true })
     await writeFile(join(workspace, "src/pages/items/[id].tsx"), `
 import { Link, type PageProps } from "../../router"
@@ -58,18 +75,22 @@ export default function Item({ params, query }: PageProps) {
     cacheRoot: join(temporary, "cache"),
     idlePruneIntervalMs: 0
   })
-  for (const sessionId of ["sesfresh", "sesmigrated"]) {
+  for (const sessionId of sessions) {
     for (const basePath of [`/show/${sessionId}/`, "/p/public-share/"]) {
       const headers = {
         "x-vibe-show-base": basePath,
         "x-avibe-show-protocol": "1",
         "x-avibe-show-context": basePath.startsWith("/p/") ? "shared" : "private"
       }
-      for (const [target, expected] of [
+      const targets = [
         ["/", "Building your Show Page"],
         ["/second", "# A second page"],
         ["/items/%E4%B8%AD%E6%96%87?view=%E5%91%A8&vibe-embed=1", "# Item 中文"]
-      ]) {
+      ]
+      // Default-branch compatibility does not claim legacy nested SSR support.
+      // The opt-in mode is the combined acceptance gate with Runtime PR #70.
+      const nestedSupported = sessionId === "sesfresh" || values["legacy-router-ssr"]
+      for (const [target, expected] of nestedSupported ? targets : targets.slice(0, 1)) {
         const response = await fetch(`${server.url}/sessions/${sessionId}/render-markdown`, {
           headers: { ...headers, "x-vibe-show-target": target }
         })
@@ -88,8 +109,10 @@ export default function Item({ params, query }: PageProps) {
       assert.equal(html.status, 200, await html.text())
       assert.match(html.headers.get("content-type"), /^text\/html/)
     }
+    assert.deepEqual(await routerSnapshot(join(workspaceRoot, sessionId)), originalRouters.get(sessionId),
+      `${sessionId}: initialization or rendering changed the editable router`)
   }
-  console.log("Show router integration passed: fresh + migrated, root + nested, Unicode, queries, links, HTML, private + public.")
+  console.log(`Show router integration passed: fresh nested SSR, Unicode, queries, links, HTML, private + public; legacy LF/CRLF ${values["legacy-router-ssr"] ? "nested SSR" : "root fallback"}; source files unchanged.`)
 } finally {
   await server?.close()
   await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
