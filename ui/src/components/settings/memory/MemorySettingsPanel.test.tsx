@@ -131,6 +131,14 @@ describe('MemorySettingsPanel', () => {
     await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ profile_enabled: false }));
   });
 
+  it('includes pending profile draft in hosted Memory toggle save', async () => {
+    const user = userEvent.setup();
+    renderPanel({ settings: { ...settings, mode: 'platform', profile_enabled: true } });
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.enableLabel' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: false, profile_enabled: false }));
+  });
+
   it('does not submit profile toggle immediately' , async () => {
     const user = userEvent.setup(); renderPanel();
     await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
