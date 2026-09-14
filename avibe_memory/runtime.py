@@ -2008,7 +2008,7 @@ class MemoryRuntime:
             scope_policy = replace(
                 policy,
                 include_current_session=False,
-                include_profile=bool(policy.include_profile and index == 0 and self.module._is_profile_enabled()),
+                include_profile=bool(policy.include_profile and index == 0),
             )
             try:
                 result = await asyncio.wait_for(

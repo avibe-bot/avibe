@@ -899,6 +899,7 @@ class MemoryModule:
         async with self._lifecycle_lock:
             if not self._is_enabled():
                 return OperationFailed(error="memory_disabled")
+            policy = replace(policy, include_profile=bool(policy.include_profile and self._is_profile_enabled()))
             try:
                 meta = await self._store_call(self._store.ensure_meta)
             except Exception:
