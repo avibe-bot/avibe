@@ -64,8 +64,8 @@ const renderPanel = (overrides: Partial<React.ComponentProps<typeof MemorySettin
     deleting: false,
     ...overrides,
   };
-  render(<MemorySettingsPanel {...props} />);
-  return props;
+  const view = render(<MemorySettingsPanel {...props} />);
+  return { props, view };
 };
 
 beforeEach(() => {
@@ -78,6 +78,20 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('follows a clean parent snapshot update for profile', async () => {
+    const { view } = renderPanel();
+    view.rerender(<MemorySettingsPanel {...({ settings: { ...settings, profile_enabled: false }, maintenance: { status: 'ok', data_exists: true, can_delete_data: true }, maintenanceError: null, onSaved: vi.fn(), onReloadSettings: vi.fn(), onReloadMaintenance: vi.fn(), onDeleteData: vi.fn(), deleting: false } as React.ComponentProps<typeof MemorySettingsPanel>)} />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }).getAttribute('aria-checked')).toBe('false'));
+  });
+  it('retains dirty profile draft across persisted parent reload', async () => {
+    const user = userEvent.setup(); const { view } = renderPanel();
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    api.saveMemorySettings.mockRejectedValueOnce(new Error('rejected'));
+    view.rerender(<MemorySettingsPanel {...({ settings: { ...settings, profile_enabled: true }, maintenance: { status: 'ok', data_exists: true, can_delete_data: true }, maintenanceError: null, onSaved: vi.fn(), onReloadSettings: vi.fn(), onReloadMaintenance: vi.fn(), onDeleteData: vi.fn(), deleting: false } as React.ComponentProps<typeof MemorySettingsPanel>)} />);
+    expect(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }).getAttribute('aria-checked')).toBe('false');
+  });
+
+
   it('keeps configuration enablement reachable while Memory is disabled', async () => {
     const user = userEvent.setup();
     renderPanel({ settings: { ...settings, enabled: false } });
@@ -91,7 +105,7 @@ describe('MemorySettingsPanel', () => {
   });
 
   it('exposes one explicit Delete data action', async () => {
-    const props = renderPanel();
+    const { props } = renderPanel();
     await userEvent.click(screen.getByRole('button', { name: 'memory.deleteData.button' }));
     expect(props.onDeleteData).toHaveBeenCalledOnce();
     expect(screen.queryByText(/Clear Memory|Factory Reset|Rebuild/i)).toBeNull();
