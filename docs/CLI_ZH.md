@@ -621,3 +621,5 @@ Web UI (`http://127.0.0.1:5123`) 提供相同的控制功能：
 - [Slack 配置指南](SLACK_SETUP_ZH.md)
 - [Telegram 配置指南](TELEGRAM_SETUP_ZH.md)
 - [Codex 配置指南](CODEX_SETUP.md)
+
+Memory 画像开关关闭后会保留既有画像和普通搜索，但暂停画像读取及自动画像处理；重新开启即可恢复。

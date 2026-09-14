@@ -706,3 +706,5 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 - [Slack Setup Guide](SLACK_SETUP.md)
 - [Telegram Setup Guide](TELEGRAM_SETUP.md)
 - [Codex Setup Guide](CODEX_SETUP.md)
+
+The Memory profile switch can disable profile reads and automatic profile processing without deleting existing memory or changing ordinary search.

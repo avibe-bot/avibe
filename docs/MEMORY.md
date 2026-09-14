@@ -345,3 +345,6 @@ model-call and token ceilings, so those policy fields remain a declarative
 envelope rather than an independently enforced provider budget.
 Current-session overlay can only use the trusted caller session supplied by the
 runtime; callers cannot provide arbitrary provider filters or session IDs.
+
+### Profile switch
+The Memory settings profile switch is enabled by default. Turning it off preserves existing profile data and ordinary capture/search, while profile reads and automatic profile processing are disabled until it is enabled again.
