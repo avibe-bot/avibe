@@ -126,7 +126,7 @@ describe('MemorySettingsPanel', () => {
     const user = userEvent.setup(); renderPanel({ settings: { ...settings, mode: 'platform', profile_enabled: true } });
     await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
     const save = screen.getByRole('button', { name: 'memory.settings.save' });
-    expect(save).toBeEnabled();
+    expect((save as HTMLButtonElement).disabled).toBe(false);
     await user.click(save);
     await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ profile_enabled: false }));
   });
