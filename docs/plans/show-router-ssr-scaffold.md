@@ -19,12 +19,39 @@ the packaged resource against the Runtime generator.
 
 ## Existing workspaces
 
-Only a byte-for-byte known, released History-router template is eligible for an
-automatic upgrade. Match its complete SHA-256, not the absence of an SSR export.
-Preserve custom routers, hash routers, routerless apps, pages, App.tsx, and styles.
-Do not follow router symlinks. Repeated initialization must leave upgraded and
-custom workspaces unchanged. Exercise both HTML initialization and Markdown-first
-requests, because the latter currently bypass Python initialization.
+Never rewrite an existing editable router during initialization or a request.
+An editor does not participate in Avibe's locks, and a final comparison followed
+by rename cannot prevent overwriting a save in that window.
+
+Runtime's existing SSR module plugin supplies its current generated router only
+when the module source exactly matches the released Python History-router
+template. Match complete source fingerprints, not the absence of an SSR export.
+The released LF and Windows CRLF SHA-256 values are respectively
+`1154739b3e21e2f1c7f45e3d0b7454dc5541fdf15e2c79bbc2f96f766338706e` and
+`ed7cbd0aa11a491ac8b7621b8a7ea64d7c83c0b53ec46e950cca95b7f4d0079e`.
+Fingerprint the exact source being transformed, rather than rereading a path
+whose contents may change. Reuse the authored Runtime template without copying
+its implementation or creating temporary workspaces.
+
+This compatibility applies only to SSR of the ordinary workspace router module.
+Browser HTML/client modules and files on disk remain unchanged. Unknown/custom,
+hash, routerless, and symlink routers retain existing behavior. Module
+invalidation must observe later custom edits. Exercise HTML-first and
+Markdown-first requests, LF/CRLF, non-ASCII routes, and concurrent edits.
+Avibe's fresh scaffold works with the existing default-branch Runtime contract;
+old-stock SSR compatibility additionally requires Runtime companion PR #70.
+
+### Review scope decision
+
+The first reviewed Avibe head, `638b7a78ec`, received three findings: the
+check/rename race, read-only filesystem errors, and blocking request-path I/O.
+There is one findings-bearing head and no repeated-class circuit-breaker trigger.
+The orchestrator removes the source migration rather than adding further
+checks or locks that external editors cannot honor. Loading compatibility in
+Runtime preserves the intended old-page SSR outcome without mutation, and
+removes the other two findings at their source. No database or public protocol
+changes are required. Runtime owns the compatibility implementation; Avibe owns
+the generated resource, packaging, and cross-repository acceptance.
 
 ## Runtime error boundary
 
@@ -62,8 +89,9 @@ the matching generated manifest. No Node process is needed to create a page.
 - Real Markdown renders for root, static and dynamic routes, query strings,
   non-ASCII values, and private/public bases; generated links retain their base.
 - Real HTML remains available for the same workspace.
-- A known old stock router upgrades on first relevant access; a second access
-  changes nothing. Unknown/custom/legacy/symlink routers are not rewritten.
+- Known old stock routers render nested Markdown through Runtime compatibility
+  while retaining their bytes and metadata. Initialization and requests never
+  rewrite existing routers, including unknown/custom/legacy/symlink routers.
 - Custom non-SSR routers receive an actionable, sanitized error for subpages.
 - Wheel and sdist contain the generated router resource.
 - Release export and integration checks detect future template drift.
