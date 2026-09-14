@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { MemorySettingsResult } from '../../context/ApiContext';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
@@ -50,7 +51,7 @@ vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
 vi.mock('./memory/MemorySettingsPanel', () => ({
-  MemorySettingsPanel: ({ onDeleteData, onSaved }: { onDeleteData: () => void; onSaved?: (next: any) => void }) => { savedSettings.current = onSaved ?? null; return (
+  MemorySettingsPanel: ({ onDeleteData, onSaved }: { onDeleteData: () => void; onSaved?: (next: Extract<MemorySettingsResult, { status: 'ok' }>) => void }) => { savedSettings.current = onSaved ?? null; return (
     <button type="button" onClick={onDeleteData}>open-delete</button>
   ); },
 }));
