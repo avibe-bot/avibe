@@ -5025,7 +5025,7 @@ def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
     # dispatcher swallows a send failure and answers None, and the turn is
     # already terminal, so treating that as done would discard the only account
     # of the interruption the user will ever get.
-    first, restarted, _engine, _engine_b, _starts = managers
+    first, restarted, engine, _engine_b, _starts = managers
     context = _context()
     admitted = asyncio.run(
         first.deliver(
@@ -5054,9 +5054,11 @@ def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
     emitted, stamped = _capture_lost_turn_report(restarted)
     restarted._active_identity = lambda *_args: None
     delivers = False
+    outputs = []
 
-    async def _emit(_context, kind, text, **_kwargs):
+    async def _emit(_context, kind, text, **kwargs):
         emitted.append((kind, text))
+        outputs.append(kwargs["output"])
         return "msg-1" if delivers else None
 
     restarted.controller.emit_agent_message = _emit
@@ -5067,10 +5069,23 @@ def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
     assert [kind for kind, _text in emitted] == ["notify"]
     assert stamped == []
 
+    # The old notice may arrive after another task starts. Retain the original
+    # failed Turn identity instead of borrowing the current live context.
+    newer_turn, newer_context = asyncio.run(_activate(restarted, text="new work"))
+    restarted._delivery_context = lambda _session_id: newer_context
+    with engine.connect() as conn:
+        before = delivery_store.get_turn(conn, newer_turn)
     delivers = True
     assert asyncio.run(restarted.notify_transport_ready("avibe")) == 1
     assert len(emitted) == 2
     assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+    assert outputs[0] == outputs[1]
+    assert outputs[1].provenance(newer_context)["turn_id"] == turn_id
+    assert outputs[1].metadata["failure_id"] == f"turn:{turn_id}"
+    assert outputs[1].completes_turn is False
+    assert outputs[1].settles_run is False
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, newer_turn) == before
 
 
 def test_retained_lost_turn_report_is_retried_on_its_own_clock(managers) -> None:
@@ -5081,7 +5096,7 @@ def test_retained_lost_turn_report_is_retried_on_its_own_clock(managers) -> None
     _first, restarted, _engine, _engine_b, _starts = managers
     emitted, _stamped = _capture_lost_turn_report(restarted)
     restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
-    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin", "trn-origin", "codex")]
     failures = 1
 
     async def _emit(_context, kind, text, **_kwargs):
@@ -5115,7 +5130,7 @@ def test_lost_turn_retry_gives_up_instead_of_spinning(managers) -> None:
     _first, restarted, _engine, _engine_b, _starts = managers
     emitted, _stamped = _capture_lost_turn_report(restarted)
     restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
-    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin", "trn-origin", "codex")]
 
     async def _emit(_context, kind, text, **_kwargs):
         emitted.append((kind, text))
@@ -5132,7 +5147,7 @@ def test_lost_turn_retry_gives_up_instead_of_spinning(managers) -> None:
 
     # One initial attempt plus one per configured delay, then it stops.
     assert len(emitted) == 3
-    assert restarted._pending_lost_turn_reports["slack"] == [("ses_fsm", "m-origin")]
+    assert restarted._pending_lost_turn_reports["slack"] == [("ses_fsm", "m-origin", "trn-origin", "codex")]
 
 
 def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:

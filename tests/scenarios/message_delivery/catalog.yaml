@@ -188,6 +188,12 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_claude_session_recovery.py::test_missing_session_queue_waits_for_explicit_recovery
+  - id: MESSAGE-DELIVERY-030
+    name: Restart interruption retains its failed Turn binding through delivery and one Web continuation
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_restart_notice_retries_through_web_and_controller
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered

@@ -8,6 +8,13 @@ not a new backend retry protocol or an automatic retry policy.
 - Only an attached `notify` with `event=backend_failure`, a `failure_id`, and a
   durable `turn_id` can offer the action. Ordinary notifications, detached
   completions, user stops, and authentication-recovery cards are unchanged.
+- A service restart that terminalizes an accepted, non-restorable conversation
+  Turn emits the same failure-notice contract, with the original Turn ID and
+  backend retained across transport readiness waits and failed-send retries.
+  Its visible restart explanation is unchanged. The notice does not settle
+  another Turn or replay the original request; clicking continues through the
+  existing admission path. Harness-owned interruptions retain their existing
+  notice owner, and a restorable live backend does not acquire a retry action.
 - The action targets the notice's exact Session and failed Turn. The server
   rechecks access, archive/read-only status, current Turn, and pending input.
   A newer task, another live owner, or an unresolved native start blocks it.
@@ -80,6 +87,7 @@ implementations; IM-specific notification button rendering is not added here.
   or a remote tenant. No real upstream model request is needed for fault cases.
 
 Scenario contracts: `MESSAGE-DELIVERY-026` through `MESSAGE-DELIVERY-028`.
+Restart notification binding and continuation: `MESSAGE-DELIVERY-030`.
 
 ## Known by design
 
