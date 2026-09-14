@@ -188,7 +188,7 @@ def _memory_settings_patch(
         raise ValueError("invalid_memory_patch")
     if "acknowledge_transition" in patch_payload and not set(
         patch_payload
-    ).issubset({"acknowledge_transition", "confirm_loss"}):
+    ).issubset({"acknowledge_transition", "confirm_loss", "profile_enabled"}):
         raise ValueError("invalid_memory_patch")
 
     target = memory_config_to_payload(current.memory, include_secrets=True)

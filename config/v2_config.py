@@ -963,6 +963,8 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
     de-duplicating — as a whole, which is what stops the recovery loop.
     """
 
+    if section == "memory" and "Config 'memory.profile_enabled'" in str(error):
+        return "profile_enabled"
     if section == "memory.cloud":
         match = re.search(r"Config '([^']+)'", str(error))
         if not match:
@@ -1179,6 +1181,9 @@ def _reset_recoverable_config_section(
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "memory" and field_name == "profile_enabled":
+        payload["memory"]["profile_enabled"] = False
+        return True
     if section == "runtime" and field_name is not None:
         if _recover_runtime_field(payload, field_name):
             return True

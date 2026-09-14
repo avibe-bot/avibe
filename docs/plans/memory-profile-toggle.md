@@ -7,6 +7,8 @@ Inspected base: origin/master ab8c22867e58cf8a98d6815c9737ea2ce74fc9c8.
 
 Add one persisted boolean, `memory.profile_enabled`, default true (including old configurations without the field). Use the existing Memory settings toggle/save flow. When Memory itself is disabled, retain the preference but do not activate any Memory work.
 
+Disk loading recovers a malformed explicit profile flag to false through the existing field recovery/warning path, preserving other valid Memory settings and the original file. Direct parsing and API writes remain strict. Confirmed cloud transition patches accept and persist a profile delta alongside acknowledgement and loss confirmation.
+
 OFF means:
 1. Hide only the profile tab. Filter the existing tab array and reuse existing `activeTab` fallback to `processingRecord`. No new effect, navigation, state synchronization or persisted tab preference. Keep search/settings and admin gating unchanged.
 2. Omit profile-specific command guidance/content from newly constructed Agent prompts. Do not add a prohibition sentence. Keep all ordinary Memory guidance. Do not attempt to remove historical transcript text or arbitrary user-supplied references to profiles.
@@ -49,3 +51,11 @@ No generalized policy helper unless existing shared code already owns this value
 | Success snapshot | Accept returned profile value as the new draft baseline. |
 | Validation failure | Keep all drafts unchanged. |
 | Throw/nonvalidation failure + reload | Refresh status/runtime, but retain local profile draft until an authoritative success snapshot. |
+
+## Implementation evidence and limits
+
+Round-four regressions exercise HTTP PATCH through candidate validation, simulated controller reconfiguration and real test-owned persistence for both organization and platform transitions. Load tests cover malformed values, endpoint preservation, `load_warnings`, legacy default, boolean round-trips and strict parser/API rejection.
+
+The managed runtime applies the setting through the existing locked reconcile path: it stops the supervised Memory child and wakes a child with the new process settings; generated OME configuration is rewritten from that preference. Tests use fake child processes and temporary directories. They do not claim a live EverOS hot-reload experiment or a host restart.
+
+Synthetic Playwright evidence at UI head `eb21b6839f61fb54edd6c26989d0e598366ce175` covers the actual MemorySettingsPanel with API/CSRF interception and a stateful parent: desktop/mobile, light/dark `data-theme`, OFF/ON Save interaction and horizontal overflow checks (four passing cases). Tab fallback is covered by the mounted SettingsMemoryPage component test, not this browser fixture. Evidence is retained in `/tmp/avibe-pr1985-evidence-sesgeabagce3w`; no live profile, service or user configuration was used. Unit and contract tests do not erase existing native transcript content or prove live model/provider integration.
