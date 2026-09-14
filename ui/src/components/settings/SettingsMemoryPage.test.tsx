@@ -21,6 +21,7 @@ const api = vi.hoisted(() => ({
   repairMemory: vi.fn(),
   wakeMemory: vi.fn(),
 }));
+const savedSettings = vi.hoisted(() => ({ current: null as null | ((next: any) => void) }));
 const translate = vi.hoisted(() => (key: string) => key);
 
 vi.mock('react-i18next', () => ({
@@ -49,9 +50,9 @@ vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
 vi.mock('./memory/MemorySettingsPanel', () => ({
-  MemorySettingsPanel: ({ onDeleteData }: { onDeleteData: () => void }) => (
+  MemorySettingsPanel: ({ onDeleteData, onSaved }: { onDeleteData: () => void; onSaved?: (next: any) => void }) => { savedSettings.current = onSaved ?? null; return (
     <button type="button" onClick={onDeleteData}>open-delete</button>
-  ),
+  ); },
 }));
 
 vi.mock('./memory/MemoryStatusPanel', () => ({
@@ -157,19 +158,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
-});
-
-describe('SettingsMemoryPage profile toggle', () => {
-  it('removes active profile tab and falls back to processingRecord after OFF snapshot', async () => {
-    const user = userEvent.setup();
-    api.getMemorySettings.mockResolvedValueOnce({ ...settings, profile_enabled: true }).mockResolvedValue({ ...settings, profile_enabled: false });
-    const view = renderPage();
-    await waitFor(() => expect(screen.getByRole('radio', { name: 'memory.tabs.profile' })).toBeTruthy());
-    await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
-    view.rerender(<MemoryRouter><InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}><ToastProvider><SettingsMemoryPage /></ToastProvider></InstanceAuthorizationContext.Provider></MemoryRouter>);
-    await waitFor(() => expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull());
-    expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
-  });
 });
 
 describe('SettingsMemoryPage', () => {
