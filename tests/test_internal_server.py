@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.controller import Controller
-from core.message_context import build_context_turn_sink_key
+from core.message_context import build_context_turn_sink_key, resolve_turn_sink_key
 from core.vibe_agents import VibeAgentStore
 from vibe.memory_contract import (
     MemoryImplementationIncompatibleError,
@@ -351,7 +351,7 @@ def _build_controller_double(handler=None):
                     runtime_key=f"runtime:{logical_turn_id}",
                     runtime_turn_id=f"runtime-turn:{logical_turn_id}",
                 )
-        sink = sinks.get(controller._get_session_key(ctx))
+        sink = sinks.get(resolve_turn_sink_key(controller, ctx))
         if sink and sink.get("done_event") is not None:
             sink["done_event"].set()
 
@@ -4726,16 +4726,10 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
         done_event = asyncio.Event()
         cleanup_started = asyncio.Event()
         allow_cleanup = asyncio.Event()
-        context = MessageContext(
-            user_id="U",
-            channel_id="C",
-            platform="avibe",
-            platform_specific={"agent_session_id": session_id},
-        )
 
         async def _stale_dispatch():
             controller.register_turn_sink(
-                controller._get_session_key(context),
+                resolve_turn_sink_key(controller, context),
                 on_chunk=AsyncMock(),
                 done_event=done_event,
                 turn_token="old-turn",
@@ -4745,14 +4739,20 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
             finally:
                 cleanup_started.set()
                 await allow_cleanup.wait()
-                controller.pop_turn_sink(controller._get_session_key(context), done_event)
+                controller.pop_turn_sink(resolve_turn_sink_key(controller, context), done_event)
 
+        context = MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={"agent_session_id": session_id},
+        )
         task = asyncio.create_task(_stale_dispatch())
         for _ in range(200):
-            if controller.get_turn_sink("avibe::C") is not None:
+            if controller.get_turn_sink(resolve_turn_sink_key(controller, context)) is not None:
                 break
             await asyncio.sleep(0.01)
-        assert controller.get_turn_sink("avibe::C") is not None
+        assert controller.get_turn_sink(resolve_turn_sink_key(controller, context)) is not None
         app.state.in_flight_dispatches[session_id] = session_turns.Turn(
             task=task,
             context=context,
@@ -4778,7 +4778,7 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
     assert resp.status_code == 200
     assert resp.json()["status"] == "stale_released"
     assert task.cancelled()
-    assert controller.get_turn_sink("avibe::C") is None
+    assert controller.active_turn_sinks == {}
 
 
 def test_cancel_keeps_turn_when_backend_interrupt_failed(tmp_path, monkeypatch):
@@ -5162,7 +5162,7 @@ def test_dispatch_turn_registers_sink_for_dispatcher_hook():
     seen: dict = {}
 
     async def capture(ctx, text):
-        sink = controller.get_turn_sink(controller._get_session_key(ctx))
+        sink = controller.get_turn_sink(resolve_turn_sink_key(controller, ctx))
         seen["on_chunk"] = sink["on_chunk"] if sink else None
         # Release the dispatch the way a real result emit would.
         if sink:

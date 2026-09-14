@@ -30,6 +30,7 @@ from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
+from core.message_context import resolve_turn_sink_key
 import core.process_isolation as process_isolation
 from core.process_isolation import (
     capture_spawned_process_identity,
@@ -4423,7 +4424,7 @@ def test_agent_run_stays_running_until_terminal_result(tmp_path: Path, monkeypat
             async def _finish_later() -> None:
                 assert terminal_event is not None
                 await terminal_event.wait()
-                sink = self.get_turn_sink(self._get_session_key(context))
+                sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
                 assert sink is not None
                 store = SQLiteBackgroundTaskStore()
                 try:
@@ -4512,7 +4513,7 @@ def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch)
             self.active_turn_sinks.pop(session_key, None)
 
         async def _handle_scheduled_message(self, context, message, parsed_session_key=None):
-            sink = self.get_turn_sink(self._get_session_key(context))
+            sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
             assert sink is not None
             store = SQLiteBackgroundTaskStore()
             try:
@@ -4599,7 +4600,7 @@ class _SettlementControllerDouble:
             await self._on_turn(self, context, message)
         # Release the waiter WITHOUT recording a terminal result — exactly what
         # ``Controller.mark_turn_complete`` does for a turn that never dispatched.
-        sink = self.get_turn_sink(self._get_session_key(context))
+        sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
         assert sink is not None
         sink["done_event"].set()
         return None
@@ -4672,7 +4673,7 @@ def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(
     )
 
     async def _keep_the_run(controller, context, _message) -> None:
-        sink = controller.get_turn_sink(controller._get_session_key(context))
+        sink = controller.get_turn_sink(resolve_turn_sink_key(controller, context))
         assert sink is not None
         sink["settled_by"] = SETTLED_BY_TURN_ONLY_RESULT
 
@@ -4725,7 +4726,7 @@ def test_a_stopped_run_settles_canceled_not_succeeded(
     assert stop_semantics.completes_turn is True
 
     async def _stop_the_turn(controller, context, _message) -> None:
-        sink = controller.get_turn_sink(controller._get_session_key(context))
+        sink = controller.get_turn_sink(resolve_turn_sink_key(controller, context))
         assert sink is not None
         sink["settled_by"] = ConsolidatedMessageDispatcher._turn_release_settlement(
             stop_semantics
@@ -8962,7 +8963,7 @@ def test_agent_run_synchronous_dispatch_error_marks_failed(tmp_path: Path, monke
             self.active_turn_sinks.pop(session_key, None)
 
         async def _handle_scheduled_message(self, context, message, parsed_session_key=None):
-            sink = self.get_turn_sink(self._get_session_key(context))
+            sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
             assert sink is not None
             sink["done_event"].set()
             return "agent 'missing' is not available"
@@ -9869,7 +9870,7 @@ def test_drain_requests_agent_run_passes_agent_name(tmp_path: Path) -> None:
 
         async def _handle_scheduled_message(self, context, message, parsed_session_key=None):
             calls.append((context, message, parsed_session_key))
-            sink = self.get_turn_sink(self._get_session_key(context))
+            sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
             assert sink is not None
             sink["done_event"].set()
             return None
@@ -12786,7 +12787,7 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
             self.session_turns.pop_turn_sink(session_key, done_event)
 
         def mark_turn_complete(self, context) -> None:
-            sink = self.get_turn_sink(self._get_session_key(context))
+            sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
             if sink is not None and emit_matches_active_turn(sink, context):
                 sink["done_event"].set()
 

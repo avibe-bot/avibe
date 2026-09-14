@@ -134,6 +134,50 @@ def test_streaming_registers_turn_sink_and_waits_for_result():
     assert "turn_chunk_callback" not in (ctx.platform_specific or {})
 
 
+def test_streaming_sink_key_stays_stable_when_handler_binds_session() -> None:
+    controller = _build_controller_double()
+    ctx = _ctx()
+    observed: dict[str, str] = {}
+
+    async def handle_user_message(context, _text):
+        context.platform_specific["agent_session_id"] = "ses_runtime_a"
+        observed["key"] = build_context_turn_sink_key(
+            context,
+            session_key="slack::C",
+        )
+        sink = controller.get_turn_sink(observed["key"])
+        assert sink is not None
+        sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
+        sink["done_event"].set()
+
+    controller.message_handler.handle_user_message = handle_user_message
+    controller._get_session_key = MagicMock(return_value="slack::C")
+    controller._get_turn_sink_key = MagicMock(
+        side_effect=lambda context: build_context_turn_sink_key(
+            context,
+            session_key="slack::C",
+        )
+    )
+    sinks: dict[str, dict] = {}
+    controller.get_turn_sink = MagicMock(side_effect=lambda key: sinks.get(key))
+    controller.register_turn_sink = MagicMock(
+        side_effect=lambda key, **kwargs: sinks.__setitem__(
+            key,
+            {"done_event": kwargs["done_event"], "settled_by": None},
+        )
+    )
+    controller.pop_turn_sink = MagicMock(
+        side_effect=lambda key, _done=None: sinks.pop(key, None)
+    )
+
+    outcome = asyncio.run(
+        dispatch_turn_with_outcome(controller, ctx, "hi", on_chunk=AsyncMock())
+    )
+
+    assert observed["key"] == "slack::C"
+    assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
+
+
 def test_streaming_dispatch_releases_lifecycle_snapshot_after_handler_returns() -> None:
     """Scenario: MEMORY-INDEP-011."""
 
@@ -344,6 +388,40 @@ def test_busy_sibling_thread_does_not_refuse_this_threads_turn():
     outcome = asyncio.run(
         dispatch_turn_with_outcome(controller, new_topic, "create a directory", on_chunk=AsyncMock())
     )
+    assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
+    controller.message_handler.handle_user_message.assert_awaited_once()
+
+
+def test_busy_runtime_session_does_not_refuse_sibling_runtime_session():
+    """Different per-run Sessions in one unthreaded channel must run independently."""
+
+    busy_session = MessageContext(
+        user_id="scheduled",
+        channel_id="C",
+        platform="discord",
+        platform_specific={"agent_session_id": "ses_runtime_a"},
+    )
+    controller = _streaming_controller(
+        sink_settled_by=SETTLED_BY_TERMINAL_RESULT,
+        in_flight=True,
+        in_flight_key=build_context_turn_sink_key(busy_session, session_key="discord::C"),
+    )
+    new_session = MessageContext(
+        user_id="scheduled",
+        channel_id="C",
+        platform="discord",
+        platform_specific={"agent_session_id": "ses_runtime_b"},
+    )
+
+    outcome = asyncio.run(
+        dispatch_turn_with_outcome(
+            controller,
+            new_session,
+            "send the scheduled report",
+            on_chunk=AsyncMock(),
+        )
+    )
+
     assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
     controller.message_handler.handle_user_message.assert_awaited_once()
 

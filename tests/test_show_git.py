@@ -16,6 +16,7 @@ from core import show_git
 from core import inbox_events
 from core.git_binary import ResolvedGit
 from core.inbox_events import InboxEventBus
+from core.message_context import resolve_turn_sink_key
 from core.session_turns import SessionTurnManager
 from core.show_git import (
     POST_TURN,
@@ -735,7 +736,7 @@ def test_agent_initiated_turn_reuses_fsm_bus_lifecycle(resolved_git, monkeypatch
         assert manager.register_agent_initiated_turn(context) is True
         manager.on_terminal_result(context, is_error=False)
         manager.on_terminal_delivery_complete(context)
-        sink = manager.get_turn_sink(f"avibe::{session_id}")
+        sink = manager.get_turn_sink(resolve_turn_sink_key(manager.controller, context))
         assert sink is not None
         sink["done_event"].set()
         await manager.in_flight[session_id].task

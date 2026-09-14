@@ -202,6 +202,10 @@ async def dispatch_turn_with_outcome(
     if context.platform_specific is None:
         context.platform_specific = {}
     context.platform_specific["turn_token"] = turn_token
+    # The backend may bind the concrete agent Session onto this context after
+    # dispatch starts. Preserve the slot selected before registration so every
+    # later receiver/terminal path resolves the same sink for this turn.
+    context.platform_specific["turn_sink_key"] = session_key
     done = asyncio.Event()
     controller.register_turn_sink(
         session_key,

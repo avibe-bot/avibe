@@ -12,7 +12,7 @@ from config import paths
 from core import inbox_events, internal_server, show_git
 from core.git_binary import ResolvedGit
 from core.inbox_events import InboxEventBus
-from core.message_context import build_context_turn_sink_key
+from core.message_context import build_context_turn_sink_key, resolve_turn_sink_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
@@ -156,7 +156,7 @@ class _Controller:
     def mark_turn_complete(self, context=None) -> None:
         if context is None:
             return
-        sink = self.get_turn_sink(self._get_session_key(context))
+        sink = self.get_turn_sink(resolve_turn_sink_key(self, context))
         if sink is None or not emit_matches_active_turn(sink, context):
             return
         done = sink.get("done_event")
