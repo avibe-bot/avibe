@@ -185,10 +185,8 @@ def _context_block(
     if memory_enabled:
         block = render_prompt_block("memory-context-prompt")
         if not profile_enabled:
-            block = RenderedPromptBlock(
-                block.module_id,
-                block.text.split("\n## Personal Memory", 1)[0] + "\n",
-            )
+            lines = [line for line in block.text.splitlines() if "vibe memory profile" not in line]
+            block = RenderedPromptBlock(block.module_id, "\n".join(lines) + "\n")
         return block
     platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
     return render_prompt_block(
