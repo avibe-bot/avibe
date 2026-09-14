@@ -146,6 +146,27 @@ describe('MemorySettingsPanel', () => {
     expect(api.saveMemorySettings).not.toHaveBeenCalled();
   });
 
+  it('jointly saves endpoint draft and profile toggle', async () => {
+    const user = userEvent.setup(); renderPanel();
+    const model = screen.getByLabelText('memory.settings.embeddingTitle: memory.settings.model');
+    await user.clear(model); await user.type(model, 'joint-model');
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-loss' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ confirm_loss: true, profile_enabled: false, processing: { embedding: { model: 'joint-model' } } }));
+  });
+
+  it('retains endpoint and profile drafts after rejected save', async () => {
+    const user = userEvent.setup(); api.saveMemorySettings.mockRejectedValue(new Error('rejected')); renderPanel();
+    const model = screen.getByLabelText('memory.settings.embeddingTitle: memory.settings.model');
+    await user.clear(model); await user.type(model, 'failed-model');
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-loss' }));
+    expect((model as HTMLInputElement).value).toBe('failed-model');
+    expect((screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }) as HTMLButtonElement).getAttribute('aria-checked')).toBe('false');
+  });
+
   it('does not call a standalone rebuild client after a confirmed save', async () => {
     const user = userEvent.setup();
     renderPanel();
