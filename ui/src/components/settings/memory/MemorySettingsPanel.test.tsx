@@ -43,6 +43,7 @@ const endpoint = (baseUrl: string, model: string) => ({
 const settings: MemorySettings = {
   status: 'ok',
   enabled: true,
+  profile_enabled: true,
   mode: 'custom',
   im_attachment_capture_available: false,
   processing: {
@@ -120,6 +121,12 @@ describe('MemorySettingsPanel', () => {
     });
   });
 
+
+  it('does not submit profile toggle immediately', async () => {
+    const user = userEvent.setup(); renderPanel();
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+  });
   it('does not call a standalone rebuild client after a confirmed save', async () => {
     const user = userEvent.setup();
     renderPanel();
