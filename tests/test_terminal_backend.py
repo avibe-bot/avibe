@@ -240,6 +240,11 @@ async def _open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path)
 
     monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
     monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+    # The process is fake; its PID may belong to the runner or a user's real
+    # process. Keep shutdown's group lookup and signal delivery fake as well.
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(terminal_service.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(terminal_service.os, "killpg", lambda pid, signum: signals.append((pid, signum)))
 
     service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
     try:
@@ -250,6 +255,7 @@ async def _open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path)
         await service.shutdown()
         for fd in opened_fds:
             terminal_service._close_fd(fd)
+    assert signals == [(4321, signal.SIGTERM)]
 
 
 def test_terminal_reconnect_replaces_session(monkeypatch, tmp_path):
