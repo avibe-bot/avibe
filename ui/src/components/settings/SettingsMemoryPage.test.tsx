@@ -21,7 +21,7 @@ const api = vi.hoisted(() => ({
   repairMemory: vi.fn(),
   wakeMemory: vi.fn(),
 }));
-const savedSettings = vi.hoisted(() => ({ current: null as null | ((next: any) => void) }));
+const savedSettings = vi.hoisted(() => ({ current: null as null | ((next: typeof settings) => void) }));
 const translate = vi.hoisted(() => (key: string) => key);
 
 vi.mock('react-i18next', () => ({
@@ -158,6 +158,20 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe('SettingsMemoryPage profile transition', () => {
+  it('falls back to processingRecord when active profile is disabled', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'memory.tabs.settings' })).toBeTruthy());
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    expect(savedSettings.current).toBeTruthy();
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
+    act(() => savedSettings.current?.({ ...settings, profile_enabled: false }));
+    await waitFor(() => expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull());
+    expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
+  });
 });
 
 describe('SettingsMemoryPage', () => {
