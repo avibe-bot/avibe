@@ -821,7 +821,7 @@ async def test_disabled_capture_is_closed(tmp_path: Path) -> None:
 @pytest.mark.parametrize("enabled_after_wait", [False, True])
 async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_path: Path, enabled_after_wait: bool) -> None:
     module, store, provider = _module(tmp_path)
-    enabled = True
+    enabled = enabled_after_wait
     module._profile_enabled_source = lambda: enabled
     seen: list[bool] = []
     original = provider.search
@@ -830,6 +830,7 @@ async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_pat
         return await original(*args, **kwargs)
     provider.search = search
     await module._lifecycle_lock.acquire()
+    enabled = False if enabled_after_wait else True
     task = asyncio.create_task(module.recall("q", policy=RecallPolicy(mode="keyword", include_profile=True), principal_id=PRINCIPAL, project_id="default"))
     await asyncio.sleep(0)
     enabled = enabled_after_wait
