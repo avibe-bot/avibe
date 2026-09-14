@@ -136,6 +136,16 @@ describe('MemorySettingsPanel', () => {
     await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
     expect(api.saveMemorySettings).not.toHaveBeenCalled();
   });
+
+  it('preserves custom endpoint draft when profile is toggled', async () => {
+    const user = userEvent.setup(); renderPanel();
+    const model = screen.getByLabelText('memory.settings.embeddingTitle: memory.settings.model');
+    await user.clear(model); await user.type(model, 'draft-model');
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    expect((model as HTMLInputElement).value).toBe('draft-model');
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+  });
+
   it('does not call a standalone rebuild client after a confirmed save', async () => {
     const user = userEvent.setup();
     renderPanel();
