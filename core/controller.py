@@ -1568,6 +1568,8 @@ class Controller:
         verified_user_key: str | None,
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
+        if not bool(getattr(getattr(self.config, "memory", None), "profile_enabled", True)):
+            return {"status": "failed", "error": "memory_disabled"}
         runtime = await self._memory_runtime_for_operation()
         scope = await self._memory_scope_for_runtime(
             runtime,

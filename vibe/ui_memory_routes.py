@@ -173,6 +173,7 @@ def _memory_settings_patch(
 
     allowed_fields = {
         "enabled",
+        "profile_enabled",
         "processing",
         "mode",
         "acknowledge_transition",
@@ -187,7 +188,7 @@ def _memory_settings_patch(
         raise ValueError("invalid_memory_patch")
     if "acknowledge_transition" in patch_payload and not set(
         patch_payload
-    ).issubset({"acknowledge_transition", "confirm_loss"}):
+    ).issubset({"acknowledge_transition", "confirm_loss", "profile_enabled"}):
         raise ValueError("invalid_memory_patch")
 
     target = memory_config_to_payload(current.memory, include_secrets=True)
@@ -202,6 +203,10 @@ def _memory_settings_patch(
         if not isinstance(patch_payload["enabled"], bool):
             raise ValueError("invalid_memory_patch")
         target["enabled"] = patch_payload["enabled"]
+    if "profile_enabled" in patch_payload:
+        if not isinstance(patch_payload["profile_enabled"], bool):
+            raise ValueError("invalid_memory_patch")
+        target["profile_enabled"] = patch_payload["profile_enabled"]
     if "mode" in patch_payload:
         mode = patch_payload["mode"]
         if (

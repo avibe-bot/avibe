@@ -1569,6 +1569,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 memory_enabled=bool(
                     getattr(getattr(self.controller.config, "memory", None), "enabled", False)
                 ),
+                profile_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
+                ),
                 context=request.context,
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),

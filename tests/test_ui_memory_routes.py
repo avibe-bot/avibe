@@ -20,6 +20,7 @@ from config.v2_config import (
 )
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import internal_client, ui_memory_routes
+from vibe.api import save_memory_config
 from vibe.ui_server import app
 
 
@@ -140,6 +141,87 @@ def test_platform_embedding_transition_accepts_confirmed_data_loss() -> None:
     assert target["cloud"]["applied_embedding_identity"] == "emb-v2"
     assert target["cloud"]["transition_notice_pending"] is False
     assert target["cloud"]["organization_attached"] is False
+
+
+@pytest.mark.parametrize("scope", ["organization", "platform"])
+def test_confirmed_cloud_transition_persists_profile_disable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(MemoryConfig(
+        enabled=True,
+        mode="custom" if scope == "organization" else "platform",
+        profile_enabled=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+        ),
+        cloud=MemoryCloudConfig(
+            scope=scope,
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-v2",
+            applied_embedding_identity="emb-v1",
+            transition_notice_pending=True,
+            model_access_key="mak_synthetic",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    ))
+    reconfigured = []
+
+    async def preflight(**_kwargs):
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def reconfigure(*, confirm_loss, memory, expected_memory, user_key):
+        assert confirm_loss is True
+        assert expected_memory["profile_enabled"] is True
+        assert memory["profile_enabled"] is False
+        assert memory["cloud"]["transition_notice_pending"] is False
+        reconfigured.append(memory)
+        # Stand in for the controller's accepted reconfiguration; use the real
+        # persistence seam against this test's AVIBE_HOME.
+        save_memory_config(memory)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "memory_reconfigure", reconfigure)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"acknowledge_transition": True, "confirm_loss": True, "profile_enabled": False},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["status"] == "ok"
+    assert response.get_json()["profile_enabled"] is False
+    assert len(reconfigured) == 1
+    loaded = V2Config.load()
+    assert loaded.memory.profile_enabled is False
+    assert loaded.memory.enabled is True
+    assert loaded.memory.cloud.transition_notice_pending is False
+    assert loaded.memory.cloud.applied_embedding_identity == "emb-v2"
+    assert loaded.memory.cloud.organization_attached is (scope == "organization")
+
+
+@pytest.mark.parametrize("invalid", ["false", None, 0, [], {}])
+def test_settings_patch_rejects_invalid_profile_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings", json={"profile_enabled": invalid},
+        headers=csrf_headers(client, BASE_URL), **_request_options(),
+    )
+    assert response.status_code == 400
+    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+    assert V2Config.load().memory.profile_enabled is True
 
 
 def test_memory_settings_get_is_no_store_and_never_projects_secrets(

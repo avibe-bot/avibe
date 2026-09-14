@@ -165,6 +165,7 @@ class MemoryModule:
         provider: MemoryProviderPort,
         *,
         enabled: bool | Callable[[], bool] = False,
+        profile_enabled: bool | Callable[[], bool] = True,
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
         provider_root_owner: ProviderRoot | None = None,
@@ -178,6 +179,7 @@ class MemoryModule:
         self._store = store
         self._provider = provider
         self._enabled_source = enabled
+        self._profile_enabled_source = profile_enabled
         self._disk_free_bytes = disk_free_bytes or self._default_free_disk_bytes
         self._effective_home = (
             paths.get_vibe_remote_dir()
@@ -896,6 +898,7 @@ class MemoryModule:
         async with self._lifecycle_lock:
             if not self._is_enabled():
                 return OperationFailed(error="memory_disabled")
+            policy = replace(policy, include_profile=bool(policy.include_profile and self._is_profile_enabled()))
             try:
                 meta = await self._store_call(self._store.ensure_meta)
             except Exception:
@@ -1075,7 +1078,7 @@ class MemoryModule:
     async def profile(self, *, principal_id: str, project_id: str) -> MemoryResult:
         """Return a bounded provider profile result or one closed error category."""
 
-        if not self._is_enabled():
+        if not self._is_enabled() or not self._is_profile_enabled():
             return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id):
             return OperationFailed(error="memory_access_denied")
@@ -1085,7 +1088,7 @@ class MemoryModule:
             return OperationFailed(error="memory_operation_in_progress")
 
         async with self._lifecycle_lock:
-            if not self._is_enabled():
+            if not self._is_enabled() or not self._is_profile_enabled():
                 return OperationFailed(error="memory_disabled")
             try:
                 meta = await self._store_call(self._store.ensure_meta)
@@ -1537,6 +1540,17 @@ class MemoryModule:
             return False
         try:
             value = self._enabled_source() if callable(self._enabled_source) else self._enabled_source
+        except Exception:
+            return False
+        return bool(value)
+
+    def _is_profile_enabled(self) -> bool:
+        try:
+            value = (
+                self._profile_enabled_source()
+                if callable(self._profile_enabled_source)
+                else self._profile_enabled_source
+            )
         except Exception:
             return False
         return bool(value)

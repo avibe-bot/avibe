@@ -29,6 +29,7 @@ from avibe_memory.types import (
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
+    RecallPolicy,
     OperationFailed,
     ProviderSearchItem,
 )
@@ -815,3 +816,24 @@ async def test_disabled_capture_is_closed(tmp_path: Path) -> None:
     module, _store, _provider = _module(tmp_path)
     module._enabled_source = False
     assert await module.capture(_request()) == CaptureSkipped(reason="memory_disabled")
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled_after_wait", [False, True])
+async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_path: Path, enabled_after_wait: bool) -> None:
+    module, store, provider = _module(tmp_path)
+    enabled = enabled_after_wait
+    module._profile_enabled_source = lambda: enabled
+    seen: list[bool] = []
+    original = provider.search
+    async def search(*args, **kwargs):
+        seen.append(kwargs["include_profile"])
+        return await original(*args, **kwargs)
+    provider.search = search
+    await module._lifecycle_lock.acquire()
+    enabled = False if enabled_after_wait else True
+    task = asyncio.create_task(module.recall("q", policy=RecallPolicy(mode="keyword", include_profile=True), principal_id=PRINCIPAL, project_id="default"))
+    await asyncio.sleep(0)
+    enabled = enabled_after_wait
+    module._lifecycle_lock.release()
+    await task
+    assert seen == [enabled_after_wait, enabled_after_wait]

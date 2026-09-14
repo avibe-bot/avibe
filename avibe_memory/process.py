@@ -157,6 +157,7 @@ class EverOSProcessSettings:
     multimodal_model: str | None = None
     multimodal_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
+    profile_enabled: bool = True
 
 
 class _ProcessKind(Enum):
@@ -2168,6 +2169,12 @@ def _write_memory_child_config(
             "",
             "[strategies.extract_foresight]",
             "enabled = false",
+            "",
+            "[strategies.trigger_profile_clustering]",
+            f"enabled = {str(settings.profile_enabled).lower()}",
+            "",
+            "[strategies.extract_user_profile]",
+            f"enabled = {str(settings.profile_enabled).lower()}",
             "",
         )
     )

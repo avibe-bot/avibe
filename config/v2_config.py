@@ -963,6 +963,8 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
     de-duplicating — as a whole, which is what stops the recovery loop.
     """
 
+    if section == "memory" and "Config 'memory.profile_enabled'" in str(error):
+        return "profile_enabled"
     if section == "memory.cloud":
         match = re.search(r"Config '([^']+)'", str(error))
         if not match:
@@ -1179,6 +1181,9 @@ def _reset_recoverable_config_section(
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "memory" and field_name == "profile_enabled":
+        payload["memory"]["profile_enabled"] = False
+        return True
     if section == "runtime" and field_name is not None:
         if _recover_runtime_field(payload, field_name):
             return True
@@ -1951,6 +1956,7 @@ class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
 
     enabled: bool = False
+    profile_enabled: bool = True
     mode: MemoryMode | None = None
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     cloud: MemoryCloudConfig = field(default_factory=MemoryCloudConfig)
@@ -1962,6 +1968,8 @@ class MemoryConfig:
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
+        if not isinstance(self.profile_enabled, bool):
+            raise ValueError("Config 'memory.profile_enabled' must be a boolean")
         if self.mode is not None and self.mode not in get_args(MemoryMode):
             raise ValueError("Config 'memory.mode' must be 'platform', 'custom', or null")
         if not isinstance(self.legacy_needs_repair, bool):
@@ -2197,6 +2205,7 @@ def memory_config_to_payload(
         processing["multimodal"] = endpoint_payload(memory.processing.multimodal)
     payload = {
         "enabled": memory.enabled,
+        "profile_enabled": memory.profile_enabled,
         "mode": memory.mode,
         "processing": processing,
         "cloud": {
@@ -2300,6 +2309,7 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
 
     memory = MemoryConfig(
         enabled=payload.get("enabled", False),
+        profile_enabled=payload.get("profile_enabled", True),
         mode=payload.get("mode"),
         legacy_needs_repair=legacy_needs_repair,
         processing=MemoryProcessingConfig(

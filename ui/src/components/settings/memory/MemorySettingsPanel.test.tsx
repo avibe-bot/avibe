@@ -43,6 +43,7 @@ const endpoint = (baseUrl: string, model: string) => ({
 const settings: MemorySettings = {
   status: 'ok',
   enabled: true,
+  profile_enabled: true,
   mode: 'custom',
   im_attachment_capture_available: false,
   processing: {
@@ -63,8 +64,8 @@ const renderPanel = (overrides: Partial<React.ComponentProps<typeof MemorySettin
     deleting: false,
     ...overrides,
   };
-  render(<MemorySettingsPanel {...props} />);
-  return props;
+  const view = render(<MemorySettingsPanel {...props} />);
+  return { props, view };
 };
 
 beforeEach(() => {
@@ -77,6 +78,20 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('follows a clean parent snapshot update for profile', async () => {
+    const { view } = renderPanel();
+    view.rerender(<MemorySettingsPanel {...({ settings: { ...settings, profile_enabled: false }, maintenance: { status: 'ok', data_exists: true, can_delete_data: true }, maintenanceError: null, onSaved: vi.fn(), onReloadSettings: vi.fn(), onReloadMaintenance: vi.fn(), onDeleteData: vi.fn(), deleting: false } as React.ComponentProps<typeof MemorySettingsPanel>)} />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }).getAttribute('aria-checked')).toBe('false'));
+  });
+  it('retains dirty profile draft across persisted parent reload', async () => {
+    const user = userEvent.setup(); const { view } = renderPanel();
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    api.saveMemorySettings.mockRejectedValueOnce(new Error('rejected'));
+    view.rerender(<MemorySettingsPanel {...({ settings: { ...settings, profile_enabled: true }, maintenance: { status: 'ok', data_exists: true, can_delete_data: true }, maintenanceError: null, onSaved: vi.fn(), onReloadSettings: vi.fn(), onReloadMaintenance: vi.fn(), onDeleteData: vi.fn(), deleting: false } as React.ComponentProps<typeof MemorySettingsPanel>)} />);
+    expect(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }).getAttribute('aria-checked')).toBe('false');
+  });
+
+
   it('keeps configuration enablement reachable while Memory is disabled', async () => {
     const user = userEvent.setup();
     renderPanel({ settings: { ...settings, enabled: false } });
@@ -90,7 +105,7 @@ describe('MemorySettingsPanel', () => {
   });
 
   it('exposes one explicit Delete data action', async () => {
-    const props = renderPanel();
+    const { props } = renderPanel();
     await userEvent.click(screen.getByRole('button', { name: 'memory.deleteData.button' }));
     expect(props.onDeleteData).toHaveBeenCalledOnce();
     expect(screen.queryByText(/Clear Memory|Factory Reset|Rebuild/i)).toBeNull();
@@ -118,6 +133,60 @@ describe('MemorySettingsPanel', () => {
       confirm_loss: true,
       processing: { embedding: { model: 'embed-v2' } },
     });
+  });
+
+
+  it('hosted profile-only toggle exposes Save and submits exact patch', async () => {
+    const user = userEvent.setup(); renderPanel({ settings: { ...settings, mode: 'platform', profile_enabled: true } });
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    const save = screen.getByRole('button', { name: 'memory.settings.save' });
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+    await user.click(save);
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ profile_enabled: false }));
+  });
+
+  it('includes pending profile draft in hosted Memory toggle save', async () => {
+    const user = userEvent.setup();
+    renderPanel({ settings: { ...settings, mode: 'platform', profile_enabled: true } });
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.enableLabel' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: false, profile_enabled: false }));
+  });
+
+  it('does not submit profile toggle immediately' , async () => {
+    const user = userEvent.setup(); renderPanel();
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+  });
+
+  it('preserves custom endpoint draft when profile is toggled', async () => {
+    const user = userEvent.setup(); renderPanel();
+    const model = screen.getByLabelText('memory.settings.embeddingTitle: memory.settings.model');
+    await user.clear(model); await user.type(model, 'draft-model');
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    expect((model as HTMLInputElement).value).toBe('draft-model');
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+  });
+
+  it('jointly saves endpoint draft and profile toggle', async () => {
+    const user = userEvent.setup(); renderPanel();
+    const model = screen.getByLabelText('memory.settings.embeddingTitle: memory.settings.model');
+    await user.clear(model); await user.type(model, 'joint-model');
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-loss' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ confirm_loss: true, profile_enabled: false, processing: { embedding: { model: 'joint-model' } } }));
+  });
+
+  it('retains endpoint and profile drafts after rejected save', async () => {
+    const user = userEvent.setup(); api.saveMemorySettings.mockRejectedValue(new Error('rejected')); renderPanel();
+    const model = screen.getByLabelText('memory.settings.embeddingTitle: memory.settings.model');
+    await user.clear(model); await user.type(model, 'failed-model');
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }));
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-loss' }));
+    expect((model as HTMLInputElement).value).toBe('failed-model');
+    expect((screen.getByRole('switch', { name: 'memory.settings.profileEnableLabel' }) as HTMLButtonElement).getAttribute('aria-checked')).toBe('false');
   });
 
   it('does not call a standalone rebuild client after a confirmed save', async () => {

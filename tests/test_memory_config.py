@@ -274,6 +274,60 @@ def test_malformed_released_recovery_field_recovers_memory_section_on_load(
     assert any("memory.recovery_intent" in warning for warning in loaded.load_warnings)
 
 
+@pytest.mark.parametrize("invalid", ["false", None, 0, [], {}])
+def test_malformed_profile_flag_load_preserves_memory(
+    tmp_path: Path,
+    invalid: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    memory = {
+        "enabled": True,
+        "mode": "custom",
+        "profile_enabled": invalid,
+        "processing": _complete_processing(),
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(_payload(memory)), encoding="utf-8")
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.profile_enabled is False
+    assert loaded.memory.enabled is True
+    assert loaded.memory.mode == "custom"
+    for name, endpoint in memory["processing"].items():
+        assert getattr(loaded.memory.processing, name) == MemoryEndpointConfig(**endpoint)
+    assert loaded.recovered_sections == ("memory.profile_enabled",)
+    assert any("memory.profile_enabled" in warning for warning in loaded.load_warnings)
+    assert "Started with a recovered config" in caplog.text
+    assert json.loads(path.read_text(encoding="utf-8"))["memory"] == memory
+
+
+@pytest.mark.parametrize(
+    "profile_patch, expected",
+    [({}, True), ({"profile_enabled": True}, True), ({"profile_enabled": False}, False)],
+)
+def test_profile_flag_load_defaults_and_roundtrip(
+    tmp_path: Path,
+    profile_patch: dict,
+    expected: bool,
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(_payload({"enabled": True, "processing": _complete_processing(), **profile_patch})),
+        encoding="utf-8",
+    )
+    loaded = V2Config.load(path)
+    assert loaded.memory.profile_enabled is expected
+    assert not loaded.load_warnings
+    loaded.save(path)
+    assert V2Config.load(path).memory.profile_enabled is expected
+
+
+def test_invalid_profile_flag_remains_rejected_by_direct_parser() -> None:
+    with pytest.raises(ValueError, match="memory.profile_enabled"):
+        V2Config.from_payload(_payload({"profile_enabled": "false"}))
+
+
 def test_released_optional_endpoint_shapes_remain_stable(tmp_path: Path) -> None:
     config = V2Config.from_payload(
         _payload({"enabled": True, "processing": _complete_processing()})

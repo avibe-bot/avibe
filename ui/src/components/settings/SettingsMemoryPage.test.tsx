@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { MemorySettingsResult } from '../../context/ApiContext';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
@@ -21,6 +22,7 @@ const api = vi.hoisted(() => ({
   repairMemory: vi.fn(),
   wakeMemory: vi.fn(),
 }));
+const savedSettings = vi.hoisted(() => ({ current: null as null | ((next: typeof settings) => void) }));
 const translate = vi.hoisted(() => (key: string) => key);
 
 vi.mock('react-i18next', () => ({
@@ -44,14 +46,14 @@ vi.mock('../ui/confirm-dialog', () => ({
 }));
 
 vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
-  MemoryProcessingRecordPanel: () => null,
+  MemoryProcessingRecordPanel: () => <div data-testid="processing-record-panel">processing-record</div>,
 }));
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
 vi.mock('./memory/MemorySettingsPanel', () => ({
-  MemorySettingsPanel: ({ onDeleteData }: { onDeleteData: () => void }) => (
+  MemorySettingsPanel: ({ onDeleteData, onSaved }: { onDeleteData: () => void; onSaved?: (next: Extract<MemorySettingsResult, { status: 'ok' }>) => void }) => { savedSettings.current = onSaved ?? null; return (
     <button type="button" onClick={onDeleteData}>open-delete</button>
-  ),
+  ); },
 }));
 
 vi.mock('./memory/MemoryStatusPanel', () => ({
@@ -78,6 +80,7 @@ vi.mock('./memory/MemoryStatusPanel', () => ({
 const settings = {
   status: 'ok' as const,
   enabled: true,
+  profile_enabled: true,
   mode: 'custom' as const,
   processing: {
     llm: { base_url: null, model: null, api_key: null, has_api_key: false },
@@ -156,6 +159,24 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe('SettingsMemoryPage profile transition', () => {
+  it('falls back to processingRecord when active profile is disabled', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'memory.tabs.settings' })).toBeTruthy());
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    expect(savedSettings.current).toBeTruthy();
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
+    const off = { ...settings, profile_enabled: false };
+    api.getMemorySettings.mockResolvedValue(off);
+    act(() => savedSettings.current?.(off));
+    await waitFor(() => {
+      expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull();
+      expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }).getAttribute('aria-checked')).toBe('true');
+    });
+  });
 });
 
 describe('SettingsMemoryPage', () => {

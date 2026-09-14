@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Building2,
@@ -225,6 +225,8 @@ export const MemorySettingsPanel: React.FC<{
   const api = useApi();
   const { showToast } = useToast();
   const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
+  const profileBaseline = useRef(settings.profile_enabled);
+  const [profileEnabledDraft, setProfileEnabledDraft] = useState(settings.profile_enabled);
   const [modeDraft, setModeDraft] = useState<MemorySettings['mode']>(settings.mode);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
@@ -237,7 +239,10 @@ export const MemorySettingsPanel: React.FC<{
 
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
   useEffect(() => {
+    const previousProfileBaseline = profileBaseline.current;
     setEnabledDraft(settings.enabled);
+    setProfileEnabledDraft((current) => current === previousProfileBaseline ? settings.profile_enabled : current);
+    profileBaseline.current = settings.profile_enabled;
     setModeDraft(settings.mode);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
@@ -253,6 +258,7 @@ export const MemorySettingsPanel: React.FC<{
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
     if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
+    if (profileEnabledDraft !== settings.profile_enabled) patch.profile_enabled = profileEnabledDraft;
     if (modeDraft !== settings.mode && modeDraft !== 'organization') patch.mode = modeDraft;
     if (!customMode) return patch;
     // Required keys can clear only while the resulting state stays disabled.
@@ -304,6 +310,7 @@ export const MemorySettingsPanel: React.FC<{
       const res = await api.saveMemorySettings(patch);
       if (isMemoryOk(res)) {
         onSaved(res);
+        profileBaseline.current = res.profile_enabled;
         const runtime = res.runtime as { ok?: boolean; error?: string } | undefined;
         if (patch.confirm_loss && runtime && typeof runtime.ok === 'boolean') {
           showToast(
@@ -391,7 +398,11 @@ export const MemorySettingsPanel: React.FC<{
 
   const setMemoryEnabled = (checked: boolean) => {
     setEnabledDraft(checked);
-    if (!customMode) void submitPatch({ enabled: checked });
+    if (!customMode) void submitPatch({ enabled: checked, ...(profileEnabledDraft !== settings.profile_enabled ? { profile_enabled: profileEnabledDraft } : {}) });
+  };
+
+  const setProfileEnabled = (checked: boolean) => {
+    setProfileEnabledDraft(checked);
   };
 
   const usePlatformMode = () => {
@@ -399,12 +410,12 @@ export const MemorySettingsPanel: React.FC<{
       setModeDraft('platform');
       return;
     }
-    setPendingPatch({ mode: 'platform' });
+    setPendingPatch({ mode: 'platform', ...(profileEnabledDraft !== settings.profile_enabled ? { profile_enabled: profileEnabledDraft } : {}) });
     setConfirmLossOpen(true);
   };
 
   const acknowledgeOrganizationTransition = () => {
-    setPendingPatch({ acknowledge_transition: true });
+    setPendingPatch({ acknowledge_transition: true, ...(profileEnabledDraft !== settings.profile_enabled ? { profile_enabled: profileEnabledDraft } : {}) });
     setConfirmLossOpen(true);
   };
 
@@ -447,6 +458,14 @@ export const MemorySettingsPanel: React.FC<{
           }
           label={t('memory.settings.enableLabel')}
         />
+      </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-surface px-4 py-3.5">
+        <div className="flex min-w-0 flex-col gap-1">
+          <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.profileEnableLabel')}</span>
+          <span className="text-[11.5px] leading-snug text-muted">{t('memory.settings.profileEnableHint')}</span>
+        </div>
+        <Switch checked={profileEnabledDraft} onCheckedChange={setProfileEnabled} disabled={busy} label={t('memory.settings.profileEnableLabel')} />
       </div>
 
       {modeDraft === 'platform' ? (
@@ -564,7 +583,7 @@ export const MemorySettingsPanel: React.FC<{
       ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        {customMode ? (
+        {(customMode || profileEnabledDraft !== settings.profile_enabled) ? (
           <div className="flex flex-wrap items-center gap-2">
             <Button onClick={() => void save()} disabled={busy}>
               {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
