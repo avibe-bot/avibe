@@ -29,6 +29,7 @@ from avibe_memory.types import (
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
+    RecallPolicy,
     OperationFailed,
     ProviderSearchItem,
 )
@@ -828,7 +829,7 @@ async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_pat
         return await original(*args, **kwargs)
     provider.search = search
     await module._lifecycle_lock.acquire()
-    task = asyncio.create_task(module.recall("q", policy=__import__("avibe_memory.types", fromlist=["RecallPolicy"]).RecallPolicy(mode="keyword", include_profile=True), principal_id=PRINCIPAL, project_id="default"))
+    task = asyncio.create_task(module.recall("q", policy=RecallPolicy(mode="keyword", include_profile=True), principal_id=PRINCIPAL, project_id="default"))
     await asyncio.sleep(0)
     enabled = False
     module._lifecycle_lock.release()

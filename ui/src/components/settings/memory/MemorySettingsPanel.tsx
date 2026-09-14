@@ -399,7 +399,6 @@ export const MemorySettingsPanel: React.FC<{
 
   const setProfileEnabled = (checked: boolean) => {
     setProfileEnabledDraft(checked);
-    void submitPatch({ profile_enabled: checked });
   };
 
   const usePlatformMode = () => {
