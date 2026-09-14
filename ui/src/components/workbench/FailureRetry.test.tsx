@@ -39,6 +39,7 @@ describe('failed-turn retry action', () => {
         metadata: {
           event: 'backend_failure', backend: 'codex',
           failure_id: 'turn:interrupted-turn', turn_id: 'interrupted-turn', detached: false,
+          replayed: true,
         },
       },
     });

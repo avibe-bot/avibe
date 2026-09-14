@@ -5082,6 +5082,7 @@ def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
     assert outputs[0] == outputs[1]
     assert outputs[1].provenance(newer_context)["turn_id"] == turn_id
     assert outputs[1].metadata["failure_id"] == f"turn:{turn_id}"
+    assert outputs[1].metadata["replayed"] is True
     assert outputs[1].completes_turn is False
     assert outputs[1].settles_run is False
     with engine.connect() as conn:

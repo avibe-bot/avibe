@@ -6449,7 +6449,7 @@ class SessionTurnManager:
                 output=backend_failure_notification_output(
                     context,
                     backend,
-                    output=MessageOutput(metadata={"turn_id": turn_id}),
+                    output=MessageOutput(metadata={"turn_id": turn_id, "replayed": True}),
                     failure_id=f"turn:{turn_id}",
                     failure_id_authoritative=True,
                 ),

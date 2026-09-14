@@ -151,6 +151,14 @@ def activity_role_for(message_type: str, metadata: Any = None) -> str:
     values = metadata if isinstance(metadata, Mapping) else {}
     if is_detached_completion(message_type, values):
         return "none"
+    # Recovery has already ended the referenced Turn. A delayed visible notice
+    # must not close a newer chronological Activity group during history reads.
+    if (
+        message_type == "notify"
+        and values.get("event") == "backend_failure"
+        and values.get("replayed") is True
+    ):
+        return "none"
     if values.get("event") in spec["terminalWhenEvents"]:
         return "terminal"
     return str(spec["activityRole"])

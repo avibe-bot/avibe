@@ -89,6 +89,7 @@ def _restart_failure_notice(tmp_path, *, backend, delivery="ready"):
     assert notice["metadata"]["failure_id"] == f"turn:{turn['id']}"
     assert notice["metadata"]["backend"] == backend
     assert notice["metadata"]["detached"] is False
+    assert notice["metadata"]["replayed"] is True
     # Neither another recovery pass nor another readiness hook emits a duplicate.
     asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
     assert asyncio.run(manager.notify_transport_ready("avibe")) == 0

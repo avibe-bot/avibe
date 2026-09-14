@@ -30,11 +30,18 @@ export const isDetachedCompletionMessage = (message: TerminalMessageCandidate): 
   return message.metadata?.detached === true && spec.detachedCompletion;
 };
 
+// Recovery reports a Turn that already ended, even when transport delivery is
+// immediate. This provenance removes foreground authority, not Retry eligibility.
+const isReplayedFailureNotice = (message: TerminalMessageCandidate): boolean =>
+  message.type === 'notify'
+  && message.metadata?.event === 'backend_failure'
+  && message.metadata.replayed === true;
+
 const activityRoleForMessage = (
   message: TerminalMessageCandidate,
 ): ReturnType<typeof specFor>['activityRole'] => {
   const spec = specFor(message.type);
-  if (isDetachedCompletionMessage(message)) return 'none';
+  if (isDetachedCompletionMessage(message) || isReplayedFailureNotice(message)) return 'none';
   const event = message.metadata?.event;
   if (typeof event === 'string' && spec.terminalWhenEvents.includes(event)) return 'terminal';
   return spec.activityRole;
@@ -85,12 +92,13 @@ export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): 
 export const isAgentActivityBoundaryMessage = (message: TerminalAgentMessageCandidate): boolean =>
   message.author === 'agent' && activityRoleForMessage(message) === 'boundary';
 
-// Terminal replies, nonterminal phase boundaries, and detached completions all
-// require a durable Activity refresh. Only terminal replies settle the live Turn.
+// Historical failures and detached completions refresh durable Activity without
+// affecting its live generation. Only current terminal replies settle the Turn.
 export const shouldRefreshAgentActivityForMessage = (
   message: TerminalAgentMessageCandidate,
 ): boolean => {
   if (message.author !== 'agent') return false;
   const role = activityRoleForMessage(message);
-  return role === 'boundary' || role === 'terminal' || isDetachedCompletionMessage(message);
+  return role === 'boundary' || role === 'terminal'
+    || isDetachedCompletionMessage(message) || isReplayedFailureNotice(message);
 };

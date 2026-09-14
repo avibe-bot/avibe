@@ -11,6 +11,7 @@ observations:
     required_updates:
       - preserve the original Turn and backend through transport readiness and failed-send retries
       - emit the existing non-settling failure-notice contract rather than a second retry mechanism
+      - mark already-ended recovery notices as replayed so delayed delivery cannot settle newer UI Activity or hide thinking
       - exercise recovery, real message persistence, Web admission, draft preservation, and duplicate clicks together
       - keep unknown acceptance, user Stop, restored live runtimes, and unlinked historical notices unchanged
   - id: OBS-MESSAGE-DELIVERY-006

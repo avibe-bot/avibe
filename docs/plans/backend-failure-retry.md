@@ -15,6 +15,14 @@ not a new backend retry protocol or an automatic retry policy.
   another Turn or replay the original request; clicking continues through the
   existing admission path. Harness-owned interruptions retain their existing
   notice owner, and a restorable live backend does not acquire a retry action.
+  Recovery sets `metadata.replayed=true`: the notice describes an already-ended
+  Turn, even on immediate delivery. This is not detached completion and does not
+  disable Retry. The Web classifier refreshes durable Activity without settling
+  its live generation or hiding a newer Turn's thinking indicator, on live
+  delivery and on reload. The Python Activity classifier and fork progress
+  filter apply the same nonterminal provenance, so history readback cannot
+  reinterpret the notice as newer work ending. Ordinary live failures keep
+  their terminal UI role.
 - The action targets the notice's exact Session and failed Turn. The server
   rechecks access, archive/read-only status, current Turn, and pending input.
   A newer task, another live owner, or an unresolved native start blocks it.
@@ -82,7 +90,9 @@ implementations; IM-specific notification button rendering is not added here.
 - Web route tests: access checks, canonical server-generated payload, source
   notice update, and reloading persisted action state.
 - UI tests: eligible notification, ineligible/read-only rows, pending/accepted
-  feedback, failure recovery, and draft-independent action; production UI build.
+  feedback, failure recovery, and draft-independent action; mounted ChatPage
+  preservation of newer Activity/thinking after replayed notices, with ordinary
+  terminal controls; production UI build.
 - Isolated local Incus verification only; never the running workstation service
   or a remote tenant. No real upstream model request is needed for fault cases.
 
