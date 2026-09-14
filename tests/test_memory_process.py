@@ -597,3 +597,19 @@ async def test_released_sync_reaper_preserves_record_on_nonce_mismatch(
 
     assert host.signals == []
     assert path.exists()
+
+@pytest.mark.parametrize("profile_enabled", [True, False])
+def test_generated_ome_profile_strategies_follow_switch(tmp_path: Path, profile_enabled: bool) -> None:
+    from avibe_memory.process import _write_memory_child_config
+    import tomllib
+    memory_dir = tmp_path / "memory"
+    provider_root = tmp_path / "provider"
+    attachments = tmp_path / "attachments"
+    memory_dir.mkdir(parents=True); (memory_dir / "generated").mkdir(); provider_root.mkdir(parents=True); attachments.mkdir(parents=True)
+    _write_memory_child_config(memory_dir=memory_dir, provider_root=provider_root, attachments_root=attachments, settings=EverOSProcessSettings(profile_enabled=profile_enabled))
+    ome = tomllib.loads((provider_root / "ome.toml").read_text())
+    strategies = ome["strategies"]
+    assert strategies["trigger_profile_clustering"]["enabled"] is profile_enabled
+    assert strategies["extract_user_profile"]["enabled"] is profile_enabled
+    assert strategies["reflect_episodes"]["enabled"] is False
+    assert strategies["extract_foresight"]["enabled"] is False
