@@ -78,6 +78,7 @@ vi.mock('./memory/MemoryStatusPanel', () => ({
 const settings = {
   status: 'ok' as const,
   enabled: true,
+  profile_enabled: true,
   mode: 'custom' as const,
   processing: {
     llm: { base_url: null, model: null, api_key: null, has_api_key: false },
@@ -156,6 +157,19 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe('SettingsMemoryPage profile toggle', () => {
+  it('removes active profile tab and falls back to processingRecord after OFF snapshot', async () => {
+    const user = userEvent.setup();
+    api.getMemorySettings.mockResolvedValueOnce({ ...settings, profile_enabled: true }).mockResolvedValue({ ...settings, profile_enabled: false });
+    const view = renderPage();
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'memory.tabs.profile' })).toBeTruthy());
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
+    view.rerender(<MemoryRouter><InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}><ToastProvider><SettingsMemoryPage /></ToastProvider></InstanceAuthorizationContext.Provider></MemoryRouter>);
+    await waitFor(() => expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull());
+    expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
+  });
 });
 
 describe('SettingsMemoryPage', () => {
