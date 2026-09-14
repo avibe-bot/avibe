@@ -348,6 +348,40 @@ def test_busy_sibling_thread_does_not_refuse_this_threads_turn():
     controller.message_handler.handle_user_message.assert_awaited_once()
 
 
+def test_busy_runtime_session_does_not_refuse_sibling_runtime_session():
+    """Different per-run Sessions in one unthreaded channel must run independently."""
+
+    busy_session = MessageContext(
+        user_id="scheduled",
+        channel_id="C",
+        platform="discord",
+        platform_specific={"agent_session_id": "ses_runtime_a"},
+    )
+    controller = _streaming_controller(
+        sink_settled_by=SETTLED_BY_TERMINAL_RESULT,
+        in_flight=True,
+        in_flight_key=build_context_turn_sink_key(busy_session, session_key="discord::C"),
+    )
+    new_session = MessageContext(
+        user_id="scheduled",
+        channel_id="C",
+        platform="discord",
+        platform_specific={"agent_session_id": "ses_runtime_b"},
+    )
+
+    outcome = asyncio.run(
+        dispatch_turn_with_outcome(
+            controller,
+            new_session,
+            "send the scheduled report",
+            on_chunk=AsyncMock(),
+        )
+    )
+
+    assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
+    controller.message_handler.handle_user_message.assert_awaited_once()
+
+
 def test_same_thread_turn_is_still_refused():
     """The slot is still exactly one turn per THREAD — the guard must stay real."""
 

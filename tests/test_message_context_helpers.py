@@ -102,6 +102,39 @@ def test_turn_sink_key_scopes_non_telegram_threads_too():
     assert build_context_turn_sink_key(thread_a) != build_context_turn_sink_key(thread_b)
 
 
+def test_turn_sink_key_separates_concrete_sessions_without_threads():
+    """Distinct runtime Sessions in one unthreaded channel need separate slots."""
+    session_a = MessageContext(
+        user_id="scheduled",
+        channel_id="C1",
+        platform="discord",
+        platform_specific={"agent_session_id": "ses_runtime_a"},
+    )
+    session_b = MessageContext(
+        user_id="scheduled",
+        channel_id="C1",
+        platform="discord",
+        platform_specific={"agent_session_id": "ses_runtime_b"},
+    )
+
+    assert build_context_turn_sink_key(session_a) == (
+        "discord::C1::session::ses_runtime_a"
+    )
+    assert build_context_turn_sink_key(session_a) != build_context_turn_sink_key(session_b)
+
+
+def test_turn_sink_key_reads_concrete_session_from_target_metadata():
+    """Rebuilt scheduled contexts may carry the Session only in their target."""
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C1",
+        platform="discord",
+        platform_specific={"agent_session_target": {"id": "ses_runtime_a"}},
+    )
+
+    assert build_context_turn_sink_key(context) == "discord::C1::session::ses_runtime_a"
+
+
 def test_turn_sink_key_falls_back_to_session_key_without_a_thread():
     """A channel-level (unthreaded) context keeps today's key verbatim."""
     context = MessageContext(user_id="U1", channel_id="C1", platform="slack")

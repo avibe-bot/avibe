@@ -135,12 +135,14 @@ def build_context_turn_sink_key(
     so every OTHER topic's turn was refused with ``refused_concurrent_turn``
     before reaching a backend, silently, until that unrelated topic finished.
 
-    The thread scope is resolved the same way every session-anchor caller
-    resolves it (``resolve_context_thread_id(context) or context.thread_id``),
-    so the key is derived purely from context fields that are already pinned
-    before dispatch and carried by every context in a turn's lifetime — the
-    dispatch context, the backend receiver's stale per-turn context, and an
-    external stop's rebuilt context all land on the same key.
+    When a context names a concrete ``agent_session_id`` (as scheduled
+    ``create_per_run`` sessions do), that identity is included too. The thread
+    scope is resolved the same way every session-anchor caller resolves it
+    (``resolve_context_thread_id(context) or context.thread_id``), so the key
+    is derived purely from context fields that are already pinned before
+    dispatch and carried by every context in a turn's lifetime — the dispatch
+    context, the backend receiver's stale per-turn context, and an external
+    stop's rebuilt context all land on the same key.
     """
 
     base = session_key if session_key is not None else build_context_session_key(context)
@@ -148,9 +150,22 @@ def build_context_turn_sink_key(
     # the lookalike namespaces the workbench/stop paths build. A context without the
     # attribute has no thread, which is the unthreaded case — not an error.
     thread_id = resolve_context_thread_id(context) or getattr(context, "thread_id", None)
-    if not thread_id:
-        return base
-    return f"{base}::thread::{thread_id}"
+    if thread_id:
+        base = f"{base}::thread::{thread_id}"
+
+    # A scheduled ``create_per_run`` Session has its own backend thread but
+    # targets the same delivery channel as every other run. Without this
+    # dimension, those distinct Sessions still share one sink when delivery is
+    # unthreaded (for example, a Discord channel).
+    spec = getattr(context, "platform_specific", None) or {}
+    target = spec.get("agent_session_target")
+    target = target if isinstance(target, dict) else {}
+    agent_session_id = str(
+        spec.get("agent_session_id") or target.get("id") or ""
+    ).strip()
+    if agent_session_id:
+        return f"{base}::session::{agent_session_id}"
+    return base
 
 
 def resolve_turn_sink_key(controller: object, context: MessageContext) -> str:
