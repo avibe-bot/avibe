@@ -239,7 +239,7 @@ export const MemorySettingsPanel: React.FC<{
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
   useEffect(() => {
     setEnabledDraft(settings.enabled);
-    setProfileEnabledDraft(settings.profile_enabled);
+    setProfileEnabledDraft((current) => current === settings.profile_enabled ? settings.profile_enabled : current);
     setModeDraft(settings.mode);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
