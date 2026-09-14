@@ -4961,6 +4961,8 @@
       "loadFailed": "Couldn't load Memory settings.",
       "enableLabel": "Memory",
       "enableHint": "Remembers what matters from your conversations.",
+      "profileEnableLabel": "Enable profile",
+      "profileEnableHint": "Use profile memories to personalize future responses.",
       "avibeCloudTitle": "Model provider",
       "avibeCloudFree": "Free",
       "avibeCloudIncluded": "Provided by Avibe Cloud. No setup required.",

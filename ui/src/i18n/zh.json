@@ -4961,6 +4961,8 @@
       "loadFailed": "无法加载记忆设置。",
       "enableLabel": "记忆",
       "enableHint": "记住对话中真正重要的内容。",
+      "profileEnableLabel": "启用画像",
+      "profileEnableHint": "使用记忆画像为未来回复提供个性化信息。",
       "avibeCloudTitle": "模型供应商",
       "avibeCloudFree": "免费",
       "avibeCloudIncluded": "由 Avibe 云端提供，无需设置",
