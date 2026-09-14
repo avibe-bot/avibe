@@ -406,12 +406,12 @@ export const MemorySettingsPanel: React.FC<{
       setModeDraft('platform');
       return;
     }
-    setPendingPatch({ mode: 'platform' });
+    setPendingPatch({ mode: 'platform', ...(profileEnabledDraft !== settings.profile_enabled ? { profile_enabled: profileEnabledDraft } : {}) });
     setConfirmLossOpen(true);
   };
 
   const acknowledgeOrganizationTransition = () => {
-    setPendingPatch({ acknowledge_transition: true });
+    setPendingPatch({ acknowledge_transition: true, ...(profileEnabledDraft !== settings.profile_enabled ? { profile_enabled: profileEnabledDraft } : {}) });
     setConfirmLossOpen(true);
   };
 

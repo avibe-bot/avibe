@@ -38,3 +38,14 @@ Use existing tests and synthetic fixtures to cover legacy default/false round-tr
 ## Explicit exclusions
 
 No generalized policy helper unless existing shared code already owns this value; no watcher for tab changes; no auth redesign, migrations, deletion, identity unification, prompt wording redesign, dependency upgrade, or background cancellation framework. No current-host deployment/config changes are authorized by implementation alone.
+
+## Profile draft ownership matrix
+| Path | Profile draft behavior |
+|---|---|
+| Normal Save | Submit profile delta with existing endpoint/mode deltas. |
+| Memory immediate toggle | Submit `enabled` plus profile delta only; never endpoint drafts. |
+| `usePlatformMode` / organization transition | Include profile delta in the transition patch. |
+| Confirm-loss | Preserve profile delta alongside `confirm_loss`. |
+| Success snapshot | Accept returned profile value as the new draft baseline. |
+| Validation failure | Keep all drafts unchanged. |
+| Throw/nonvalidation failure + reload | Refresh status/runtime, but retain local profile draft until an authoritative success snapshot. |
