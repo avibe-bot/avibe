@@ -815,3 +815,22 @@ async def test_disabled_capture_is_closed(tmp_path: Path) -> None:
     module, _store, _provider = _module(tmp_path)
     module._enabled_source = False
     assert await module.capture(_request()) == CaptureSkipped(reason="memory_disabled")
+
+@pytest.mark.asyncio
+async def test_recall_clamps_profile_inside_lifecycle_lock_after_disable(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    enabled = True
+    module._profile_enabled_source = lambda: enabled
+    seen: list[bool] = []
+    original = provider.search
+    async def search(*args, **kwargs):
+        seen.append(kwargs["include_profile"])
+        return await original(*args, **kwargs)
+    provider.search = search
+    await module._lifecycle_lock.acquire()
+    task = asyncio.create_task(module.recall("q", policy=__import__("avibe_memory.types", fromlist=["RecallPolicy"]).RecallPolicy(mode="keyword", include_profile=True), principal_id=PRINCIPAL, project_id="default"))
+    await asyncio.sleep(0)
+    enabled = False
+    module._lifecycle_lock.release()
+    await task
+    assert seen == [False, False]
