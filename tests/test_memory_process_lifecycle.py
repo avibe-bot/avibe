@@ -698,3 +698,107 @@ async def test_discovery_skips_generation_gone_during_classification(monkeypatch
         result = module._processes_syncing_owned_root(provider_root=tmp_path, python=Path(sys.executable), nonce="test")
     assert not kernel, "test must reach the classification race"
     assert result == {}
+
+
+@pytest.mark.parametrize("timeout", [False, True], ids=["ready-stop", "startup-timeout"])
+async def test_startup_retains_helper_observed_before_detachment(monkeypatch, timeout):
+    """Readiness discovery must survive later loss of both ancestry and group."""
+    with tempfile.TemporaryDirectory(prefix="mr1990-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        (root / "memory/everos-root").mkdir(parents=True, mode=0o700)
+        (root / "memory").chmod(0o700)
+        helper_code = """
+import os, pathlib, time
+root = pathlib.Path('.')
+(root / 'helper.tmp').write_text(str(os.getpid()))
+(root / 'helper.tmp').replace(root / 'helper')
+while not (root / 'detach').exists(): time.sleep(.005)
+os.setsid()
+(root / 'detached').touch()
+time.sleep(60)
+"""
+        middle_code = f"""
+import pathlib, subprocess, sys, time
+subprocess.Popen([sys.executable, '-c', {helper_code!r}],
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+while not pathlib.Path('detach').exists(): time.sleep(.005)
+"""
+        leader_code = f"""
+import pathlib, subprocess, sys, time
+while not pathlib.Path('spawn-helper').exists(): time.sleep(.005)
+subprocess.Popen([sys.executable, '-c', {middle_code!r}],
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(60)
+"""
+        helper = None
+        observed = None
+        children = []
+
+        async def until(predicate):
+            async with asyncio.timeout(3):
+                while not predicate():
+                    await asyncio.sleep(.005)
+
+        class Host(module._SystemProcessHost):
+            async def spawn(self, *args, **kwargs):
+                if children:
+                    assert module._reference_state(helper, helper.pid) is False
+                child = await spawn(root, leader_code if not children else "import time; time.sleep(60)")
+                children.append(child)
+                owner._socket_path.parent.mkdir(parents=True, exist_ok=True)
+                owner._socket_path.touch()
+                return child
+
+            def inspect_identity(self, pid):
+                identity = super().inspect_identity(pid)
+                if len(children) == 1:
+                    assert list(owner._owned_processes) == [pid]
+                    (root / "spawn-helper").touch()
+                return identity
+
+        class Port:
+            def __init__(self, *args, **kwargs):
+                self.polls = 0
+
+            async def health(self):
+                nonlocal helper, observed
+                if len(children) > 1:
+                    return True
+                self.polls += 1
+                if self.polls == 1:
+                    await until(lambda: (root / "helper").exists())
+                    helper = psutil.Process(int((root / "helper").read_text()))
+                    return False  # Leave the helper visible for the next discovery poll.
+                if self.polls == 2:
+                    observed = owner._owned_processes.get(helper.pid)
+                    original_parent = helper.ppid()
+                    (root / "detach").touch()
+                    await until(lambda: (root / "detached").exists() and helper.ppid() != original_parent)
+                    assert os.getpgid(helper.pid) == helper.pid
+                    assert helper.pid not in {
+                        child.pid for child in psutil.Process(children[0].pid).children(recursive=True)
+                    }
+                return not timeout
+
+        owner = module.EverOSProcess(
+            sys.executable, effective_home=root, settings=settings(), _host=Host(),
+            provider_root_guard=lambda: None, startup_timeout_seconds=2, stop_timeout_seconds=.3,
+        )
+        monkeypatch.setattr(module, "EverOSPort", Port)
+        monkeypatch.setattr(owner, "_secure_socket", lambda: None)
+        try:
+            assert await owner.start() is (not timeout)
+            if not timeout:
+                await owner.stop()
+            assert helper is not None
+            assert module._reference_state(helper, helper.pid) is False
+            assert observed is not None
+            assert module._reference_state(observed, helper.pid) is False
+            assert not owner.retains_active_config
+            assert await owner.start()  # Spawn checks old helper is gone before replacement.
+        finally:
+            if helper is not None and module._reference_state(helper, helper.pid) is True:
+                helper.kill()
+            await owner.stop()
+            for child in children:
+                await dispose(child)

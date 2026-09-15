@@ -720,6 +720,7 @@ class EverOSProcess:
         while time.monotonic() < deadline:
             if process.returncode is not None:
                 raise RuntimeError("sidecar exited before readiness")
+            _refresh_owned_process_tree(self._host, self._owned_processes, process.pid, self._process_group)
             if self._socket_path.exists():
                 self._secure_socket()
                 if await client.health():

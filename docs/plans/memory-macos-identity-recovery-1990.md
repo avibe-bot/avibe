@@ -12,7 +12,7 @@ healthy Memory child, and exhausted bounded Wake retries without clearing it.
 Use direct `asyncio` child waiting as lifecycle authority. Keep public retained
 `psutil.Process` references for action-boundary reuse protection. Remove the
 independent 0.2-second authentication loop and readiness timestamp gate; preserve
-the one-second descendant/TCP safety inspection. A timestamp shift alone neither
+discovery at existing readiness polls and the one-second descendant/TCP inspection. A timestamp shift alone neither
 marks the child down nor pauses claims or consumes restart attempts.
 
 ## Ownership and cleanup invariants
@@ -53,8 +53,8 @@ startup** (Wake) once cleanup is possible. Wake preserves existing data.
 
 Scenario IDs: MEMORY-WAKE-001, MEMORY-WAKE-202, MEMORY-WAKE-204, MEMORY-WAKE-205.
 
-- Focused process, lifecycle, supervisor, Wake and provider regression: 223 passed.
-- Darwin arm64 psutil floor and resolved environments: 35 passed each, including
+- Focused process, lifecycle, supervisor, Wake and provider regression: 225 passed.
+- Darwin arm64 psutil floor and resolved environments: 37 passed each, including
   real processing/recall. Boot-time injection is test-only and checks its hook.
 - Native tests cover full scan cycles during a shift, probe capture before shift
   then timeout cleanup, a prohibited TCP listener, and leader/child/grandchild exit.
@@ -71,6 +71,8 @@ Old-test mapping: health-only pinned Wake -> full MEMORY-WAKE-205 (required in C
 fake lifecycle self-tests -> supervisor callback/non-overlap consumers; generic
 orphan success -> shift/retirement case covering all three released record shapes;
 native orphan helper -> consuming reaper; duplicate capture-read dimension merged.
+Readiness regression: observed startup helpers remain owned after detachment,
+through successful startup/Stop and failed-start timeout cleanup.
 PM follow-up: ordinary exits skip classification but retain surviving-group cleanup;
 missing record identity is explicit; legacy sync equality is removed. Group lookups
 retain the established scope across exit/reuse; gone anchors retain legacy role context.
@@ -98,6 +100,7 @@ No production credentials or regression state were copied/reset.
 
 If no initial reference is acquired, cleanup stays unknown (a probe may remain
 unreaped); a later PID or delayed child callback cannot authorize recapture.
-Public checks are not atomic macOS pidfds; group movement/delivery is not exactly-once.
+An unseen helper that reparents and leaves the group entirely between observations
+remains outside this polling model, as before. Public checks are not atomic macOS pidfds; group movement/delivery is not exactly-once.
 No private identity API, native ABI, schema, recovery loop, service-manager/IPC,
 writer-lock redesign, running-property change or expanded retries were added.
