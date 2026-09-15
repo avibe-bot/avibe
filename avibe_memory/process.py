@@ -1350,6 +1350,9 @@ class SidecarOwnership:
         terminated = await self._terminate_orphan_tree(
             pid,
             reference,
+            process_group=_recorded_sidecar_group(
+                record, socket_path=self._socket_path, provider_root=self._provider_root,
+            ),
             role=group_match_role,
         )
         if not terminated:
@@ -1368,7 +1371,10 @@ class SidecarOwnership:
             await self._reap_unidentified_child()
             _remove_sidecar_record(self.record_path)
 
-    async def _terminate_orphan_tree(self, pid: int, reference: psutil.Process | None, *, role: str | None = _SIDECAR_ROLE) -> bool:
+    async def _terminate_orphan_tree(
+        self, pid: int, reference: psutil.Process | None,
+        *, process_group: int | None, role: str | None,
+    ) -> bool:
         """Reap an orphan's whole tree, not just the pid the record names.
 
         The sidecar may have spawned helpers before the service died, and those
@@ -1385,12 +1391,8 @@ class SidecarOwnership:
             (signal.SIGTERM, self._stop_timeout_seconds),
             (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
         )
-        process_group = self._host.process_group(pid) or pid
+        process_group = _captured_process_group(self._host, pid, reference, process_group)
         for signum, timeout_seconds in rounds:
-            if _reference_state(identities.get(pid), pid) is True:
-                # Only rediscover while the recorded root is still the process we
-                # identified; a dead root's pid may already have been recycled.
-                process_group = self._host.process_group(pid)
             _refresh_terminating_process_tree(
                 self._host, identities, pid, process_group,
                 socket_path=self._socket_path, provider_root=self._provider_root, role=role,
@@ -1574,13 +1576,12 @@ class SidecarOwnership:
         for pid, reference in sorted(socket_anchors.items()):
             identity = _inspect_captured_identity(self._host, pid, reference)
             if identity is None:
-                if not await self._terminate_orphan_tree(pid, reference):
+                if not await self._terminate_orphan_tree(pid, reference, process_group=pid, role=None):
                     raise RuntimeError("orphaned sidecar group did not exit")
                 continue
             if pid in root_only:
                 if (
-                    identity is None
-                    or identity.cmdline is None
+                    identity.cmdline is None
                     or not _cmdline_matches_role(
                         identity.cmdline,
                         role=_SIDECAR_ROLE,
@@ -1598,7 +1599,7 @@ class SidecarOwnership:
             # Helpers are reached through the anchor's own group rather than by
             # widening the machine-wide test, because membership is what makes the
             # looser per-member claim safe.
-            group = self._host.process_group(pid)
+            group = _captured_process_group(self._host, pid, reference, pid)
             self._persist_record(
                 pid,
                 identity.stamp,
@@ -1778,9 +1779,8 @@ class _ReleasedSyncReaper:
                 _validate_legacy_sync_identity(
                     identity, record, provider_root=self._provider_root, require_argv=True,
                 )
-            group = self._host.process_group(pid)
-            if group is None and identity is None:
-                group = pid  # Released children launch an isolated group; classify survivors below.
+            # Released sync launches use setsid; never read a replacement PID's group.
+            group = _captured_process_group(self._host, pid, reference, pid)
             if group is None:
                 raise RuntimeError("released pending sync process group is unavailable")
             identities[pid] = reference
@@ -3184,6 +3184,24 @@ def _inspect_captured_identity(
     return identity
 
 
+def _captured_process_group(
+    host: _ProcessHost, pid: int, reference: psutil.Process | None, known_group: int | None,
+) -> int | None:
+    """Keep the established cleanup scope if its leader exits during lookup."""
+    state = _reference_state(reference, pid)
+    if state is False:
+        return known_group
+    if state is None:
+        raise RuntimeError("process group is unreadable")
+    group = host.process_group(pid)
+    state = _reference_state(reference, pid)
+    if state is False:
+        return known_group
+    if state is None:
+        raise RuntimeError("process group is unreadable")
+    return group
+
+
 def _capture_process(pid: int) -> psutil.Process | None:
     try:
         # Retain the public reference even if later reads are temporarily denied.
@@ -3331,9 +3349,18 @@ def _signal_owned_group(
     return True
 
 
-def _signal_owned_processes(identities: Mapping[int, psutil.Process | None], signum: int) -> None:
+def _signal_owned_processes(
+    identities: Mapping[int, psutil.Process | None], signum: int,
+    *, delivered_group: int | None = None,
+) -> None:
     for reference in _confirmed_owned_processes(identities).values():
         try:
+            if delivered_group is not None:
+                if _reference_state(reference, reference.pid) is not True:
+                    continue
+                group = os.getpgid(reference.pid)
+                if _reference_state(reference, reference.pid) is not True or group == delivered_group:
+                    continue
             reference.send_signal(signum)
         except (psutil.Error, OSError):
             continue
@@ -3582,9 +3609,12 @@ class _SystemProcessHost:
         process_group: int | None = None,
         process: asyncio.subprocess.Process | None = None,
     ) -> None:
-        _signal_owned_group(process_group, identities, signum)
-        # Retained descendants may have left the original group.
-        _signal_owned_processes(identities, signum)
+        delivered = _signal_owned_group(process_group, identities, signum)
+        # With stable membership these sets are disjoint. Group movement and
+        # delivery are not atomic; retained-reference checks still fence reuse.
+        _signal_owned_processes(
+            identities, signum, delivered_group=process_group if delivered else None,
+        )
 
     async def wait_for_exit(
         self,

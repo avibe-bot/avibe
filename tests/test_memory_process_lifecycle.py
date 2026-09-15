@@ -9,6 +9,7 @@ import signal
 import socket
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 import psutil
@@ -410,18 +411,44 @@ async def test_classifier_cannot_transfer_authority_between_generations():
     assert module._inspect_captured_identity(Host(), 451, old) is None
 
 
-async def test_successful_group_signal_also_reaches_escaped_retained_child(monkeypatch):
+@pytest.mark.parametrize("group_delivery", ["success", "refused", "failed", "reused_during_lookup"])
+async def test_successful_group_signal_also_reaches_escaped_retained_child(monkeypatch, group_delivery):
     kernel = {}
     leader = Generation(kernel, 451)
     escaped = Generation(kernel, 452)
     group_signals = []
     monkeypatch.setattr(module, "_snapshot_process_group", lambda group: {451: leader})
-    monkeypatch.setattr(module.os, "killpg", lambda group, sig: group_signals.append((group, sig)))
+    terminal = Generation(kernel, 453)
+    Generation(kernel, 453)
+    denied = Generation(kernel, 454)
+    denied.denied = True
+
+    def getpgid(pid):
+        assert pid in {451, 452}, "looked up a terminal/unreadable reference"
+        if pid == 452 and group_delivery == "reused_during_lookup":
+            Generation(kernel, pid)
+        return 451 if pid == leader.pid else 452
+
+    monkeypatch.setattr(module.os, "getpgid", getpgid)
+
+    def killpg(group, sig):
+        if group_delivery == "failed":
+            raise PermissionError
+        group_signals.append((group, sig))
+        leader.send_signal(sig)
+
+    monkeypatch.setattr(module.os, "killpg", killpg)
+    if group_delivery == "refused":
+        monkeypatch.setattr(module, "_group_contains_only_confirmed_owned_processes", lambda *args: False)
     host = module._SystemProcessHost()
-    owned = {451: leader, 452: escaped}
+    owned = {451: leader, 452: escaped, 453: terminal, 454: denied}
     host.signal(owned, signal.SIGTERM, process_group=451)
-    assert group_signals == [(451, signal.SIGTERM)]
-    assert escaped.signals == [signal.SIGTERM]
+    assert group_signals == ([(451, signal.SIGTERM)] if group_delivery in {"success", "reused_during_lookup"} else [])
+    assert leader.signals == [signal.SIGTERM]
+    assert escaped.signals == ([] if group_delivery == "reused_during_lookup" else [signal.SIGTERM])
+    assert not terminal.signals and not denied.signals
+    if group_delivery == "reused_during_lookup":
+        assert not kernel[452].signals
     kernel.clear()
     monkeypatch.setattr(module, "_snapshot_process_group", lambda group: {})
     assert await host.wait_for_exit(owned, 0.1, process_group=451)
@@ -518,8 +545,11 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
         package.mkdir()
         (package / "__init__.py").touch()
         (package / "sidecar.py").write_text(
-            "import os,signal,subprocess,sys\n"
+            "import os,signal,subprocess,sys,time\n"
             "def leave(*args):\n"
+            " with open('term-count','a') as log: log.write('1')\n"
+            " if len(open('term-count').read()) > 1: return\n"
+            " time.sleep(0.05)\n"
             " env=dict(os.environ)\n"
             f" if {mismatch == 'root'!r}: env['EVEROS_ROOT'] += '-foreign'\n"
             f" if {mismatch == 'role'!r}: env['AVIBE_MEMORY_CHILD_ROLE'] = 'foreign'\n"
@@ -548,6 +578,21 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
             except psutil.NoSuchProcess:
                 return None
 
+        if timing == "term":
+            deliver_group = module._signal_owned_group
+
+            def group_delivery(*args):
+                delivered = deliver_group(*args)
+                if delivered and args[2] == signal.SIGTERM:
+                    # Ensure the native handler has begun before individual
+                    # delivery, so coalescing cannot hide a duplicate TERM.
+                    for _ in range(50):
+                        if (home / "term-count").exists():
+                            break
+                        time.sleep(0.002)
+                return delivered
+
+            monkeypatch.setattr(module, "_signal_owned_group", group_delivery)
         helper_task = asyncio.create_task(observe_helper())
         helper = None
         host = module._SystemProcessHost()
@@ -608,6 +653,7 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                     helper = await helper_task if child.returncode is None else None
                 assert child.returncode is not None
                 assert not module._snapshot_process_group(child.pid)
+                assert (home / "term-count").read_text() == "1"
                 if consumer != "probe":
                     assert not record_path.exists()
                 if consumer in {"stop", "watch"}:

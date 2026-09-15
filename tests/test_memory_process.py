@@ -664,3 +664,107 @@ async def test_orphan_exit_during_classification_still_reaps_surviving_group(tmp
     await reaper.reconcile_orphans()
     assert host.signals == [{452: 10.5}]
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer", ["orphan", "pending_sync"])
+@pytest.mark.parametrize("exit_phase", ["before_group", "during_group"])
+async def test_reaper_never_targets_replacement_process_group(tmp_path, consumer, exit_phase):
+    """A recycled non-leader PID cannot redirect old ownership into its group."""
+    from avibe_memory.process import _confirmed_owned_processes
+
+    home = tmp_path / "home"
+    root = home / "memory/everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    if consumer == "orphan":
+        path, record = _sidecar_record(home)
+        identity = _sidecar_identity(home, record)
+    else:
+        path, record = _released_sync_record(home, state="pending")
+        identity = _ProcessIdentity(
+            stamp=10.5, cmdline=tuple(record["argv"]), uid=os.getuid(),
+            environment=_released_sync_environment(home, record), wall_create_time=10.5,
+        )
+    replacement = _ProcessIdentity(stamp=99, cmdline=("foreign",), uid=os.getuid())
+    base = _SidecarHost if consumer == "orphan" else _ReleasedSyncHost
+    group_reads = []
+    cleanup_groups = []
+
+    class Reference(_TestReference):
+        reads = 0
+
+        def is_running(self):
+            self.reads += 1
+            if exit_phase == "before_group" and self.reads == 3:
+                self.host.children[451] = replacement
+            return super().is_running()
+
+    class Host(base):
+        def capture(self, pid):
+            return Reference(self, pid)
+
+        def find_syncs(self, **kwargs):
+            return {451: self.capture(451)} if consumer == "pending_sync" else {}
+
+        def process_group(self, pid):
+            assert self.children[451] is identity, "looked up a known terminal PID"
+            group_reads.append(pid)
+            self.children[451] = replacement
+            return 999  # Replacement is not this unrelated group's leader.
+
+        def recorded_group_members(self, group, **kwargs):
+            assert group == 451
+            cleanup_groups.append(group)
+            return {}, []
+
+        def signal(self, identities, signum, *, process_group=None, **kwargs):
+            assert process_group == 451
+            assert not _confirmed_owned_processes(identities)
+
+        async def wait_for_exit(self, identities, timeout, *, process_group=None, **kwargs):
+            assert process_group == 451
+            return not self.live(identities)
+
+    host = Host({451: identity})
+    reaper = ReleasedEverOSOrphanReconciler(provider_root=root, effective_home=home, _host=host)
+    await reaper.reconcile_orphans()
+    assert group_reads == ([] if exit_phase == "before_group" else [451])
+    assert cleanup_groups and set(cleanup_groups) == {451}
+    assert host.children[451] is replacement
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_gone_unidentified_anchor_preserves_legacy_helper_classification(tmp_path):
+    home = tmp_path / "home"
+    root = home / "memory/everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    path, record = _sidecar_record(home)
+    path.write_text("unusable")
+    identity = _sidecar_identity(home, record)
+    seen_roles = []
+
+    class Host(_SidecarHost):
+        def find_sidecars(self, **kwargs):
+            reference = self.capture(451)
+            self.children.pop(451)
+            return {451: reference}
+
+        def process_group(self, pid):
+            pytest.fail("gone anchor must keep its original isolated group")
+
+        def recorded_group_members(self, group, *, role=None, **kwargs):
+            assert group == 451
+            seen_roles.append(role)
+            # Shipped unidentified recovery accepts a helper without a role tag.
+            return super().recorded_group_members(group) if role is None else ({}, [452])
+
+    host = Host({451: identity, 452: identity}, group_owned={452: 10.5})
+    reaper = ReleasedEverOSOrphanReconciler(provider_root=root, effective_home=home, _host=host)
+    await reaper.reconcile_orphans()
+    assert seen_roles and set(seen_roles) == {None}
+    assert not host.children and not path.exists()

@@ -25,11 +25,12 @@ marks the child down nor pauses claims or consumes restart attempts.
   their PIDs into another generation. `None` means unresolved presence, not exit.
 - Use retained public references for individual signals. Group signals require
   every current member to match a confirmed owned reference and cannot target
-  Avibe's own group. Also signal retained children outside the original group.
+  Avibe's own group. Successful group delivery sends individually only to escaped
+  references; failed/refused group delivery uses the full confirmed individual set.
 - TERM, bounded wait, KILL and final wait remain. Direct-child reaping alone is
   insufficient: known descendants and unknown group members block cleanup.
   Late helpers after leader exit enter each bounded round through existing
-  root/socket/role group classification; foreign members block replacement.
+  root/socket/role classification; second-round arrivals receive KILL within the bound.
 - Existing locks, child-object identity and supervisor generations serialize
   stop, natural exit, Wake and close. No new lifecycle state machine is added.
 
@@ -52,8 +53,8 @@ startup** (Wake) once cleanup is possible. Wake preserves existing data.
 
 Scenario IDs: MEMORY-WAKE-001, MEMORY-WAKE-202, MEMORY-WAKE-204, MEMORY-WAKE-205.
 
-- Focused process, lifecycle, supervisor, Wake and provider regression: 215 passed.
-- Darwin arm64 psutil floor and resolved environments: 32 passed each, including
+- Focused process, lifecycle, supervisor, Wake and provider regression: 223 passed.
+- Darwin arm64 psutil floor and resolved environments: 35 passed each, including
   real processing/recall. Boot-time injection is test-only and checks its hook.
 - Native tests cover full scan cycles during a shift, probe capture before shift
   then timeout cleanup, a prohibited TCP listener, and leader/child/grandchild exit.
@@ -71,7 +72,8 @@ fake lifecycle self-tests -> supervisor callback/non-overlap consumers; generic
 orphan success -> shift/retirement case covering all three released record shapes;
 native orphan helper -> consuming reaper; duplicate capture-read dimension merged.
 PM follow-up: ordinary exits skip classification but retain surviving-group cleanup;
-missing record identity is explicit, and tautological legacy sync equality is removed.
+missing record identity is explicit; legacy sync equality is removed. Group lookups
+retain the established scope across exit/reuse; gone anchors retain legacy role context.
 
 ```sh
 uv sync --no-install-project --group dev
@@ -96,6 +98,6 @@ No production credentials or regression state were copied/reset.
 
 If no initial reference is acquired, cleanup stays unknown (a probe may remain
 unreaped); a later PID or delayed child callback cannot authorize recapture.
-Public process checks are not an atomic macOS pidfd. No private identity API,
-native ABI, new record schema, reconfirmation loop, service-manager integration,
-IPC, writer-lock redesign, running-property change or expanded retries were added.
+Public checks are not atomic macOS pidfds; group movement/delivery is not exactly-once.
+No private identity API, native ABI, schema, recovery loop, service-manager/IPC,
+writer-lock redesign, running-property change or expanded retries were added.
