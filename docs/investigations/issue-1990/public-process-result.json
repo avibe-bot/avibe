@@ -1,0 +1,11 @@
+{
+  "host": "Darwin",
+  "arch": "arm64",
+  "psutil": "7.2.2",
+  "display_time_shift_seconds": 1.0,
+  "public_identity_equal": true,
+  "alive_before_stop": true,
+  "public_terminate_succeeded": true,
+  "exit_code": -15,
+  "alive_after_reap": false
+}

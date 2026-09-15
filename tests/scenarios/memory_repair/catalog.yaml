@@ -227,3 +227,31 @@ scenarios:
       - Ready, missing, error, or unsupported status with the retained reason
       - No repair offer for an unsupported platform
       - Controller-owned artifact installation for supported repair
+
+  - id: MEMORY-WAKE-204
+    name: Display-time shifts never authenticate a live execution
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_process_lifecycle.py::test_native_shift_survives_full_scans_and_stop
+    related_tests:
+      - tests/test_memory_process_lifecycle.py::test_native_probe_timeout_during_shift
+      - tests/test_memory_process_lifecycle.py::test_reused_pid_stays_terminal_during_delayed_child_callback
+      - tests/test_memory_process_lifecycle.py::test_unknown_group_and_retained_descendant_prevent_false_cleanup
+      - tests/test_memory_process_lifecycle.py::test_successful_group_signal_also_reaches_escaped_retained_child
+      - tests/test_memory_process_lifecycle.py::test_native_leader_exit_retains_child_and_grandchild
+      - tests/test_memory_process.py::test_orphan_record_survives_shift_until_classified_execution_exits
+    given: One retained execution with direct-child wait and public process references
+    when: Display creation times shift, the leader exits, or PIDs are reused
+    then: Real exit and complete tree cleanup govern replacement; unknown and reused targets are never signaled
+    evidence_boundary: Darwin arm64 native fault injection at psutil 7.1.0 and 7.2.2; deterministic generation model covers PID reuse without forcing host PID recycling
+  - id: MEMORY-WAKE-205
+    name: Real processing and recall continue across non-destructive Wake
+    status: covered
+    kind: recovery
+    layer: integration
+    test: tests/scenarios/memory_repair/test_memory_lifecycle_runtime.py::test_real_wake_preserves_old_and_processes_new_input
+    given: Actual pinned EverOS, production claims and writer, test-owned storage, loopback model provider
+    when: An old memory is captured and Wake replaces the child before a new capture
+    then: Old and newly processed inputs are both recallable
+    evidence_boundary: External model responses are deterministic doubles; Incus deployment requires unavailable seed configuration

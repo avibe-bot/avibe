@@ -299,10 +299,14 @@ name = "avibe-memory"
 source = { directory = "packaging/avibe-memory" }
 dependencies = [
     { name = "avibe-os" },
+    { name = "psutil" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "avibe-os", specifier = ">=3.0.14.dev0,<3.1" }]
+requires-dist = [
+    { name = "avibe-os", specifier = ">=3.0.14.dev0,<3.1" },
+    { name = "psutil", specifier = ">=7.1.0" },
+]
 
 [[package]]
 name = "avibe-os"
@@ -373,7 +377,7 @@ requires-dist = [
     { name = "markdown-to-mrkdwn", specifier = ">=0.2.0" },
     { name = "packaging", specifier = ">=23.0" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
-    { name = "psutil", specifier = ">=5.9.0" },
+    { name = "psutil", specifier = ">=7.1.0" },
     { name = "pycryptodome", specifier = ">=3.20" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },

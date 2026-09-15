@@ -21,6 +21,18 @@ from avibe_memory.process import (
 )
 
 
+class _TestReference:
+    def __init__(self, host, pid):
+        self.host, self.pid = host, pid
+        self.generation = host.children.get(pid)
+
+    def is_running(self):
+        return self.generation is not None and self.host.children.get(self.pid) is self.generation
+
+    def status(self):
+        return "running"
+
+
 class _ReleasedSyncHost:
     def __init__(
         self,
@@ -34,6 +46,9 @@ class _ReleasedSyncHost:
         self.parent = parent
         self.signals: list[tuple[dict[int, float], int | None]] = []
 
+    def capture(self, pid: int):
+        return _TestReference(self, pid) if pid in self.children else None
+
     def inspect_identity(self, pid: int):
         return self.parent if pid == 99 else self.children.get(pid)
 
@@ -43,13 +58,13 @@ class _ReleasedSyncHost:
     def recorded_group_members(self, _group, *, role=None, **_kwargs):
         assert role == "cascade_sync"
         return {
-            pid: float(identity.stamp)
+            pid: self.capture(pid)
             for pid, identity in self.children.items()
             if identity.stamp is not None
         }, []
 
     def find_syncs(self, **_kwargs):
-        return dict(self.candidates)
+        return {pid: self.capture(pid) for pid in self.candidates}
 
     def find_sidecars(self, **_kwargs):
         return {}
@@ -62,13 +77,12 @@ class _ReleasedSyncHost:
             pid: created_at
             for pid, created_at in identities.items()
             if (
-                (identity := self.children.get(pid)) is not None
-                and identity.stamp == created_at
+created_at is not None and created_at.is_running()
             )
         }
 
     def signal(self, identities, _signum, *, process_group=None, **_kwargs) -> None:
-        self.signals.append((dict(identities), process_group))
+        self.signals.append(({pid: ref.generation.stamp for pid, ref in identities.items()}, process_group))
         for pid in identities:
             self.children.pop(pid, None)
 
@@ -89,18 +103,21 @@ class _SidecarHost:
         self.group_foreign = group_foreign or []
         self.signals: list[dict[int, float]] = []
 
+    def capture(self, pid: int):
+        return _TestReference(self, pid) if pid in self.children else None
+
     def inspect_identity(self, pid: int):
         return self.children.get(pid)
 
     def process_group(self, pid: int) -> int | None:
         return pid
 
-    def snapshot_tree(self, pid: int, _group: int | None):
+    def snapshot_tree(self, pid: int, _group: int | None, owned=None):
         identity = self.children.get(pid)
-        return {} if identity is None else {pid: float(identity.stamp)}
+        return dict(owned) if owned is not None else ({} if identity is None else {pid: self.capture(pid)})
 
     def recorded_group_members(self, _group, **_kwargs):
-        return dict(self.group_owned), list(self.group_foreign)
+        return {pid: self.capture(pid) for pid in self.group_owned}, list(self.group_foreign)
 
     def find_sidecars(self, **_kwargs):
         return {}
@@ -116,13 +133,12 @@ class _SidecarHost:
             pid: created_at
             for pid, created_at in identities.items()
             if (
-                (identity := self.children.get(pid)) is not None
-                and identity.stamp == created_at
+created_at is not None and created_at.is_running()
             )
         }
 
     def signal(self, identities, _signum, **_kwargs) -> None:
-        self.signals.append(dict(identities))
+        self.signals.append({pid: ref.generation.stamp for pid, ref in identities.items()})
         for pid in identities:
             self.children.pop(pid, None)
             self.group_owned.pop(pid, None)
@@ -613,3 +629,69 @@ def test_generated_ome_profile_strategies_follow_switch(tmp_path: Path, profile_
     assert strategies["extract_user_profile"]["enabled"] is profile_enabled
     assert strategies["reflect_episodes"]["enabled"] is False
     assert strategies["extract_foresight"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_orphan_record_survives_shift_until_classified_execution_exits(tmp_path):
+    """MEMORY-WAKE-204: classification, signals, wait and retirement share one reference."""
+    from dataclasses import replace
+    from avibe_memory.process import SidecarOwnership
+
+    home = tmp_path / "home"
+    root = home / "memory" / "everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    record_path, record = _sidecar_record(home)
+    identity = _sidecar_identity(home, record)
+
+    class ShiftHost(_SidecarHost):
+        shifted = False
+        rounds = 0
+        captured = None
+
+        def capture(self, pid):
+            self.captured = super().capture(pid)
+            return self.captured
+
+        def inspect_identity(self, pid):
+            value = super().inspect_identity(pid)
+            return replace(value, stamp=value.stamp + 1) if self.shifted and value else value
+
+        def signal(self, identities, signum, **kwargs):
+            self.rounds += 1
+            assert identities[451] is self.captured
+            self.shifted = True
+            if self.rounds == 2:
+                super().signal(identities, signum, **kwargs)
+
+        async def wait_for_exit(self, identities, timeout, **kwargs):
+            assert record_path.exists()
+            assert identities[451] is self.captured
+            if self.rounds == 1:
+                assert self.inspect_identity(451).stamp == 11.5
+                assert self.live(identities)
+                return False
+            assert not self.live(identities)
+            return True
+
+    host = ShiftHost({451: identity})
+    ownership = SidecarOwnership(record_path=record_path,
+                                socket_path=Path(record["socket_path"]),
+                                provider_root=root, _host=host)
+    await ownership.reap()
+    assert host.rounds == 2
+    assert not record_path.exists()
+
+
+def test_record_retirement_rejects_a_late_claimed_survivor(tmp_path):
+    from avibe_memory.process import SidecarOwnership
+    home = tmp_path / "home"
+    record_path, record = _sidecar_record(home)
+    host = _SidecarHost(group_owned={452: 10.5})
+    ownership = SidecarOwnership(record_path=record_path,
+                                socket_path=Path(record["socket_path"]),
+                                provider_root=Path(record["provider_root"]), _host=host)
+    with pytest.raises(RuntimeError, match="did not exit"):
+        ownership.retire_if_group_is_clear(451, 451)
+    assert record_path.exists()

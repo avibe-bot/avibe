@@ -21,3 +21,9 @@ observations:
       - MEMORY-REPAIR-204
       - MEMORY-REPAIR-205
     observation: No operation stage is persisted or resumed; startup reevaluates the native root, while ordinary provider and machine faults stay degraded.
+
+  - id: MEMORY-REPAIR-OBS-004
+    scenarios:
+      - MEMORY-WAKE-204
+      - MEMORY-WAKE-205
+    observation: Darwin arm64 tests inject the psutil boot-time read locally; public references survive the display-time shift. The real EverOS 1.2.3 pipeline requires 1024-dimensional embedding responses. Native production Wake, claims, writer, extraction, indexing and keyword recall run with test-owned storage and loopback model doubles; this is not model-quality or four-platform deployment evidence. Local Incus provisioning is blocked before target creation by required IM/model seed configuration.

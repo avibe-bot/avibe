@@ -246,6 +246,11 @@ Settings names this path by user intent: `degraded` shows **Retry startup**,
 while `running` keeps **Restart Memory service** under **More actions**. Both use
 the same non-destructive Wake path.
 
+If automatic Wake retries are exhausted and the state remains `degraded` with
+`memory_wake_failed`, correct the underlying fault and choose **Retry startup**
+for an explicit Wake attempt. Automatic retries are bounded; Wake preserves
+existing data and requires the previous process tree to stop before replacement.
+
 Provider, credential, disk, and permission faults produce `degraded` with a
 sanitized reason. Correct the external condition and choose **Retry startup**.
 These faults never enable or route to destructive Repair.

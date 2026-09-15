@@ -754,3 +754,19 @@ def test_wheel_installation_matrix(
             ),
             cwd=tmp_path,
         )
+
+
+@pytest.mark.parametrize("project", [ROOT / "pyproject.toml", MEMORY_PROJECT / "pyproject.toml"])
+def test_memory_process_dependency_requires_monotonic_public_identity(project) -> None:
+    requirement = _requirement(_project(project)["dependencies"], "psutil")
+    assert Version("7.0.0") not in requirement.specifier
+    assert Version("7.1.0") in requirement.specifier
+    assert Version("7.2.2") in requirement.specifier
+
+
+@pytest.mark.parametrize("variable", ["AVIBE_CORE_WHEEL", "AVIBE_MEMORY_WHEEL"])
+def test_built_memory_process_dependency_floor(variable) -> None:
+    _, metadata = _wheel_metadata(_wheel_path(variable))
+    requirement = _requirement(metadata.get_all("Requires-Dist"), "psutil")
+    assert Version("7.0.0") not in requirement.specifier
+    assert Version("7.1.0") in requirement.specifier

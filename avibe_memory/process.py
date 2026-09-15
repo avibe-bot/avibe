@@ -112,7 +112,6 @@ _PROCESSING_PROBE_TIMEOUT_SECONDS = PROCESSING_PROBE_MAX_DEADLINE_SECONDS
 _PROCESSING_PROBE_STDERR_BYTES = 2048
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
-_SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
@@ -252,7 +251,9 @@ class _ProcessHost(Protocol):
 
     def inspect_identity(self, pid: int) -> _ProcessIdentity | None: ...
 
-    def snapshot_tree(self, pid: int, process_group: int | None) -> dict[int, float]: ...
+    def capture(self, pid: int) -> psutil.Process | None: ...
+
+    def snapshot_tree(self, pid: int, process_group: int | None, owned=None) -> dict[int, psutil.Process | None]: ...
 
     def recorded_group_members(
         self,
@@ -261,11 +262,11 @@ class _ProcessHost(Protocol):
         socket_path: Path,
         provider_root: Path,
         role: str | None = None,
-    ) -> tuple[dict[int, float], list[int]]: ...
+    ) -> tuple[dict[int, psutil.Process | None], list[int]]: ...
 
-    def find_sidecars(self, *, socket_path: Path) -> dict[int, float]: ...
+    def find_sidecars(self, *, socket_path: Path) -> dict[int, psutil.Process | None]: ...
 
-    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]: ...
+    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, psutil.Process | None]: ...
 
     def find_syncs(
         self,
@@ -273,13 +274,13 @@ class _ProcessHost(Protocol):
         provider_root: Path,
         python: Path,
         nonce: str,
-    ) -> dict[int, float]: ...
+    ) -> dict[int, psutil.Process | None]: ...
 
-    def live(self, identities: Mapping[int, float]) -> dict[int, float]: ...
+    def live(self, identities: Mapping[int, psutil.Process | None]) -> dict[int, psutil.Process | None]: ...
 
     def signal(
         self,
-        identities: Mapping[int, float],
+        identities: Mapping[int, psutil.Process | None],
         signum: int,
         *,
         process_group: int | None = None,
@@ -288,14 +289,14 @@ class _ProcessHost(Protocol):
 
     async def wait_for_exit(
         self,
-        identities: dict[int, float],
+        identities: dict[int, psutil.Process | None],
         timeout_seconds: float,
         *,
         process_group: int | None = None,
         process: asyncio.subprocess.Process | None = None,
     ) -> bool: ...
 
-    def has_tcp_listener(self, identities: Mapping[int, float]) -> bool: ...
+    def has_tcp_listener(self, identities: Mapping[int, psutil.Process | None]) -> bool: ...
 
 
 class EverOSProcess:
@@ -360,7 +361,7 @@ class EverOSProcess:
         self._watch_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._retained_provider_root_lock: _ProviderRootLock | None = None
-        self._owned_processes: dict[int, float] = {}
+        self._owned_processes: dict[int, psutil.Process | None] = {}
         self._on_ready = on_ready
         self._before_start = before_start
         self._on_unexpected_exit = on_unexpected_exit
@@ -411,7 +412,7 @@ class EverOSProcess:
             self._desired_running = False
             process = self._process
             process_group = self._process_group
-            owned_processes = dict(self._owned_processes)
+            owned_processes = self._owned_processes
             watch_task = self._watch_task
             monitor_task = self._monitor_task
             self._starting = False
@@ -465,8 +466,9 @@ class EverOSProcess:
             logger.warning("EverOS processing probe could not start; branch=probe_spawn")
             return False
 
+        owned_processes = {probe.pid: self._host.capture(probe.pid)}
         process_group = self._host.process_group(probe.pid)
-        owned_processes = self._host.snapshot_tree(probe.pid, process_group)
+        _refresh_owned_process_tree(self._host, owned_processes, probe.pid, process_group)
         stderr = getattr(probe, "stderr", None)
         stderr_task = asyncio.create_task(_drain_probe_stderr(stderr)) if stderr is not None else None
         try:
@@ -544,13 +546,14 @@ class EverOSProcess:
                 )
             )
             self._process = process
+            self._owned_processes = {process.pid: self._host.capture(process.pid)}
             self._process_group = self._host.process_group(process.pid)
-            self._owned_processes = self._host.snapshot_tree(process.pid, self._process_group)
-            if not _host_identity_is_live(self._host, process.pid, self._owned_processes):
+            _refresh_owned_process_tree(self._host, self._owned_processes, process.pid, self._process_group)
+            if _reference_state(self._owned_processes.get(process.pid), process.pid) is not True:
                 raise RuntimeError("could not establish sidecar process ownership")
             self._ownership.record_launch(
                 process.pid,
-                self._owned_processes[process.pid],
+                _inspect_captured_identity(self._host, process.pid, self._owned_processes[process.pid]).stamp,
                 self._process_group,
             )
             if spawn_interrupted:
@@ -573,7 +576,7 @@ class EverOSProcess:
                         self._terminate_owned_tree(
                             process,
                             process_group=process_group,
-                            owned_processes=dict(self._owned_processes),
+                            owned_processes=self._owned_processes,
                         )
                     )
                 except Exception:
@@ -610,7 +613,7 @@ class EverOSProcess:
             logger.exception("EverOS sidecar start failed")
             process = self._process
             process_group = self._process_group
-            owned_processes = dict(self._owned_processes)
+            owned_processes = self._owned_processes
             cleanup_failed = False
             if process is not None:
                 try:
@@ -713,13 +716,6 @@ class EverOSProcess:
         while time.monotonic() < deadline:
             if process.returncode is not None:
                 raise RuntimeError("sidecar exited before readiness")
-            if not _refresh_owned_process_tree(
-                self._host,
-                self._owned_processes,
-                process.pid,
-                self._process_group,
-            ):
-                raise RuntimeError("sidecar ownership changed before readiness")
             if self._socket_path.exists():
                 self._secure_socket()
                 if await client.health():
@@ -733,7 +729,7 @@ class EverOSProcess:
             if process is not self._process:
                 return
             process_group = self._process_group
-            owned_processes = dict(self._owned_processes)
+            owned_processes = self._owned_processes
             monitor_task = self._monitor_task
             try:
                 await self._terminate_owned_tree(
@@ -775,41 +771,17 @@ class EverOSProcess:
         """Keep tracking descendants and reject any later TCP listener."""
 
         try:
-            next_tree_inspection = time.monotonic()
             while process is self._process and process.returncode is None:
-                observed_at = time.monotonic()
-                if observed_at >= next_tree_inspection:
-                    owned_processes = self._refresh_owned_processes(process.pid)
-                    self._assert_no_tcp_listener(
-                        process.pid,
-                        owned_processes=owned_processes,
-                    )
-                    next_tree_inspection = observed_at + _TREE_INSPECTION_INTERVAL_SECONDS
-                elif not _host_identity_is_live(self._host, process.pid, self._owned_processes):
-                    raise RuntimeError("sidecar ownership changed during monitoring")
-                await asyncio.sleep(_SAFETY_MONITOR_INTERVAL_SECONDS)
+                owned_processes = self._refresh_owned_processes(process.pid)
+                self._assert_no_tcp_listener(process.pid, owned_processes=owned_processes)
+                await asyncio.sleep(_TREE_INSPECTION_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             return
         except Exception:
             if not self._desired_running:
                 return
             notify_unexpected_exit = False
-            recorded_stamp = (
-                self._owned_processes.get(process.pid) if process.pid is not None else None
-            )
-            live_stamp = None
-            if process.pid is not None:
-                try:
-                    live_stamp = _process_creation_stamp(psutil.Process(process.pid))
-                except Exception:
-                    live_stamp = None
-            logger.exception(
-                "EverOS sidecar safety monitor rejected the child tree "
-                "(pid %s recorded_stamp=%s live_stamp=%s)",
-                process.pid,
-                recorded_stamp,
-                live_stamp,
-            )
+            logger.exception("EverOS sidecar safety monitor rejected the child tree (pid %s)", process.pid)
             async with self._lifecycle_lock:
                 if process is not self._process:
                     return
@@ -820,7 +792,7 @@ class EverOSProcess:
                     await self._terminate_owned_tree(
                         process,
                         process_group=process_group,
-                        owned_processes=dict(self._owned_processes),
+                        owned_processes=self._owned_processes,
                     )
                 except Exception:
                     logger.warning("EverOS sidecar safety shutdown did not reap the child tree")
@@ -915,41 +887,21 @@ class EverOSProcess:
         except FileNotFoundError:
             return
 
-    def _refresh_owned_processes(self, pid: int) -> dict[int, float]:
-        if not _refresh_owned_process_tree(
-            self._host,
-            self._owned_processes,
-            pid,
-            self._process_group,
-        ):
-            raise RuntimeError("sidecar ownership changed during monitoring")
-        unverifiable = {
-            process_id: created_at
-            for process_id, created_at in self._owned_processes.items()
-            if created_at < 0
-        }
-        self._owned_processes = self._host.live(self._owned_processes)
-        # AccessDenied group members use a negative identity sentinel. Retain
-        # those for fail-closed group cleanup even though ordinary dead PIDs are
-        # pruned from the hot monitor set.
-        _merge_owned_processes(self._owned_processes, unverifiable)
-        if pid not in self._owned_processes:
-            raise RuntimeError("sidecar ownership changed during monitoring")
+    def _refresh_owned_processes(self, pid: int) -> dict[int, psutil.Process | None]:
+        _refresh_owned_process_tree(self._host, self._owned_processes, pid, self._process_group)
         return dict(self._owned_processes)
 
     def _assert_no_tcp_listener(
         self,
         pid: int,
         *,
-        owned_processes: Mapping[int, float] | None = None,
+        owned_processes: Mapping[int, psutil.Process | None] | None = None,
     ) -> None:
         live_processes = (
             dict(owned_processes)
             if owned_processes is not None
             else self._refresh_owned_processes(pid)
         )
-        if pid not in live_processes:
-            raise RuntimeError("sidecar ownership changed during listener inspection")
         if self._host.has_tcp_listener(live_processes):
             raise RuntimeError("sidecar opened a TCP listener")
 
@@ -958,7 +910,7 @@ class EverOSProcess:
         process: asyncio.subprocess.Process,
         *,
         process_group: int | None,
-        owned_processes: Mapping[int, float] | None = None,
+        owned_processes: Mapping[int, psutil.Process | None] | None = None,
     ) -> None:
         await _terminate_owned_process_tree(
             self._host,
@@ -1256,11 +1208,9 @@ class SidecarOwnership:
         the group and keep the provider root open.
         """
 
-        if created_at < 0:
-            # A negative sentinel means the OS would not disclose the creation time,
-            # and the liveness check above this call should already have rejected
-            # that. Recording it would produce a record nothing can ever match, so
-            # fail rather than launch a child no later boot can identify.
+        if not _is_identity_stamp(created_at):
+            # Released records still require a readable diagnostic stamp. A
+            # failed record write retains the live reference for startup cleanup.
             raise RuntimeError("could not verify the sidecar creation time to record")
         if self._python is None:
             raise RuntimeError("could not verify the EverOS child interpreter to record")
@@ -1347,7 +1297,8 @@ class SidecarOwnership:
         group_match_role = (
             None if isinstance(record, dict) and record.get("role") is None else recorded_role
         )
-        identity = self._host.inspect_identity(pid)
+        reference = self._host.capture(pid)
+        identity = _inspect_captured_identity(self._host, pid, reference)
         verdict = _classify_recorded_child(
             record,
             identity,
@@ -1392,7 +1343,7 @@ class SidecarOwnership:
         )
         terminated = await self._terminate_orphan_tree(
             pid,
-            confirmed_create_time,
+            reference,
         )
         if not terminated:
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self.record_path})")
@@ -1410,7 +1361,7 @@ class SidecarOwnership:
             await self._reap_unidentified_child()
             _remove_sidecar_record(self.record_path)
 
-    async def _terminate_orphan_tree(self, pid: int, created_at: float) -> bool:
+    async def _terminate_orphan_tree(self, pid: int, reference: psutil.Process | None) -> bool:
         """Reap an orphan's whole tree, not just the pid the record names.
 
         The sidecar may have spawned helpers before the service died, and those
@@ -1422,27 +1373,20 @@ class SidecarOwnership:
         liveness is decided purely from the captured identities.
         """
 
-        identities: dict[int, float] = {pid: created_at}
+        identities: dict[int, psutil.Process | None] = {pid: reference}
         rounds = (
             (signal.SIGTERM, self._stop_timeout_seconds),
             (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
         )
+        process_group = self._host.process_group(pid)
         for signum, timeout_seconds in rounds:
-            if _host_identity_is_live(self._host, pid, identities):
+            if _reference_state(identities.get(pid), pid) is True:
                 # Only rediscover while the recorded root is still the process we
                 # identified; a dead root's pid may already have been recycled.
                 process_group = self._host.process_group(pid)
-                if not _refresh_owned_process_tree(
-                    self._host,
-                    identities,
-                    pid,
-                    process_group,
-                ):
-                    process_group = None
-            else:
-                process_group = None
+                _refresh_owned_process_tree(self._host, identities, pid, process_group)
             self._host.signal(identities, signum, process_group=process_group)
-            if await self._host.wait_for_exit(identities, timeout_seconds):
+            if await self._host.wait_for_exit(identities, timeout_seconds, process_group=process_group):
                 return True
         return False
 
@@ -1585,7 +1529,10 @@ class SidecarOwnership:
                         "sidecar process group could not be verified "
                         f"(group {process_group}, record {self.record_path})"
                     )
-                return
+                raise RuntimeError(
+                    "sidecar process group did not exit "
+                    f"(group {process_group}, record {self.record_path})"
+                )
         _remove_sidecar_record(self.record_path)
 
     async def _reap_unidentified_child(self) -> None:
@@ -1611,15 +1558,16 @@ class SidecarOwnership:
             provider_root=self._provider_root
         )
         root_only = set(root_anchors).difference(socket_anchors)
-        socket_anchors.update(root_anchors)
+        _merge_owned_processes(socket_anchors, root_anchors)
         if not socket_anchors:
             return
-        for pid, created_at in sorted(socket_anchors.items()):
+        for pid, reference in sorted(socket_anchors.items()):
+            identity = _inspect_captured_identity(self._host, pid, reference)
+            if identity is None:
+                continue
             if pid in root_only:
-                identity = self._host.inspect_identity(pid)
                 if (
                     identity is None
-                    or identity.stamp != created_at
                     or identity.cmdline is None
                     or not _cmdline_matches_role(
                         identity.cmdline,
@@ -1634,14 +1582,14 @@ class SidecarOwnership:
                 "Reaping an EverOS sidecar an unusable ownership record could not identify (pid %s)",
                 pid,
             )
-            identities = {pid: created_at}
+            identities = {pid: reference}
             # Helpers are reached through the anchor's own group rather than by
             # widening the machine-wide test, because membership is what makes the
             # looser per-member claim safe.
             group = self._host.process_group(pid)
             self._persist_record(
                 pid,
-                created_at,
+                identity.stamp,
                 group,
                 role=None,
                 python=None,
@@ -1682,7 +1630,7 @@ class SidecarOwnership:
     async def _terminate_claimed_processes(
         self,
         process_group: int | None,
-        identities: dict[int, float],
+        identities: dict[int, psutil.Process | None],
         *,
         role: str | None = None,
     ) -> tuple[bool, list[int]]:
@@ -1713,7 +1661,7 @@ class SidecarOwnership:
                 _merge_owned_processes(identities, discovered)
                 foreign.update(round_foreign)
             self._host.signal(identities, signum, process_group=process_group)
-            if await self._host.wait_for_exit(identities, timeout_seconds):
+            if await self._host.wait_for_exit(identities, timeout_seconds, process_group=process_group):
                 return True, sorted(foreign)
         return False, sorted(foreign)
 
@@ -1800,7 +1748,7 @@ class _ReleasedSyncReaper:
         return float(identity.wall_create_time) == float(record["parent_create_time"])
 
     async def _reconcile_exclusive(self, record: Mapping[str, Any]) -> None:
-        identities: dict[int, float] = {}
+        identities: dict[int, psutil.Process | None] = {}
         if record["state"] == "pending":
             candidates = self._host.find_syncs(
                 provider_root=self._provider_root,
@@ -1812,23 +1760,24 @@ class _ReleasedSyncReaper:
                 return
             if len(candidates) != 1:
                 raise RuntimeError("released pending sync ownership is ambiguous")
-            pid, created_at = next(iter(candidates.items()))
-            identity = self._host.inspect_identity(pid)
+            pid, reference = next(iter(candidates.items()))
+            identity = _inspect_captured_identity(self._host, pid, reference)
             _validate_legacy_sync_identity(
                 identity,
                 record,
-                created_at=created_at,
+                created_at=identity.stamp if identity is not None else None,
                 provider_root=self._provider_root,
                 require_argv=True,
             )
             group = self._host.process_group(pid)
             if group is None:
                 raise RuntimeError("released pending sync process group is unavailable")
-            identities[pid] = created_at
+            identities[pid] = reference
         else:
             pid = int(record["pid"])
             group = int(record["process_group"])
-            identity = self._host.inspect_identity(pid)
+            reference = self._host.capture(pid)
+            identity = _inspect_captured_identity(self._host, pid, reference)
             if identity is not None:
                 verdict = _classify_recorded_child(
                     record,
@@ -1851,13 +1800,13 @@ class _ReleasedSyncReaper:
                     provider_root=self._provider_root,
                     require_argv=True,
                 )
-                identities[pid] = float(identity.stamp)
+                identities[pid] = reference
 
         if hasattr(os, "getpgrp") and group == os.getpgrp():
             raise RuntimeError("released sync process group is unsafe")
         self._merge_validated_group(record, group, identities)
         await self._terminate_group(record, group, identities)
-        remaining: dict[int, float] = {}
+        remaining: dict[int, psutil.Process | None] = {}
         self._merge_validated_group(record, group, remaining)
         if self._host.live(remaining):
             raise RuntimeError("released sync process group did not exit")
@@ -1867,7 +1816,7 @@ class _ReleasedSyncReaper:
         self,
         record: Mapping[str, Any],
         group: int,
-        identities: dict[int, float],
+        identities: dict[int, psutil.Process | None],
     ) -> None:
         claimed, foreign = self._host.recorded_group_members(
             group,
@@ -1877,24 +1826,24 @@ class _ReleasedSyncReaper:
         )
         if foreign:
             raise RuntimeError("released sync process group is unverifiable")
-        for pid, created_at in claimed.items():
-            identity = self._host.inspect_identity(pid)
+        for pid, reference in claimed.items():
+            identity = _inspect_captured_identity(self._host, pid, reference)
             if identity is None:
                 continue
             _validate_legacy_sync_identity(
                 identity,
                 record,
-                created_at=created_at,
+                created_at=identity.stamp if identity is not None else None,
                 provider_root=self._provider_root,
                 require_argv=pid == record.get("pid"),
             )
-            identities.setdefault(pid, created_at)
+            identities.setdefault(pid, reference)
 
     async def _terminate_group(
         self,
         record: Mapping[str, Any],
         group: int,
-        identities: dict[int, float],
+        identities: dict[int, psutil.Process | None],
     ) -> None:
         rounds = (
             (signal.SIGTERM, self._stop_timeout_seconds),
@@ -1907,7 +1856,7 @@ class _ReleasedSyncReaper:
             if self._host.live(identities):
                 self._merge_validated_group(record, group, identities)
             self._host.signal(identities, signum, process_group=group)
-            if await self._host.wait_for_exit(identities, timeout_seconds):
+            if await self._host.wait_for_exit(identities, timeout_seconds, process_group=group):
                 return
         raise RuntimeError("released sync process group did not exit")
 
@@ -2259,10 +2208,10 @@ async def _terminate_owned_process_tree(
     process: asyncio.subprocess.Process,
     *,
     process_group: int | None,
-    owned_processes: Mapping[int, float] | None,
+    owned_processes: Mapping[int, psutil.Process | None] | None,
     stop_timeout_seconds: float,
 ) -> None:
-    identities = dict(owned_processes or {})
+    identities = owned_processes if isinstance(owned_processes, dict) else dict(owned_processes or {})
     _refresh_owned_process_tree(host, identities, process.pid, process_group)
     host.signal(
         identities,
@@ -2652,28 +2601,28 @@ def _recorded_group_members(
     socket_path: Path,
     provider_root: Path,
     role: str | None = None,
-) -> tuple[dict[int, float], list[int]]:
+) -> tuple[dict[int, psutil.Process | None], list[int]]:
     """Split a recorded group's live members into ours and ones to leave alone.
 
-    Returns claimed ``(pid, create_time)`` identities plus the pids that could not
+    Returns retained public Process references plus the pids that could not
     be tied to this installation, so the caller can log what it deliberately spared.
     """
 
-    claimed: dict[int, float] = {}
+    claimed: dict[int, psutil.Process | None] = {}
     foreign: list[int] = []
     own_pid = os.getpid()
-    for pid, created_at in _snapshot_process_group(process_group).items():
+    for pid, reference in _snapshot_process_group(process_group).items():
         if pid == own_pid:
             continue
-        if created_at >= 0 and _process_names_owned_runtime(
+        if _reference_state(reference, pid) is True and _process_names_owned_runtime(
             pid,
             socket_path=socket_path,
             provider_root=provider_root,
             role=role,
-        ):
-            claimed[pid] = created_at
+        ) and _reference_state(reference, pid) is True:
+            claimed[pid] = reference
         else:
-            # Either the identity is unreadable (the negative sentinel) or nothing
+            # Either the identity is unreadable or nothing
             # observable ties the process to this installation.
             foreign.append(pid)
     return claimed, sorted(foreign)
@@ -3023,7 +2972,7 @@ def _remove_legacy_sync_record(path: Path) -> None:
         raise RuntimeError("released sync ownership record cannot be retired") from exc
 
 
-def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
+def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, psutil.Process | None]:
     """Live processes running this home's sidecar entrypoint against its socket.
 
     The anchor for a recovery that has no usable record to work from, so unlike
@@ -3039,11 +2988,13 @@ def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
     what makes the looser per-member claim safe.
     """
 
-    claimed: dict[int, float] = {}
+    claimed: dict[int, psutil.Process | None] = {}
     own_pid = os.getpid()
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
-    for candidate in psutil.process_iter():
+    for observed in psutil.process_iter():
+        reference = _capture_process(observed.pid)
+        candidate = reference if reference is not None else observed
         if candidate.pid == own_pid:
             continue
         try:
@@ -3052,24 +3003,24 @@ def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
             cmdline = _disclosed_identity_field(candidate.cmdline)
             if cmdline is None or not _cmdline_serves_socket(tuple(str(value) for value in cmdline), socket_path):
                 continue
-            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
         except psutil.Error:
             continue
-        # A claimed process whose creation time is withheld carries the negative
-        # sentinel: it can never be signaled by identity, and it never counts as
-        # reaped, so it fails the launch closed instead of being written off.
-        claimed[candidate.pid] = -1.0 if created_at is None else float(created_at)
+        if reference is not None and _reference_state(reference, candidate.pid) is not True:
+            raise RuntimeError("sidecar changed during ownership classification")
+        claimed[candidate.pid] = reference
     return claimed
 
 
-def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
+def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, psutil.Process | None]:
     """Live exact sidecar entrypoints owned by this uid and provider root."""
 
-    claimed: dict[int, float] = {}
+    claimed: dict[int, psutil.Process | None] = {}
     own_pid = os.getpid()
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
-    for candidate in psutil.process_iter():
+    for observed in psutil.process_iter():
+        reference = _capture_process(observed.pid)
+        candidate = reference if reference is not None else observed
         if candidate.pid == own_pid:
             continue
         try:
@@ -3083,7 +3034,6 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
             if not _cmdline_is_sidecar(rendered):
                 continue
             environment = _disclosed_process_environment(candidate)
-            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
         except psutil.NoSuchProcess:
             continue
         except psutil.Error:
@@ -3100,7 +3050,9 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
         role = environment.get("AVIBE_MEMORY_CHILD_ROLE")
         if role not in (None, _SIDECAR_ROLE):
             continue
-        claimed[candidate.pid] = -1.0 if created_at is None else float(created_at)
+        if reference is not None and _reference_state(reference, candidate.pid) is not True:
+            raise RuntimeError("sidecar changed during ownership classification")
+        claimed[candidate.pid] = reference
     return claimed
 
 
@@ -3109,14 +3061,16 @@ def _processes_syncing_owned_root(
     provider_root: Path,
     python: Path,
     nonce: str,
-) -> dict[int, float]:
+) -> dict[int, psutil.Process | None]:
     """Discover one exact released nonce-bearing sync child."""
 
-    claimed: dict[int, float] = {}
+    claimed: dict[int, psutil.Process | None] = {}
     own_pid = os.getpid()
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
-    for candidate in psutil.process_iter():
+    for observed in psutil.process_iter():
+        reference = _capture_process(observed.pid)
+        candidate = reference if reference is not None else observed
         if candidate.pid == own_pid:
             continue
         try:
@@ -3171,7 +3125,9 @@ def _processes_syncing_owned_root(
             or environment.get(_SYNC_NONCE_ENV) != nonce
         ):
             continue
-        claimed[candidate.pid] = float(created_at)
+        if reference is not None and _reference_state(reference, candidate.pid) is not True:
+            raise RuntimeError("sync child changed during ownership classification")
+        claimed[candidate.pid] = reference
     return claimed
 
 
@@ -3188,164 +3144,144 @@ def _remove_sidecar_record(path: Path) -> None:
         return
 
 
-async def _wait_for_identities_exit(identities: Mapping[int, float], timeout_seconds: float) -> bool:
+async def _wait_for_identities_exit(identities: Mapping[int, psutil.Process | None], timeout_seconds: float, process_group: int | None = None) -> bool:
     """Poll recorded identities until none is live or the bound expires."""
 
     deadline = time.monotonic() + max(timeout_seconds, 0.1)
     while time.monotonic() < deadline:
-        if not _live_owned_processes(identities):
+        if not _live_owned_processes(identities) and not _snapshot_process_group(process_group):
             return True
         await asyncio.sleep(0.05)
-    return not _live_owned_processes(identities)
+    return not _live_owned_processes(identities) and not _snapshot_process_group(process_group)
 
 
-def _snapshot_owned_processes(pid: int, process_group: int | None) -> dict[int, float]:
-    """Record `(pid, stamp)` identities while the child is still owned."""
+def _inspect_captured_identity(
+    host: _ProcessHost,
+    pid: int,
+    reference: psutil.Process | None,
+) -> _ProcessIdentity | None:
+    if reference is not None and _reference_state(reference, pid) is not True:
+        raise RuntimeError("process changed or became unreadable before ownership classification")
+    identity = host.inspect_identity(pid)
+    if identity is not None and _reference_state(reference, pid) is not True:
+        raise RuntimeError("process changed or became unreadable during ownership classification")
+    return identity
 
-    identities: dict[int, float] = {}
+
+def _capture_process(pid: int) -> psutil.Process | None:
     try:
-        root = psutil.Process(pid)
-        candidates = [root, *root.children(recursive=True)]
+        reference = psutil.Process(pid)
+        reference.create_time()  # Require readable capture, never compare this display value.
+        return reference if reference.is_running() else None
     except psutil.Error:
-        candidates = []
-    for candidate in candidates:
-        try:
-            identities.setdefault(candidate.pid, _process_creation_stamp(candidate))
-        except psutil.Error:
+        return None
+
+
+def _reference_state(reference: psutil.Process | None, pid: int) -> bool | None:
+    """True is live, False is gone/reused, None is unresolved presence."""
+    try:
+        if reference is None:
+            return None if psutil.pid_exists(pid) else False
+        if not reference.is_running():
+            return False
+        return reference.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.Error, OSError):
+        return None
+
+
+def _snapshot_owned_processes(
+    pid: int,
+    process_group: int | None,
+    owned: Mapping[int, psutil.Process | None] | None = None,
+) -> dict[int, psutil.Process | None]:
+    identities = dict(owned) if owned is not None else {pid: _capture_process(pid)}
+    # Children are observed through retained parents, even after reparenting or
+    # leaving the original group. Never refresh a captured PID into a new birth.
+    for parent_pid, parent in list(identities.items()):
+        if _reference_state(parent, parent_pid) is not True:
             continue
-    _merge_owned_processes(identities, _snapshot_process_group(process_group))
+        try:
+            children = parent.children(recursive=True)
+            group = _snapshot_process_group(process_group) if parent_pid == pid else {}
+            if _reference_state(parent, parent_pid) is not True:
+                continue
+            discovered = {child.pid: child for child in children}
+            if parent_pid == pid and _isolated_process_group(pid) == process_group:
+                discovered.update(group)
+            _merge_owned_processes(identities, discovered)
+        except (psutil.Error, OSError):
+            # Keep captured members on read errors; listener inspection and the
+            # independent group-clear check still fail closed on unknown presence.
+            continue
     return identities
 
 
-def _snapshot_process_group(process_group: int | None) -> dict[int, float]:
+def _snapshot_process_group(process_group: int | None) -> dict[int, psutil.Process | None]:
     if process_group is None or os.name != "posix" or not hasattr(os, "getpgid"):
         return {}
-    identities: dict[int, float] = {}
+    identities = {}
     for candidate in psutil.process_iter():
         try:
             if os.getpgid(candidate.pid) == process_group:
-                identities[candidate.pid] = _process_creation_stamp(candidate)
-        except psutil.AccessDenied:
-            # The member exists but its identity cannot be verified. Keep it with a
-            # sentinel so the "all confirmed" check sees an unverifiable member and
-            # fails closed (no killpg) rather than silently dropping it.
-            identities[candidate.pid] = -1.0
-        except (OSError, psutil.Error):
+                reference = _capture_process(candidate.pid)
+                if (
+                    _reference_state(reference, candidate.pid) is not False
+                    and os.getpgid(candidate.pid) == process_group
+                ):
+                    identities[candidate.pid] = reference
+        except (PermissionError, psutil.AccessDenied):
+            identities[candidate.pid] = None
+        except (ProcessLookupError, psutil.NoSuchProcess):
             continue
     return identities
 
 
-def _merge_owned_processes(identities: dict[int, float], discovered: Mapping[int, float]) -> None:
-    """Add newly seen children without changing a captured process identity."""
-
-    for process_id, created_at in discovered.items():
-        identities.setdefault(process_id, created_at)
-
-
-def _host_identity_is_live(
-    host: _ProcessHost,
-    process_id: int,
-    identities: Mapping[int, float],
-) -> bool:
-    created_at = identities.get(process_id)
-    return created_at is not None and process_id in host.live({process_id: created_at})
+def _merge_owned_processes(
+    identities: dict[int, psutil.Process | None],
+    discovered: Mapping[int, psutil.Process | None],
+) -> None:
+    for pid, reference in discovered.items():
+        if pid not in identities or identities[pid] is None:
+            identities[pid] = reference
 
 
 def _refresh_owned_process_tree(
     host: _ProcessHost,
-    identities: dict[int, float],
+    identities: dict[int, psutil.Process | None],
     process_id: int,
     process_group: int | None,
-) -> bool:
-    """Extend ownership only while the captured root identity remains live."""
-
-    created_at = identities.get(process_id)
-    if created_at is None or not _host_identity_is_live(
-        host,
-        process_id,
-        {process_id: created_at},
-    ):
-        return False
-    discovered = host.snapshot_tree(process_id, process_group)
-    if discovered.get(process_id) != created_at or not _host_identity_is_live(
-        host,
-        process_id,
-        {process_id: created_at},
-    ):
-        return False
+) -> None:
+    discovered = host.snapshot_tree(process_id, process_group, identities)
     _merge_owned_processes(identities, discovered)
-    return True
 
 
-def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
-    live: dict[int, float] = {}
-    for process_id, created_at in identities.items():
-        try:
-            candidate = psutil.Process(process_id)
-            if _process_creation_stamp(candidate) != created_at:
-                continue
-            if candidate.status() == psutil.STATUS_ZOMBIE:
-                continue
-        except psutil.NoSuchProcess:
-            continue
-        except psutil.AccessDenied:
-            # An uninspectable descendant cannot be treated as cleanly reaped.
-            pass
-        except psutil.Error:
-            continue
-        live[process_id] = created_at
-    return live
+def _live_owned_processes(identities: Mapping[int, psutil.Process | None]) -> dict[int, psutil.Process | None]:
+    return {pid: ref for pid, ref in identities.items() if _reference_state(ref, pid) is not False}
 
 
-def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
-    """Return identities whose current creation stamp is readable and unchanged."""
-
-    confirmed: dict[int, float] = {}
-    for process_id, created_at in identities.items():
-        try:
-            candidate = psutil.Process(process_id)
-            if _process_creation_stamp(candidate) != created_at or candidate.status() == psutil.STATUS_ZOMBIE:
-                continue
-        except psutil.Error:
-            # AccessDenied is live-but-unverified: retain it for reaping, but
-            # never use it as authority to signal a numeric PID.
-            continue
-        confirmed[process_id] = created_at
-    return confirmed
+def _confirmed_owned_processes(identities: Mapping[int, psutil.Process | None]) -> dict[int, psutil.Process]:
+    return {pid: ref for pid, ref in identities.items() if ref is not None and _reference_state(ref, pid) is True}
 
 
 def _group_contains_only_confirmed_owned_processes(
     process_group: int | None,
-    identities: Mapping[int, float],
+    identities: Mapping[int, psutil.Process | None],
 ) -> bool:
-    """Whether a group can be signaled without bypassing PID identity checks."""
-
-    if process_group is None:
+    if process_group is None or (hasattr(os, "getpgrp") and process_group == os.getpgrp()):
         return False
-    group_members = _snapshot_process_group(process_group)
+    members = _snapshot_process_group(process_group)
     confirmed = _confirmed_owned_processes(identities)
-    return bool(group_members) and all(
-        confirmed.get(process_id) == created_at for process_id, created_at in group_members.items()
-    )
+    return bool(members) and all(ref is not None and confirmed.get(pid) == ref for pid, ref in members.items())
 
 
 def _signal_owned_group(
     process_group: int | None,
-    identities: Mapping[int, float],
+    identities: Mapping[int, psutil.Process | None],
     signum: int,
 ) -> bool:
-    """Signal a whole isolated group, but only if every member is confirmed owned.
-
-    Returns whether the group signal settled the delivery, so a caller holding a
-    direct child handle can fall back to it without widening the blast radius: a
-    group with an unverifiable member is never signaled group-wide.
-    """
-
-    if (
-        process_group is None
-        or not hasattr(os, "killpg")
-        or not _group_contains_only_confirmed_owned_processes(process_group, identities)
-    ):
+    if not hasattr(os, "killpg") or not _group_contains_only_confirmed_owned_processes(process_group, identities):
         return False
     try:
         os.killpg(process_group, signum)
@@ -3356,60 +3292,29 @@ def _signal_owned_group(
     return True
 
 
-def _signal_owned_group_or_process(
-    process: asyncio.subprocess.Process,
-    process_group: int | None,
-    identities: Mapping[int, float],
-    signum: int,
-) -> None:
-    if _signal_owned_group(process_group, identities, signum):
-        return
-    if process.returncode is not None:
-        return
-    created_at = identities.get(process.pid)
-    if created_at is None or process.pid not in _confirmed_owned_processes(
-        {process.pid: created_at}
-    ):
-        return
-    try:
-        process.send_signal(signum)
-    except ProcessLookupError:
-        return
-
-
-def _signal_owned_processes(identities: Mapping[int, float], signum: int) -> None:
-    for process_id, created_at in _confirmed_owned_processes(identities).items():
+def _signal_owned_processes(identities: Mapping[int, psutil.Process | None], signum: int) -> None:
+    for reference in _confirmed_owned_processes(identities).values():
         try:
-            candidate = psutil.Process(process_id)
-            if _process_creation_stamp(candidate) != created_at:
-                continue
-            candidate.send_signal(signum)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        except psutil.Error:
+            reference.send_signal(signum)
+        except (psutil.Error, OSError):
             continue
 
 
 async def _wait_for_owned_exit(
+    host: _ProcessHost,
     process: asyncio.subprocess.Process,
     *,
     process_group: int | None,
-    identities: dict[int, float],
+    identities: dict[int, psutil.Process | None],
     timeout_seconds: float,
 ) -> bool:
-    """Wait for the direct child and every discovered descendant to disappear."""
-
+    """Reap the direct child AND prove retained descendants and group are clear."""
     deadline = time.monotonic() + max(timeout_seconds, 0.1)
     waiter = asyncio.create_task(process.wait(), name="memory-everos-reap")
     try:
         while time.monotonic() < deadline:
-            _refresh_owned_process_tree(
-                _SystemProcessHost(),
-                identities,
-                process.pid,
-                process_group,
-            )
-            if waiter.done() and not _live_owned_processes(identities):
+            _refresh_owned_process_tree(host, identities, process.pid, process_group)
+            if waiter.done() and not host.live(identities) and not _snapshot_process_group(process_group):
                 await waiter
                 return True
             await asyncio.sleep(0.05)
@@ -3587,8 +3492,11 @@ class _SystemProcessHost:
     def inspect_identity(self, pid: int) -> _ProcessIdentity | None:
         return _inspect_process_identity(pid)
 
-    def snapshot_tree(self, pid: int, process_group: int | None) -> dict[int, float]:
-        return _snapshot_owned_processes(pid, process_group)
+    def capture(self, pid: int) -> psutil.Process | None:
+        return _capture_process(pid)
+
+    def snapshot_tree(self, pid: int, process_group: int | None, owned=None) -> dict[int, psutil.Process | None]:
+        return _snapshot_owned_processes(pid, process_group, owned)
 
     def recorded_group_members(
         self,
@@ -3597,7 +3505,7 @@ class _SystemProcessHost:
         socket_path: Path,
         provider_root: Path,
         role: str | None = None,
-    ) -> tuple[dict[int, float], list[int]]:
+    ) -> tuple[dict[int, psutil.Process | None], list[int]]:
         return _recorded_group_members(
             process_group,
             socket_path=socket_path,
@@ -3605,10 +3513,10 @@ class _SystemProcessHost:
             role=role,
         )
 
-    def find_sidecars(self, *, socket_path: Path) -> dict[int, float]:
+    def find_sidecars(self, *, socket_path: Path) -> dict[int, psutil.Process | None]:
         return _processes_serving_owned_socket(socket_path=socket_path)
 
-    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]:
+    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, psutil.Process | None]:
         return _processes_serving_owned_root(provider_root=provider_root)
 
     def find_syncs(
@@ -3617,51 +3525,56 @@ class _SystemProcessHost:
         provider_root: Path,
         python: Path,
         nonce: str,
-    ) -> dict[int, float]:
+    ) -> dict[int, psutil.Process | None]:
         return _processes_syncing_owned_root(
             provider_root=provider_root,
             python=python,
             nonce=nonce,
         )
 
-    def live(self, identities: Mapping[int, float]) -> dict[int, float]:
+    def live(self, identities: Mapping[int, psutil.Process | None]) -> dict[int, psutil.Process | None]:
         return _live_owned_processes(identities)
 
     def signal(
         self,
-        identities: Mapping[int, float],
+        identities: Mapping[int, psutil.Process | None],
         signum: int,
         *,
         process_group: int | None = None,
         process: asyncio.subprocess.Process | None = None,
     ) -> None:
-        if process is None:
-            _signal_owned_group(process_group, identities, signum)
-        else:
-            _signal_owned_group_or_process(process, process_group, identities, signum)
+        _signal_owned_group(process_group, identities, signum)
+        # Retained descendants may have left the original group.
         _signal_owned_processes(identities, signum)
 
     async def wait_for_exit(
         self,
-        identities: dict[int, float],
+        identities: dict[int, psutil.Process | None],
         timeout_seconds: float,
         *,
         process_group: int | None = None,
         process: asyncio.subprocess.Process | None = None,
     ) -> bool:
         if process is None:
-            return await _wait_for_identities_exit(identities, timeout_seconds)
+            return await _wait_for_identities_exit(identities, timeout_seconds, process_group)
         return await _wait_for_owned_exit(
-            process,
+            self, process,
             process_group=process_group,
             identities=identities,
             timeout_seconds=timeout_seconds,
         )
 
-    def has_tcp_listener(self, identities: Mapping[int, float]) -> bool:
-        for process_id in identities:
+    def has_tcp_listener(self, identities: Mapping[int, psutil.Process | None]) -> bool:
+        for pid, reference in identities.items():
+            state = _reference_state(reference, pid)
+            if state is False:
+                continue
+            if state is None:
+                raise RuntimeError("could not inspect sidecar listeners")
             try:
-                connections = psutil.Process(process_id).net_connections(kind="inet")
+                connections = reference.net_connections(kind="inet")
+                if _reference_state(reference, pid) is False:
+                    continue
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
             except psutil.Error as exc:
