@@ -1,0 +1,3 @@
+# Byte-exact generated resource and released-template migration fixture.
+vibe/show_router.tsx text eol=lf
+tests/fixtures/show_pages/router-history-pre-ssr.tsx text eol=lf

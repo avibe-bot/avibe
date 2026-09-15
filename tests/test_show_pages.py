@@ -2515,7 +2515,7 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     assert "globalThis.__AVIBE_SHOW__?.basePath" in router
     assert "popstate" in router
     assert "pushState" in router
-    assert 'searchParams.get("vibe-embed")' in router
+    assert '.get("vibe-embed")' in router
     assert "hashchange" not in router
     assert "useSyncExternalStore" in router
     # A concrete path wins over a matching [param] route of the same length.

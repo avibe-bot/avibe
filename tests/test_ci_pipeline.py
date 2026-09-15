@@ -75,6 +75,7 @@ def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
     }
     assert set(owners) == {
         "unit-test-shards", "migration-release-guard", "install-upgrade-shards", "memory-insight-contract",
+        "show-router-integration",
     }
     cache_keys = {}
     for name, job in owners.items():
@@ -89,7 +90,9 @@ def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
         assert any(step.get("uses", "").startswith("actions/setup-python@") for step in steps[:steps.index(install)])
         assert not any(step.get("uses", "").startswith("astral-sh/setup-uv@") for step in steps)
         cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache")]
-        action = "actions/cache/restore" if name in {"unit-test-shards", "migration-release-guard"} else "actions/cache"
+        action = "actions/cache/restore" if name in {
+            "unit-test-shards", "migration-release-guard", "show-router-integration",
+        } else "actions/cache"
         assert cache["uses"] == f"{action}@caa296126883cff596d87d8935842f9db880ef25"
         assert cache["with"]["path"] == "~/.cache/uv"
         key = cache["with"]["key"]

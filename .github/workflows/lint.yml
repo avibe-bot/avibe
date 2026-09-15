@@ -61,6 +61,43 @@ jobs:
           npm run test:inbox-return
           npm run test:badge-triggers
 
+  show-router-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          repository: avibe-bot/vibe-show-runtime
+          # Producer of the checked-in generated router. Release builds export
+          # it again from the same Runtime source as their platform archives.
+          ref: 5a9a6a52f2ae03611d617a659bfd0c1c32389478
+          path: .show-runtime-test
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: .show-runtime-test/package-lock.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+      - run: uv sync --frozen --no-install-project
+      - name: Build the real Runtime
+        working-directory: .show-runtime-test
+        run: |
+          npm ci
+          npm run build -w @avibe/show-sdk
+          npm run build -w @avibe/show-ui
+          npm run build -w @avibe/show-runtime
+      - name: Check Python scaffold through Runtime HTTP
+        run: node scripts/check_show_router.mjs --runtime-root .show-runtime-test --python .venv/bin/python
+
   build-linux-artifacts:
     runs-on: ubuntu-latest
     steps:

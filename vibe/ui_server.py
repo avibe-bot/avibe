@@ -14733,7 +14733,7 @@ def _show_page_markdown_runtime_error_response(proxied: Any):
     expected_codes = {
         400: {"invalid_target"},
         404: {"session_unknown"},
-        502: {"render_failed", "output_too_large"},
+        502: {"render_failed", "output_too_large", "router_not_ssr_capable"},
         503: {"renderer_unavailable"},
         504: {"render_timeout"},
     }

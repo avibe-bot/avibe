@@ -96,6 +96,15 @@ def _wheel_metadata(wheel: Path) -> tuple[set[str], Any]:
     return names, metadata
 
 
+def test_core_distributions_ship_the_generated_show_router() -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    expected = (ROOT / "vibe" / "show_router.tsx").read_bytes()
+    with zipfile.ZipFile(core_wheel) as archive:
+        assert archive.read("vibe/show_router.tsx") == expected
+    with tarfile.open(_sdist_path(core_wheel, "avibe_os"), "r:gz") as archive:
+        assert _sdist_member(archive, "show_router.tsx") == expected
+
+
 def _sdist_metadata(wheel: Path, distribution: str) -> Any:
     sdist = _sdist_path(wheel, distribution)
     with tarfile.open(sdist, "r:gz") as archive:
