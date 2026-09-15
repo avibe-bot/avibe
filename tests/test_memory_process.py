@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 import json
 import os
 from pathlib import Path
@@ -14,11 +13,22 @@ from avibe_memory.process import (
     _cmdline_is_sidecar,
     _memory_child_environment,
     EverOSProcessSettings,
-    FakeEverOSProcess,
     FakeEverOSProcessFactory,
     ReleasedEverOSOrphanReconciler,
     legacy_sync_record_path,
 )
+
+
+class _TestReference:
+    def __init__(self, host, pid):
+        self.host, self.pid = host, pid
+        self.generation = host.children.get(pid)
+
+    def is_running(self):
+        return self.generation is not None and self.host.children.get(self.pid) is self.generation
+
+    def status(self):
+        return "running"
 
 
 class _ReleasedSyncHost:
@@ -34,6 +44,9 @@ class _ReleasedSyncHost:
         self.parent = parent
         self.signals: list[tuple[dict[int, float], int | None]] = []
 
+    def capture(self, pid: int):
+        return _TestReference(self, pid) if pid in self.children else None
+
     def inspect_identity(self, pid: int):
         return self.parent if pid == 99 else self.children.get(pid)
 
@@ -43,13 +56,13 @@ class _ReleasedSyncHost:
     def recorded_group_members(self, _group, *, role=None, **_kwargs):
         assert role == "cascade_sync"
         return {
-            pid: float(identity.stamp)
+            pid: self.capture(pid)
             for pid, identity in self.children.items()
             if identity.stamp is not None
         }, []
 
     def find_syncs(self, **_kwargs):
-        return dict(self.candidates)
+        return {pid: self.capture(pid) for pid in self.candidates}
 
     def find_sidecars(self, **_kwargs):
         return {}
@@ -62,13 +75,12 @@ class _ReleasedSyncHost:
             pid: created_at
             for pid, created_at in identities.items()
             if (
-                (identity := self.children.get(pid)) is not None
-                and identity.stamp == created_at
+created_at is not None and created_at.is_running()
             )
         }
 
     def signal(self, identities, _signum, *, process_group=None, **_kwargs) -> None:
-        self.signals.append((dict(identities), process_group))
+        self.signals.append(({pid: ref.generation.stamp for pid, ref in identities.items()}, process_group))
         for pid in identities:
             self.children.pop(pid, None)
 
@@ -89,18 +101,21 @@ class _SidecarHost:
         self.group_foreign = group_foreign or []
         self.signals: list[dict[int, float]] = []
 
+    def capture(self, pid: int):
+        return _TestReference(self, pid) if pid in self.children else None
+
     def inspect_identity(self, pid: int):
         return self.children.get(pid)
 
     def process_group(self, pid: int) -> int | None:
         return pid
 
-    def snapshot_tree(self, pid: int, _group: int | None):
+    def snapshot_tree(self, pid: int, _group: int | None, owned=None):
         identity = self.children.get(pid)
-        return {} if identity is None else {pid: float(identity.stamp)}
+        return dict(owned) if owned is not None else ({} if identity is None else {pid: self.capture(pid)})
 
     def recorded_group_members(self, _group, **_kwargs):
-        return dict(self.group_owned), list(self.group_foreign)
+        return {pid: self.capture(pid) for pid in self.group_owned}, list(self.group_foreign)
 
     def find_sidecars(self, **_kwargs):
         return {}
@@ -116,13 +131,12 @@ class _SidecarHost:
             pid: created_at
             for pid, created_at in identities.items()
             if (
-                (identity := self.children.get(pid)) is not None
-                and identity.stamp == created_at
+created_at is not None and created_at.is_running()
             )
         }
 
     def signal(self, identities, _signum, **_kwargs) -> None:
-        self.signals.append(dict(identities))
+        self.signals.append({pid: ref.generation.stamp for pid, ref in identities.items()})
         for pid in identities:
             self.children.pop(pid, None)
             self.group_owned.pop(pid, None)
@@ -255,39 +269,6 @@ def _released_sync_environment(
     }
 
 
-@pytest.mark.asyncio
-async def test_fake_sidecar_start_and_stop_expose_proven_lifecycle() -> None:
-    ready = 0
-
-    async def on_ready() -> None:
-        nonlocal ready
-        ready += 1
-
-    process = FakeEverOSProcess(
-        start_results=deque([True]),
-        on_ready=on_ready,
-    )
-
-    assert await process.start() is True
-    assert process.running is True
-    await process.stop()
-
-    assert process.running is False
-    assert process.stopped is True
-    assert ready == 1
-
-
-@pytest.mark.asyncio
-async def test_sidecar_stop_failure_retains_process_tree_proof() -> None:
-    process = FakeEverOSProcess(stop_failure=RuntimeError("still alive"))
-    assert await process.start() is True
-
-    with pytest.raises(RuntimeError, match="still alive"):
-        await process.stop()
-
-    assert process.retains_active_config is True
-
-
 def test_process_factory_keeps_secrets_out_of_repr(tmp_path: Path) -> None:
     factory = FakeEverOSProcessFactory()
     settings = EverOSProcessSettings(
@@ -353,43 +334,6 @@ async def test_recorded_sidecar_reaper_accepts_empty_owned_root(tmp_path: Path) 
     await reaper.reconcile_orphans()
 
     assert provider_root.is_dir()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("entrypoint", "legacy_record"),
-    [
-        ("avibe_memory.sidecar", False),
-        ("core.memory.sidecar", False),
-        ("core.memory.sidecar", True),
-    ],
-)
-async def test_sidecar_reaper_verifies_identity_before_signalling(
-    tmp_path: Path,
-    entrypoint: str,
-    legacy_record: bool,
-) -> None:
-    home = tmp_path / "home"
-    provider_root = home / "memory" / "everos-root"
-    provider_root.mkdir(mode=0o700, parents=True)
-    home.chmod(0o700)
-    (home / "memory").chmod(0o700)
-    path, record = _sidecar_record(home)
-    if legacy_record:
-        record.pop("role")
-        path.write_text(json.dumps(record), encoding="utf-8")
-    identity = _sidecar_identity(home, record, entrypoint=entrypoint)
-    host = _SidecarHost({451: identity})
-    reaper = ReleasedEverOSOrphanReconciler(
-        provider_root=provider_root,
-        effective_home=home,
-        _host=host,
-    )
-
-    await reaper.reconcile_orphans()
-
-    assert host.signals[0] == {451: 10.5}
-    assert not path.exists()
 
 
 @pytest.mark.parametrize(
@@ -613,3 +557,214 @@ def test_generated_ome_profile_strategies_follow_switch(tmp_path: Path, profile_
     assert strategies["extract_user_profile"]["enabled"] is profile_enabled
     assert strategies["reflect_episodes"]["enabled"] is False
     assert strategies["extract_foresight"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entrypoint", "legacy_record"),
+    [
+        ("avibe_memory.sidecar", False),
+        ("core.memory.sidecar", False),
+        ("core.memory.sidecar", True),
+    ],
+)
+async def test_orphan_record_survives_shift_until_classified_execution_exits(tmp_path, entrypoint, legacy_record):
+    """MEMORY-WAKE-204: classification, signals, wait and retirement share one reference."""
+    from dataclasses import replace
+
+    home = tmp_path / "home"
+    root = home / "memory" / "everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    record_path, record = _sidecar_record(home)
+    if legacy_record:
+        record.pop("role")
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+    identity = _sidecar_identity(home, record, entrypoint=entrypoint)
+
+    class ShiftHost(_SidecarHost):
+        shifted = False
+        rounds = 0
+        captured = None
+
+        def capture(self, pid):
+            self.captured = super().capture(pid)
+            return self.captured
+
+        def inspect_identity(self, pid):
+            value = super().inspect_identity(pid)
+            return replace(value, stamp=value.stamp + 1) if self.shifted and value else value
+
+        def signal(self, identities, signum, **kwargs):
+            self.rounds += 1
+            assert identities[451] is self.captured
+            self.shifted = True
+            if self.rounds == 2:
+                super().signal(identities, signum, **kwargs)
+
+        async def wait_for_exit(self, identities, timeout, **kwargs):
+            assert record_path.exists()
+            assert identities[451] is self.captured
+            if self.rounds == 1:
+                assert self.inspect_identity(451).stamp == 11.5
+                assert self.live(identities)
+                return False
+            assert not self.live(identities)
+            return True
+
+    host = ShiftHost({451: identity})
+    reaper = ReleasedEverOSOrphanReconciler(
+        provider_root=root, effective_home=home, _host=host
+    )
+    await reaper.reconcile_orphans()
+    assert host.rounds == 2
+    assert not record_path.exists()
+
+
+def test_record_retirement_rejects_a_late_claimed_survivor(tmp_path):
+    from avibe_memory.process import SidecarOwnership
+    home = tmp_path / "home"
+    record_path, record = _sidecar_record(home)
+    host = _SidecarHost(group_owned={452: 10.5})
+    ownership = SidecarOwnership(record_path=record_path,
+                                socket_path=Path(record["socket_path"]),
+                                provider_root=Path(record["provider_root"]), _host=host)
+    with pytest.raises(RuntimeError, match="did not exit"):
+        ownership.retire_if_group_is_clear(451, 451)
+    assert record_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_phase", ["before", "during"])
+async def test_orphan_exit_during_classification_still_reaps_surviving_group(tmp_path, exit_phase):
+    """A normal exit is absence, but its recorded group must still be cleaned."""
+    home = tmp_path / "home"
+    root = home / "memory/everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    path, record = _sidecar_record(home)
+    identity = _sidecar_identity(home, record)
+
+    class Host(_SidecarHost):
+        def capture(self, pid):
+            reference = super().capture(pid)
+            if pid == 451 and exit_phase == "before":
+                self.children.pop(pid, None)
+            return reference
+
+        def inspect_identity(self, pid):
+            if pid == 451 and exit_phase == "during":
+                self.children.pop(pid, None)
+            return super().inspect_identity(pid)
+
+    host = Host({451: identity, 452: identity}, group_owned={452: 10.5})
+    reaper = ReleasedEverOSOrphanReconciler(provider_root=root, effective_home=home, _host=host)
+    await reaper.reconcile_orphans()
+    assert host.signals == [{452: 10.5}]
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer", ["orphan", "pending_sync"])
+@pytest.mark.parametrize("exit_phase", ["before_group", "during_group"])
+async def test_reaper_never_targets_replacement_process_group(tmp_path, consumer, exit_phase):
+    """A recycled non-leader PID cannot redirect old ownership into its group."""
+    from avibe_memory.process import _confirmed_owned_processes
+
+    home = tmp_path / "home"
+    root = home / "memory/everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    if consumer == "orphan":
+        path, record = _sidecar_record(home)
+        identity = _sidecar_identity(home, record)
+    else:
+        path, record = _released_sync_record(home, state="pending")
+        identity = _ProcessIdentity(
+            stamp=10.5, cmdline=tuple(record["argv"]), uid=os.getuid(),
+            environment=_released_sync_environment(home, record), wall_create_time=10.5,
+        )
+    replacement = _ProcessIdentity(stamp=99, cmdline=("foreign",), uid=os.getuid())
+    base = _SidecarHost if consumer == "orphan" else _ReleasedSyncHost
+    group_reads = []
+    cleanup_groups = []
+
+    class Reference(_TestReference):
+        reads = 0
+
+        def is_running(self):
+            self.reads += 1
+            if exit_phase == "before_group" and self.reads == 3:
+                self.host.children[451] = replacement
+            return super().is_running()
+
+    class Host(base):
+        def capture(self, pid):
+            return Reference(self, pid)
+
+        def find_syncs(self, **kwargs):
+            return {451: self.capture(451)} if consumer == "pending_sync" else {}
+
+        def process_group(self, pid):
+            assert self.children[451] is identity, "looked up a known terminal PID"
+            group_reads.append(pid)
+            self.children[451] = replacement
+            return 999  # Replacement is not this unrelated group's leader.
+
+        def recorded_group_members(self, group, **kwargs):
+            assert group == 451
+            cleanup_groups.append(group)
+            return {}, []
+
+        def signal(self, identities, signum, *, process_group=None, **kwargs):
+            assert process_group == 451
+            assert not _confirmed_owned_processes(identities)
+
+        async def wait_for_exit(self, identities, timeout, *, process_group=None, **kwargs):
+            assert process_group == 451
+            return not self.live(identities)
+
+    host = Host({451: identity})
+    reaper = ReleasedEverOSOrphanReconciler(provider_root=root, effective_home=home, _host=host)
+    await reaper.reconcile_orphans()
+    assert group_reads == ([] if exit_phase == "before_group" else [451])
+    assert cleanup_groups and set(cleanup_groups) == {451}
+    assert host.children[451] is replacement
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_gone_unidentified_anchor_preserves_legacy_helper_classification(tmp_path):
+    home = tmp_path / "home"
+    root = home / "memory/everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    path, record = _sidecar_record(home)
+    path.write_text("unusable")
+    identity = _sidecar_identity(home, record)
+    seen_roles = []
+
+    class Host(_SidecarHost):
+        def find_sidecars(self, **kwargs):
+            reference = self.capture(451)
+            self.children.pop(451)
+            return {451: reference}
+
+        def process_group(self, pid):
+            pytest.fail("gone anchor must keep its original isolated group")
+
+        def recorded_group_members(self, group, *, role=None, **kwargs):
+            assert group == 451
+            seen_roles.append(role)
+            # Shipped unidentified recovery accepts a helper without a role tag.
+            return super().recorded_group_members(group) if role is None else ({}, [452])
+
+    host = Host({451: identity, 452: identity}, group_owned={452: 10.5})
+    reaper = ReleasedEverOSOrphanReconciler(provider_root=root, effective_home=home, _host=host)
+    await reaper.reconcile_orphans()
+    assert seen_roles and set(seen_roles) == {None}
+    assert not host.children and not path.exists()

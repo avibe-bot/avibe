@@ -426,6 +426,9 @@ async def test_retained_child_exhausts_recovery_without_dual_ownership(
     assert supervisor.status.state == "degraded"
 
     retained.stop_failure = None
+    assert await supervisor.wake(Path(sys.executable), _settings()) is True
+    assert supervisor.status.state == "running"
+    assert len(factory.supervised) == 2
     await supervisor.close()
 
 
