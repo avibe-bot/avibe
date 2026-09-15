@@ -633,3 +633,34 @@ def test_record_retirement_rejects_a_late_claimed_survivor(tmp_path):
     with pytest.raises(RuntimeError, match="did not exit"):
         ownership.retire_if_group_is_clear(451, 451)
     assert record_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_phase", ["before", "during"])
+async def test_orphan_exit_during_classification_still_reaps_surviving_group(tmp_path, exit_phase):
+    """A normal exit is absence, but its recorded group must still be cleaned."""
+    home = tmp_path / "home"
+    root = home / "memory/everos-root"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.parent.chmod(0o700)
+    path, record = _sidecar_record(home)
+    identity = _sidecar_identity(home, record)
+
+    class Host(_SidecarHost):
+        def capture(self, pid):
+            reference = super().capture(pid)
+            if pid == 451 and exit_phase == "before":
+                self.children.pop(pid, None)
+            return reference
+
+        def inspect_identity(self, pid):
+            if pid == 451 and exit_phase == "during":
+                self.children.pop(pid, None)
+            return super().inspect_identity(pid)
+
+    host = Host({451: identity, 452: identity}, group_owned={452: 10.5})
+    reaper = ReleasedEverOSOrphanReconciler(provider_root=root, effective_home=home, _host=host)
+    await reaper.reconcile_orphans()
+    assert host.signals == [{452: 10.5}]
+    assert not path.exists()

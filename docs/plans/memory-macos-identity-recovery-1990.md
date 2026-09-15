@@ -1,8 +1,7 @@
 # Memory subprocess lifecycle — issue 1990
 
 Owner-approved implementation summary, 2026-09-15. The full investigation and
-review remain outside this PR in the coordinating checkout. This summary does
-not change the approved product contract. No deployment or live restart is included.
+review remain outside this PR. This summary preserves the approved product contract.
 
 ## Problem and decision
 
@@ -29,7 +28,8 @@ marks the child down nor pauses claims or consumes restart attempts.
   Avibe's own group. Also signal retained children outside the original group.
 - TERM, bounded wait, KILL and final wait remain. Direct-child reaping alone is
   insufficient: known descendants and unknown group members block cleanup.
-  Late survivors block record retirement, socket removal and replacement.
+  Late helpers after leader exit enter each bounded round through existing
+  root/socket/role group classification; foreign members block replacement.
 - Existing locks, child-object identity and supervisor generations serialize
   stop, natural exit, Wake and close. No new lifecycle state machine is added.
 
@@ -52,8 +52,8 @@ startup** (Wake) once cleanup is possible. Wake preserves existing data.
 
 Scenario IDs: MEMORY-WAKE-001, MEMORY-WAKE-202, MEMORY-WAKE-204, MEMORY-WAKE-205.
 
-- Focused process, lifecycle, supervisor, Wake and provider regression: 202 passed.
-- Darwin arm64 psutil floor and resolved environments: 21 passed each, including
+- Focused process, lifecycle, supervisor, Wake and provider regression: 215 passed.
+- Darwin arm64 psutil floor and resolved environments: 32 passed each, including
   real processing/recall. Boot-time injection is test-only and checks its hook.
 - Native tests cover full scan cycles during a shift, probe capture before shift
   then timeout cleanup, a prohibited TCP listener, and leader/child/grandchild exit.
@@ -69,7 +69,9 @@ Scenario IDs: MEMORY-WAKE-001, MEMORY-WAKE-202, MEMORY-WAKE-204, MEMORY-WAKE-205
 Old-test mapping: health-only pinned Wake -> full MEMORY-WAKE-205 (required in CI);
 fake lifecycle self-tests -> supervisor callback/non-overlap consumers; generic
 orphan success -> shift/retirement case covering all three released record shapes;
-native orphan helper -> real consuming reaper. Rejection/listener cases remain.
+native orphan helper -> consuming reaper; duplicate capture-read dimension merged.
+PM follow-up: ordinary exits skip classification but retain surviving-group cleanup;
+missing record identity is explicit, and tautological legacy sync equality is removed.
 
 ```sh
 uv sync --no-install-project --group dev

@@ -452,7 +452,7 @@ class EverOSProcess:
                     _ProcessKind.PROCESSING_PROBE,
                     self._python,
                     cwd=self._effective_home,
-                    env=self._child_environment(),
+                    env=self._child_environment(role=_ProcessKind.PROCESSING_PROBE.value),
                     capture_stderr=True,
                 )
             except TypeError:
@@ -460,7 +460,7 @@ class EverOSProcess:
                     _ProcessKind.PROCESSING_PROBE,
                     self._python,
                     cwd=self._effective_home,
-                    env=self._child_environment(),
+                    env=self._child_environment(role=_ProcessKind.PROCESSING_PROBE.value),
                 )
         except (OSError, ValueError):
             logger.warning("EverOS processing probe could not start; branch=probe_spawn")
@@ -482,6 +482,7 @@ class EverOSProcess:
                     probe,
                     process_group=process_group,
                     owned_processes=owned_processes,
+                    role=_ProcessKind.PROCESSING_PROBE.value,
                 )
             except Exception:
                 logger.warning("EverOS processing probe cleanup failed")
@@ -498,6 +499,7 @@ class EverOSProcess:
                     probe,
                     process_group=process_group,
                     owned_processes=owned_processes,
+                    role=_ProcessKind.PROCESSING_PROBE.value,
                 )
             except Exception:
                 logger.warning("EverOS processing probe cleanup failed")
@@ -511,6 +513,7 @@ class EverOSProcess:
                 probe,
                 process_group=process_group,
                 owned_processes=owned_processes,
+                role=_ProcessKind.PROCESSING_PROBE.value,
             )
         except Exception:
             logger.warning("EverOS processing probe cleanup failed")
@@ -549,11 +552,12 @@ class EverOSProcess:
             self._owned_processes = {process.pid: self._host.capture(process.pid)}
             self._process_group = self._host.process_group(process.pid)
             _refresh_owned_process_tree(self._host, self._owned_processes, process.pid, self._process_group)
-            if _reference_state(self._owned_processes.get(process.pid), process.pid) is not True:
-                raise RuntimeError("could not establish sidecar process ownership")
+            identity = _inspect_captured_identity(self._host, process.pid, self._owned_processes[process.pid])
+            if identity is None:
+                raise RuntimeError("sidecar exited before ownership could be recorded")
             self._ownership.record_launch(
                 process.pid,
-                _inspect_captured_identity(self._host, process.pid, self._owned_processes[process.pid]).stamp,
+                identity.stamp,
                 self._process_group,
             )
             if spawn_interrupted:
@@ -911,6 +915,7 @@ class EverOSProcess:
         *,
         process_group: int | None,
         owned_processes: Mapping[int, psutil.Process | None] | None = None,
+        role: str = _SIDECAR_ROLE,
     ) -> None:
         await _terminate_owned_process_tree(
             self._host,
@@ -918,6 +923,7 @@ class EverOSProcess:
             process_group=process_group,
             owned_processes=owned_processes,
             stop_timeout_seconds=self._stop_timeout_seconds,
+            socket_path=self._socket_path, provider_root=self._provider_root, role=role,
         )
 
     async def _notify_ready(self) -> None:
@@ -1344,6 +1350,7 @@ class SidecarOwnership:
         terminated = await self._terminate_orphan_tree(
             pid,
             reference,
+            role=group_match_role,
         )
         if not terminated:
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self.record_path})")
@@ -1361,7 +1368,7 @@ class SidecarOwnership:
             await self._reap_unidentified_child()
             _remove_sidecar_record(self.record_path)
 
-    async def _terminate_orphan_tree(self, pid: int, reference: psutil.Process | None) -> bool:
+    async def _terminate_orphan_tree(self, pid: int, reference: psutil.Process | None, *, role: str | None = _SIDECAR_ROLE) -> bool:
         """Reap an orphan's whole tree, not just the pid the record names.
 
         The sidecar may have spawned helpers before the service died, and those
@@ -1378,13 +1385,16 @@ class SidecarOwnership:
             (signal.SIGTERM, self._stop_timeout_seconds),
             (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
         )
-        process_group = self._host.process_group(pid)
+        process_group = self._host.process_group(pid) or pid
         for signum, timeout_seconds in rounds:
             if _reference_state(identities.get(pid), pid) is True:
                 # Only rediscover while the recorded root is still the process we
                 # identified; a dead root's pid may already have been recycled.
                 process_group = self._host.process_group(pid)
-                _refresh_owned_process_tree(self._host, identities, pid, process_group)
+            _refresh_terminating_process_tree(
+                self._host, identities, pid, process_group,
+                socket_path=self._socket_path, provider_root=self._provider_root, role=role,
+            )
             self._host.signal(identities, signum, process_group=process_group)
             if await self._host.wait_for_exit(identities, timeout_seconds, process_group=process_group):
                 return True
@@ -1564,6 +1574,8 @@ class SidecarOwnership:
         for pid, reference in sorted(socket_anchors.items()):
             identity = _inspect_captured_identity(self._host, pid, reference)
             if identity is None:
+                if not await self._terminate_orphan_tree(pid, reference):
+                    raise RuntimeError("orphaned sidecar group did not exit")
                 continue
             if pid in root_only:
                 if (
@@ -1639,8 +1651,8 @@ class SidecarOwnership:
         Mirrors ``_terminate_orphan_tree``, minus the recorded root: whatever this
         run claimed is all there is to work from. A process group, when one is
         known, is both the rediscovery anchor and the only thing that permits a
-        group-wide signal; rediscovery runs only while an already-claimed process
-        is alive to prove the group has not emptied out from under the scan.
+        group-wide signal. Late members must pass contextual classification;
+        terminal retained references are never replaced by these discoveries.
         The result carries both the claimed-tree death proof and every unverifiable
         group member observed during those rediscovery rounds.
         """
@@ -1651,7 +1663,7 @@ class SidecarOwnership:
         )
         foreign: set[int] = set()
         for signum, timeout_seconds in rounds:
-            if process_group is not None and self._host.live(identities):
+            if process_group is not None:
                 discovered, round_foreign = self._host.recorded_group_members(
                     process_group,
                     socket_path=self._socket_path,
@@ -1762,14 +1774,13 @@ class _ReleasedSyncReaper:
                 raise RuntimeError("released pending sync ownership is ambiguous")
             pid, reference = next(iter(candidates.items()))
             identity = _inspect_captured_identity(self._host, pid, reference)
-            _validate_legacy_sync_identity(
-                identity,
-                record,
-                created_at=identity.stamp if identity is not None else None,
-                provider_root=self._provider_root,
-                require_argv=True,
-            )
+            if identity is not None:
+                _validate_legacy_sync_identity(
+                    identity, record, provider_root=self._provider_root, require_argv=True,
+                )
             group = self._host.process_group(pid)
+            if group is None and identity is None:
+                group = pid  # Released children launch an isolated group; classify survivors below.
             if group is None:
                 raise RuntimeError("released pending sync process group is unavailable")
             identities[pid] = reference
@@ -1796,7 +1807,6 @@ class _ReleasedSyncReaper:
                 _validate_legacy_sync_identity(
                     identity,
                     record,
-                    created_at=float(identity.stamp),
                     provider_root=self._provider_root,
                     require_argv=True,
                 )
@@ -1833,7 +1843,6 @@ class _ReleasedSyncReaper:
             _validate_legacy_sync_identity(
                 identity,
                 record,
-                created_at=identity.stamp if identity is not None else None,
                 provider_root=self._provider_root,
                 require_argv=pid == record.get("pid"),
             )
@@ -1853,8 +1862,7 @@ class _ReleasedSyncReaper:
             ),
         )
         for signum, timeout_seconds in rounds:
-            if self._host.live(identities):
-                self._merge_validated_group(record, group, identities)
+            self._merge_validated_group(record, group, identities)
             self._host.signal(identities, signum, process_group=group)
             if await self._host.wait_for_exit(identities, timeout_seconds, process_group=group):
                 return
@@ -1968,15 +1976,10 @@ def _validate_legacy_sync_identity(
     identity: _ProcessIdentity | None,
     record: Mapping[str, Any],
     *,
-    created_at: float,
     provider_root: Path,
     require_argv: bool,
 ) -> None:
-    if (
-        identity is None
-        or not _is_identity_stamp(created_at)
-        or identity.stamp != created_at
-    ):
+    if identity is None or not _is_identity_stamp(identity.stamp):
         raise RuntimeError("released sync identity is unavailable")
     if require_argv and identity.cmdline != tuple(record["argv"]):
         raise RuntimeError("released sync identity is unavailable")
@@ -2210,38 +2213,25 @@ async def _terminate_owned_process_tree(
     process_group: int | None,
     owned_processes: Mapping[int, psutil.Process | None] | None,
     stop_timeout_seconds: float,
+    socket_path: Path,
+    provider_root: Path,
+    role: str | None = _SIDECAR_ROLE,
 ) -> None:
     identities = owned_processes if isinstance(owned_processes, dict) else dict(owned_processes or {})
-    _refresh_owned_process_tree(host, identities, process.pid, process_group)
-    host.signal(
-        identities,
-        signal.SIGTERM,
-        process_group=process_group,
-        process=process,
+    rounds = (
+        (signal.SIGTERM, stop_timeout_seconds),
+        (getattr(signal, "SIGKILL", signal.SIGTERM), min(stop_timeout_seconds, 3.0)),
     )
-    if await host.wait_for_exit(
-        identities,
-        stop_timeout_seconds,
-        process_group=process_group,
-        process=process,
-    ):
-        return
-
-    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-    _refresh_owned_process_tree(host, identities, process.pid, process_group)
-    host.signal(
-        identities,
-        kill_signal,
-        process_group=process_group,
-        process=process,
-    )
-    if await host.wait_for_exit(
-        identities,
-        min(stop_timeout_seconds, 3.0),
-        process_group=process_group,
-        process=process,
-    ):
-        return
+    for signum, timeout_seconds in rounds:
+        _refresh_terminating_process_tree(
+            host, identities, process.pid, process_group,
+            socket_path=socket_path, provider_root=provider_root, role=role,
+        )
+        host.signal(identities, signum, process_group=process_group, process=process)
+        if await host.wait_for_exit(
+            identities, timeout_seconds, process_group=process_group, process=process,
+        ):
+            return
     raise RuntimeError("EverOS child process tree did not exit")
 
 
@@ -2612,7 +2602,7 @@ def _recorded_group_members(
     foreign: list[int] = []
     own_pid = os.getpid()
     for pid, reference in _snapshot_process_group(process_group).items():
-        if pid == own_pid:
+        if pid == own_pid or _reference_state(reference, pid) is False:
             continue
         if _reference_state(reference, pid) is True and _process_names_owned_runtime(
             pid,
@@ -2621,9 +2611,8 @@ def _recorded_group_members(
             role=role,
         ) and _reference_state(reference, pid) is True:
             claimed[pid] = reference
-        else:
-            # Either the identity is unreadable or nothing
-            # observable ties the process to this installation.
+        elif _reference_state(reference, pid) is not False:
+            # Either unreadable or not attributable; never signal it.
             foreign.append(pid)
     return claimed, sorted(foreign)
 
@@ -2993,7 +2982,11 @@ def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, psutil.Pr
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
     for observed in psutil.process_iter():
+        # process_iter may return a cached generation. Capture afresh for this
+        # discovery, then bracket classification without adopting old references.
         reference = _capture_process(observed.pid)
+        if reference is not None and _reference_state(reference, observed.pid) is False:
+            continue
         candidate = reference if reference is not None else observed
         if candidate.pid == own_pid:
             continue
@@ -3005,8 +2998,11 @@ def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, psutil.Pr
                 continue
         except psutil.Error:
             continue
-        if reference is not None and _reference_state(reference, candidate.pid) is not True:
-            raise RuntimeError("sidecar changed during ownership classification")
+        state = _reference_state(reference, candidate.pid)
+        if state is False:
+            continue
+        if state is None and reference is not None:
+            raise RuntimeError("sidecar unreadable during ownership classification")
         claimed[candidate.pid] = reference
     return claimed
 
@@ -3019,7 +3015,11 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, psutil.Pr
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
     for observed in psutil.process_iter():
+        # process_iter may return a cached generation. Capture afresh for this
+        # discovery, then bracket classification without adopting old references.
         reference = _capture_process(observed.pid)
+        if reference is not None and _reference_state(reference, observed.pid) is False:
+            continue
         candidate = reference if reference is not None else observed
         if candidate.pid == own_pid:
             continue
@@ -3050,8 +3050,11 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, psutil.Pr
         role = environment.get("AVIBE_MEMORY_CHILD_ROLE")
         if role not in (None, _SIDECAR_ROLE):
             continue
-        if reference is not None and _reference_state(reference, candidate.pid) is not True:
-            raise RuntimeError("sidecar changed during ownership classification")
+        state = _reference_state(reference, candidate.pid)
+        if state is False:
+            continue
+        if state is None and reference is not None:
+            raise RuntimeError("sidecar unreadable during ownership classification")
         claimed[candidate.pid] = reference
     return claimed
 
@@ -3069,7 +3072,11 @@ def _processes_syncing_owned_root(
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
     for observed in psutil.process_iter():
+        # process_iter may return a cached generation. Capture afresh for this
+        # discovery, then bracket classification without adopting old references.
         reference = _capture_process(observed.pid)
+        if reference is not None and _reference_state(reference, observed.pid) is False:
+            continue
         candidate = reference if reference is not None else observed
         if candidate.pid == own_pid:
             continue
@@ -3125,8 +3132,11 @@ def _processes_syncing_owned_root(
             or environment.get(_SYNC_NONCE_ENV) != nonce
         ):
             continue
-        if reference is not None and _reference_state(reference, candidate.pid) is not True:
-            raise RuntimeError("sync child changed during ownership classification")
+        state = _reference_state(reference, candidate.pid)
+        if state is False:
+            continue
+        if state is None and reference is not None:
+            raise RuntimeError("sync child unreadable during ownership classification")
         claimed[candidate.pid] = reference
     return claimed
 
@@ -3160,11 +3170,17 @@ def _inspect_captured_identity(
     pid: int,
     reference: psutil.Process | None,
 ) -> _ProcessIdentity | None:
-    if reference is not None and _reference_state(reference, pid) is not True:
-        raise RuntimeError("process changed or became unreadable before ownership classification")
+    state = _reference_state(reference, pid)
+    if state is False:
+        return None
+    if state is None:
+        raise RuntimeError("process unreadable before ownership classification")
     identity = host.inspect_identity(pid)
-    if identity is not None and _reference_state(reference, pid) is not True:
-        raise RuntimeError("process changed or became unreadable during ownership classification")
+    state = _reference_state(reference, pid)
+    if state is False:
+        return None
+    if state is None:
+        raise RuntimeError("process unreadable during ownership classification")
     return identity
 
 
@@ -3255,6 +3271,29 @@ def _refresh_owned_process_tree(
 ) -> None:
     discovered = host.snapshot_tree(process_id, process_group, identities)
     _merge_owned_processes(identities, discovered)
+
+
+def _refresh_terminating_process_tree(
+    host: _ProcessHost,
+    identities: dict[int, psutil.Process | None],
+    pid: int,
+    process_group: int | None,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+    role: str | None,
+) -> None:
+    _refresh_owned_process_tree(host, identities, pid, process_group)
+    if process_group is not None and _reference_state(identities.get(pid), pid) is False:
+        # A helper born after the last scan has no retained reference. Only the
+        # existing ownership classifier can attribute it after its leader exits.
+        claimed, _foreign = host.recorded_group_members(
+            process_group, socket_path=socket_path, provider_root=provider_root, role=role,
+        )
+        for member_pid, reference in claimed.items():
+            if member_pid != pid:
+                identities.setdefault(member_pid, reference)
+        # Foreign/unknown members remain visible to group signaling and wait proof.
 
 
 def _live_owned_processes(identities: Mapping[int, psutil.Process | None]) -> dict[int, psutil.Process | None]:

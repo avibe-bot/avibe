@@ -119,10 +119,9 @@ async def test_native_probe_timeout_during_shift(tmp_path, monkeypatch):
     assert host.child.returncode is not None
 
 
-@pytest.mark.parametrize("consumer", ["stop", "start_failure", "probe_timeout"])
-@pytest.mark.parametrize("transient_read", ["create_time", "is_running"])
+@pytest.mark.parametrize("consumer", ["stop", "start_failure", "record_exit", "probe_timeout"])
 async def test_capture_keeps_reference_through_transient_read_failure(
-    tmp_path, monkeypatch, consumer, transient_read,
+    tmp_path, monkeypatch, caplog, consumer,
 ):
     with tempfile.TemporaryDirectory(prefix="mc1990-", dir="/tmp") as temporary:
         tmp_path = Path(temporary).resolve()
@@ -144,11 +143,18 @@ async def test_capture_keeps_reference_through_transient_read_failure(
                 # Only the capture boundary loses visibility; it must not discard
                 # a successfully constructed reference because of an extra read.
                 with monkeypatch.context() as fault:
-                    fault.setattr(reference, transient_read, inaccessible)
+                    fault.setattr(reference, "create_time", inaccessible)
+                    fault.setattr(reference, "is_running", inaccessible)
                     fault.setattr(psutil, "Process", lambda target: reference)
                     captured = super().capture(pid)
                 assert captured is reference
                 return captured
+
+            def inspect_identity(self, pid):
+                if consumer == "record_exit":
+                    self.reference.terminate()
+                    return None
+                return super().inspect_identity(pid)
 
             def signal(self, identities, signum, **kwargs):
                 assert identities[self.child.pid] is self.reference
@@ -164,7 +170,7 @@ async def test_capture_keeps_reference_through_transient_read_failure(
             if consumer == "probe_timeout":
                 monkeypatch.setattr(module, "_processing_probe_timeout_seconds", lambda _: 0.1)
                 assert not await owner.processing_healthy()
-            elif consumer == "start_failure":
+            elif consumer in {"start_failure", "record_exit"}:
                 # Real start/record/failed-readiness cleanup, with a sleeping test child.
                 assert not await owner.start()
             else:
@@ -175,6 +181,9 @@ async def test_capture_keeps_reference_through_transient_read_failure(
             assert host.child.returncode is not None
             assert not host.reference.is_running()
             assert not owner.retains_active_config
+            if consumer == "record_exit":
+                assert "sidecar exited before ownership could be recorded" in caplog.text
+                assert "AttributeError" not in caplog.text
         finally:
             if hasattr(host, "child"):
                 await dispose(host.child)
@@ -366,7 +375,8 @@ async def test_unknown_group_and_retained_descendant_prevent_false_cleanup(monke
     assert await module._wait_for_identities_exit(owned, 0.1, 451)
 
 
-async def test_reused_member_cannot_be_readopted_from_group(monkeypatch):
+@pytest.mark.parametrize("leader_exited", [False, True])
+async def test_reused_member_cannot_be_readopted_from_group(monkeypatch, leader_exited):
     kernel = {}
     root = Generation(kernel, 451)
     old = Generation(kernel, 452)
@@ -374,7 +384,14 @@ async def test_reused_member_cannot_be_readopted_from_group(monkeypatch):
     replacement = Generation(kernel, 452)
     monkeypatch.setattr(module, "_snapshot_process_group", lambda group: {451: root, 452: replacement})
     monkeypatch.setattr(module, "_isolated_process_group", lambda pid: 451)
-    module._refresh_owned_process_tree(module._SystemProcessHost(), owned, 451, 451)
+    host = module._SystemProcessHost()
+    if leader_exited:
+        del kernel[451]
+        monkeypatch.setattr(host, "recorded_group_members", lambda *args, **kwargs: ({452: replacement}, []))
+    module._refresh_terminating_process_tree(
+        host, owned, 451, 451, socket_path=Path("/test/socket"),
+        provider_root=Path("/test/root"), role="sidecar",
+    )
     assert owned[452] is old
     assert not module._group_contains_only_confirmed_owned_processes(451, owned)
     module._signal_owned_processes(owned, signal.SIGTERM)
@@ -390,8 +407,7 @@ async def test_classifier_cannot_transfer_authority_between_generations():
             Generation(kernel, pid)
             return SimpleNamespace(stamp=1)
 
-    with pytest.raises(RuntimeError, match="classification"):
-        module._inspect_captured_identity(Host(), 451, old)
+    assert module._inspect_captured_identity(Host(), 451, old) is None
 
 
 async def test_successful_group_signal_also_reaches_escaped_retained_child(monkeypatch):
@@ -425,7 +441,8 @@ async def test_failed_stop_keeps_newly_discovered_references(monkeypatch):
 
     with pytest.raises(RuntimeError, match="did not exit"):
         await module._terminate_owned_process_tree(
-            Host(), SimpleNamespace(pid=451), process_group=None, owned_processes=owned, stop_timeout_seconds=0.1
+            Host(), SimpleNamespace(pid=451), process_group=None, owned_processes=owned, stop_timeout_seconds=0.1,
+            socket_path=Path("/test/socket"), provider_root=Path("/test/root"),
         )
     assert owned[452] is descendant
 
@@ -451,7 +468,8 @@ async def test_native_leader_exit_retains_child_and_grandchild(tmp_path):
         assert child.returncode == 0
         assert host.live(owned)
         await module._terminate_owned_process_tree(
-            host, child, process_group=group, owned_processes=owned, stop_timeout_seconds=1
+            host, child, process_group=group, owned_processes=owned, stop_timeout_seconds=1,
+            socket_path=tmp_path / "memory.sock", provider_root=tmp_path,
         )
         assert not host.live(owned)
     finally:
@@ -477,3 +495,160 @@ async def test_unreadable_discovered_sidecar_remains_unresolved(monkeypatch, tmp
     module._signal_owned_processes(found, signal.SIGTERM)
     with pytest.raises(RuntimeError, match="listeners"):
         module._SystemProcessHost().has_tcp_listener(found)
+
+
+@pytest.mark.parametrize(
+    ("consumer", "timing", "mismatch"),
+    [("stop", "before", None), ("stop", "term", None),
+     ("watch", "before", None), ("probe", "before", None),
+     ("probe", "term", None), ("orphan", "term", None),
+     ("stop", "before", "root"), ("stop", "before", "role"),
+     ("stop", "before", "unreadable")],
+)
+async def test_native_late_group_helper_is_classified_before_cleanup(
+    monkeypatch, consumer, timing, mismatch,
+):
+    """MEMORY-WAKE-204: unseen helper survives leader; context, not PGID, owns it."""
+    with tempfile.TemporaryDirectory(prefix="mlate-", dir="/tmp") as temporary:
+        home = Path(temporary).resolve()
+        root = home / "memory/everos-root"
+        root.mkdir(parents=True, mode=0o700)
+        root.parent.chmod(0o700)
+        package = home / "avibe_memory"
+        package.mkdir()
+        (package / "__init__.py").touch()
+        (package / "sidecar.py").write_text(
+            "import os,signal,subprocess,sys\n"
+            "def leave(*args):\n"
+            " env=dict(os.environ)\n"
+            f" if {mismatch == 'root'!r}: env['EVEROS_ROOT'] += '-foreign'\n"
+            f" if {mismatch == 'role'!r}: env['AVIBE_MEMORY_CHILD_ROLE'] = 'foreign'\n"
+            " p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],env=env,"
+            "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            " print(p.pid,flush=True)\n"
+            " sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM,leave)\n"
+            "print('ready',flush=True)\n"
+            "sys.stdin.readline()\n"
+            "leave()\n"
+        )
+        socket_path = home / "memory/.rt/everos.sock"
+        role = "processing_probe" if consumer == "probe" else "sidecar"
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "avibe_memory.sidecar", "--uds", str(socket_path),
+            cwd=home, start_new_session=True,
+            env={"HOME": str(home), "EVEROS_ROOT": str(root), "AVIBE_MEMORY_CHILD_ROLE": role},
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        )
+        assert await child.stdout.readline() == b"ready\n"
+        async def observe_helper():
+            line = await child.stdout.readline()
+            try:
+                return psutil.Process(int(line)) if line else None
+            except psutil.NoSuchProcess:
+                return None
+
+        helper_task = asyncio.create_task(observe_helper())
+        helper = None
+        host = module._SystemProcessHost()
+        owner = module.EverOSProcess(
+            sys.executable, effective_home=home, _host=host, settings=settings(),
+            provider_root_guard=lambda: None, stop_timeout_seconds=0.1,
+        )
+        owned = {child.pid: host.capture(child.pid)}
+        owner._process, owner._process_group, owner._owned_processes = child, child.pid, owned
+        owner._ownership.record_launch(child.pid, module._process_creation_stamp(owned[child.pid]), child.pid)
+        record_path = owner._ownership.record_path
+        try:
+            if consumer == "probe":
+                async def probe_spawn(*args, **kwargs):
+                    assert kwargs["env"]["AVIBE_MEMORY_CHILD_ROLE"] == role
+                    return child
+
+                monkeypatch.setattr(host, "spawn", probe_spawn)
+                monkeypatch.setattr(module, "_processing_probe_timeout_seconds", lambda _: 0.1)
+                # The probe's own capture/scan happens before release of this leader.
+                original_snapshot = host.snapshot_tree
+
+                def snapshot(*args, **kwargs):
+                    result = original_snapshot(*args, **kwargs)
+                    if timing == "before" and child.returncode is None:
+                        child.stdin.write(b"go\n")
+                    return result
+
+                monkeypatch.setattr(host, "snapshot_tree", snapshot)
+            elif timing == "before":
+                child.stdin.write(b"go\n")
+                await child.stdin.drain()
+                helper = await helper_task
+                await child.wait()
+                assert helper.pid not in owned
+                if mismatch == "unreadable":
+                    original_environment = module._disclosed_process_environment
+                    monkeypatch.setattr(
+                        module, "_disclosed_process_environment",
+                        lambda process: None if process.pid == helper.pid else original_environment(process),
+                    )
+            if mismatch:
+                with pytest.raises(RuntimeError, match="did not exit"):
+                    await owner.stop()
+                assert helper.is_running() and record_path.exists()
+                assert owner.retains_active_config
+            else:
+                if consumer == "probe":
+                    result = await owner.processing_healthy()
+                    assert result is (timing == "before")
+                elif consumer == "orphan":
+                    await owner._ownership.reap()
+                elif consumer == "watch":
+                    await owner._watch_child(child)
+                else:
+                    await owner.stop()
+                if helper is None:
+                    helper = await helper_task if child.returncode is None else None
+                assert child.returncode is not None
+                assert not module._snapshot_process_group(child.pid)
+                if consumer != "probe":
+                    assert not record_path.exists()
+                if consumer in {"stop", "watch"}:
+                    assert not owner.retains_active_config  # Replacement admission is clear.
+        finally:
+            await dispose(child)
+            helper = await asyncio.wait_for(helper_task, 2)
+            if helper is not None and module._reference_state(helper, helper.pid) is True:
+                helper.kill()
+
+
+@pytest.mark.parametrize("discovery", ["socket", "root", "sync"])
+async def test_discovery_skips_generation_gone_during_classification(monkeypatch, tmp_path, discovery):
+    kernel = {}
+    reference = Generation(kernel, 451)
+    socket_path = tmp_path / "memory.sock"
+    cmdline = [sys.executable, "-m", "avibe_memory.sidecar", "--uds", str(socket_path)]
+    if discovery == "sync":
+        cmdline = [sys.executable, "-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"]
+    reference.uids = lambda: SimpleNamespace(real=os.getuid())
+    reference.cmdline = lambda: cmdline
+    reference.create_time = lambda: 1.0
+
+    def environment():
+        kernel.clear()
+        return {"EVEROS_ROOT": str(tmp_path), "AVIBE_MEMORY_CHILD_ROLE": "cascade_sync" if discovery == "sync" else "sidecar", "AVIBE_MEMORY_SYNC_NONCE": "test"}
+
+    reference.environ = environment
+    if discovery == "socket":
+        def command():
+            kernel.clear()
+            return cmdline
+        reference.cmdline = command
+    monkeypatch.setattr(psutil, "process_iter", lambda: [reference])
+    monkeypatch.setattr(module, "_capture_process", lambda pid: reference)
+    monkeypatch.setattr(module, "_process_creation_stamp", lambda process: 1.0)
+    if discovery == "socket":
+        result = module._processes_serving_owned_socket(socket_path=socket_path)
+    elif discovery == "root":
+        result = module._processes_serving_owned_root(provider_root=tmp_path)
+    else:
+        result = module._processes_syncing_owned_root(provider_root=tmp_path, python=Path(sys.executable), nonce="test")
+    assert not kernel, "test must reach the classification race"
+    assert result == {}
