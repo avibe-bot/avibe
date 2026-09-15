@@ -156,6 +156,37 @@ def _write_minimal_wheel(directory: Path, distribution: str, version: str) -> Pa
     return wheel
 
 
+def _newer_decoy_version(version: Version) -> Version:
+    release = list(version.release)
+    release[-1] += 1
+    return Version(f"{version.epoch}!{'.'.join(map(str, release))}")
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("3.0.15rc11", "3.0.16"),
+        ("3.0.99rc1", "3.0.100"),
+        ("3.1.0", "3.1.1"),
+        ("4.0.0", "4.0.1"),
+        ("3.1.0.dev2", "3.1.1"),
+        ("3.1.0.post2", "3.1.1"),
+        ("3.1.0+local", "3.1.1"),
+        ("2!3.1.0rc1", "2!3.1.1"),
+        ("4", "5"),
+        ("4.1", "4.2"),
+        ("4.1.0.9", "4.1.0.10"),
+    ],
+)
+def test_decoy_is_a_newer_resolver_candidate_for_any_release(version: str, expected: str) -> None:
+    current = Version(version)
+    decoy = _newer_decoy_version(current)
+    assert decoy == Version(expected)
+    assert decoy > current
+    assert not decoy.is_prerelease
+    assert not SpecifierSet(f"=={current}").contains(decoy, prereleases=True)
+
+
 def _parent_site_packages() -> list[Path]:
     paths = [
         path
@@ -640,7 +671,7 @@ def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> 
     core_pyproject = _sdist_pyproject(core_wheel, "avibe_os")
     memory_pyproject = _sdist_pyproject(memory_wheel, "avibe_memory")
     core_version = Version(_sdist_metadata(core_wheel, "avibe_os")["Version"])
-    decoy_version = Version("3.0.99rc2")
+    decoy_version = _newer_decoy_version(core_version)
     assert decoy_version > core_version
 
     package_links = tmp_path / "package-links"
