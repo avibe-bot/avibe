@@ -400,8 +400,21 @@ jobs:
               raise SystemExit("avibe-memory wheel unexpectedly contains Memory Runtime archives")
           PY
 
+      - name: Checkout release automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
+          path: release-automation
+          sparse-checkout: |
+            scripts/github_release.py
+            tests/test_memory_distribution.py
+          sparse-checkout-cone-mode: false
+
       - name: Verify distribution package matrix
         run: |
+          # Use workflow-owned verification only AFTER building the tagged source.
+          # Keep its location so source comparisons still inspect that source.
+          cp release-automation/tests/test_memory_distribution.py tests/test_memory_distribution.py
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
           AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)" \
             pytest tests/test_memory_distribution.py -v
@@ -426,14 +439,6 @@ jobs:
             tests/e2e/test_install_command.py \
             tests/e2e/test_upgrade_command.py \
             -v
-
-      - name: Checkout release automation
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
-          path: release-automation
-          sparse-checkout: scripts/github_release.py
-          sparse-checkout-cone-mode: false
 
       - name: Upload GitHub release assets
         env:
