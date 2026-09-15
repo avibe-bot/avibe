@@ -3170,9 +3170,9 @@ def _inspect_captured_identity(
 
 def _capture_process(pid: int) -> psutil.Process | None:
     try:
-        reference = psutil.Process(pid)
-        reference.create_time()  # Require readable capture, never compare this display value.
-        return reference if reference.is_running() else None
+        # Retain the public reference even if later reads are temporarily denied.
+        # State and signal checks decide authority at their existing boundaries.
+        return psutil.Process(pid)
     except psutil.Error:
         return None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -16,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from avibe_memory.artifact import MemoryArtifactManager
+from avibe_memory.artifact import EVEROS_VERSION, MemoryArtifactManager
 from avibe_memory.types import CaptureAccepted, CaptureRequest, RecallPolicy
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 
@@ -102,6 +103,7 @@ async def test_real_wake_preserves_old_and_processes_new_input(monkeypatch, memo
         if os.environ.get("AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT") == "1":
             pytest.fail("pinned EverOS 1.2.3 runtime environment is required")
         pytest.skip("pinned EverOS 1.2.3 runtime environment is not installed")
+    assert importlib.metadata.version("everos") == EVEROS_VERSION
     monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(runtime_python))
     url, requests = lifecycle_provider
     config = MemoryConfig(

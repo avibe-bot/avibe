@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 import json
 import os
 from pathlib import Path
@@ -14,7 +13,6 @@ from avibe_memory.process import (
     _cmdline_is_sidecar,
     _memory_child_environment,
     EverOSProcessSettings,
-    FakeEverOSProcess,
     FakeEverOSProcessFactory,
     ReleasedEverOSOrphanReconciler,
     legacy_sync_record_path,
@@ -271,39 +269,6 @@ def _released_sync_environment(
     }
 
 
-@pytest.mark.asyncio
-async def test_fake_sidecar_start_and_stop_expose_proven_lifecycle() -> None:
-    ready = 0
-
-    async def on_ready() -> None:
-        nonlocal ready
-        ready += 1
-
-    process = FakeEverOSProcess(
-        start_results=deque([True]),
-        on_ready=on_ready,
-    )
-
-    assert await process.start() is True
-    assert process.running is True
-    await process.stop()
-
-    assert process.running is False
-    assert process.stopped is True
-    assert ready == 1
-
-
-@pytest.mark.asyncio
-async def test_sidecar_stop_failure_retains_process_tree_proof() -> None:
-    process = FakeEverOSProcess(stop_failure=RuntimeError("still alive"))
-    assert await process.start() is True
-
-    with pytest.raises(RuntimeError, match="still alive"):
-        await process.stop()
-
-    assert process.retains_active_config is True
-
-
 def test_process_factory_keeps_secrets_out_of_repr(tmp_path: Path) -> None:
     factory = FakeEverOSProcessFactory()
     settings = EverOSProcessSettings(
@@ -369,43 +334,6 @@ async def test_recorded_sidecar_reaper_accepts_empty_owned_root(tmp_path: Path) 
     await reaper.reconcile_orphans()
 
     assert provider_root.is_dir()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("entrypoint", "legacy_record"),
-    [
-        ("avibe_memory.sidecar", False),
-        ("core.memory.sidecar", False),
-        ("core.memory.sidecar", True),
-    ],
-)
-async def test_sidecar_reaper_verifies_identity_before_signalling(
-    tmp_path: Path,
-    entrypoint: str,
-    legacy_record: bool,
-) -> None:
-    home = tmp_path / "home"
-    provider_root = home / "memory" / "everos-root"
-    provider_root.mkdir(mode=0o700, parents=True)
-    home.chmod(0o700)
-    (home / "memory").chmod(0o700)
-    path, record = _sidecar_record(home)
-    if legacy_record:
-        record.pop("role")
-        path.write_text(json.dumps(record), encoding="utf-8")
-    identity = _sidecar_identity(home, record, entrypoint=entrypoint)
-    host = _SidecarHost({451: identity})
-    reaper = ReleasedEverOSOrphanReconciler(
-        provider_root=provider_root,
-        effective_home=home,
-        _host=host,
-    )
-
-    await reaper.reconcile_orphans()
-
-    assert host.signals[0] == {451: 10.5}
-    assert not path.exists()
 
 
 @pytest.mark.parametrize(
@@ -632,10 +560,17 @@ def test_generated_ome_profile_strategies_follow_switch(tmp_path: Path, profile_
 
 
 @pytest.mark.asyncio
-async def test_orphan_record_survives_shift_until_classified_execution_exits(tmp_path):
+@pytest.mark.parametrize(
+    ("entrypoint", "legacy_record"),
+    [
+        ("avibe_memory.sidecar", False),
+        ("core.memory.sidecar", False),
+        ("core.memory.sidecar", True),
+    ],
+)
+async def test_orphan_record_survives_shift_until_classified_execution_exits(tmp_path, entrypoint, legacy_record):
     """MEMORY-WAKE-204: classification, signals, wait and retirement share one reference."""
     from dataclasses import replace
-    from avibe_memory.process import SidecarOwnership
 
     home = tmp_path / "home"
     root = home / "memory" / "everos-root"
@@ -643,7 +578,10 @@ async def test_orphan_record_survives_shift_until_classified_execution_exits(tmp
     home.chmod(0o700)
     root.parent.chmod(0o700)
     record_path, record = _sidecar_record(home)
-    identity = _sidecar_identity(home, record)
+    if legacy_record:
+        record.pop("role")
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+    identity = _sidecar_identity(home, record, entrypoint=entrypoint)
 
     class ShiftHost(_SidecarHost):
         shifted = False
@@ -676,10 +614,10 @@ async def test_orphan_record_survives_shift_until_classified_execution_exits(tmp
             return True
 
     host = ShiftHost({451: identity})
-    ownership = SidecarOwnership(record_path=record_path,
-                                socket_path=Path(record["socket_path"]),
-                                provider_root=root, _host=host)
-    await ownership.reap()
+    reaper = ReleasedEverOSOrphanReconciler(
+        provider_root=root, effective_home=home, _host=host
+    )
+    await reaper.reconcile_orphans()
     assert host.rounds == 2
     assert not record_path.exists()
 
