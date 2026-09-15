@@ -124,13 +124,17 @@ jobs:
           cache: "npm"
 
       - name: Build Show Runtime bundle
-        shell: bash
+        # Keep the runner's native shell: Git Bash shadows Windows' tar.
         run: |
           npm ci
           npm run build
           npm run bundle:vibe-remote
           cp dist/vibe-show-runtime-node-*.tgz .
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
+
+      - name: Export Show Runtime router
+        shell: bash
+        run: |
           node --input-type=module <<'JS'
           import { mkdtemp, copyFile, rm } from "node:fs/promises"
           import { tmpdir } from "node:os"
