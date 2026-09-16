@@ -624,6 +624,18 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          # checkout can replace the runner-local annotated ref with its peeled
+          # commit. Read the exact origin object through FETCH_HEAD instead,
+          # without overwriting any local tag or remote-tracking refs.
+          git fetch --no-tags --refmap= origin "refs/tags/${TAG}"
+          TAG_OBJECT="$(git rev-parse FETCH_HEAD)"
+          if [ "$(git rev-parse "${TAG_OBJECT}^{commit}")" != "$SOURCE_SHA" ]; then
+            echo "Remote tag no longer matches the release notes source." >&2
+            exit 1
+          fi
+
           # Permissive form for DETECTING intent to be silent (tag annotation or
           # existing body may carry the marker bare or as a comment).
           MARKER_RE='(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none'
@@ -634,8 +646,12 @@ jobs:
           MARKER_COMMENT_RE='<!--[[:space:]]*(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none[[:space:]]*-->'
           has_marker="false"
 
-          # Source 1: the tag annotation (annotated-tag release flow).
-          TAG_MSG=$(git tag -l --format='%(contents)' "$TAG")
+          # Source 1: only an actual annotation, never a lightweight tag's
+          # commit message (which may merely discuss this marker).
+          TAG_MSG=""
+          if [ "$(git cat-file -t "$TAG_OBJECT")" = "tag" ]; then
+            TAG_MSG="$(git cat-file tag "$TAG_OBJECT" | sed '1,/^$/d')"
+          fi
           if echo "$TAG_MSG" | grep -qE "$MARKER_RE"; then
             echo "Silent update marker found in tag annotation."
             has_marker="true"
@@ -666,7 +682,6 @@ jobs:
             mv release.md.tmp release.md
           fi
 
-          SOURCE_SHA="$(git rev-parse "${TAG}^{commit}")"
           READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} run=${GITHUB_RUN_ID} -->"
           if ! grep -qF "$READY_MARKER" release.md; then
             printf '\n\n%s\n' "$READY_MARKER" >> release.md

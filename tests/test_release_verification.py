@@ -23,6 +23,116 @@ WORKFLOWS = (
 )
 
 
+@pytest.mark.parametrize(
+    ("annotation", "existing_body", "silent"),
+    [
+        ("说明\n<!-- avibe:update-notification=none -->", "", True),
+        ("vibe-remote:update-notification=none", "", True),
+        ("Ordinary annotated release", "", False),
+        (None, "", False),
+        (None, "<!-- vibe-remote:update-notification=none -->", True),
+        (None, "Document `avibe:update-notification=none` in prose.", False),
+    ],
+)
+@pytest.mark.parametrize("rewritten", [False, True])
+def test_notes_shell_reads_remote_annotation_not_checkout_ref(
+    tmp_path, annotation, existing_body, silent, rewritten,
+):
+    remote, workspace, env, tag, source, command = _notes_git_fixture(
+        tmp_path, annotation=annotation, existing_body=existing_body,
+    )
+    if rewritten:
+        _fixture_git(workspace, "update-ref", f"refs/tags/{tag}", source)
+    local_object = _fixture_git(workspace, "rev-parse", f"refs/tags/{tag}")
+    remote_object = _fixture_git(remote, "rev-parse", f"refs/tags/{tag}")
+    notes = workspace / "release.md"
+    notes.write_text("# Release 发布说明\n\nChanges and changes in Chinese.\n", encoding="utf-8")
+    for _ in range(2):
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+            cwd=workspace, env=env, capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    text = notes.read_text(encoding="utf-8")
+    for brand in ("avibe", "vibe-remote"):
+        assert text.count(f"<!-- {brand}:update-notification=none -->") == int(silent)
+    assert text.count(f"<!-- avibe:release-notes=ready source={source} run=42 -->") == 1
+    assert "# Release 发布说明" in text
+    assert _fixture_git(workspace, "rev-parse", f"refs/tags/{tag}") == local_object
+    assert _fixture_git(remote, "rev-parse", f"refs/tags/{tag}") == remote_object
+
+
+@pytest.mark.parametrize("failure", ["missing-tag", "source-mismatch"])
+def test_notes_shell_does_not_mutate_notes_when_remote_tag_cannot_be_bound(tmp_path, failure):
+    remote, workspace, env, tag, source, command = _notes_git_fixture(
+        tmp_path, annotation="<!-- avibe:update-notification=none -->",
+        existing_body="<!-- vibe-remote:update-notification=none -->",
+    )
+    _fixture_git(remote, "update-ref", "-d", f"refs/tags/{tag}")
+    if failure == "source-mismatch":
+        _fixture_git(remote, "commit", "--allow-empty", "-m", "Different release source")
+        _fixture_git(remote, "tag", "-a", tag, "-m", "Replacement annotation")
+    notes = workspace / "release.md"
+    before = b"# Untouched release notes\n"
+    notes.write_bytes(before)
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+        cwd=workspace, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert notes.read_bytes() == before
+    assert _fixture_git(workspace, "rev-parse", f"refs/tags/{tag}^{{commit}}") == source
+
+
+def _fixture_git(directory, *arguments):
+    return subprocess.run(
+        ["git", "-C", str(directory), "-c", "user.name=Release test",
+         "-c", "user.email=release-test@example.invalid", "-c", "commit.gpgsign=false",
+         "-c", "tag.gpgsign=false", *arguments],
+        check=True, capture_output=True, text=True, timeout=15,
+    ).stdout.strip()
+
+
+def _notes_git_fixture(tmp_path, *, annotation, existing_body):
+    remote = tmp_path / "remote 中文"
+    remote.mkdir()
+    _fixture_git(remote, "init")
+    # Lightweight commit-message prose is not an annotation. Annotated cases
+    # use an ordinary commit, reproducing checkout losing actual silent intent.
+    message = (
+        "Document avibe:update-notification=none without selecting that policy"
+        if annotation is None else "Release source"
+    )
+    _fixture_git(remote, "commit", "--allow-empty", "-m", message)
+    source = _fixture_git(remote, "rev-parse", "HEAD")
+    tag = "gh-v3.1.0rc1"
+    if annotation is None:
+        _fixture_git(remote, "tag", tag)
+    else:
+        _fixture_git(remote, "tag", "-a", tag, "-m", annotation)
+    workspace = tmp_path / "checkout 中文"
+    _fixture_git(tmp_path, "clone", "--no-hardlinks", str(remote), str(workspace))
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    gh = binaries / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        f"assert sys.argv[1:] == {['release', 'view', tag, '--repo', 'avibe-bot/avibe', '--json', 'body', '--jq', '.body']!r}\n"
+        f"print({existing_body!r})\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    env = {
+        **os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+        "TAG": tag, "GITHUB_RUN_ID": "42", "GITHUB_REPOSITORY": "avibe-bot/avibe",
+    }
+    command = _step(
+        _job("release_ai.yml", "release"),
+        "Preserve silent-update marker (tag annotation or existing release body)",
+    )["run"]
+    return remote, workspace, env, tag, source, command
+
+
 @pytest.mark.parametrize("failure", [None, "missing-wheel", "missing-sdist", "mismatch", "unpublished"])
 @pytest.mark.parametrize(
     ("tag", "version"),
