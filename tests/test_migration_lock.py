@@ -18,7 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from storage.lock import MigrationFileLock, MigrationLockTimeout, migration_lock_path_for
+from storage.lock import (
+    MigrationFileLock,
+    MigrationLockTimeout,
+    _try_lock,
+    migration_lock_path_for,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,6 +80,20 @@ def test_re_entrance_belongs_to_the_path_not_to_one_lock_object(tmp_path: Path) 
             assert _free_for_another_thread(lock_path) is False
         assert _free_for_another_thread(lock_path) is False
 
+    assert _free_for_another_thread(lock_path) is True
+
+
+def test_release_closes_an_adopted_locked_handle(tmp_path: Path) -> None:
+    lock_path = tmp_path / "migration.lock"
+    lock = MigrationFileLock(lock_path, timeout_seconds=0)
+    handle = open(lock_path, "a+", encoding="utf-8")
+    assert _try_lock(handle)
+    lock.adopt_locked_handle(handle)
+
+    assert _free_for_another_thread(lock_path) is False
+    lock.release()
+
+    assert handle.closed
     assert _free_for_another_thread(lock_path) is True
 
 

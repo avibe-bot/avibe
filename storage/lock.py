@@ -122,6 +122,23 @@ class MigrationFileLock:
         self._key = _state_key(self.lock_path)
         self._state: _PathLockState | None = None
         self._entries = 0
+        # A small number of security-sensitive callers open and validate the
+        # descriptor themselves before taking the advisory lock. They still
+        # need MigrationFileLock to own the unlock/close lifecycle afterward.
+        self._adopted_handle: IO[str] | None = None
+
+    def adopt_locked_handle(self, handle: IO[str]) -> None:
+        """Transfer an already-locked descriptor into this lock's ownership.
+
+        The caller remains responsible for acquiring and validating the OS
+        lock. Once adopted, ``release()`` performs the matching unlock and
+        closes the descriptor, just like a normal ``acquire()`` path.
+        """
+        if self._state is not None or self._entries:
+            raise RuntimeError("cannot adopt a handle while the lock is acquired")
+        if self._adopted_handle is not None:
+            raise RuntimeError("a locked handle is already adopted")
+        self._adopted_handle = handle
 
     def acquire(self) -> None:
         deadline = None if self.timeout_seconds is None else time.monotonic() + self.timeout_seconds
@@ -152,6 +169,10 @@ class MigrationFileLock:
     def release(self) -> None:
         state = self._state
         if state is None or self._entries == 0:
+            handle = self._adopted_handle
+            if handle is not None:
+                self._adopted_handle = None
+                _release_file_lock(handle)
             return
         self._entries -= 1
         if self._entries == 0:
