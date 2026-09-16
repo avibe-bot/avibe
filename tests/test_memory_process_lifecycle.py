@@ -71,6 +71,43 @@ async def read_child_line(child, description):
     return line
 
 
+async def wait_for_task_for_cleanup(task, timeout):
+    waiter = asyncio.create_task(asyncio.wait_for(asyncio.shield(task), timeout))
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            if waiter.cancelled():
+                return None, cancelled
+            cancelled = True
+            if not waiter.done():
+                continue
+            result = waiter.result()
+        return result, cancelled
+
+
+async def dispose_helper(helper):
+    if helper is None or module._reference_state(helper, helper.pid) is not True:
+        return
+    try:
+        helper.kill()
+        await asyncio.wait_for(
+            asyncio.to_thread(helper.wait, _CHILD_CLEANUP_TIMEOUT_SECONDS),
+            _CHILD_CLEANUP_TIMEOUT_SECONDS + 1,
+        )
+    except psutil.NoSuchProcess:
+        pass
+    except (asyncio.TimeoutError, psutil.TimeoutExpired) as exc:
+        raise AssertionError("test helper did not exit during cleanup") from exc
+
+
+async def dispose_captured_child(captured_child):
+    child = captured_child.get("process")
+    if child is not None:
+        await dispose(child)
+
+
 def native_test_python():
     current_cmdline = psutil.Process().cmdline()
     python_command = current_cmdline[0] if current_cmdline else sys.executable
@@ -565,7 +602,7 @@ async def test_unreadable_discovered_sidecar_remains_unresolved(monkeypatch, tmp
      ("stop", "before", "unreadable")],
 )
 async def test_native_late_group_helper_is_classified_before_cleanup(
-    monkeypatch, consumer, timing, mismatch,
+    monkeypatch, consumer, timing, mismatch, helper_report_delay=0.0,
 ):
     """MEMORY-WAKE-204: unseen helper survives leader; context, not PGID, owns it."""
     with tempfile.TemporaryDirectory(prefix="mlate-", dir="/tmp") as temporary:
@@ -588,6 +625,9 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
             f" if {mismatch == 'role'!r}: env['AVIBE_MEMORY_CHILD_ROLE'] = 'foreign'\n"
             " p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],env=env,"
             "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            " with open('helper-spawned.tmp','w') as marker: marker.write(str(p.pid))\n"
+            " os.replace('helper-spawned.tmp','helper-spawned')\n"
+            f" time.sleep({helper_report_delay!r})\n"
             " print(p.pid,flush=True)\n"
             " sys.exit(0)\n"
             "signal.signal(signal.SIGTERM,leave)\n"
@@ -662,7 +702,10 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
             elif timing == "before":
                 child.stdin.write(b"go\n")
                 await child.stdin.drain()
-                helper = await helper_task
+                helper = await asyncio.wait_for(
+                    asyncio.shield(helper_task),
+                    _CHILD_IO_TIMEOUT_SECONDS,
+                )
                 await asyncio.wait_for(child.wait(), _CHILD_IO_TIMEOUT_SECONDS)
                 assert helper.pid not in owned
                 if mismatch == "unreadable":
@@ -687,7 +730,10 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                 else:
                     await owner.stop()
                 if helper is None:
-                    helper = await asyncio.wait_for(helper_task, _CHILD_IO_TIMEOUT_SECONDS)
+                    helper = await asyncio.wait_for(
+                        asyncio.shield(helper_task),
+                        _CHILD_IO_TIMEOUT_SECONDS,
+                    )
                 assert child.returncode is not None
                 assert not module._snapshot_process_group(child.pid)
                 assert (home / "term-count").read_text() == "1"
@@ -696,31 +742,36 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                 if consumer in {"stop", "watch"}:
                     assert not owner.retains_active_config  # Replacement admission is clear.
         finally:
+            active_exception = sys.exc_info()[1]
+            cleanup_error = None
+            cleanup_cancelled = False
             try:
-                await dispose(child)
-            finally:
                 if helper_task is not None and helper is None:
                     try:
-                        helper = await asyncio.wait_for(
+                        helper, cleanup_cancelled = await wait_for_task_for_cleanup(
                             helper_task,
                             _CHILD_IO_TIMEOUT_SECONDS,
                         )
-                    except (asyncio.TimeoutError, AssertionError):
+                    finally:
                         if not helper_task.done():
                             helper_task.cancel()
                         await asyncio.gather(helper_task, return_exceptions=True)
-                if helper is not None and module._reference_state(helper, helper.pid) is True:
+            except BaseException as exc:
+                cleanup_error = exc
+            finally:
+                try:
+                    await dispose(child)
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
+                finally:
                     try:
-                        helper.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.to_thread(helper.wait, _CHILD_CLEANUP_TIMEOUT_SECONDS),
-                            _CHILD_CLEANUP_TIMEOUT_SECONDS,
-                        )
-                    except (psutil.NoSuchProcess, psutil.TimeoutExpired) as exc:
-                        raise AssertionError("test helper did not exit during cleanup") from exc
+                        await dispose_helper(helper)
+                    except BaseException as exc:
+                        cleanup_error = cleanup_error or exc
+            if cleanup_cancelled and active_exception is None:
+                raise asyncio.CancelledError
+            if active_exception is None and cleanup_error is not None:
+                raise cleanup_error
 
 
 @pytest.mark.parametrize("failure", ["error", "cancel"], ids=["failure", "cancellation"])
@@ -760,15 +811,103 @@ async def test_native_late_group_helper_cleanup_consumes_completed_observation(m
             assert module._reference_state(helper, helper.pid) is not True
     finally:
         for helper in captured_helpers:
-            if module._reference_state(helper, helper.pid) is True:
-                helper.kill()
-                try:
-                    await asyncio.wait_for(
-                        asyncio.to_thread(helper.wait, _CHILD_CLEANUP_TIMEOUT_SECONDS),
-                        _CHILD_CLEANUP_TIMEOUT_SECONDS,
-                    )
-                except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-                    pass
+            await dispose_helper(helper)
+
+
+async def wait_for_helper_marker(captured_child):
+    deadline = asyncio.get_running_loop().time() + _CHILD_IO_TIMEOUT_SECONDS
+    while asyncio.get_running_loop().time() < deadline:
+        home = captured_child.get("home")
+        if home is not None:
+            marker = home / "helper-spawned"
+            if marker.exists():
+                return psutil.Process(int(marker.read_text()))
+        await asyncio.sleep(0.005)
+    raise AssertionError("helper spawn marker did not appear")
+
+
+async def test_native_late_group_helper_cleanup_observes_spawned_helper_before_failure(monkeypatch):
+    captured_child = {}
+    captured_helpers = []
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def capture_spawn(*args, **kwargs):
+        child = await original_spawn(*args, **kwargs)
+        captured_child["process"] = child
+        captured_child["home"] = Path(kwargs["cwd"])
+        return child
+
+    async def fail_after_helper_spawn(self, *args, **kwargs):
+        captured_helpers.append(await wait_for_helper_marker(captured_child))
+        raise RuntimeError("review-injected failure after helper spawn")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    monkeypatch.setattr(module._SystemProcessHost, "wait_for_exit", fail_after_helper_spawn)
+    try:
+        with pytest.raises(RuntimeError, match="review-injected failure after helper spawn"):
+            await test_native_late_group_helper_is_classified_before_cleanup(
+                monkeypatch, "stop", "term", None, helper_report_delay=0.5,
+            )
+        assert captured_helpers
+        assert all(module._reference_state(helper, helper.pid) is not True for helper in captured_helpers)
+        assert captured_child["process"].returncode is not None
+    finally:
+        try:
+            await asyncio.wait_for(
+                dispose_captured_child(captured_child),
+                _CHILD_CLEANUP_TIMEOUT_SECONDS + 1,
+            )
+        finally:
+            for helper in captured_helpers:
+                await dispose_helper(helper)
+
+
+async def test_native_late_group_helper_cleanup_survives_pending_observation_cancellation(monkeypatch):
+    captured_child = {}
+    captured_helpers = []
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def capture_spawn(*args, **kwargs):
+        child = await original_spawn(*args, **kwargs)
+        captured_child["process"] = child
+        captured_child["home"] = Path(kwargs["cwd"])
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    target = asyncio.create_task(
+        test_native_late_group_helper_is_classified_before_cleanup(
+            monkeypatch, "stop", "before", None, helper_report_delay=0.5,
+        )
+    )
+    try:
+        captured_helpers.append(await wait_for_helper_marker(captured_child))
+        target.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                asyncio.shield(target),
+                _CHILD_CLEANUP_TIMEOUT_SECONDS + _CHILD_IO_TIMEOUT_SECONDS,
+            )
+        assert captured_helpers
+        assert all(module._reference_state(helper, helper.pid) is not True for helper in captured_helpers)
+        assert captured_child["process"].returncode is not None
+    finally:
+        if not target.done():
+            target.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(target),
+                _CHILD_CLEANUP_TIMEOUT_SECONDS + _CHILD_IO_TIMEOUT_SECONDS,
+            )
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        try:
+            await asyncio.wait_for(
+                dispose_captured_child(captured_child),
+                _CHILD_CLEANUP_TIMEOUT_SECONDS + 1,
+            )
+        finally:
+            for helper in captured_helpers:
+                await dispose_helper(helper)
 
 
 @pytest.mark.parametrize(
