@@ -715,6 +715,18 @@ class MemoryRuntime:
         except Exception:
             return False
 
+    def _active_artifact_identity(self) -> tuple[Path, str] | None:
+        """Snapshot the verified active binary, not the selected manifest."""
+
+        status = self._artifact_manager.status()
+        if status.get("installed") is not True or status.get("status") != "ready":
+            return None
+        python = self._artifact_manager.resolve_python()
+        fingerprint = self._artifact_manager.artifact_fingerprint()
+        if python is None or fingerprint is None:
+            return None
+        return python, fingerprint
+
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
         return self._module if self._module is not None else _UNAVAILABLE_MODULE
@@ -2182,7 +2194,7 @@ class MemoryRuntime:
         *,
         operation_lease_held: bool = False,
     ) -> dict[str, Any]:
-        """Validate the artifact and non-destructively wake the existing root."""
+        """Converge the selected artifact and non-destructively wake its root."""
 
         if self._closing:
             return {
@@ -2254,7 +2266,18 @@ class MemoryRuntime:
             artifact_admitted = await self._lifecycle_checkpoint(
                 run_blocking(self.artifact_admitted)
             )
-            if not artifact_admitted:
+            artifact_status = await self._lifecycle_checkpoint(
+                run_blocking(self._artifact_manager.status)
+            )
+            # Admission proves the old artifact is usable; it does not prove it
+            # matches this package's manifest. Startup uses this same Wake path,
+            # including when a release changes bytes without changing EverOS's
+            # version. Unknown/development manifests are not update authority.
+            manifest_changed = artifact_status.get("matches_manifest") is False
+            if not artifact_admitted or manifest_changed:
+                previous_artifact = await self._lifecycle_checkpoint(
+                    run_blocking(self._active_artifact_identity)
+                )
                 if self.available:
                     async with self._reconcile_lock, self.module.lifecycle():
                         self._require_lifecycle_work()
@@ -2283,6 +2306,23 @@ class MemoryRuntime:
                     self._install_artifact_with_lease()
                 )
                 if installed.get("ok") is not True:
+                    # The installer owns pointer rollback. Only resume the exact
+                    # verified artifact it left in place; never restore pointers
+                    # or erase data here. _wake_locked rechecks the old root and
+                    # actual native readiness, while dependency status retains
+                    # the failed update rather than claiming manifest currency.
+                    active_artifact = await self._lifecycle_checkpoint(
+                        run_blocking(self._active_artifact_identity)
+                    )
+                    if previous_artifact is not None and active_artifact == previous_artifact:
+                        logger.warning(
+                            "Memory artifact update failed; waking the retained artifact: %s",
+                            installed.get("reason") or "memory_runtime_install_failed",
+                        )
+                        async with self._reconcile_lock:
+                            self._require_lifecycle_work()
+                            result = await self._wake_locked()
+                        return {**result, "artifact_update": installed}
                     self._runtime_error = str(
                         installed.get("reason") or "memory_wake_failed"
                     )

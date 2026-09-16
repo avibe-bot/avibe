@@ -15,6 +15,7 @@ capabilities:
     observations: tests/scenarios/memory_runtime_install/observations.yaml
     scenario_tests:
       - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
+      - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py
     unit_or_contract_tests:
       - tests/test_memory_artifact_contract.py
       - tests/test_managed_runtime.py

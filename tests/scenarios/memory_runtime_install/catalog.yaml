@@ -4,6 +4,7 @@ capability:
   name: Memory Runtime artifact installation
   canonical_tests:
     - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
+    - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py
     - tests/test_memory_artifact_contract.py
     - tests/test_managed_runtime.py
     - tests/test_memory_runtime_release.py
@@ -47,5 +48,30 @@ scenarios:
       - tests/test_managed_runtime.py::test_memory_latest_install_failure_safely_ignores_malformed_or_older_state
       - tests/test_managed_runtime.py::test_memory_latest_install_failure_rejects_symlink_state
       - tests/test_managed_runtime.py::test_memory_reuse_clears_latest_install_failure
+  - id: MEMORY-RUNTIME-INSTALL-004
+    name: Enabled startup and Wake converge same-version changed native bytes or contracts
+    status: covered
+    kind: upgrade
+    layer: scenario
+    test: tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py::test_wake_converges_same_version_release_bytes_without_changing_user_state
+    given: An admitted old artifact and nonempty Unicode data root with Memory enabled
+    when: A new package selects a different archive or compatibility contract at the same EverOS version
+    then: Wake stops old execution, admits and activates the selected artifact, preserves data/config, and does not reinstall on the next Wake
+    related_tests:
+      - tests/test_memory_wake.py::test_unknown_or_current_manifest_does_not_install
+      - tests/test_memory_wake.py::test_manifest_switch_requires_proven_stop_and_keeps_direct_install_guard
+      - tests/test_memory_wake.py::test_cancelled_artifact_install_joins_before_releasing_lease
+  - id: MEMORY-RUNTIME-INSTALL-005
+    name: Failed automatic native cutover retains verified old availability and failure evidence
+    status: covered
+    kind: degradation
+    layer: scenario
+    test: tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py::test_failed_update_resumes_only_the_retained_admitted_artifact
+    given: A working artifact and nonempty provider root from the previous release
+    when: Download, digest validation, cold admission, activation, or root compatibility fails
+    then: Existing pointer/data remain intact, the exact admitted old runtime can resume, and update failure stays visible
+    related_tests:
+      - tests/test_memory_wake.py::test_update_failure_never_wakes_an_unverified_or_changed_artifact
 manual_evidence:
   - Install a normal wheel in a clean linux-arm64 Incus guest and consume the real published manifest and archive; verify the first Web install succeeds with Memory disabled, no model credentials, and no recovery intent.
+  - Upgrade a released core/companion pair with enabled Memory and existing real data; verify unattended native convergence and real search using the new published archive. Hermetic scenario execution substitutes the native process and provider.

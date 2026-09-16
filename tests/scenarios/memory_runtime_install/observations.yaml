@@ -10,3 +10,8 @@ observations:
     scenarios:
       - MEMORY-RUNTIME-INSTALL-003
     observation: Failed staging is always reclaimed while a bounded status/reason record survives process replacement; malformed, oversized, or linked state grants no status authority and a successful install or reuse clears the record.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-003
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-004
+      - MEMORY-RUNTIME-INSTALL-005
+    observation: A core/companion upgrade can leave a healthy same-version native artifact on earlier release bytes. Previous Wake tests equated admission with manifest currency and did not cross both real release selections. Wake now converges proven manifest mismatches under its existing operation lease without toggling persistent settings. Scenarios use actual archive integrity, pointer activation/rollback and nonempty Unicode root checks, with deterministic native/provider execution. Availability after a failed update is distinct from successful convergence; the failed attempt remains in dependency status and the Wake result.

@@ -447,8 +447,10 @@ async def test_repair_fenced_wake_reports_released_ownership_failure(
     assert status["reason"] == "memory_sidecar_unavailable"
 
 
+@pytest.mark.parametrize("consumer", ("install", "wake"))
 @pytest.mark.asyncio
 async def test_cancelled_artifact_install_joins_before_releasing_lease(
+    consumer: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
@@ -475,12 +477,19 @@ async def test_cancelled_artifact_install_joins_before_releasing_lease(
             lease_events.append("release")
 
     monkeypatch.setattr(runtime_module, "MemoryOperationLease", Lease)
+    artifact = BlockingArtifact(
+        python=Path(sys.executable),
+        status_payload={"installed": True, "status": "ready", "matches_manifest": False},
+    )
     runtime = memory_runtime_factory(
-        MemoryConfig(enabled=False),
-        artifact_manager=BlockingArtifact(),
+        _config() if consumer == "wake" else MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        process_factory=FakeEverOSProcessFactory(),
         effective_home=tmp_path,
     )
-    task = asyncio.create_task(runtime.install_artifact())
+    task = asyncio.create_task(
+        runtime.wake() if consumer == "wake" else runtime.install_artifact()
+    )
     assert await asyncio.to_thread(install_started.wait, 2)
 
     task.cancel()
@@ -492,6 +501,83 @@ async def test_cancelled_artifact_install_joins_before_releasing_lease(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert lease_events == ["acquire", "release"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", (None, True))
+async def test_unknown_or_current_manifest_does_not_install(
+    tmp_path, monkeypatch, memory_runtime_factory, mismatch,
+):
+    artifact = FakeMemoryArtifactManager(
+        python=Path(sys.executable),
+        status_payload={"installed": True, "status": "ready", "matches_manifest": mismatch},
+    )
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: FakeMemoryProvider())
+    runtime = memory_runtime_factory(
+        _config(), artifact_manager=artifact,
+        process_factory=FakeEverOSProcessFactory(), effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    assert artifact.ensure_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ("before", "after", "changed", "unidentified"))
+async def test_update_failure_never_wakes_an_unverified_or_changed_artifact(
+    tmp_path, monkeypatch, memory_runtime_factory, invalid,
+):
+    class FailedUpdate(FakeMemoryArtifactManager):
+        def ensure(self, *, force=False):
+            self.ensure_calls.append(force)
+            if invalid == "after":
+                self.python = None
+            elif invalid == "changed":
+                self.fingerprint = "different-artifact"
+            return {"ok": False, "reason": "memory_runtime_install_failed"}
+
+    artifact = FailedUpdate(
+        python=Path(sys.executable),
+        status_payload={
+            "installed": invalid != "before",
+            "status": "invalid" if invalid == "before" else "ready",
+            "matches_manifest": False,
+        },
+        fingerprint=None if invalid == "unidentified" else "old-admitted-artifact",
+    )
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: FakeMemoryProvider())
+    processes = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        _config(), artifact_manager=artifact, process_factory=processes, effective_home=tmp_path,
+    )
+
+    result = await runtime.wake()
+
+    assert result == {"ok": False, "state": "degraded", "error": "memory_runtime_install_failed"}
+    assert artifact.ensure_calls == [True]
+    assert processes.created == []
+
+
+@pytest.mark.asyncio
+async def test_manifest_switch_requires_proven_stop_and_keeps_direct_install_guard(
+    tmp_path, monkeypatch, memory_runtime_factory,
+):
+    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: FakeMemoryProvider())
+    processes = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        _config(), artifact_manager=artifact, process_factory=processes, effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    artifact.status_payload["matches_manifest"] = False
+    assert (await runtime.install_artifact())["reason"] == "memory_runtime_install_requires_stopped_memory"
+    child = processes.supervised[-1]
+    child.stop_failure = RuntimeError("fixture cannot prove process exit")
+    try:
+        result = await runtime.wake()
+        assert result["ok"] is False
+        assert artifact.ensure_calls == []
+    finally:
+        child.stop_failure = None
 
 
 @pytest.mark.asyncio
