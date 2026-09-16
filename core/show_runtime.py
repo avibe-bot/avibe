@@ -3702,26 +3702,27 @@ class ShowRuntimeManager:
                     yield unavailable
                     return
                 file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
-                file_lock._handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
+                handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
                 deadline = (
                     None
                     if timeout_seconds is None
                     else time.monotonic() + timeout_seconds
                 )
                 while True:
-                    file_lock._handle.seek(0)
-                    if storage_lock_try_lock(file_lock._handle):
-                        file_lock._handle.seek(0)
-                        file_lock._handle.truncate()
-                        file_lock._handle.write(str(os.getpid()))
-                        file_lock._handle.flush()
+                    handle.seek(0)
+                    if storage_lock_try_lock(handle):
+                        handle.seek(0)
+                        handle.truncate()
+                        handle.write(str(os.getpid()))
+                        handle.flush()
+                        file_lock.adopt_locked_handle(handle)
                         break
                     if deadline is not None and time.monotonic() >= deadline:
-                        file_lock._handle.close()
+                        handle.close()
                         yield busy
                         return
                     time.sleep(0.1)
-                if not self._guard_path_matches_fd(file_lock._handle.fileno()):
+                if not self._guard_path_matches_fd(handle.fileno()):
                     logger.warning(
                         "Show Runtime install guard path was replaced after lock acquisition; refusing",
                     )
