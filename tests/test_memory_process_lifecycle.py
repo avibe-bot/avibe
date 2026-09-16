@@ -723,7 +723,8 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                         raise AssertionError("test helper did not exit during cleanup") from exc
 
 
-async def test_native_late_group_helper_cleanup_consumes_completed_observation(monkeypatch):
+@pytest.mark.parametrize("failure", ["error", "cancel"], ids=["failure", "cancellation"])
+async def test_native_late_group_helper_cleanup_consumes_completed_observation(monkeypatch, failure):
     captured_helpers = []
     helper_reported = asyncio.Event()
     original_read_child_line = read_child_line
@@ -738,12 +739,19 @@ async def test_native_late_group_helper_cleanup_consumes_completed_observation(m
     async def fail_after_helper_report(self, *args, **kwargs):
         await asyncio.wait_for(helper_reported.wait(), _CHILD_IO_TIMEOUT_SECONDS)
         await asyncio.sleep(0.02)
+        if failure == "cancel":
+            raise asyncio.CancelledError
         raise RuntimeError("review-injected cleanup failure after helper PID output")
 
     monkeypatch.setattr(sys.modules[__name__], "read_child_line", capture_helper_line)
     monkeypatch.setattr(module._SystemProcessHost, "wait_for_exit", fail_after_helper_report)
     try:
-        with pytest.raises(RuntimeError, match="review-injected cleanup failure"):
+        expected = (
+            pytest.raises(asyncio.CancelledError)
+            if failure == "cancel"
+            else pytest.raises(RuntimeError, match="review-injected cleanup failure")
+        )
+        with expected:
             await test_native_late_group_helper_is_classified_before_cleanup(
                 monkeypatch, "stop", "term", None,
             )
@@ -767,10 +775,11 @@ async def test_native_late_group_helper_cleanup_consumes_completed_observation(m
     ("argv0", "resolved"),
     [
         ("python3", "/standalone/bin/python3"),
+        ("./python3", "/standalone/bin/python3"),
         ("/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python",
          "/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python"),
     ],
-    ids=["path-invoked", "framework"],
+    ids=["path-invoked", "relative-path", "framework"],
 )
 async def test_native_test_python_uses_absolute_runnable_interpreter(monkeypatch, argv0, resolved):
     monkeypatch.setattr(psutil, "Process", lambda: SimpleNamespace(cmdline=lambda: [argv0]))
@@ -778,6 +787,37 @@ async def test_native_test_python_uses_absolute_runnable_interpreter(monkeypatch
 
     assert native_test_python() == Path(resolved)
     assert native_test_python().is_absolute()
+
+
+async def test_native_late_group_helper_readiness_timeout_cleans_up_child(monkeypatch):
+    captured_children = []
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def capture_spawn(*args, **kwargs):
+        child = await original_spawn(*args, **kwargs)
+        captured_children.append(child)
+
+        async def hanging_readline():
+            await asyncio.sleep(60)
+
+        child.stdout.readline = hanging_readline
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_CHILD_IO_TIMEOUT_SECONDS",
+        0.05,
+    )
+    with pytest.raises(AssertionError, match="sidecar readiness did not produce output"):
+        await test_native_late_group_helper_is_classified_before_cleanup(
+            monkeypatch, "stop", "before", None,
+        )
+
+    assert captured_children
+    child = captured_children[0]
+    await asyncio.wait_for(child.wait(), _CHILD_CLEANUP_TIMEOUT_SECONDS)
+    assert child.returncode is not None
 
 
 @pytest.mark.parametrize("discovery", ["socket", "root", "sync"])
