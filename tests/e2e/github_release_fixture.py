@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import argparse
 from functools import partial
+import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import Distribution
+import json
 from pathlib import Path
 import ssl
 import subprocess
+import zipfile
 
 
-def create_certificate(directory: Path) -> tuple[Path, Path, Path]:
+def create_certificate(directory: Path, *, hostname: str = "github.com") -> tuple[Path, Path, Path]:
     """Create ephemeral test credentials, never a developer-machine trust entry."""
     directory.mkdir(parents=True, exist_ok=True)
     ca = directory / "ca.pem"
@@ -22,7 +26,7 @@ def create_certificate(directory: Path) -> tuple[Path, Path, Path]:
     key = directory / "server.key"
     extensions = directory / "server.ext"
     extensions.write_text(
-        "subjectAltName=DNS:github.com\nbasicConstraints=critical,CA:FALSE\n"
+        f"subjectAltName=DNS:{hostname}\nbasicConstraints=critical,CA:FALSE\n"
         "keyUsage=critical,digitalSignature,keyEncipherment\n"
         "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\n"
         "authorityKeyIdentifier=keyid,issuer\n",
@@ -34,7 +38,7 @@ def create_certificate(directory: Path) -> tuple[Path, Path, Path]:
          "-addext", "basicConstraints=critical,CA:TRUE",
          "-addext", "keyUsage=critical,keyCertSign,cRLSign",
          "-keyout", str(directory / "ca.key"), "-out", str(ca)],
-        ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=github.com",
+        ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", f"/CN={hostname}",
          "-keyout", str(key), "-out", str(directory / "server.csr")],
         ["x509", "-req", "-days", "2", "-in", str(directory / "server.csr"),
          "-CA", str(ca), "-CAkey", str(directory / "ca.key"), "-CAcreateserial",
@@ -45,19 +49,39 @@ def create_certificate(directory: Path) -> tuple[Path, Path, Path]:
     return ca, cert, key
 
 
-def verify_archive_origin(record: dict, url: str, sha256: str) -> None:
-    """Require exact provenance across both specified PEP610 hash encodings."""
-    assert record["url"] == url
-    archive = record["archive_info"]
-    hashes = archive.get("hashes")
-    legacy = archive.get("hash")
-    if hashes is not None:
-        assert hashes.get("sha256") == sha256
-        if legacy is not None:
-            algorithm, separator, digest = legacy.partition("=")
-            assert separator and hashes.get(algorithm) == digest
-    else:
-        assert legacy == f"sha256={sha256}"
+def verify_installed_companion(distribution: Distribution, wheel: Path, url: str) -> None:
+    """Verify exact origin AND installed bytes without requiring optional hashes."""
+    record = json.loads(distribution.read_text("direct_url.json"))
+    assert record["url"] == url, "Installed companion has a different origin"
+    archive = record.get("archive_info")
+    assert isinstance(archive, dict), "Wheel origin requires archive_info"
+    hashes = archive.get("hashes", {})
+    assert isinstance(hashes, dict), "archive_info.hashes must be a dictionary"
+    reported = dict(hashes)
+    if "hash" in archive:
+        assert isinstance(archive["hash"], str), "archive_info.hash must be a string"
+        algorithm, separator, digest = archive["hash"].partition("=")
+        assert separator and algorithm and digest, "Malformed legacy archive hash"
+        if "hashes" in archive:
+            assert hashes.get(algorithm) == digest, "Conflicting archive hashes"
+        reported[algorithm] = digest
+    contents = wheel.read_bytes()
+    for algorithm, digest in reported.items():
+        assert hashlib.new(algorithm, contents).hexdigest() == digest, "Wrong archive digest"
+
+    # PEP610 permits empty archive_info (uv emits it for an unhashed URL).
+    # Independently inspect what was installed, including code and metadata.
+    # RECORD is rewritten by installers to add their own generated files.
+    with zipfile.ZipFile(wheel) as source:
+        payload = [
+            entry.filename for entry in source.infolist()
+            if not entry.is_dir() and not entry.filename.endswith(".dist-info/RECORD")
+        ]
+        assert any(name.startswith("avibe_memory/") for name in payload), "Missing companion payload"
+        for name in payload:
+            installed = Path(distribution.locate_file(name))
+            assert installed.is_file(), f"Missing installed companion file: {name}"
+            assert installed.read_bytes() == source.read(name), f"Changed installed companion file: {name}"
 
 
 def make_server(root: Path, cert: Path, key: Path, *, port: int = 0, handler=None) -> ThreadingHTTPServer:

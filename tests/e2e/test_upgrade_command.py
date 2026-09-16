@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+from importlib.metadata import Distribution
 import json
 import os
 import shlex
@@ -15,11 +16,12 @@ import sys
 import tempfile
 import threading
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from tests.e2e.github_release_fixture import create_certificate, make_server, verify_archive_origin
+from tests.e2e.github_release_fixture import create_certificate, make_server, verify_installed_companion
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -197,30 +199,134 @@ def test_github_companion_supplier_uses_verified_https_outside_the_index(tmp_pat
         thread.join(timeout=5)
 
 
-@pytest.mark.parametrize(
-    "archive",
-    [{"hashes": {"sha256": "a" * 64}}, {"hash": "sha256=" + "a" * 64},
-     {"hashes": {"sha256": "a" * 64}, "hash": "sha256=" + "a" * 64}],
-)
-def test_companion_origin_accepts_both_pep610_hash_representations(archive):
-    verify_archive_origin({"url": "https://github.com/exact.whl", "archive_info": archive},
-                          "https://github.com/exact.whl", "a" * 64)
+@pytest.fixture(scope="module")
+def provenance_wheel(tmp_path_factory):
+    return _build_test_wheel(
+        tmp_path_factory.mktemp("companion-provenance"), TEST_RELEASE_VERSION,
+        project=REPO_ROOT / "packaging" / "avibe-memory", distribution="avibe_memory",
+    )
 
 
-@pytest.mark.parametrize(
-    ("url", "archive"),
-    [("https://wrong.example/exact.whl", {"hash": "sha256=" + "a" * 64}),
-     ("https://github.com/exact.whl", {}),
-     ("https://github.com/exact.whl", {"hashes": {}}),
-     ("https://github.com/exact.whl", {"hash": "sha256=" + "b" * 64}),
-     ("https://github.com/exact.whl", {"hashes": {"sha256": "b" * 64}}),
-     ("https://github.com/exact.whl", {"hashes": {"sha256": "a" * 64}, "hash": "sha256=" + "b" * 64}),
-     ("https://github.com/exact.whl", {"hashes": {}, "hash": "sha256=" + "a" * 64})],
-)
-def test_companion_origin_rejects_missing_wrong_or_conflicting_hashes(url, archive):
+@pytest.fixture
+def installed_companion(tmp_path, provenance_wheel):
+    site = tmp_path / "installed 中文"
+    with zipfile.ZipFile(provenance_wheel) as archive:
+        archive.extractall(site)
+    metadata = next(site.glob("*.dist-info"))
+    return Distribution.at(metadata), metadata / "direct_url.json"
+
+
+@pytest.mark.parametrize("encoding", ["absent", "empty", "hashes", "legacy", "both", "sha512"])
+def test_installed_companion_checks_bytes_with_optional_pep610_hashes(
+    provenance_wheel, installed_companion, encoding,
+):
+    distribution, origin_path = installed_companion
+    original = provenance_wheel.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    archive = {
+        "absent": {}, "empty": {"hashes": {}}, "hashes": {"hashes": {"sha256": digest}},
+        "legacy": {"hash": f"sha256={digest}"},
+        "both": {"hashes": {"sha256": digest}, "hash": f"sha256={digest}"},
+        "sha512": {"hashes": {"sha512": hashlib.sha512(original).hexdigest()}},
+    }[encoding]
+    url = "https://github.com/exact.whl"
+    origin_path.write_text(json.dumps({"url": url, "archive_info": archive}))
+    verify_installed_companion(distribution, provenance_wheel, url)
+    assert provenance_wheel.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure", [
+    "wrong-url", "missing-archive", "invalid-archive", "invalid-hashes", "invalid-legacy",
+    "wrong-hash", "conflicting-hash", "missing-reciprocal-hash",
+])
+def test_installed_companion_rejects_wrong_or_malformed_provenance(
+    provenance_wheel, installed_companion, failure,
+):
+    distribution, origin_path = installed_companion
+    digest = hashlib.sha256(provenance_wheel.read_bytes()).hexdigest()
+    url = "https://github.com/exact.whl"
+    record = {"url": url, "archive_info": {}}
+    if failure == "wrong-url":
+        record["url"] = "https://wrong.example/exact.whl"
+    elif failure == "missing-archive":
+        del record["archive_info"]
+    else:
+        record["archive_info"] = {
+            "invalid-archive": None, "invalid-hashes": {"hashes": None},
+            "invalid-legacy": {"hash": None}, "wrong-hash": {"hashes": {"sha256": "bad"}},
+            "conflicting-hash": {"hashes": {"sha256": digest}, "hash": "sha256=bad"},
+            "missing-reciprocal-hash": {"hashes": {}, "hash": f"sha256={digest}"},
+        }[failure]
+    origin_path.write_text(json.dumps(record))
     with pytest.raises(AssertionError):
-        verify_archive_origin({"url": url, "archive_info": archive},
-                              "https://github.com/exact.whl", "a" * 64)
+        verify_installed_companion(distribution, provenance_wheel, url)
+
+
+@pytest.mark.parametrize("changed", [True, False], ids=["changed", "missing"])
+@pytest.mark.parametrize("member", [
+    "avibe_memory/__init__.py", "vibe/memory_runtime_manifest.json",
+    f"avibe_memory-{TEST_RELEASE_VERSION}.dist-info/METADATA",
+])
+def test_installed_companion_rejects_different_payload_even_without_archive_hash(
+    provenance_wheel, installed_companion, changed, member,
+):
+    distribution, origin_path = installed_companion
+    url = "https://github.com/exact.whl"
+    origin_path.write_text(json.dumps({"url": url, "archive_info": {}}))
+    original = provenance_wheel.read_bytes()
+    installed = Path(distribution.locate_file(member))
+    if changed:
+        installed.write_bytes(b"changed bytes")
+    else:
+        installed.unlink()
+    with pytest.raises(AssertionError, match="installed companion file"):
+        verify_installed_companion(distribution, provenance_wheel, url)
+    assert provenance_wheel.read_bytes() == original
+
+
+@pytest.mark.parametrize("installer", ["pip", "uv"])
+def test_real_installer_provenance_and_payload_from_https(
+    tmp_path, provenance_wheel, installer,
+):
+    ca, cert, key = create_certificate(tmp_path / "TLS 中文", hostname="localhost")
+    server = make_server(provenance_wheel.parent, cert, key)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        environment = tmp_path / "isolated env 中文"
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(environment)],
+            check=True, capture_output=True, timeout=60,
+        )
+        python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        url = f"https://localhost:{server.server_port}/{provenance_wheel.name}"
+        env = {**os.environ, "SSL_CERT_FILE": str(ca), "PIP_CERT": str(ca),
+               "UV_NATIVE_TLS": "true", "NO_PROXY": "localhost,127.0.0.1",
+               "no_proxy": "localhost,127.0.0.1"}
+        if installer == "uv":
+            uv = shutil.which("uv")
+            assert uv, "The regression job must supply uv"
+            command = [uv, "pip", "install", "--python", str(python), "--no-cache"]
+        else:
+            command = [str(python), "-m", "pip", "install", "--no-cache-dir"]
+        result = subprocess.run(
+            [*command, "--no-deps", "--no-index", url], env=env,
+            capture_output=True, text=True, timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        verification = (
+            "from importlib.metadata import distribution; from pathlib import Path; from runpy import run_path; "
+            f"verify=run_path({str(REPO_ROOT / 'tests/e2e/github_release_fixture.py')!r})['verify_installed_companion']; "
+            f"verify(distribution('avibe-memory'), Path({str(provenance_wheel)!r}), {url!r})"
+        )
+        result = subprocess.run(
+            [str(python), "-c", verification], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _build_test_wheel(
@@ -408,11 +514,10 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
         shutil.move(memory_wheel_path, memory_asset)
         create_certificate(fixtures_dir / "tls")
         verify_memory_origin = (
-            "import json; from importlib.metadata import distribution; from runpy import run_path; "
-            "record=json.loads(distribution('avibe-memory').read_text('direct_url.json')); "
-            "verify=run_path('/work/tests/e2e/github_release_fixture.py')['verify_archive_origin']; "
-            f"verify(record, 'https://github.com{MEMORY_RELEASE_PATH}', "
-            f"'{hashlib.sha256(memory_asset.read_bytes()).hexdigest()}')"
+            "from importlib.metadata import distribution; from pathlib import Path; from runpy import run_path; "
+            "verify=run_path('/work/tests/e2e/github_release_fixture.py')['verify_installed_companion']; "
+            f"verify(distribution('avibe-memory'), Path('/fixtures/github{MEMORY_RELEASE_PATH}'), "
+            f"'https://github.com{MEMORY_RELEASE_PATH}')"
         )
 
         memory_payload = {
