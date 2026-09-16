@@ -311,3 +311,17 @@ observations:
       the handoff before any backend started. The binding transaction must atomically
       adopt the freshly reserved Session only for create_per_run rows; a Run already
       bound to another Session must remain a hard refusal.
+  - id: HFR-OBS-026
+    date: 2026-09-16
+    source: issue 1995 and isolated file/SQLite shared-reader reproduction
+    result: confirmed
+    detail: >-
+      maybe_reload acknowledges cache freshness, not scheduler reconciliation.
+      An existing Watch can refresh the shared mirror before the scheduler scans,
+      leaving an enabled new Watch in every snapshot but never scheduled. Repeated
+      scans cannot recover when their reload result is used as the admission gate.
+      HFR-485 exercises real stores and worker-task ownership across both scheduler
+      paths; only external waiter execution is replaced by a blocking coroutine.
+      Prior reload and single-flight tests did not connect that reader ordering to
+      actual scheduling. Always reconciling the captured snapshot retains existing
+      worker identity and avoids adding a second change-acknowledgement mechanism.

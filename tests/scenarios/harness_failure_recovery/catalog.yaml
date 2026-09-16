@@ -4382,6 +4382,16 @@ scenarios:
     # refused for a merely backlogged predecessor leaves its registration alone.
     # An edit that keeps the definition recurring still runs, at its refreshed value.
     test: tests/test_scheduled_tasks.py::test_hfr_484_in_flight_cron_fire_cannot_spend_a_replacement_one_shot
+  - id: HFR-485
+    name: Watch scheduling survives another reader consuming the store reload
+    status: covered
+    kind: concurrency
+    layer: scenario
+    backend: shared
+    # File and SQLite stores, both scheduler paths, and changes before or after
+    # snapshot capture must converge without a resume or another definition write.
+    # Unchanged snapshots retain worker identity; consumed disables still stop it.
+    test: tests/test_watches.py::test_hfr_485_watch_reconciles_after_another_reader_consumes_reload
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

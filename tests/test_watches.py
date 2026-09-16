@@ -2486,7 +2486,6 @@ def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: 
     )
     service._running = True
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = False
 
     async def _run() -> None:
@@ -2502,7 +2501,7 @@ def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: 
     asyncio.run(_run())
 
     assert store.reloads > 0
-    assert store.lists == 0
+    assert store.lists == store.reloads
     assert runtime_store.writes == 0
 
 
@@ -2591,7 +2590,8 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
 
     asyncio.run(_run())
 
-    assert events == [("terminate", 4321), ("reconcile", None)]
+    assert events[0] == ("terminate", 4321)
+    assert events[1:] and all(event == ("reconcile", None) for event in events[1:])
 
 
 def test_managed_watch_service_start_does_not_reap_reused_pid(
@@ -2635,7 +2635,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
 
     asyncio.run(_run())
 
-    assert reconciles == 1
+    assert reconciles >= 1
     assert watch.id not in service._recovery_blocked_watch_ids
 
 
@@ -2808,7 +2808,7 @@ def test_managed_watch_service_start_ignores_dead_recorded_pid(
 
     asyncio.run(_run())
 
-    assert reconciles == 1
+    assert reconciles >= 1
 
 
 def test_managed_watch_service_start_reaps_group_after_leader_exit(
@@ -2851,7 +2851,8 @@ def test_managed_watch_service_start_reaps_group_after_leader_exit(
 
     asyncio.run(_run())
 
-    assert events == ["terminate-group", "reconcile"]
+    assert events[0] == "terminate-group"
+    assert events[1:] and all(event == "reconcile" for event in events[1:])
 
 
 def test_managed_watch_service_does_not_reap_unverified_group_after_leader_exit(
@@ -3054,6 +3055,152 @@ def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("backend", ["file", "sqlite"])
+@pytest.mark.parametrize("ordering", ["before_scan", "after_scan", "legacy"])
+def test_hfr_485_watch_reconciles_after_another_reader_consumes_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    ordering: str,
+) -> None:
+    """Issue #1995: a refreshed mirror is not an acknowledged scheduling change."""
+    monkeypatch.setattr(watches_module, "_publish_watch_definitions_updated", lambda: None)
+    monkeypatch.setattr(watches_module, "WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+    reader = ManagedWatchStore(tmp_path / "watches.json")
+    writer = ManagedWatchStore(tmp_path / "watches.json")
+    sqlite_stores = []
+    if backend == "sqlite":
+        for store in (reader, writer):
+            store._sqlite = SQLiteBackgroundTaskStore(tmp_path / "isolated.sqlite")
+            sqlite_stores.append(store._sqlite)
+            store.load()
+    reader.maybe_reload()
+    assert reader.maybe_reload() is False
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=reader,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    started: list[str] = []
+    runtime_writes: list[dict] = []
+    write_runtime = service.runtime_store.write
+
+    def record_runtime_write(payload: dict) -> None:
+        runtime_writes.append(payload)
+        write_runtime(payload)
+
+    monkeypatch.setattr(service.runtime_store, "write", record_runtime_write)
+
+    async def _run() -> None:
+        new_started = asyncio.Event()
+        release_workers = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+
+        async def worker(watch_id: str) -> None:
+            started.append(watch_id)
+            if watch_id == "new-watch":
+                new_started.set()
+            try:
+                await release_workers.wait()
+            finally:
+                if watch_id == "new-watch":
+                    cleanup_started.set()
+                    await finish_cleanup.wait()
+
+        monkeypatch.setattr(service, "_run_watch", worker)
+
+        async def scan():
+            items, _ = await asyncio.to_thread(
+                handler.scan, limit=1, occupied=frozenset(), cursor=None,
+            )
+            return items[0]
+
+        service._running = True
+        legacy_task = None
+        try:
+            writer.upsert_watch(watches_module.ManagedWatch(
+                id="existing-watch", name="Existing", session_key="",
+            ))
+            assert await handler.process(await scan()) is True
+            await asyncio.sleep(0)
+            assert started == ["existing-watch"]
+            original_task = service._active_tasks["existing-watch"]
+
+            # Also cover a definition arriving after scan captured its old snapshot.
+            stale_item = await scan() if ordering == "after_scan" else None
+            writer.upsert_watch(watches_module.ManagedWatch(
+                id="new-watch", name="新 Watch", session_key="",
+            ))
+            assert await service._watch_store_call_async(
+                "existing-watch", "reload before follow-up fence", reader.maybe_reload,
+            ) is True
+            assert reader.get_watch("new-watch") is not None
+            assert reader.maybe_reload() is False
+
+            if ordering == "legacy":
+                legacy_task = asyncio.create_task(service._watch_store())
+            else:
+                if stale_item is not None:
+                    assert await handler.process(stale_item) is True
+                current = await scan()
+                assert {watch.id for watch in current.observation["watches"]} == {
+                    "existing-watch", "new-watch",
+                }
+                assert await handler.process(current) is True
+            await asyncio.wait_for(new_started.wait(), timeout=1)
+
+            writes_before_idle = len(runtime_writes)
+            for _ in range(3):
+                assert await handler.process(await scan()) is True
+            await asyncio.sleep(0)
+            assert started == ["existing-watch", "new-watch"]
+            assert service._active_tasks["existing-watch"] is original_task
+            assert len(runtime_writes) == writes_before_idle
+
+            # A consumed disabling change must still retire the existing owner.
+            writer.set_enabled("new-watch", False)
+            assert await service._watch_store_call_async(
+                "existing-watch", "reload", reader.maybe_reload,
+            ) is True
+            new_task = service._active_tasks["new-watch"]
+            assert await handler.process(await scan()) is True
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            writes_before_cleanup = len(runtime_writes)
+            for _ in range(3):
+                assert await handler.process(await scan()) is True
+            assert not new_task.done()
+            assert len(runtime_writes) == writes_before_cleanup
+            finish_cleanup.set()
+            await asyncio.gather(new_task, return_exceptions=True)
+            assert new_task.cancelled()
+            assert service._active_tasks["existing-watch"] is original_task
+            writer.set_enabled("new-watch", True)
+            new_started.clear()
+            assert await handler.process(await scan()) is True
+            await asyncio.wait_for(new_started.wait(), timeout=1)
+            assert started == ["existing-watch", "new-watch", "new-watch"]
+            assert service._active_tasks["new-watch"] is not new_task
+        finally:
+            service._running = False
+            finish_cleanup.set()
+            pending = list(service._active_tasks.values())
+            if legacy_task is not None:
+                pending.append(legacy_task)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        for store in sqlite_stores:
+            store.close()
+
+
 def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3066,7 +3213,6 @@ def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = True
     reload_calls = 0
     persist_entered = asyncio.Event()
@@ -3125,7 +3271,6 @@ def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
     token = object()
     service._runtime_work_token = token  # type: ignore[assignment]
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = False
     service._recovery_blocked_watch_ids.add("watch-a")
     handler = _ManagedWatchRuntimeWorkHandler(service)
@@ -3134,7 +3279,6 @@ def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
         {
             "recovery": _StaleWorkerRecovery(True),
             "unblocked": (),
-            "changed": False,
             "watches": (),
             "store_error": None,
             "fused": False,
@@ -3167,7 +3311,6 @@ def test_hfr_179_pending_watch_recovery_uses_watch_lane_cadence(
         {
             "recovery": _StaleWorkerRecovery(False),
             "unblocked": (),
-            "changed": False,
             "watches": (),
             "store_error": None,
             "fused": False,
@@ -3191,7 +3334,6 @@ def test_hfr_179_watch_store_fuse_stops_generation_reads_and_retries(
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = False
     reads = 0
 
@@ -3252,7 +3394,6 @@ def test_watch_runtime_state_persistence_failure_rearms_maintenance(
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = True
 
     async def _persist_but_remain_dirty() -> None:
@@ -3265,7 +3406,6 @@ def test_watch_runtime_state_persistence_failure_rearms_maintenance(
         {
             "recovery": _StaleWorkerRecovery(True),
             "unblocked": (),
-            "changed": False,
             "watches": (),
         },
         rearm_after_process=False,
