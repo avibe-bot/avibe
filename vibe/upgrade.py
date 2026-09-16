@@ -1184,12 +1184,12 @@ def get_current_uv_tool_dir(python_executable: str | None = None) -> str | None:
 
 
 def _names_a_published_release(version: str) -> bool:
-    """Whether an index could serve `version`, as opposed to it naming this tree.
+    """Whether the version alone can identify a release for an index install.
 
-    A development build's version describes the tree it was built from rather
-    than anything published: PEP 440 spells that as a `dev` segment, a local
-    segment (`+<sha>`), or both, and the regression builder emits exactly that
-    shape.
+    Without an explicit release origin, dev/local versions may describe only
+    the source tree; the regression builder emits that shape. A matching
+    GitHub wheel origin is stronger evidence for a published dev release and
+    is checked separately by the release-pair verifier.
 
     Asking the property instead of listing the strings is what stops the next
     unlisted shape from costing the same attempt. Unparseable reads as
@@ -1249,6 +1249,8 @@ def _memory_target_version(package_spec: str, target_version: str | None) -> str
             _, version = parse_sdist_filename(filename)
         except InvalidSdistFilename:
             return None
+    if _release_asset_pair(str(version), artifact) is not None:
+        return str(version)
     return _published_version(str(version))
 
 
@@ -1294,9 +1296,12 @@ def _release_asset_pair(version: str, origin: str | None) -> tuple[str, str] | N
     if not origin:
         return None
     try:
-        normalized = str(Version(version))
+        parsed_version = Version(version)
     except InvalidVersion:
         return None
+    if parsed_version.local is not None:
+        return None
+    normalized = str(parsed_version)
     prefix = f"{RELEASE_DOWNLOAD_BASE_URL}/"
     if not origin.startswith(prefix):
         return None
@@ -1309,7 +1314,11 @@ def _release_asset_pair(version: str, origin: str | None) -> tuple[str, str] | N
     if not tag.startswith(("v", "gh-v")):
         return None
     tag_version = tag.removeprefix("gh-").removeprefix("v")
-    if _published_version(tag_version) != normalized:
+    try:
+        normalized_tag_version = str(Version(tag_version))
+    except InvalidVersion:
+        return None
+    if normalized_tag_version != normalized:
         return None
     if asset != f"{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl":
         return None
@@ -1328,18 +1337,18 @@ def memory_release_spec(version: str, core_spec: str) -> str:
     Other artifact origins cannot redirect the companion to an untrusted host.
     """
 
-    normalized = _published_version(version)
-    if normalized is None:
-        raise ValueError("A Memory install requires a published target release version")
     try:
         requirement = Requirement(core_spec)
     except InvalidRequirement:
         origin = core_spec
     else:
         origin = requirement.url
-    pair = _release_asset_pair(normalized, origin)
+    pair = _release_asset_pair(version, origin)
     if pair:
         return pair[1]
+    normalized = _published_version(version)
+    if normalized is None:
+        raise ValueError("A Memory install requires a published target release version")
     return (
         f"{RELEASE_DOWNLOAD_BASE_URL}/v{normalized}/"
         f"{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl"

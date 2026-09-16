@@ -8818,7 +8818,9 @@ def _published_running_version() -> str | None:
         version = Version(__version__)
     except InvalidVersion:
         return None
-    if version.is_devrelease or version.local is not None:
+    if version.local is not None:
+        return None
+    if version.is_devrelease and release_asset_specs(str(version)) is None:
         return None
     return str(version)
 

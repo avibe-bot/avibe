@@ -26,6 +26,10 @@ or restart local Avibe.
   An exact core wheel from this repository's GitHub Release selects its same
   tag, including `gh-v` previews. Forward upgrades derive this from their
   target artifact, never the currently installed preview's origin.
+  A published dev wheel also requires that exact matching GitHub origin;
+  a dev version alone cannot identify a published index/local build. The same
+  origin verifier governs forward targets, exact repairs and startup admission.
+  Local-version and source-build guards remain unchanged.
 - Every install/preflight command uses the explicit companion source. Missing
   assets fail before activating a new installation; there is no PyPI fallback
   for Memory, new updater, rollback protocol, or runtime preparation.
