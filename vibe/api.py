@@ -8818,8 +8818,10 @@ def _published_running_version() -> str | None:
         version = Version(__version__)
     except InvalidVersion:
         return None
-    if version.is_devrelease or version.local is not None:
+    if version.local is not None:
         return None
+    # Official index releases include dev versions. Source deployment is
+    # rejected independently by readiness; a dev suffix is not provenance.
     return str(version)
 
 
@@ -9795,12 +9797,9 @@ def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
             if restart_only:
                 result = {"ok": True}
             else:
-                # A GitHub-only release publishes its pair as release assets and
-                # nothing to an index, so pinning it by name would resolve
-                # against a PyPI that never served this version and spend an
-                # attempt on an install that cannot succeed. This asks where
-                # core actually came from; an index install answers `None` and
-                # keeps its pins.
+                # Preserve an exact GitHub core origin (including previews).
+                # Otherwise core keeps its index pin and the planner selects
+                # Memory from that version's official GitHub Release.
                 asset_specs = release_asset_specs(current_version)
                 plan = build_upgrade_plan(
                     version=current_version,

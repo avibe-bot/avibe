@@ -2,6 +2,10 @@
 
 > Status: implemented (scenario MEMORY-INDEP-027)
 >
+> Historical implementation record. The origin-aware preview behavior remains;
+> the official PyPI companion assumptions below are superseded by
+> [Memory as a GitHub Release companion](memory-github-distribution.md).
+>
 > Scope: a `gh-v*` preview install or preview-to-preview upgrade is one
 > copyable `uv tool install` command for the core wheel; the Memory companion
 > converges automatically afterward. No CLI surface changes. The official

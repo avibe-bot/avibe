@@ -11,12 +11,16 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from runpy import run_path
 from typing import Any, Sequence
 from urllib.parse import quote
 
 
 NOTES_READY_MARKER_PREFIX = "<!-- avibe:release-notes=ready source="
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
+package_version_from_release_tag = run_path(
+    str(Path(__file__).with_name("release_package_version.py"))
+)["package_version_from_release_tag"]
 
 
 class ReleaseError(RuntimeError):
@@ -122,6 +126,15 @@ def _notes_arguments(*, notes: str | None, notes_file: Path | None) -> list[str]
     raise ReleaseError("Release notes or a release notes file is required")
 
 
+def _validate_publication_tag(tag: str) -> None:
+    # This module is workflow-owned, even when a dispatch builds older tagged
+    # sources. An old producer must not bypass the current publication policy.
+    try:
+        package_version_from_release_tag(tag)
+    except ValueError as exc:
+        raise ReleaseError(str(exc)) from exc
+
+
 def ensure_draft(
     *,
     repo: str,
@@ -130,6 +143,7 @@ def ensure_draft(
     notes: str | None,
     notes_file: Path | None,
 ) -> ReleaseState:
+    _validate_publication_tag(tag)
     existing = get_release(repo, tag)
     if existing is not None:
         return existing
@@ -273,6 +287,7 @@ def finalize_release(
     prerelease: bool,
     latest: str,
 ) -> ReleaseState:
+    _validate_publication_tag(tag)
     if get_release(repo, tag) is None:
         raise ReleaseError(f"Cannot finalize missing GitHub Release {tag}")
 

@@ -3361,21 +3361,40 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
     )
 
 
+@pytest.mark.parametrize("tag,direct", [
+    (f"v{REPAIR_VERSION}", False),
+    ("v3.2.0a1", False),
+    ("v3.2.0b1", False),
+    ("v3.2.0rc1", False),
+    ("v3.2.0.dev0", False),
+    ("v3.2.0.dev1", False),
+    ("v3.2.0.post1", False),
+    (f"gh-v{REPAIR_VERSION}", True),
+    ("gh-v3.2.0.dev1", True),
+    ("gh-v03.02.00dev01", True),
+    ("v3.2.0.dev1", True),
+])
 def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
-    monkeypatch,
+    monkeypatch, tmp_path, tag, direct,
 ) -> None:
-    """MEMORY-INDEP-027: a core-only preview install converges from its own release.
+    """A core-only install converges from the corresponding GitHub Release.
 
-    A `gh-v*` release publishes the wheel pair as release assets and nothing to
-    an index, so this builds the real plan rather than a recorded call: what
-    matters is the command an installer would actually run.
+    MEMORY-INDEP-027 retains its preview-origin coverage. The PyPI-core case
+    additionally verifies the same consuming startup path without a direct URL.
     """
 
-    current_version = REPAIR_VERSION
+    from scripts.release_package_version import package_version_from_release_tag
+
+    current_version = package_version_from_release_tag(tag)
+    release = f"https://github.com/avibe-bot/avibe/releases/download/{tag}/"
+    origin = f"{release}avibe_os-{current_version}-py3-none-any.whl" if direct else None
     calls: dict[str, object] = {}
-    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: RELEASE_CORE_URL)
-    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
-    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
+    monkeypatch.setattr("vibe.__version__", current_version)
+    monkeypatch.setattr(api, "_load_memory_requirement", lambda: api._MemoryRequirementProjection(True, "required"))
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: api._MemoryPackageMetadata(0, None))
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: tmp_path / "repair.json")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
     monkeypatch.setattr(api, "restart_is_pending", lambda: False)
@@ -3403,7 +3422,7 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     assert result["ok"] is True
     assert result["restarting"] is True
     plan = calls["plan"]
-    release = f"https://github.com/avibe-bot/avibe/releases/download/gh-v{current_version}/"
+    core_spec = origin or f"{api.PACKAGE_NAME}=={current_version}"
     commands = [
         command
         for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command)
@@ -3411,12 +3430,43 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     ]
     assert len(commands) >= 2, "the repair resolves the pair before it installs it"
     for command in commands:
-        assert f"{release}avibe_os-{current_version}-py3-none-any.whl" in command
+        assert core_spec in command
         assert f"avibe-memory @ {release}avibe_memory-{current_version}-py3-none-any.whl" in command
-        # An index pin here is the bug: PyPI never served this version, so the
-        # install fails and spends one of the bounded repair attempts.
-        assert f"{api.PACKAGE_NAME}=={current_version}" not in command
+        # Memory never falls back to an index, even when core uses one.
         assert f"{api.MEMORY_PACKAGE_NAME}=={current_version}" not in command
+
+
+@pytest.mark.parametrize("version,origin,build_kind", [
+    ("3.2.0.dev1+local", None, "package"),
+    ("3.2.0+local", None, "package"),
+    ("invalid", None, "package"),
+    ("3.2.0.dev1", None, "source"),
+    ("3.2.0", None, "source"),
+    ("3.2.0.dev1+local", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev1+local/avibe_os-3.2.0.dev1+local-py3-none-any.whl", "package"),
+    ("3.2.0.dev1", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1-py3-none-any.whl", "source"),
+])
+def test_local_or_source_build_cannot_enter_memory_repair(
+    monkeypatch, tmp_path, version, origin, build_kind,
+):
+    monkeypatch.setattr("vibe.__version__", version)
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _: origin)
+    monkeypatch.setattr(api, "_load_memory_requirement", lambda: api._MemoryRequirementProjection(True, "required"))
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: api._MemoryPackageMetadata(0, None))
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    if build_kind == "source":
+        # An unreadable source marker must never become a package install.
+        monkeypatch.setenv("VIBE_BUILD_METADATA_PATH", str(tmp_path / "missing-source.json"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", Mock(side_effect=ImportError("missing")))
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    build = Mock(side_effect=AssertionError("operator-only build must not plan an install"))
+    monkeypatch.setattr(api, "build_upgrade_plan", build)
+    result = api._prepare_memory_package_job(automatic=True)
+    assert result["ok"] is False
+    assert result["action_class"] == "operator_only"
+    assert result["reason"] == (
+        "memory_package_source_build" if build_kind == "source" else "memory_package_unpublished_build"
+    )
+    build.assert_not_called()
 
 
 def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_scheduled(

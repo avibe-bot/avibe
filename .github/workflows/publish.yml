@@ -407,6 +407,7 @@ jobs:
           path: release-automation
           sparse-checkout: |
             scripts/github_release.py
+            scripts/release_package_version.py
             tests/test_memory_distribution.py
           sparse-checkout-cone-mode: false
 
@@ -445,6 +446,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ needs.resolve-tag.outputs.tag }}"
           python release-automation/scripts/github_release.py ensure-draft \
             --repo "$GITHUB_REPOSITORY" \
@@ -452,35 +454,46 @@ jobs:
             --title "$TAG" \
             --notes "Release assets for $TAG."
 
-          # Runtime archives + manifests are IMMUTABLE per tag and must NOT be
-          # re-clobbered. Builds are normalized and pinned, but the wheel published
-          # to PyPI is itself immutable. Replacing any hosted runtime byte after that
-          # point would desync the wheel's manifest and break integrity checks.
-          #
-          # Verify immutability BEFORE mutating ANY release asset (including dist/*), so a
-          # mismatch fails the job without having already replaced the wheel/sdist. Upload
-          # each runtime asset only if absent; if it already exists, require byte-identity.
+          # All artifacts are immutable per tag, including the GitHub-only
+          # companion. Compare every existing byte BEFORE uploading anything.
           existing="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           tmp="$(mktemp -d)"
+          trap 'rm -r -- "$tmp"' EXIT
           runtime_to_upload=()
+          package_to_upload=()
+          package_paths=(
+            dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
+            dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz
+          )
+          # The existing v3.0.x shim remains part of those releases only.
+          for path in dist/vibe_remote-*.whl dist/vibe_remote-*.tar.gz; do
+            if [ -e "$path" ]; then package_paths+=("$path"); fi
+          done
           for path in \
             runtime-artifacts/vibe-show-runtime-node-*.tgz \
             runtime-artifacts/show-runtime-manifest.json \
             runtime-artifacts/memory-runtime-*.tar.gz \
-            runtime-artifacts/memory-runtime-manifest.json; do
+            runtime-artifacts/memory-runtime-manifest.json \
+            "${package_paths[@]}"; do
+            if [ ! -s "$path" ]; then
+              echo "::error::Missing or empty release asset: $path" >&2
+              exit 1
+            fi
             name="$(basename "$path")"
             if grep -qxF "$name" <<<"$existing"; then
-              rm -f "$tmp/$name"
               gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern "$name" --dir "$tmp" --clobber
               if cmp -s "$tmp/$name" "$path"; then
                 echo "Release asset '$name' already present and byte-identical; skipping (immutable per tag)."
               else
                 echo "::error::Release asset '$name' already exists for $TAG but differs from this run's build." >&2
-                echo "::error::Overwriting it would desync the release from the PyPI wheel's manifest. Cut a NEW version instead of re-running the release." >&2
+                echo "::error::Published package and runtime bytes are immutable; cut a new version." >&2
                 exit 1
               fi
             else
-              runtime_to_upload+=("$path")
+              case "$path" in
+                runtime-artifacts/*) runtime_to_upload+=("$path") ;;
+                *) package_to_upload+=("$path") ;;
+              esac
             fi
           done
 
@@ -488,8 +501,9 @@ jobs:
           if [ "${#runtime_to_upload[@]}" -gt 0 ]; then
             gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" "${runtime_to_upload[@]}"
           fi
-          # Python distributions are safe to refresh (PyPI itself is skip-existing).
-          gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber
+          if [ "${#package_to_upload[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" "${package_to_upload[@]}"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
@@ -497,40 +511,11 @@ jobs:
           name: dist
           path: dist/
 
-  publish-avibe-memory:
-    needs:
-      - build
-      - finalize-github-release
-    runs-on: ubuntu-latest
-    environment: pypi-avibe-memory
-    permissions:
-      id-token: write  # Required for trusted publishing
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
-        with:
-          name: dist
-          path: dist/
-
-      - name: Keep avibe-memory distributions only
-        shell: bash
-        run: |
-          find dist -type f ! \( -name 'avibe_memory-*' -o -name 'avibe-memory-*' \) -delete
-          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_memory-*.whl' -print -quit)"
-          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_memory-*.tar.gz' -print -quit)"
-
-      - name: Publish avibe-memory to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
-        with:
-          skip-existing: true
-        # Uses trusted publishing (OIDC), no API token needed
-        # Configure at: https://pypi.org/manage/project/avibe-memory/settings/publishing/
-
-  verify-avibe-memory-pypi:
+  verify-avibe-memory-release:
     needs:
       - resolve-tag
       - build
-      - publish-avibe-memory
+      - finalize-github-release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -549,59 +534,38 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Verify PyPI serves the exact avibe-memory wheel
+      - name: Verify public GitHub companion distributions
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-
-          staged_wheels=(dist/avibe_memory-*.whl)
-          if [ "${#staged_wheels[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one staged avibe-memory wheel, found ${#staged_wheels[@]}." >&2
-            exit 1
-          fi
-
           package_version="$(python scripts/release_package_version.py "$RELEASE_TAG")"
-          download_dir="$RUNNER_TEMP/avibe-memory-pypi"
-          mkdir -p "$download_dir"
-
-          for attempt in {1..12}; do
-            find "$download_dir" -mindepth 1 -maxdepth 1 -type f -delete
-            if python -m pip --isolated download \
-              --index-url https://pypi.org/simple \
-              --disable-pip-version-check \
-              --no-deps \
-              --no-cache-dir \
-              --only-binary=:all: \
-              --dest "$download_dir" \
-              "avibe-memory==$package_version"; then
-              public_wheels=("$download_dir"/avibe_memory-*.whl)
-              if [ "${#public_wheels[@]}" -ne 1 ]; then
-                echo "::error::Expected exactly one public avibe-memory wheel, found ${#public_wheels[@]}." >&2
-                exit 1
-              fi
-              if cmp -s "${staged_wheels[0]}" "${public_wheels[0]}"; then
-                echo "PyPI serves the exact staged avibe-memory wheel for $package_version."
-                exit 0
-              fi
-              echo "::error::PyPI already serves a non-identical avibe-memory wheel for $package_version." >&2
+          download_dir="$(mktemp -d "$RUNNER_TEMP/avibe-memory-release.XXXXXXXX")"
+          trap 'rm -r -- "$download_dir"' EXIT
+          for asset in "avibe_memory-${package_version}-py3-none-any.whl" "avibe_memory-${package_version}.tar.gz"; do
+            test -s "dist/$asset"
+            # Anonymous HTTPS fetch proves availability to end-user installers,
+            # not merely to the workflow's authenticated GitHub identity.
+            # Fresh public URLs may briefly return 404. Retry only this
+            # idempotent download, within finite attempt and time bounds.
+            curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
+              --retry-max-time 60 --connect-timeout 10 --max-time 30 \
+              --proto '=https' --proto-redir '=https' \
+              --output "$download_dir/$asset" \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}"
+            if ! cmp -s "dist/$asset" "$download_dir/$asset"; then
+              echo "::error::GitHub serves a non-identical companion asset: $asset" >&2
               exit 1
             fi
-
-            if [ "$attempt" -eq 12 ]; then
-              echo "::error::PyPI did not serve the avibe-memory wheel for $package_version after $attempt attempts." >&2
-              exit 1
-            fi
-            sleep 10
           done
+          echo "GitHub serves both exact staged companion distributions for $package_version."
 
   publish-avibe-os:
     needs:
       - build
       - finalize-github-release
-      - verify-avibe-memory-pypi
+      - verify-avibe-memory-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

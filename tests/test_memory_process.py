@@ -45,7 +45,8 @@ class _ReleasedSyncHost:
         self.signals: list[tuple[dict[int, float], int | None]] = []
 
     def capture(self, pid: int):
-        return _TestReference(self, pid) if pid in self.children else None
+        # Absence belongs to the fake generation table, not the host PID table.
+        return _TestReference(self, pid)
 
     def inspect_identity(self, pid: int):
         return self.parent if pid == 99 else self.children.get(pid)
@@ -102,7 +103,8 @@ class _SidecarHost:
         self.signals: list[dict[int, float]] = []
 
     def capture(self, pid: int):
-        return _TestReference(self, pid) if pid in self.children else None
+        # None means unresolved capture to production, not known fake absence.
+        return _TestReference(self, pid)
 
     def inspect_identity(self, pid: int):
         return self.children.get(pid)
@@ -143,6 +145,43 @@ created_at is not None and created_at.is_running()
 
     async def wait_for_exit(self, identities, _timeout, **_kwargs) -> bool:
         return not self.live(identities)
+
+
+@pytest.fixture(params=[False, True], ids=["system-pid-absent", "system-pid-present"])
+def system_pid_presence(request, monkeypatch):
+    """Synthetic ownership must not depend on unrelated host processes."""
+    probes = []
+
+    def pid_exists(pid):
+        probes.append(pid)
+        return request.param
+
+    monkeypatch.setattr("avibe_memory.process.psutil.pid_exists", pid_exists)
+    yield
+    assert probes == [], f"synthetic process fixture queried host PIDs: {probes}"
+
+
+@pytest.mark.parametrize("host_type", [_SidecarHost, _ReleasedSyncHost])
+def test_fake_host_capture_retains_absent_and_replaced_generations(
+    host_type, system_pid_presence,
+):
+    from avibe_memory.process import _reference_state
+
+    host = host_type()
+    absent = host.capture(451)
+    assert _reference_state(absent, 451) is False
+
+    host.children[451] = _ProcessIdentity(stamp=10.5, cmdline=("fake-child",), uid=None)
+    assert _reference_state(absent, 451) is False
+    live = host.capture(451)
+    assert _reference_state(live, 451) is True
+
+    host.children[451] = _ProcessIdentity(stamp=11.5, cmdline=("replacement",), uid=None)
+    assert _reference_state(live, 451) is False
+    replacement = host.capture(451)
+    assert _reference_state(replacement, 451) is True
+    host.children.clear()
+    assert _reference_state(replacement, 451) is False
 
 
 def _sidecar_record(home: Path) -> tuple[Path, dict[str, object]]:
@@ -402,7 +441,9 @@ async def test_sidecar_reaper_does_not_signal_unverifiable_identity(
 
 
 @pytest.mark.asyncio
-async def test_sidecar_reaper_fails_closed_on_unverifiable_tree(tmp_path: Path) -> None:
+async def test_sidecar_reaper_fails_closed_on_unverifiable_tree(
+    tmp_path: Path, system_pid_presence,
+) -> None:
     home = tmp_path / "home"
     provider_root = home / "memory" / "everos-root"
     provider_root.mkdir(mode=0o700, parents=True)
@@ -428,6 +469,7 @@ async def test_sidecar_reaper_fails_closed_on_unverifiable_tree(tmp_path: Path) 
 async def test_released_sync_reaper_retires_gone_ownership(
     tmp_path: Path,
     state: str,
+    system_pid_presence,
 ) -> None:
     home = tmp_path / "home"
     provider_root = home / "memory" / "everos-root"
@@ -484,6 +526,7 @@ async def test_released_sync_reaper_stops_exact_live_child(
 @pytest.mark.asyncio
 async def test_released_sync_reaper_sweeps_exact_helper_after_leader_exits(
     tmp_path: Path,
+    system_pid_presence,
 ) -> None:
     home = tmp_path / "home"
     provider_root = home / "memory" / "everos-root"

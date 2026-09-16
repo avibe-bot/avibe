@@ -14,6 +14,22 @@ TAG = "v3.0.14"
 SOURCE_SHA = "a" * 40
 
 
+@pytest.mark.parametrize("tag", ["v3.2.0-rc1", "v03.02.00", "v3.2.0.post01"])
+@pytest.mark.parametrize("operation", ["ensure", "notes", "finalize"])
+def test_noncanonical_official_tag_fails_before_any_release_request(monkeypatch, tmp_path, tag, operation):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid publication identity must fail before any GitHub request")
+
+    monkeypatch.setattr(github_release, "_run_gh", forbidden)
+    with pytest.raises(github_release.ReleaseError, match="canonical spelling"):
+        if operation == "ensure":
+            github_release.ensure_draft(repo=REPO, tag=tag, title=tag, notes="notes", notes_file=None)
+        elif operation == "notes":
+            github_release.update_notes(repo=REPO, tag=tag, title=tag, notes_file=tmp_path / "notes.md")
+        else:
+            github_release.finalize_release(repo=REPO, tag=tag, prerelease=True, latest="false")
+
+
 def _completed(
     arguments: list[str],
     *,
@@ -451,10 +467,7 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     assert "--run-sha \"${{ needs.resolve-tag.outputs.workflow_sha }}\"" in publish
     assert "--source-sha \"${{ needs.resolve-tag.outputs.source_sha }}\"" in publish
     assert "python scripts/github_release.py finalize" in publish
-    memory_publish = publish.split("  publish-avibe-memory:", 1)[1].split(
-        "  verify-avibe-memory-pypi:", 1
-    )[0]
-    memory_verify = publish.split("  verify-avibe-memory-pypi:", 1)[1].split(
+    memory_verify = publish.split("  verify-avibe-memory-release:", 1)[1].split(
         "  publish-avibe-os:", 1
     )[0]
     avibe_publish = publish.split("  publish-avibe-os:", 1)[1].split(
@@ -463,10 +476,10 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     legacy_publish = publish.split("  publish-vibe-remote:", 1)[1].split(
         "  finalize-github-release:", 1
     )[0]
-    assert "- finalize-github-release" in memory_publish
-    assert "environment: pypi-avibe-memory" in memory_publish
-    assert "- publish-avibe-memory" in memory_verify
-    assert "- verify-avibe-memory-pypi" in avibe_publish
+    assert "publish-avibe-memory:" not in publish
+    assert "environment: pypi-avibe-memory" not in publish
+    assert "- finalize-github-release" in memory_verify
+    assert "- verify-avibe-memory-release" in avibe_publish
     assert "- finalize-github-release" in avibe_publish
     assert "- finalize-github-release" in legacy_publish
 

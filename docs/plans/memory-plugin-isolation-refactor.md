@@ -6,6 +6,9 @@
 >
 > `docs/MEMORY.md` is the current product contract. This plan records the
 > completed isolation waves and their retained boundaries.
+> The PyPI/extra distribution mechanics recorded here are superseded by
+> [Memory as a GitHub Release companion](memory-github-distribution.md);
+> the isolation, lazy loading, startup convergence, and data boundaries remain.
 
 ## Decision
 

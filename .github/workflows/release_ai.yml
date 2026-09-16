@@ -690,26 +690,35 @@ jobs:
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
           runtime_to_upload=()
-          runtime_paths=(
+          package_to_upload=()
+          asset_paths=(
             dist/vibe-show-runtime-node-*.tgz
             dist/show-runtime-manifest.json
             dist/memory-runtime-*.tar.gz
             dist/memory-runtime-manifest.json
+            dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
+            dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz
           )
-          for path in "${runtime_paths[@]}"; do
-            if [ ! -f "$path" ]; then
-              echo "::error::Missing GitHub-only runtime release asset: $path" >&2
+          # Packages and runtimes share the same immutable publication boundary.
+          # Validate every existing byte before uploading even a missing asset.
+          for path in "${asset_paths[@]}"; do
+            if [ ! -s "$path" ]; then
+              echo "::error::Missing or empty GitHub-only release asset: $path" >&2
               exit 1
             fi
             name="$(basename "$path")"
             if grep -qxF "$name" <<<"$existing"; then
               gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$temporary" --clobber
               if ! cmp -s "$temporary/$name" "$path"; then
-                echo "::error::Immutable runtime asset '$name' differs for $TAG; cut a new version." >&2
+                echo "::error::Immutable release asset '$name' differs for $TAG; cut a new version." >&2
                 exit 1
               fi
             else
-              runtime_to_upload+=("$path")
+              case "$name" in
+                vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|memory-runtime-*.tar.gz|memory-runtime-manifest.json)
+                  runtime_to_upload+=("$path") ;;
+                *) package_to_upload+=("$path") ;;
+              esac
             fi
           done
 
@@ -719,19 +728,9 @@ jobs:
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${runtime_to_upload[@]}"
           fi
 
-          package_assets=()
-          for path in dist/*; do
-            case "$(basename "$path")" in
-              vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|memory-runtime-*.tar.gz|memory-runtime-manifest.json)
-                ;;
-              *) package_assets+=("$path") ;;
-            esac
-          done
-          if [ "${#package_assets[@]}" -eq 0 ]; then
-            echo "::error::No Python release assets were built." >&2
-            exit 1
+          if [ "${#package_to_upload[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_to_upload[@]}"
           fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_assets[@]}" --clobber
 
           python scripts/github_release.py finalize \
             --repo "$GITHUB_REPOSITORY" \
