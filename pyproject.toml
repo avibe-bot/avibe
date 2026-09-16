@@ -79,9 +79,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-memory = [
-    "avibe-memory>=3.0.14.dev0,<3.1",
-]
+# Compatibility spelling only. Enabled Memory is reconciled from the matching
+# GitHub Release; it is not a separately indexed dependency.
+memory = []
 
 [project.urls]
 Homepage = "https://github.com/avibe-bot/avibe"
@@ -169,6 +169,3 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
 ]
-
-[tool.uv.sources]
-avibe-memory = { path = "packaging/avibe-memory" }

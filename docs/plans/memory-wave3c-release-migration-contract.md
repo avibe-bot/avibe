@@ -50,13 +50,12 @@ finalizer:
 6. `Release (AI Notes)` may update the Draft notes and assets, but it never
    publishes an official release.
 7. `Publish to PyPI` verifies the exact notes run and the asset-complete Draft,
-   then publishes the GitHub Release before either distribution reaches PyPI.
-8. Publish only `avibe-memory` through its trusted-publishing environment with
-   skip-existing semantics. Retry a direct PyPI wheel download without
-   dependencies or cache and byte-compare it with the staged wheel. An existing
-   non-identical wheel fails closed.
+   then publishes the GitHub Release before core reaches PyPI.
+8. Fetch the companion wheel and sdist anonymously from that GitHub Release
+   and byte-compare both with the staged artifacts. Missing or non-identical
+   public bytes fail closed. Memory is not published to PyPI.
 9. Publish only `avibe-os` through its existing trusted-publishing environment
-   after the public `avibe-memory` wheel verification succeeds.
+   after public GitHub companion verification succeeds.
 
 A release failure resumes through the same tag and Draft only when all existing
 runtime bytes are identical. It does not mint a replacement identity, publish
@@ -128,10 +127,8 @@ window, and the retained backup remains tied to one exact manifest hash.
 
 - Do not pre-create or manually edit an official `v*` GitHub Release; the
   annotated tag and workflows own release state.
-- Before the first `avibe-memory` publication, configure its PyPI
-  pending/trusted publisher for repository `avibe-bot/avibe`, workflow
-  `publish.yml`, and GitHub environment `pypi-avibe-memory`. This external
-  configuration is a required operator action and is not performed by CI.
+- Memory is a GitHub-only companion; no Memory PyPI publisher is needed.
+  Core retains its existing trusted publisher.
 - Do not overwrite a mismatched runtime asset, weaken a digest, bypass the
   public re-fetch, or continue to PyPI before the GitHub Release is published.
 - Do not classify policy exclusions as recoverable missing bytes.

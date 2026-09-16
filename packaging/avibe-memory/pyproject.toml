@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "psutil>=7.1.0",
-    "avibe-os>=3.0.14.dev0,<3.1",
+    "avibe-os>=3.0.14.dev0,<4",
 ]
 
 [project.urls]

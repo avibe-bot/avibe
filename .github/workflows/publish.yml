@@ -497,40 +497,11 @@ jobs:
           name: dist
           path: dist/
 
-  publish-avibe-memory:
-    needs:
-      - build
-      - finalize-github-release
-    runs-on: ubuntu-latest
-    environment: pypi-avibe-memory
-    permissions:
-      id-token: write  # Required for trusted publishing
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
-        with:
-          name: dist
-          path: dist/
-
-      - name: Keep avibe-memory distributions only
-        shell: bash
-        run: |
-          find dist -type f ! \( -name 'avibe_memory-*' -o -name 'avibe-memory-*' \) -delete
-          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_memory-*.whl' -print -quit)"
-          test -n "$(find dist -maxdepth 1 -type f -name 'avibe_memory-*.tar.gz' -print -quit)"
-
-      - name: Publish avibe-memory to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
-        with:
-          skip-existing: true
-        # Uses trusted publishing (OIDC), no API token needed
-        # Configure at: https://pypi.org/manage/project/avibe-memory/settings/publishing/
-
-  verify-avibe-memory-pypi:
+  verify-avibe-memory-release:
     needs:
       - resolve-tag
       - build
-      - publish-avibe-memory
+      - finalize-github-release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -549,59 +520,34 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Verify PyPI serves the exact avibe-memory wheel
+      - name: Verify public GitHub companion distributions
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-
-          staged_wheels=(dist/avibe_memory-*.whl)
-          if [ "${#staged_wheels[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one staged avibe-memory wheel, found ${#staged_wheels[@]}." >&2
-            exit 1
-          fi
-
           package_version="$(python scripts/release_package_version.py "$RELEASE_TAG")"
-          download_dir="$RUNNER_TEMP/avibe-memory-pypi"
-          mkdir -p "$download_dir"
-
-          for attempt in {1..12}; do
-            find "$download_dir" -mindepth 1 -maxdepth 1 -type f -delete
-            if python -m pip --isolated download \
-              --index-url https://pypi.org/simple \
-              --disable-pip-version-check \
-              --no-deps \
-              --no-cache-dir \
-              --only-binary=:all: \
-              --dest "$download_dir" \
-              "avibe-memory==$package_version"; then
-              public_wheels=("$download_dir"/avibe_memory-*.whl)
-              if [ "${#public_wheels[@]}" -ne 1 ]; then
-                echo "::error::Expected exactly one public avibe-memory wheel, found ${#public_wheels[@]}." >&2
-                exit 1
-              fi
-              if cmp -s "${staged_wheels[0]}" "${public_wheels[0]}"; then
-                echo "PyPI serves the exact staged avibe-memory wheel for $package_version."
-                exit 0
-              fi
-              echo "::error::PyPI already serves a non-identical avibe-memory wheel for $package_version." >&2
+          download_dir="$(mktemp -d "$RUNNER_TEMP/avibe-memory-release.XXXXXXXX")"
+          trap 'rm -r -- "$download_dir"' EXIT
+          for asset in "avibe_memory-${package_version}-py3-none-any.whl" "avibe_memory-${package_version}.tar.gz"; do
+            test -s "dist/$asset"
+            # Anonymous HTTPS fetch proves availability to end-user installers,
+            # not merely to the workflow's authenticated GitHub identity.
+            curl --fail --location --retry 5 --proto '=https' --proto-redir '=https' \
+              --output "$download_dir/$asset" \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}"
+            if ! cmp -s "dist/$asset" "$download_dir/$asset"; then
+              echo "::error::GitHub serves a non-identical companion asset: $asset" >&2
               exit 1
             fi
-
-            if [ "$attempt" -eq 12 ]; then
-              echo "::error::PyPI did not serve the avibe-memory wheel for $package_version after $attempt attempts." >&2
-              exit 1
-            fi
-            sleep 10
           done
+          echo "GitHub serves both exact staged companion distributions for $package_version."
 
   publish-avibe-os:
     needs:
       - build
       - finalize-github-release
-      - verify-avibe-memory-pypi
+      - verify-avibe-memory-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -3361,19 +3361,19 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
     )
 
 
-def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
-    monkeypatch,
+@pytest.mark.parametrize("origin", [None, RELEASE_CORE_URL], ids=["pypi-core", "github-preview"])
+def test_memory_indep_027_repair_installs_companion_from_the_corresponding_release(
+    monkeypatch, origin,
 ) -> None:
-    """MEMORY-INDEP-027: a core-only preview install converges from its own release.
+    """A core-only install converges from the corresponding GitHub Release.
 
-    A `gh-v*` release publishes the wheel pair as release assets and nothing to
-    an index, so this builds the real plan rather than a recorded call: what
-    matters is the command an installer would actually run.
+    MEMORY-INDEP-027 retains its preview-origin coverage. The PyPI-core case
+    additionally verifies the same consuming startup path without a direct URL.
     """
 
     current_version = REPAIR_VERSION
     calls: dict[str, object] = {}
-    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: RELEASE_CORE_URL)
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
     monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
     monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
@@ -3403,7 +3403,9 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     assert result["ok"] is True
     assert result["restarting"] is True
     plan = calls["plan"]
-    release = f"https://github.com/avibe-bot/avibe/releases/download/gh-v{current_version}/"
+    tag = f"gh-v{current_version}" if origin else f"v{current_version}"
+    release = f"https://github.com/avibe-bot/avibe/releases/download/{tag}/"
+    core_spec = origin or f"{api.PACKAGE_NAME}=={current_version}"
     commands = [
         command
         for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command)
@@ -3411,11 +3413,9 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     ]
     assert len(commands) >= 2, "the repair resolves the pair before it installs it"
     for command in commands:
-        assert f"{release}avibe_os-{current_version}-py3-none-any.whl" in command
+        assert core_spec in command
         assert f"avibe-memory @ {release}avibe_memory-{current_version}-py3-none-any.whl" in command
-        # An index pin here is the bug: PyPI never served this version, so the
-        # install fails and spends one of the bounded repair attempts.
-        assert f"{api.PACKAGE_NAME}=={current_version}" not in command
+        # Memory never falls back to an index, even when core uses one.
         assert f"{api.MEMORY_PACKAGE_NAME}=={current_version}" not in command
 
 

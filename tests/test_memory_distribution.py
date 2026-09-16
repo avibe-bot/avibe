@@ -31,7 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PROJECT = ROOT / "packaging" / "avibe-memory"
-COMPATIBILITY = SpecifierSet(">=3.0.14.dev0,<3.1")
+COMPATIBILITY = SpecifierSet(">=3.0.14.dev0,<4")
 PACKAGE_CONTRACT_VERSION = Version("3.0.99rc1")
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
 
@@ -243,10 +243,10 @@ def test_source_metadata_preserves_the_developer_compatibility_window() -> None:
     host = _project(ROOT / "pyproject.toml")
     memory = _project(MEMORY_PROJECT / "pyproject.toml")
 
-    memory_requirement = _requirement(host["optional-dependencies"]["memory"], "avibe-memory")
     host_requirement = _requirement(memory["dependencies"], "avibe-os")
 
-    assert memory_requirement.specifier == COMPATIBILITY
+    assert host["optional-dependencies"]["memory"] == []
+    assert not any(canonicalize_name(Requirement(value).name) == "avibe-memory" for value in host["dependencies"])
     assert host_requirement.specifier == COMPATIBILITY
 
 
@@ -269,25 +269,24 @@ def test_pr_artifact_build_uses_an_explicit_prerelease_contract_version() -> Non
 
 
 def test_publishable_metadata_without_the_peer_contract_fails_closed(tmp_path: Path) -> None:
-    wheel = tmp_path / "avibe_os-3.0.99rc1-py3-none-any.whl"
-    dist_info = "avibe_os-3.0.99rc1.dist-info"
+    wheel = tmp_path / "avibe_memory-3.0.99rc1-py3-none-any.whl"
+    dist_info = "avibe_memory-3.0.99rc1.dist-info"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
             f"{dist_info}/METADATA",
-            "Metadata-Version: 2.4\nName: avibe-os\nVersion: 3.0.99rc1\n\n",
+            "Metadata-Version: 2.4\nName: avibe-memory\nVersion: 3.0.99rc1\n\n",
         )
         archive.writestr(
             f"{dist_info}/RECORD",
             f"{dist_info}/METADATA,,\n{dist_info}/RECORD,,\n",
         )
 
-    with pytest.raises(RuntimeError, match="exactly one avibe-memory dependency"):
+    with pytest.raises(RuntimeError, match="exactly one avibe-os dependency"):
         pin_peer_dependency(
             str(wheel),
-            project_name="avibe-os",
-            peer_name="avibe-memory",
+            project_name="avibe-memory",
+            peer_name="avibe-os",
             package_version="3.0.99rc1",
-            peer_extra="memory",
         )
 
     assert not wheel.exists()
@@ -299,7 +298,7 @@ def test_distribution_release_contract_is_forward_only_and_memory_first() -> Non
     )
 
     assert "asset-complete GitHub Release" in contract
-    assert "Publish `avibe-memory`" in contract
+    assert "not on PyPI" in contract
     assert "byte-identical to the staged wheel" in contract
     assert "Publish `avibe-os` only after that verification succeeds" in contract
     assert "forward-only" in contract
@@ -382,30 +381,28 @@ def test_official_draft_uploads_both_verified_distribution_pairs() -> None:
     assert 'gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber' in release_upload
 
 
-def test_official_release_publishes_and_verifies_memory_before_core() -> None:
+def test_official_release_verifies_public_github_memory_before_core() -> None:
     jobs = _workflow("publish.yml")["jobs"]
 
     assert {"build", "finalize-github-release"} <= _needs(
-        jobs["publish-avibe-memory"]
+        jobs["verify-avibe-memory-release"]
     )
-    assert jobs["publish-avibe-memory"]["environment"] == "pypi-avibe-memory"
-    assert "publish-avibe-memory" in _needs(jobs["verify-avibe-memory-pypi"])
-    assert "verify-avibe-memory-pypi" in _needs(jobs["publish-avibe-os"])
+    assert "publish-avibe-memory" not in jobs
+    assert "verify-avibe-memory-pypi" not in jobs
+    assert "verify-avibe-memory-release" in _needs(jobs["publish-avibe-os"])
     assert "finalize-github-release" in _needs(jobs["publish-avibe-os"])
 
     verify = _step(
-        jobs["verify-avibe-memory-pypi"],
-        "Verify PyPI serves the exact avibe-memory wheel",
+        jobs["verify-avibe-memory-release"],
+        "Verify public GitHub companion distributions",
     )["run"]
     for fragment in (
-        "for attempt in {1..12}",
-        "python -m pip --isolated download",
-        "--index-url https://pypi.org/simple",
-        "--no-deps",
-        "--no-cache-dir",
-        "--only-binary=:all:",
-        'cmp -s "${staged_wheels[0]}" "${public_wheels[0]}"',
-        "PyPI already serves a non-identical avibe-memory wheel",
+        "curl --fail --location --retry 5",
+        "avibe_memory-${package_version}-py3-none-any.whl",
+        "avibe_memory-${package_version}.tar.gz",
+        'cmp -s "dist/$asset" "$download_dir/$asset"',
+        "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}",
+        "GitHub serves a non-identical companion asset",
     ):
         assert fragment in verify
 
@@ -413,12 +410,6 @@ def test_official_release_publishes_and_verifies_memory_before_core() -> None:
 @pytest.mark.parametrize(
     ("job_name", "keep_step", "allowed", "excluded"),
     [
-        (
-            "publish-avibe-memory",
-            "Keep avibe-memory distributions only",
-            "avibe_memory-*",
-            "avibe_os-*",
-        ),
         (
             "publish-avibe-os",
             "Keep avibe-os distributions only",
@@ -497,21 +488,18 @@ def test_built_distributions_have_independent_contents_and_exact_peer_metadata()
 
     for metadata in (core_metadata, core_sdist_metadata):
         assert Version(metadata["Version"]) == core_version
-        memory_requirement = _requirement(metadata.get_all("Requires-Dist") or [], "avibe-memory")
-        assert str(memory_requirement.specifier) == f"=={core_version}"
-        assert memory_requirement.marker is not None
-        assert memory_requirement.marker.evaluate({"extra": "memory"})
-        assert not memory_requirement.marker.evaluate({"extra": "not-memory"})
+        assert all(
+            canonicalize_name(Requirement(value).name) != "avibe-memory"
+            for value in metadata.get_all("Requires-Dist") or []
+        )
     for metadata in (memory_metadata, memory_sdist_metadata):
         assert Version(metadata["Version"]) == memory_version
         host_requirement = _requirement(metadata.get_all("Requires-Dist") or [], "avibe-os")
         assert str(host_requirement.specifier) == f"=={memory_version}"
         assert host_requirement.marker is None
 
-    core_build_requirement = _requirement(core_sdist_project["optional-dependencies"]["memory"], "avibe-memory")
     memory_build_requirement = _requirement(memory_sdist_project["dependencies"], "avibe-os")
-    assert str(core_build_requirement.specifier) == f"=={core_version}"
-    assert core_build_requirement.marker is None
+    assert core_sdist_project["optional-dependencies"]["memory"] == []
     assert str(memory_build_requirement.specifier) == f"=={memory_version}"
     assert memory_build_requirement.marker is None
     for pyproject in (core_sdist_pyproject, memory_sdist_pyproject):
@@ -605,7 +593,7 @@ def test_core_sdist_installs_and_mirrors_builtin_skills_without_a_checkout(tmp_p
     )
 
 
-def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:
+def test_explicit_companion_resolves_and_installs_the_same_version_pair(tmp_path: Path) -> None:
     core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
     memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
     core_version = Version(_wheel_metadata(core_wheel)[1]["Version"])
@@ -649,7 +637,8 @@ def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path
         str(core_wheel.parent),
         "--find-links",
         str(memory_wheel.parent),
-        f"avibe-os[memory]=={core_version}",
+        f"avibe-os=={core_version}",
+        f"avibe-memory @ {memory_wheel.as_uri()}",
         cwd=tmp_path,
     )
     _run(
@@ -663,7 +652,7 @@ def test_memory_extra_resolves_and_installs_the_same_version_pair(tmp_path: Path
     )
 
 
-def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> None:
+def test_explicit_companion_resolves_and_installs_from_both_sdists(tmp_path: Path) -> None:
     core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
     memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
     core_sdist = _sdist_path(core_wheel, "avibe_os")
@@ -676,7 +665,6 @@ def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> 
 
     package_links = tmp_path / "package-links"
     package_links.mkdir()
-    shutil.copy2(memory_sdist, package_links / memory_sdist.name)
     _write_minimal_wheel(package_links, "avibe-memory", str(decoy_version))
     build_links = tmp_path / "build-links"
     _provision_build_requirement_wheelhouse((core_pyproject, memory_pyproject), build_links)
@@ -710,7 +698,8 @@ def test_memory_extra_resolves_and_installs_from_both_sdists(tmp_path: Path) -> 
         str(package_links),
         "--find-links",
         str(build_links),
-        f"avibe-os[memory] @ {core_sdist.as_uri()}",
+        f"avibe-os @ {core_sdist.as_uri()}",
+        f"avibe-memory @ {memory_sdist.as_uri()}",
     ]
     assert "--no-build-isolation" not in install_command
     assert install_command.count("--find-links") == 2

@@ -12,7 +12,6 @@ ROUTER_PATH = "vibe/show_router.tsx"
 _VALIDATION = run_path(str(Path(__file__).parent / "scripts" / "show_runtime_manifest_asset.py"))
 validate_manifest_bytes = _VALIDATION["validate_manifest_bytes"]
 validate_manifest_file = _VALIDATION["validate_manifest_file"]
-pin_peer_dependency = run_path(str(Path(__file__).parent / "hatch_exact_peer.py"))["pin_peer_dependency"]
 
 
 class CustomBuildHook(BuildHookInterface):
@@ -44,10 +43,3 @@ class CustomBuildHook(BuildHookInterface):
                 validate_manifest_bytes(content)
             except ValueError as exc:
                 raise RuntimeError(f"Built wheel contains an invalid {MANIFEST_WHEEL_PATH}: {exc}") from exc
-        pin_peer_dependency(
-            artifact_path,
-            project_name="avibe-os",
-            peer_name="avibe-memory",
-            package_version=self.metadata.version,
-            peer_extra="memory",
-        )

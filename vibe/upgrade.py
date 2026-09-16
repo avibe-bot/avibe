@@ -53,14 +53,9 @@ logger = logging.getLogger(__name__)
 PACKAGE_NAME = CORE_PACKAGE_NAME
 LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
-MEMORY_EXTRA_NAME = "memory"
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
-# A GitHub-only pre-release publishes its wheels as release assets and nothing
-# to PyPI, so an install taken from one can only be repaired from that same
-# release. Which release that is comes from the installer's own PEP 610 record,
-# never from the version string: `publish.yml` accepts official `vX.Y.ZrcN`
-# tags and publishes them to PyPI, so a pre-release version says nothing about
-# where its wheels live.
+# Core is on PyPI; Memory is a same-version GitHub Release companion. A recorded
+# GitHub core origin preserves its exact release tag, including gh-v previews.
 RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
@@ -1208,28 +1203,6 @@ def _names_a_published_release(version: str) -> bool:
     return not (match.group("dev") or match.group("local"))
 
 
-def _with_memory_extra(package_spec: str) -> str:
-    """Add the Memory extra without corrupting URL or local path specs."""
-
-    if package_spec.startswith(("git+", "hg+", "svn+", "bz+", "http://", "https://", "file://")):
-        return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {package_spec}"
-    try:
-        requirement = Requirement(package_spec)
-    except InvalidRequirement:
-        artifact_uri = Path(package_spec).expanduser().resolve().as_uri()
-        return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {artifact_uri}"
-
-    extras = sorted({*requirement.extras, MEMORY_EXTRA_NAME})
-    rendered = f"{requirement.name}[{','.join(extras)}]"
-    if requirement.url:
-        rendered += f" @ {requirement.url}"
-    else:
-        rendered += str(requirement.specifier)
-    if requirement.marker:
-        rendered += f"; {requirement.marker}"
-    return rendered
-
-
 def _published_version(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1312,25 +1285,12 @@ def _recorded_install_origin(package_name: str) -> str | None:
 
 
 def release_asset_specs(version: str) -> tuple[str, str] | None:
-    """The wheel pair this install came from, or `None` if an index serves it.
+    """Preserve a verified GitHub core origin during an exact package repair."""
 
-    A version string cannot answer this. `publish.yml` accepts official
-    `vX.Y.ZrcN` tags and publishes them to PyPI, so a pre-release may well be
-    on an index, while a `gh-v*` build carrying the identical version is on no
-    index at all. Treating every pre-release as GitHub-only would point the
-    official one at a tag that was never created.
+    return _release_asset_pair(version, _recorded_install_origin(PACKAGE_NAME))
 
-    The installer already recorded the answer. When core came from a release
-    asset of this repository, the pair is repaired from that same release —
-    the one it demonstrably came from, rather than one derived from a naming
-    convention. Every other origin, an index install included, returns `None`
-    and keeps its index pins.
 
-    The recorded URL must name this exact running version, so a stale or
-    mismatched record cannot drive the repair to a different pair.
-    """
-
-    origin = _recorded_install_origin(PACKAGE_NAME)
+def _release_asset_pair(version: str, origin: str | None) -> tuple[str, str] | None:
     if not origin:
         return None
     try:
@@ -1346,7 +1306,10 @@ def release_asset_specs(version: str) -> tuple[str, str] | None:
     if len(segments) != 2:
         return None
     tag, asset = segments
-    if not tag or tag in {".", ".."}:
+    if not tag.startswith(("v", "gh-v")):
+        return None
+    tag_version = tag.removeprefix("gh-").removeprefix("v")
+    if _published_version(tag_version) != normalized:
         return None
     if asset != f"{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl":
         return None
@@ -1354,6 +1317,32 @@ def release_asset_specs(version: str) -> tuple[str, str] | None:
     return (
         origin,
         f"{prefix}{tag}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
+    )
+
+
+def memory_release_spec(version: str, core_spec: str) -> str:
+    """Name the companion explicitly, without consulting a package index.
+
+    PyPI core releases use official v-tags. An explicitly selected core wheel
+    from this repository preserves its own tag instead (including previews).
+    Other artifact origins cannot redirect the companion to an untrusted host.
+    """
+
+    normalized = _published_version(version)
+    if normalized is None:
+        raise ValueError("A Memory install requires a published target release version")
+    try:
+        requirement = Requirement(core_spec)
+    except InvalidRequirement:
+        origin = core_spec
+    else:
+        origin = requirement.url
+    pair = _release_asset_pair(normalized, origin)
+    if pair:
+        return pair[1]
+    return (
+        f"{RELEASE_DOWNLOAD_BASE_URL}/v{normalized}/"
+        f"{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl"
     )
 
 
@@ -1400,13 +1389,9 @@ def build_upgrade_plan(
     replace the ordinary upgrade request and force the installer so the matching
     optional distribution is applied even when core is already satisfied.
 
-    `core_spec` and `memory_spec` name where to fetch that exact pair when it
-    was never published to an index — a preview release's own wheel URLs. They
-    replace the two pins and change nothing else, so the resulting plan is the
-    same operation against a different source. A forward upgrade resolves the
-    newest release rather than a known one and has no such source to name, so
-    passing either without `version` is rejected instead of ignored: a spec that
-    silently does nothing would read as applied.
+    Memory always comes from the target's GitHub Release, not an index.
+    Exact repairs may supply the recorded core/companion pair. Forward plans
+    derive the companion from the selected target version and core artifact.
     """
 
     if (core_spec or memory_spec) and not version:
@@ -1439,9 +1424,7 @@ def build_upgrade_plan(
         if target_version is None:
             raise ValueError("A Memory-preserving upgrade requires a target release version")
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
-    if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
-        package_spec = _with_memory_extra(package_spec)
-    memory_target = memory_version if version else target_version
+    memory_target = (memory_version or version) if version else target_version
     # The URL form stays a named requirement so every installer still reads it
     # as "this distribution, from here" rather than as an anonymous artifact.
     pinned_memory_spec = None
@@ -1449,7 +1432,7 @@ def build_upgrade_plan(
         if memory_spec:
             pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_spec}"
         elif memory_target:
-            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_target}"
+            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_release_spec(memory_target, package_spec)}"
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)

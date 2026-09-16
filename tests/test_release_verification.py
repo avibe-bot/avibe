@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shutil
 
 import pytest
 import yaml
@@ -15,6 +16,68 @@ WORKFLOWS = (
     ("release_ai.yml", "build-assets", "Checkout release verification", "${{ github.sha }}"),
     ("publish.yml", "build", "Checkout release automation", "${{ needs.resolve-tag.outputs.workflow_sha }}"),
 )
+
+
+@pytest.mark.parametrize("failure", [None, "missing-wheel", "missing-sdist", "mismatch", "unpublished"])
+def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, failure):
+    workspace = tmp_path / "public release 中文"
+    dist = workspace / "dist"
+    scripts = workspace / "scripts"
+    binaries = tmp_path / "bin"
+    runtime_tmp = tmp_path / "runner temp"
+    for directory in (dist, scripts, binaries, runtime_tmp):
+        directory.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/release_package_version.py", scripts)
+    assets = {
+        "avibe_memory-3.1.1-py3-none-any.whl": b"companion wheel",
+        "avibe_memory-3.1.1.tar.gz": b"companion sdist",
+    }
+    for name, data in assets.items():
+        (dist / name).write_bytes(data)
+    if failure in {"missing-wheel", "missing-sdist"}:
+        suffix = ".whl" if failure == "missing-wheel" else ".tar.gz"
+        next(dist.glob(f"*{suffix}")).unlink()
+    (binaries / "python").symlink_to(sys.executable)
+    curl = binaries / "curl"
+    curl.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "assert not any('authorization' in arg.lower() for arg in args)\n"
+        "url = args[-1]\n"
+        "assert url.startswith('https://github.com/avibe-bot/avibe/releases/download/v3.1.1/')\n"
+        "with pathlib.Path('fetches.jsonl').open('a') as log: log.write(json.dumps(url) + '\\n')\n"
+        f"sys.exit(22) if {failure == 'unpublished'!r} else None\n"
+        "asset = url.rsplit('/', 1)[1]\n"
+        f"data = {assets!r}[asset]\n"
+        f"data = b'wrong' if {failure == 'mismatch'!r} else data\n"
+        "pathlib.Path(args[args.index('--output') + 1]).write_bytes(data)\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    command = _step(
+        _job("publish.yml", "verify-avibe-memory-release"),
+        "Verify public GitHub companion distributions",
+    )["run"]
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+        cwd=workspace,
+        env={
+            **os.environ,
+            "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runtime_tmp),
+            "RELEASE_TAG": "v3.1.1",
+            "GITHUB_REPOSITORY": "avibe-bot/avibe",
+        },
+        capture_output=True, text=True, timeout=15,
+    )
+    assert (result.returncode == 0) is (failure is None), result.stdout + result.stderr
+    assert not list(runtime_tmp.iterdir())
+    if failure is None:
+        fetches = [json.loads(line) for line in (workspace / "fetches.jsonl").read_text().splitlines()]
+        assert {url.rsplit("/", 1)[1] for url in fetches} == set(assets)
+    for path in dist.iterdir():
+        assert path.read_bytes() == assets[path.name]
 
 
 def _job(workflow_name: str, job_name: str) -> dict:

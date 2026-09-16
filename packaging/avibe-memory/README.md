@@ -1,23 +1,17 @@
 # avibe-memory
 
 `avibe-memory` is the optional in-process Memory implementation for `avibe-os`.
-Install it through the host extra so the resolver selects a compatible pair:
+It is distributed only as a same-version GitHub Release wheel and sdist, not
+on PyPI. Install core normally and enable Memory in Avibe; the existing
+Dependencies reconciler obtains its matching companion from GitHub.
 
-```console
-pip install "avibe-os[memory]"
-```
+Every built companion requires `avibe-os==X` at its own normalized version X.
+Core has no indexed Memory dependency. Its empty `memory` extra is retained
+only as a compatibility spelling; it does not install the companion.
 
-The `3.0.x` package line implements Memory runtime protocol `1`. Every built
-wheel and sdist requires the peer distribution at exactly the same normalized
-version: `avibe-memory==X` requires `avibe-os==X`, and the `memory` extra on
-`avibe-os==X` requires `avibe-memory==X`. This is the same identity used by the
-Dependencies readiness check.
-
-The source projects retain the `>=3.0.14.dev0,<3.1` compatibility window so a
-source or editable checkout can use an available development peer before that
-exact version is published. The Hatch build hooks replace that development
-range in every publishable artifact and fail the build unless the resulting
-metadata contains the reciprocal exact pin.
+The companion source retains the `>=3.0.14.dev0,<4` compatibility window for
+source/editable development. Its Hatch build hook replaces that range in every
+publishable artifact and fails unless the metadata contains the exact core pin.
 
 ## Distribution contract
 
@@ -36,19 +30,22 @@ An official release follows this forward-only order:
 
 1. Verify the runtime assets, both distribution pairs, and their shared version.
 2. Finalize the asset-complete GitHub Release before any PyPI publication.
-3. Publish `avibe-memory` with trusted publishing and skip-existing semantics.
-4. Retry a no-dependency, no-cache PyPI download and require its wheel to be
-   byte-identical to the staged wheel.
+3. Download the public GitHub companion wheel and sdist anonymously over HTTPS.
+4. Require the wheel to be byte-identical to the staged wheel and likewise
+   require exact sdist bytes.
 5. Publish `avibe-os` only after that verification succeeds.
 
 A `gh-v*` GitHub-only release attaches both wheel/sdist pairs and the existing
 runtime assets without publishing either distribution to PyPI.
 
-The first official publication requires the PyPI pending/trusted publisher for
-project `avibe-memory` to match repository `avibe-bot/avibe`, workflow
-`publish.yml`, and GitHub environment `pypi-avibe-memory`. That external
-configuration is an operator prerequisite; the repository workflow does not
-create it.
+No Memory PyPI account, project, or trusted publisher is required.
+
+Older Avibe versions may request Memory from PyPI during their built-in update,
+before new code can run. Migrate through the official core-only installer first,
+then start the updated core normally; enabled Memory is reconciled from the
+matching GitHub Release. Do not use an old `avibe-os[memory]` upgrade request as
+the migration path. GitHub-installed previews retain their original tag through
+PEP 610; index-installed core uses its official `v<version>` release.
 
 The package split changes distribution ownership only. The installed import
 path remains `avibe_memory`, the host keeps its fixed loader and protocol
