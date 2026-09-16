@@ -13842,3 +13842,28 @@ def test_show_runtime_manager_defaults_to_manifest_when_package_manifest_exists(
     )
 
     assert manager.runtime_source == "manifest-cache"
+
+
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer"])
+def test_remote_instance_manager_can_repair_accessible_show_runtime(monkeypatch, tmp_path, role):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True, instance_kind="organization")
+    _create_show_page("ses-manager-repair", "private")
+    manager = _FakeShowRuntimeManager(fail=True, failure_reason="runtime_start_health_timeout")
+    set_show_runtime_manager_for_tests(manager)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _active_org_cookie(config, f"{role}@example.com", role, role=role),
+        domain="alex.avibe.bot",
+    )
+    try:
+        response = client.get(
+            "/show/ses-manager-repair/", base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(), headers={"X-Avibe-Show-Recovery-Retry": "1"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+    assert response.status_code == 200
+    assert manager.automatic_calls == [role not in {"owner", "member"}]
+    assert (b"show-runtime-retry-now" in response.content) == (role in {"owner", "member"})

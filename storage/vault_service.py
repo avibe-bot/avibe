@@ -1816,7 +1816,7 @@ def _require_secret_resource_management(conn: Connection, row: dict[str, Any], u
     from storage import resource_access_service
 
     context = resolve_resource_access_context(user_context)
-    if not context.is_instance_owner:
+    if not context.can_manage_instance:
         raise VaultSecretAccessError("Vault secret access is not permitted.")
     resource_id = str(row.get("id") or "")
     if not resource_id or not resource_access_service.can_manage_resource_acl(

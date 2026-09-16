@@ -543,8 +543,7 @@ def test_active_org_admin_can_manage_public_vault_secret(vault) -> None:
             "PUBLIC_MANAGEMENT",
             user_context=_context("member-1"),
         )["name"] == "PUBLIC_MANAGEMENT"
-        # Writes stay reserved to admin/owner Organization roles under the
-        # Resource ACL boundary (see #1343).
+        # Instance Editor cannot manage secrets, regardless of Organization role.
         with pytest.raises(vault_service.VaultSecretAccessError):
             vault_service.update_secret_metadata(
                 conn,
@@ -726,3 +725,50 @@ def test_narrowed_vault_release_failure_stays_pending_until_retry_succeeds(vault
             "outcome": "applied",
         }
     ]
+
+
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer"])
+def test_secret_management_follows_instance_manager_capability(vault, role):
+    context = _context("manager", instance_role=role)
+    with vault.begin() as conn:
+        _create_secret(conn, "MANAGED_KEY")
+        operations = (
+            lambda: vault_service.update_secret_tags(conn, "MANAGED_KEY", ["test"], user_context=context),
+            lambda: vault_service.update_secret_metadata(conn, "MANAGED_KEY", description="managed", user_context=context),
+            lambda: vault_service.update_secret_classification(conn, "MANAGED_KEY", protection="protected", user_context=context),
+            lambda: vault_service.store_pubkey_pin(conn, "MANAGED_KEY", {"fingerprint": "test-pin"}, user_context=context),
+            lambda: vault_service.rotate_secret(conn, "MANAGED_KEY", _sealed("rotated"), user_context=context),
+            lambda: vault_service.delete_secret(conn, "MANAGED_KEY", user_context=context),
+        )
+        for operation in operations:
+            if role in {"owner", "member"}:
+                operation()
+            else:
+                with pytest.raises(vault_service.VaultSecretAccessError):
+                    operation()
+        if role in {"owner", "member"}:
+            with pytest.raises(vault_service.SecretNotFoundError):
+                vault_service.get_secret_meta(conn, "MANAGED_KEY")
+        else:
+            assert vault_service.get_secret_meta(conn, "MANAGED_KEY")["tags"] == []
+
+
+@pytest.mark.parametrize("policy", ["missing", "foreign"])
+def test_management_parity_does_not_bypass_direct_secret_use_policy(vault, policy):
+    # Direct service contexts retain ACL checks; validated remote Organization
+    # use intentionally has the existing Editor-or-higher behavior above.
+    context = _context("manager", instance_role="member", is_remote=False)
+    with vault.begin() as conn:
+        _create_secret(conn, "DIRECT_PRIVATE", protection="protected")
+        resource_id = _secret_id(conn, "DIRECT_PRIVATE")
+        conn.execute(resource_access_policies.delete().where(resource_access_policies.c.resource_id == resource_id))
+        if policy == "foreign":
+            resource_access_service.ensure_resource_policy(
+                conn, resource_kind="vault_secret", resource_id=resource_id,
+                organization_id="foreign-org", owner_user_id="foreign-user",
+                access_level="private", group_ids=[], policy_revision=1,
+                last_applied_control_plane_revision=1,
+            )
+        vault_service.update_secret_metadata(conn, "DIRECT_PRIVATE", description="managed", user_context=context)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.resolve_secret_access(conn, "DIRECT_PRIVATE", session_id="ses-private", user_context=context)

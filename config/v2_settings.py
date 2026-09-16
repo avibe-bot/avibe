@@ -549,13 +549,13 @@ class SettingsStore:
         self.settings = self._service.load_state()
         self._generation += 1
 
-    def save(self) -> None:
+    def save(self, *, user_context=None) -> None:
         with self._reload_lock:
             try:
-                revision = self._service.save_state(self.settings)
+                revision = self._service.save_state(self.settings, user_context=user_context)
             except Exception:
-                # API helpers mutate the singleton before saving. A refused transaction
-                # must restore the durable snapshot before any later read or save.
+                # Restore the durable snapshot after a refused transaction before
+                # this store can be read or saved again.
                 self._load_with_revision()
                 raise
             # Use the exact revision committed by this transaction. Reading the
@@ -632,21 +632,25 @@ class SettingsStore:
         thread_id: str,
         settings: ChannelSettings,
         platform: Optional[str] = None,
+        *,
+        user_context=None,
     ) -> None:
         key = self._thread_key(channel_id, thread_id, platform)
         self._carry_agent_binding_expectation(self.settings.threads.get(key), settings)
         self.settings.threads[key] = settings
-        self.save()
+        self.save(user_context=user_context)
 
     def delete_thread(
         self,
         channel_id: str,
         thread_id: str,
         platform: Optional[str] = None,
+        *,
+        user_context=None,
     ) -> bool:
         removed = self.settings.threads.pop(self._thread_key(channel_id, thread_id, platform), None)
         if removed is not None:
-            self.save()
+            self.save(user_context=user_context)
             return True
         return False
 

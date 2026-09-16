@@ -571,23 +571,11 @@ def test_editor_config_write_always_answers_with_a_renderable_code(monkeypatch, 
     assert V2Config.load().runtime.default_cwd == "."
 
 
-def test_no_non_owner_can_persist_a_credential_through_the_config_write(monkeypatch, tmp_path) -> None:
-    """Persisting a secret is an Owner act, and the allowlist closes that by shape.
+def test_editor_cannot_persist_a_credential_through_the_config_write(monkeypatch, tmp_path) -> None:
+    """Editor keeps its preference-only schema across all credential sections.
 
-    The write schema used to be selected with ``can_manage_instance``, which
-    stopped being an owner test once a member held that capability: the member
-    fell past the Editor allowlist into a filter that removed only
-    ``remote_access``, so platform bot tokens and gateway secrets reached the
-    save path and were reconciled onto the live platform.
-
-    The enumeration comes from ``api._PLATFORM_SECRET_FIELDS`` and
-    ``api._GATEWAY_SECRET_FIELDS`` rather than from the four fields a review
-    happened to name, and the assertion is over the allowlist rather than over
-    those tables: a secret added to either table -- or a credential-bearing
-    section nobody has written down yet -- is unreachable below Owner because
-    it is absent from ``_EDITOR_CONFIG_WRITE_FIELDS``, not because someone
-    remembered to strip it. ``remote_access`` rides the same rule, which is why
-    the pairing-specific filter it used to need is gone.
+    The field registry independently enumerates credential-bearing sections;
+    Member management is covered by the signed remote management scenarios.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, _ids = _setup_state(tmp_path)
@@ -617,7 +605,7 @@ def test_no_non_owner_can_persist_a_credential_through_the_config_write(monkeypa
     assert baseline["slack.bot_token"] == ""
     assert baseline["remote_access.instance_id"] == "inst_123"
 
-    for role in ("member", "editor"):
+    for role in ("editor",):
         client = _remote_client(config, role=role, email=f"{role}@example.com")
         headers = csrf_headers(client, REMOTE_ORIGIN)
         for section, fields in secret_sections.items():

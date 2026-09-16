@@ -61,8 +61,14 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     create_default_service,
 )
-from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
-from vibe import backend_model_catalog, ui_server
+from tests.ui_server_test_helpers import (
+    _save_config,
+    csrf_headers,
+    remote_peer,
+    remote_session_cookie,
+    save_config,
+)
+from vibe import backend_model_catalog, remote_access, ui_server
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
@@ -615,6 +621,28 @@ def _as_ui_client(service):
     return UIClientShape()
 
 
+def _remote_model_hub_client(tmp_path, *, role="member", kind="organization", organization_role="member"):
+    """Use the real paired-session signature, authorization and CSRF path."""
+    config = _save_config(tmp_path, paired=True, instance_kind=kind)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "model-hub@example.com",
+            "model-hub-user",
+            role=role,
+            access_source="organization_group" if kind == "organization" else "email",
+            organization_id="org-model-hub" if kind == "organization" else None,
+            organization_member_id="membership-model-hub" if kind == "organization" else None,
+            organization_role=organization_role if kind == "organization" else None,
+            group_ids=[] if kind == "organization" else None,
+        ),
+        domain="alex.avibe.bot",
+    )
+    return client, "https://alex.avibe.bot"
+
+
 def test_api_response_registry_exactly_covers_contract_and_server_routes():
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
     documented = {
@@ -717,11 +745,16 @@ def test_oauth_result_response_discriminates_terminal_intent_and_tail():
     API_RESPONSE_EXERCISES,
     ids=lambda value: (f"{value['method']} {value['path']}" if "method" in value else value.get("setup", "plain")),
 )
+@pytest.mark.parametrize("access", [
+    "local", "personal-member", "organization-owner", "organization-member",
+    "organization-editor", "organization-viewer",
+])
 def test_every_model_hub_endpoint_returns_its_contract_response(
     monkeypatch,
     tmp_path,
     route_contract,
     exercise,
+    access,
 ):
     endpoint = f"{route_contract['method']} {route_contract['path']}"
 
@@ -729,18 +762,33 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
     monkeypatch.setenv("HOME", str(isolated_home))
     monkeypatch.setenv("AVIBE_HOME", str(isolated_home / ".avibe"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
-    save_config(isolated_home)
+    if access == "local":
+        save_config(isolated_home)
+        client = app.test_client()
+        base_url = "http://127.0.0.1:15131"
+    else:
+        kind, role = access.split("-", 1)
+        client, base_url = _remote_model_hub_client(isolated_home, role=role, kind=kind)
     service = _seed_response_conformance_service(tmp_path)
     if endpoint == "POST /api/models/runtime/stop":
         for agent in service.store.config.agents.values():
             agent.mode = "direct"
-    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
-    client = app.test_client()
-    base_url = "http://127.0.0.1:15131"
+    admitted = access not in {"organization-editor", "organization-viewer"} or (
+        access == "organization-editor"
+        and endpoint == "GET /api/models/agents/<backend>/models"
+    )
+
+    def get_service():
+        assert admitted, "authorization must deny before entering a Model Hub handler"
+        return _as_ui_client(service)
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", get_service)
     request_kwargs = {
         "headers": csrf_headers(client, base_url),
         "base_url": base_url,
     }
+    if access != "local":
+        request_kwargs["environ_base"] = remote_peer()
     setup = exercise.get("setup")
     if setup in {"backend_model_guard", "backend_model_forced_removal"}:
         baseline = service.backend_catalog_models("claude")
@@ -798,6 +846,10 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
         **request_kwargs,
     )
     body = response.get_json()
+    if not admitted:
+        assert response.status_code == 403
+        assert body["error"] == "instance_access_forbidden"
+        return
     assert response.status_code == exercise["status"], (
         f"{endpoint}: expected HTTP {exercise['status']}, got {response.status_code}: {body}"
     )
@@ -9164,3 +9216,23 @@ def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):
     assert updated["interrupted"] == []
     assert store.config.sources[0].display_name == "After rename"
     assert len(adapter.synced) == sync_count
+
+
+def test_signed_organization_member_completes_models_page_bootstrap(monkeypatch, tmp_path):
+    """Reported settings/models regression: status must precede all page reads."""
+    client, base_url = _remote_model_hub_client(tmp_path)
+    service = _seed_response_conformance_service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
+    for path, key in (
+        ("/api/models/runtime/status", "runtime"),
+        ("/api/models/sources", "sources"),
+        ("/api/models/agents", "agents"),
+        ("/api/models/events", "events"),
+        ("/api/models/usage", "usage"),
+    ):
+        response = client.get(path, base_url=base_url, environ_base=remote_peer())
+        assert response.status_code == 200, (path, response.get_json())
+        assert key in response.get_json()
+    # A valid signed session still needs CSRF for writes.
+    response = client.post("/api/models/runtime/start", json={}, base_url=base_url, environ_base=remote_peer())
+    assert response.status_code == 403

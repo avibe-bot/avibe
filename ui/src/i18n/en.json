@@ -2944,6 +2944,8 @@
     "step5OpenLink": "Open Version Management"
   },
   "wechatConfig": {
+    "ownerBindingRequired": "QR login also grants user access and requires the instance Owner. You can update an existing bot token and connection settings here.",
+    "botToken": "Bot token",
     "eyebrow": "WeChat",
     "title": "WeChat Setup",
     "subtitle": "Scan the QR code with your WeChat to connect.",

@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
@@ -106,6 +107,8 @@ const addDiscordGuildToAllowlist = (allowlist: string[], selectedGuild: string):
 };
 
 export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onBack, isPage, forcedPlatform, wizardPlatforms }) => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -1259,6 +1262,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 <label className="inline-flex items-center gap-2 text-[13px] text-foreground">
                   <span>{t('channelList.requireBind')}</span>
                   <ToggleSwitch
+                    disabled={!canManageAccessMembers}
                     enabled={!!(config as any)[pageTab]?.require_bind}
                     onClick={() => savePlatformFlag(pageTab, 'require_bind')}
                   />
@@ -1305,7 +1309,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         >
                           <input
                             type="checkbox"
-                            checked={selectedGuildIds.includes(g.id)}
+                            disabled={!canManageAccessMembers}
+                          checked={selectedGuildIds.includes(g.id)}
                             onChange={(e) => toggleAllowedGuild(g.id, e.target.checked)}
                             className="h-3.5 w-3.5 accent-accent"
                           />
@@ -1453,7 +1458,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 if (rawConfig.require_mention === null || rawConfig.require_mention === undefined) {
                   patch.require_mention = !!platformDefaults.require_mention;
                 }
-                if (rawConfig.require_bind === null || rawConfig.require_bind === undefined) {
+                if (canManageAccessMembers && (rawConfig.require_bind === null || rawConfig.require_bind === undefined)) {
                   patch.require_bind = !!platformDefaults.require_bind;
                 }
                 updateRow(patch);
@@ -1818,6 +1823,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       >
                         <input
                           type="checkbox"
+                          disabled={!canManageAccessMembers}
                           checked={selectedGuildIds.includes(g.id)}
                           onChange={(e) => toggleAllowedGuild(g.id, e.target.checked)}
                           className="h-3.5 w-3.5 accent-accent"
@@ -1902,7 +1908,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       if (rawConfig.require_mention === null || rawConfig.require_mention === undefined) {
                         patch.require_mention = !!platformDefaults.require_mention;
                       }
-                      if (rawConfig.require_bind === null || rawConfig.require_bind === undefined) {
+                      if (canManageAccessMembers && (rawConfig.require_bind === null || rawConfig.require_bind === undefined)) {
                         patch.require_bind = !!platformDefaults.require_bind;
                       }
                       updateConfig(channel.id, patch);

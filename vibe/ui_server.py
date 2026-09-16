@@ -3189,6 +3189,10 @@ def _resolve_log_sources() -> list[dict[str, Any]]:
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Global exception handler - ensures all errors return JSON."""
+    from vibe.authorization import InstanceAuthorizationError
+
+    if isinstance(e, InstanceAuthorizationError):
+        return jsonify({"ok": False, "error": e.code, "required_role": e.minimum_role}), 403
     # Preserve HTTP status codes for client errors (4xx)
     status_code = getattr(e, "status_code", None)
     detail = getattr(e, "detail", None)
@@ -6622,13 +6626,15 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     return {"ok": True, "restart": restart}
 
 
-def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool, bool, list[str]]:
+def _save_config_and_runtime_decisions(
+    payload: dict, *, user_context: Any = None,
+) -> tuple[V2Config, bool, bool, bool, list[str]]:
     from vibe import api
     from vibe import remote_access
 
     with CONFIG_LOCK:
         previous_config = _load_remote_access_config()
-        config = api.save_config(payload, generic_remote_access=True)
+        config = api.save_config(payload, generic_remote_access=True, user_context=user_context)
         previous_cloud = previous_config.remote_access.vibe_cloud if previous_config is not None else None
         current_cloud = config.remote_access.vibe_cloud
         old_instance_id = str(previous_cloud.instance_id or "") if previous_cloud is not None else ""
@@ -6743,24 +6749,10 @@ async def config_post():
     # falsy shapes that happen to exist today.
     payload = request.json
     authorization_context = getattr(g, "authorization_context", None)
-    # Persisting a credential is an Owner act, so the write schema is selected
-    # by ownership and by nothing else. ``can_manage_instance`` used to pick it,
-    # which stopped being an owner test the moment a member acquired that
-    # capability: a member fell past this branch into a filter that removed only
-    # ``remote_access``, and every other section — ``slack.bot_token``,
-    # ``discord.bot_token``, ``lark.app_secret``, gateway secrets — reached the
-    # save path and was reconciled onto the live platform.
-    #
-    # There is one non-owner write schema and it is ``_EDITOR_CONFIG_WRITE_FIELDS``,
-    # a closed allowlist of non-secret preferences. Closed is the whole point:
-    # no credential-bearing section has to be enumerated here, and a secret
-    # added to ``api._PLATFORM_SECRET_FIELDS`` (or to any config section) is
-    # unreachable below Owner by construction rather than by remembering to add
-    # it to a strip list. Pairing identity is covered by the same rule —
-    # ``remote_access`` is not on the allowlist, so it is refused outright
-    # instead of silently dropped.
+    # Editors keep their preference-only schema; managers can save ordinary
+    # settings. api.save_config protects admission/pairing at the locked writer.
     non_owner_write = (
-        authorization_context is not None and not authorization_context.can_manage_access_members
+        authorization_context is not None and not authorization_context.can_manage_instance
     )
     if non_owner_write:
         try:
@@ -6779,6 +6771,7 @@ async def config_post():
         ) = await asyncio.to_thread(
             _save_config_and_runtime_decisions,
             payload,
+            user_context=authorization_context,
         )
     except ValueError as exc:
         # Same chokepoint as the allowlist rejection above: a non-owner write
@@ -7410,7 +7403,7 @@ def settings_post():
 
     payload = request.json or {}
     try:
-        return jsonify(api.save_settings(payload))
+        return jsonify(api.save_settings(payload, user_context=_request_authorization_context()))
     except StaleScopeAgentBindingError as exc:
         return _settings_conflict_response(exc)
     except ScopeAgentUnavailableError as exc:
@@ -7426,7 +7419,10 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
         body = await starlette_request.body()
         payload = await starlette_request.json() if body else {}
         try:
-            return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+            return api.save_thread_settings(
+                payload if isinstance(payload, dict) else {},
+                user_context=_request_authorization_context(),
+            )
         except StaleScopeAgentBindingError as exc:
             return _settings_conflict_response(exc)
         except ScopeAgentUnavailableError as exc:
@@ -7445,6 +7441,7 @@ async def thread_settings_delete(starlette_request: FastAPIRequest):
             query.get("platform", ""),
             query.get("channel_id", ""),
             query.get("thread_id", ""),
+            user_context=_request_authorization_context(),
         )
 
     return await _dispatch_native_ui_request(starlette_request, handler)
@@ -7526,6 +7523,7 @@ def channels_delete():
             payload.get("platform", ""),
             payload.get("id", ""),
             scope_type=payload.get("scope_type", "channel"),
+            user_context=_request_authorization_context(),
         )
     )
 
@@ -12667,12 +12665,9 @@ def users_post():
     from vibe import api
     from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
-    forbidden = _access_administration_forbidden()
-    if forbidden is not None:
-        return forbidden
     payload = request.json or {}
     try:
-        return jsonify(api.save_users(payload))
+        return jsonify(api.save_users(payload, user_context=_request_authorization_context()))
     except StaleScopeAgentBindingError as exc:
         return _settings_conflict_response(exc)
     except ScopeAgentUnavailableError as exc:
@@ -15505,7 +15500,7 @@ async def serve_private_show_page(session_id, asset_path):
     from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
 
     authorization_context = _request_authorization_context()
-    runtime_retry_authorized = _has_runtime_owner_access(authorization_context)
+    runtime_retry_authorized = bool(authorization_context and authorization_context.can_manage_instance)
     markdown_requested = _is_show_page_markdown_request(asset_path, request._request)
     store = ShowPageStore()
     try:

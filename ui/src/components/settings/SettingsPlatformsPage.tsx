@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -55,6 +56,8 @@ const tileStyle = (id: string) =>
 //    and save. There is no user-facing "primary platform" — the backend derives
 //    an internal default from the enabled set, so this page never sends one.
 export const SettingsPlatformsPage: React.FC = () => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -96,7 +99,7 @@ export const SettingsPlatformsPage: React.FC = () => {
   const savePlatformSettings = async (platform: string, nextData: any) => {
     const discordGuildAllowlist = nextData?.discordGuildAllowlist;
     if (
-      platform === 'discord' &&
+      canManageAccessMembers && platform === 'discord' &&
       Array.isArray(discordGuildAllowlist) &&
       (discordGuildAllowlist.length > 0 || nextData?.discordGuildAllowlistTouched === true)
     ) {

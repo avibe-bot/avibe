@@ -1571,7 +1571,7 @@ class SlackConfig(BaseIMConfig):
     require_mention: bool = False
     # Global default for the per-channel require_bind gate (allowed users).
     # False=any channel member may drive the agent, True=only bound users.
-    # Channels whose per-channel require_bind is None inherit this value.
+    # Seeds newly enabled channels; runtime None/False remains unrestricted.
     require_bind: bool = False
     disable_link_unfurl: bool = False
 

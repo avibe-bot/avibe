@@ -1058,6 +1058,7 @@ def delete_scope(
     *,
     scope_type: str = CHANNEL_SCOPE_TYPE,
     db_path: Path | None = None,
+    user_context: Any = None,
 ) -> dict[str, bool]:
     """Remove a discovered scope and its settings without destroying history.
 
@@ -1076,13 +1077,27 @@ def delete_scope(
     Returns ``{"removed": bool, "dismissed": bool}``.
     """
     scope_id = make_scope_id(platform, scope_type, native_id)
+    from storage.agent_session_rows import reserve_write_lock
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    context = require_instance_role(user_context, "member")
     engine = _engine(db_path)
     try:
         with engine.begin() as conn:
+            reserve_write_lock(conn)
             row = conn.execute(select(scopes).where(scopes.c.id == scope_id)).mappings().one_or_none()
             if row is None:
                 return {"removed": False, "dismissed": False}
             descendants = _descendant_scope_rows(conn, scope_id)
+            if not context.can_manage_access_members:
+                removed_ids = [scope_id, *(item["id"] for item in descendants)]
+                settings = conn.execute(
+                    select(scope_settings.c.settings_json).where(scope_settings.c.scope_id.in_(removed_ids))
+                ).scalars()
+                # Removing a parent also removes thread overrides. All would
+                # return to the open default if rediscovered.
+                if any(json.loads(value or "{}").get("require_bind") for value in settings):
+                    raise InstanceAuthorizationError("owner")
             runtime_settings_changed = False
             for descendant in reversed(descendants):
                 _, descendant_changed = _remove_scope_row_preserving_history(conn, descendant)

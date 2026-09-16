@@ -35,6 +35,80 @@ from storage.settings_revision import (
 
 SETTINGS_VERSION = 1
 GUILD_POLICY_KIND = "guild_policy"
+
+
+def _require_preserved_access_policy(current: SettingsState, candidate: SettingsState) -> None:
+    """Compare access effects against the snapshot held by the SQLite write lock."""
+    from vibe.authorization import InstanceAuthorizationError
+
+    # Until its first settings migration, Discord reads admission from config.
+    # Read the atomic config file directly: V2Config.load can itself migrate and
+    # acquire the config lock, inverting the config -> SQLite writer lock order.
+    from config import paths
+
+    legacy_guilds = None
+    if "discord" not in current.guild_scope_platforms or "discord" not in candidate.guild_scope_platforms:
+        try:
+            config_payload = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            config_payload = {}
+        discord = config_payload.get("discord") or {}
+        allowed, denied = discord.get("guild_allowlist") or [], discord.get("guild_denylist") or []
+        default = not bool(allowed)
+        entries = {str(key): True for key in allowed}
+        entries.update({str(key): False for key in denied})
+        legacy_guilds = default, {
+            _make_scoped_key("discord", key): enabled
+            for key, enabled in entries.items() if enabled != default
+        }
+
+    def members(state):
+        return {
+            key: (user.is_admin, user.enabled, user.bound_at, user.dm_chat_id)
+            for key, user in state.users.items()
+        }
+
+    def guild_policy(state, platform):
+        if platform == "discord" and platform not in state.guild_scope_platforms:
+            return legacy_guilds
+        default = (
+            bool(state.guild_default_enabled.get(platform, False))
+            if platform in state.guild_scope_platforms else True
+        )
+        exceptions = {
+            key: bool(guild.enabled)
+            for key, guild in state.guilds.items()
+            if _split_scoped_key(key)[0] == platform and bool(guild.enabled) != default
+        }
+        return default, exceptions
+
+    def binding(state, key, *, thread=False):
+        if thread:
+            item = state.threads.get(key)
+            if item is not None:
+                return bool(item.require_bind)
+            platform, native_id = _split_scoped_key(key)
+            channel_id, _ = split_thread_native_id(native_id)
+            key = _make_scoped_key(platform, channel_id) if platform else channel_id
+        item = state.channels.get(key)
+        # Channel None/False is open; the platform flag only seeds new channels.
+        return bool(item and item.require_bind)
+
+    changed = members(current) != members(candidate) or current.bind_codes != candidate.bind_codes
+    platforms = current.guild_scope_platforms | candidate.guild_scope_platforms
+    changed = changed or any(guild_policy(current, p) != guild_policy(candidate, p) for p in platforms)
+    changed = changed or any(
+        binding(current, key) != binding(candidate, key)
+        for key in current.channels.keys() | candidate.channels.keys()
+    )
+    changed = changed or any(
+        binding(current, key, thread=True) != binding(candidate, key, thread=True)
+        for key in current.threads.keys() | candidate.threads.keys()
+    )
+    if changed:
+        raise InstanceAuthorizationError("owner")
+
+
 class StaleScopeAgentBindingError(ValueError):
     code = "settings_conflict"
 
@@ -65,20 +139,31 @@ class SQLiteSettingsService:
 
     def load_state(self) -> SettingsState:
         with self.engine.connect() as conn:
-            return SettingsState(
-                channels=self._load_channels(conn),
-                threads=self._load_threads(conn),
-                guilds=self._load_guilds(conn),
-                guild_scope_platforms=self._load_guild_scope_platforms(conn),
-                guild_default_enabled=self._load_guild_policies(conn),
-                users=self._load_users(conn),
-                bind_codes=self._load_bind_codes(conn),
-            )
+            return self._load_state(conn)
 
-    def save_state(self, state: SettingsState) -> str:
+    def _load_state(self, conn: Connection) -> SettingsState:
+        return SettingsState(
+            channels=self._load_channels(conn),
+            threads=self._load_threads(conn),
+            guilds=self._load_guilds(conn),
+            guild_scope_platforms=self._load_guild_scope_platforms(conn),
+            guild_default_enabled=self._load_guild_policies(conn),
+            users=self._load_users(conn),
+            bind_codes=self._load_bind_codes(conn),
+        )
+
+    def save_state(self, state: SettingsState, *, user_context: Any = None) -> str:
+        from vibe.authorization import require_instance_role
+
+        # General config still accepts Editor preferences and may round-trip
+        # the legacy Discord scope projection. HTTP/API management callers
+        # require Member before entering; every non-owner preserves access here.
+        context = require_instance_role(user_context, "editor")
         saved_bindings: list[tuple[ChannelSettings | UserSettings, RoutingSettings]] = []
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
+            if not context.can_manage_access_members:
+                _require_preserved_access_policy(self._load_state(conn), state)
             now = _utc_now_iso()
             # Per-row reconcile (NOT a delete-everything rewrite): upsert each
             # managed scope's settings, then delete only the managed rows that

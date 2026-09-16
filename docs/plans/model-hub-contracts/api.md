@@ -1,5 +1,13 @@
 # Model Hub — REST API contract
 
+Authorization: all current Model Hub management endpoints admit Instance Member
+and Owner in both Personal and Organization instances. The model picker read
+`GET /api/models/agents/<backend>/models` remains Editor-readable. Organization
+membership alone supplies no instance-management grant. Signed-session, CSRF,
+credential redaction and supply-impact confirmation rules still apply; unknown
+API siblings retain the Owner default.
+
+
 Status: **Normative, `contract_version` 10** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
 Success envelope: `{ok: true, contract_version: 10, ...}`.

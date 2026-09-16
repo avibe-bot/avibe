@@ -501,8 +501,8 @@ def test_settings_save_does_not_absorb_a_newer_external_revision(
     external = SQLiteSettingsService(tmp_path / "vibe.sqlite")
     original_save = store._service.save_state
 
-    def save_then_race(state: SettingsState) -> str:
-        committed_revision = original_save(state)
+    def save_then_race(state: SettingsState, *, user_context=None) -> str:
+        committed_revision = original_save(state, user_context=user_context)
         external.save_state(
             SettingsState(
                 channels={

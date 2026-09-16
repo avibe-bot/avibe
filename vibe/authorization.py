@@ -402,9 +402,8 @@ _VIEWER_HTTP_MUTATION_RULES = (
 )
 
 # Pairing identity, member set, and ownership stay Owner-only. Writes under
-# /api/remote-access default to owner so a newly added pair/unpair/settings
-# sibling cannot slip through as member. The ops below cannot change instance
-# id, backend URL, or secrets, so member keeps them.
+# /api/remote-access default to Owner. Explicit tunnel operations below preserve
+# pairing identity; the settings writer accepts only transport/recovery fields.
 _REMOTE_ACCESS_HTTP_NAMESPACE = "/api/remote-access"
 _REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
     (method, re.compile(pattern))
@@ -413,68 +412,44 @@ _REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
         ("GET", r"^/api/remote-access/network-interfaces$"),
         ("POST", r"^/api/remote-access/optimize-route$"),
         ("POST", r"^/api/remote-access/diagnostics$"),
+        ("POST", r"^/api/remote-access/(?:start|stop|settings)$"),
     )
 )
 
-# The member surface is an allow-list, and the unknown-route default is Owner.
-#
-# Enumerating the Owner exceptions instead was tried and does not converge: with
-# an unknown route defaulting to member, adding the member rank silently widened
-# every `/api/*` route that no other table classified -- 112 of them, including
-# `POST /api/control`, `POST /api/upgrade`, every `/api/backend/*/auth` route,
-# and the resource/project ACL PUTs. Review found members of that set one head at
-# a time because a list of exceptions is only ever as complete as the last audit.
-#
-# Inverting makes the omission safe in the other direction: a route absent from
-# this table keeps exactly the role it had before the member rank existed, so a
-# newly added management route cannot become member-reachable by accident and the
-# blast radius of this capability is bounded by what is written here.
-#
-# What belongs here: the routes backing the capabilities the member rank is
-# defined to grant -- ``can_manage_agents`` (Agent CRUD and the model routing an
-# Agent is configured against) and ``can_manage_projects``, plus read-only
-# instance state. What deliberately does not, and is therefore Owner:
-#   * anything that mints, revokes, or promotes instance access -- the cloud
-#     allowlist, IM bound users, and bind codes. A bind code is a bearer
-#     credential, so *listing* them is equivalent to minting and stays Owner
-#     while ``GET /api/users`` is a member read.
-#   * anything holding or minting a credential -- `/api/backend/*/auth`, model
-#     source credentials and OAuth, and the platform `auth_test`/channel probes
-#     that take a bot token.
-#   * instance lifecycle and host reach -- control, upgrade, ui/reload, logs,
-#     doctor writes, dependency installs, and the filesystem browse routes.
-#   * anything that changes an ACL or the IM access boundary -- the resource and
-#     project access PUTs, and the channel/thread settings writes that carry
-#     ``require_bind``.
-#   * bulk Agent onboarding, a one-way instance-wide migration whose GET
-#     discloses every Agent row and whose POST claims every policy-less one under
-#     the caller's private ACL.
+# Instance management follows Member capabilities, using an explicit method/path
+# inventory. Unknown APIs remain Owner-only. Access-member/role administration,
+# pairing identity, Project/Resource ACL changes, WeChat's combined login/binding,
+# and bulk Agent ownership migration deliberately remain outside this table.
+# Mixed config/scope writers also preserve access policy at their locked commit.
 _MEMBER_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        # can_manage_agents: Agent CRUD and instance-wide default selection.
-        # /api/agent-onboarding is a bulk migration and stays Owner by default.
-        #
-        # ``/api/agent/<name>/install`` is absent on purpose, and so is its job
-        # status sibling: the handler runs a package manager, a self-update, or a
-        # curl script on the host, persists the resulting CLI path, and may
-        # restart the backend. That is the "dependency installs" bullet above --
-        # host lifecycle, not Agent CRUD -- and it reached member only because
-        # this table was written by hand while the policy sat in a comment. There
-        # is no owner exception listed for it because none is needed: an absent
-        # route keeps the role it had before the member rank existed, which is
-        # Owner.
+        # Agent CRUD and instance-wide default selection.
         ("POST", r"^/api/agents$"),
         ("PATCH", r"^/api/agents/[^/]+$"),
         ("DELETE", r"^/api/agents/[^/]+$"),
         ("POST", r"^/api/agents/import$"),
         ("POST", r"^/api/agents/default$"),
-        # can_manage_agents: selecting among already-authenticated model sources.
-        # Adding or re-authenticating a source is credential work and stays Owner.
+        # Model Hub management. Keep this method/path allow-list aligned with
+        # its registered API contract; unknown siblings remain Owner-only.
+        # GET /agents/<backend>/models stays in the Editor model-picker rules.
+        ("GET", r"^/api/models/sources$"),
+        ("POST", r"^/api/models/sources$"),
+        ("POST", r"^/api/models/sources/observe$"),
+        ("PATCH", r"^/api/models/sources/[^/]+$"),
+        ("DELETE", r"^/api/models/sources/[^/]+$"),
+        ("PUT", r"^/api/models/sources/[^/]+/credential$"),
+        ("POST", r"^/api/models/sources/[^/]+/(?:reauth|refresh|probe)$"),
+        ("POST", r"^/api/models/sources/[^/]+/models$"),
+        # Model IDs are path parameters and may contain vendor/model slashes.
+        ("PATCH", r"^/api/models/sources/[^/]+/models/.+$"),
+        ("DELETE", r"^/api/models/sources/[^/]+/models/.+$"),
         ("GET", r"^/api/models/agents$"),
         ("GET", r"^/api/models/agents/[^/]+/chains$"),
         ("GET", r"^/api/models/agents/[^/]+/chain$"),
         ("PUT", r"^/api/models/agents/[^/]+/chain$"),
+        ("DELETE", r"^/api/models/agents/[^/]+/chain$"),
+        ("POST", r"^/api/models/agents/[^/]+/chain/preview$"),
         ("GET", r"^/api/models/agents/[^/]+/sources$"),
         ("PUT", r"^/api/models/agents/[^/]+/sources$"),
         ("GET", r"^/api/models/agents/[^/]+/models/candidates$"),
@@ -482,7 +457,15 @@ _MEMBER_HTTP_RULES = tuple(
         ("GET", r"^/api/models/catalog/models-dev$"),
         ("PATCH", r"^/api/models/agents/[^/]+/mode$"),
         ("POST", r"^/api/models/agents/[^/]+/chains/reorder$"),
-        ("GET", r"^/api/models/sources$"),
+        ("POST", r"^/api/models/agents/[^/]+/probe$"),
+        ("GET", r"^/api/models/agents/[^/]+/provenance$"),
+        ("GET", r"^/api/models/(?:events|usage)$"),
+        ("POST", r"^/api/models/oauth/(?:start|submit|cancel)$"),
+        ("GET", r"^/api/models/oauth/status/[^/]+$"),
+        ("POST", r"^/api/models/migration/(?:scan|apply)$"),
+        ("GET", r"^/api/models/turns/[^/]+/provenance$"),
+        ("GET", r"^/api/models/runtime/status$"),
+        ("POST", r"^/api/models/runtime/(?:install|start|stop)$"),
         # can_manage_agents: instance-wide prompt text, not a credential.
         ("GET", r"^/api/global-prompts$"),
         ("PUT", r"^/api/global-prompts$"),
@@ -494,7 +477,69 @@ _MEMBER_HTTP_RULES = tuple(
         ("DELETE", r"^/api/projects/[^/]+$"),
         ("GET", r"^/api/projects/[^/]+/agents-md$"),
         ("PUT", r"^/api/projects/[^/]+/agents-md$"),
-        # Read-only instance state. The member set is readable, not writable.
+        # General instance settings; mixed writes retain access-administration guards.
+        ("GET", r"^/api/doctor$"),
+        ("PUT", r"^/api/workbench/prefs$"),
+        ("GET", r"^/api/cli/detect$"),
+        ("GET", r"^/api/slack/manifest$"),
+        ("POST", r"^/api/control$"),
+        ("POST", r"^/api/ui/reload$"),
+        ("POST", r"^/api/settings$"),
+        ("POST", r"^/api/settings/thread$"),
+        ("DELETE", r"^/api/settings/thread$"),
+        ("POST", r"^/api/slack/auth_test$"),
+        ("POST", r"^/api/slack/channels$"),
+        ("POST", r"^/api/discord/auth_test$"),
+        ("POST", r"^/api/discord/guilds$"),
+        ("POST", r"^/api/discord/channels$"),
+        ("POST", r"^/api/channels/delete$"),
+        ("POST", r"^/api/telegram/auth_test$"),
+        ("POST", r"^/api/telegram/chats$"),
+        ("POST", r"^/api/lark/auth_test$"),
+        ("POST", r"^/api/lark/chats$"),
+        ("POST", r"^/api/lark/temp_ws/start$"),
+        ("POST", r"^/api/lark/temp_ws/stop$"),
+        ("POST", r"^/api/doctor$"),
+        ("POST", r"^/api/logs$"),
+        ("POST", r"^/api/opencode/options$"),
+        ("POST", r"^/api/upgrade$"),
+        ("POST", r"^/api/opencode/setup-permission$"),
+        ("GET", r"^/api/opencode/permission-status$"),
+        ("GET", r"^/api/claude/agents$"),
+        ("GET", r"^/api/codex/agents$"),
+        ("POST", r"^/api/agent/[^/]+/install$"),
+        ("GET", r"^/api/agent/[^/]+/install/[^/]+$"),
+        ("GET", r"^/api/backend/[^/]+/runtime$"),
+        ("POST", r"^/api/backend/[^/]+/restart$"),
+        ("GET", r"^/api/dependencies$"),
+        ("POST", r"^/api/dependencies/[^/]+/install$"),
+        ("GET", r"^/api/dependencies/[^/]+/install/[^/]+$"),
+        ("GET", r"^/api/backend/codex/auth$"),
+        ("POST", r"^/api/backend/codex/auth$"),
+        ("GET", r"^/api/backend/claude/auth$"),
+        ("POST", r"^/api/backend/claude/auth$"),
+        ("POST", r"^/api/backend/[^/]+/auth/oauth/start$"),
+        ("GET", r"^/api/backend/[^/]+/auth/oauth/status/[^/]+$"),
+        ("POST", r"^/api/backend/[^/]+/auth/oauth/submit-code$"),
+        ("POST", r"^/api/backend/[^/]+/auth/oauth/cancel$"),
+        ("POST", r"^/api/backend/[^/]+/auth/oauth/remove$"),
+        ("POST", r"^/api/backend/claude/auth/oauth/credentials/remove$"),
+        ("POST", r"^/api/backend/[^/]+/auth/api-key/remove$"),
+        ("POST", r"^/api/backend/[^/]+/auth/test$"),
+        ("GET", r"^/api/backend/opencode/providers$"),
+        ("POST", r"^/api/backend/opencode/custom-provider$"),
+        ("DELETE", r"^/api/backend/opencode/custom-provider/[^/]+$"),
+        ("POST", r"^/api/backend/opencode/provider/[^/]+/auth/oauth/start$"),
+        ("POST", r"^/api/backend/opencode/provider/[^/]+/auth$"),
+        ("DELETE", r"^/api/backend/opencode/provider/[^/]+/auth$"),
+        ("POST", r"^/api/backend/opencode/provider/[^/]+/test$"),
+        ("POST", r"^/api/backend/opencode/default-provider$"),
+        ("POST", r"^/api/backend/opencode/provider/[^/]+/models$"),
+        ("DELETE", r"^/api/backend/opencode/provider/[^/]+/models/.+$"),
+        ("POST", r"^/api/browse$"),
+        ("POST", r"^/api/browse/mkdir$"),
+        ("POST", r"^/api/users$"),
+        # Read-only instance state.
         ("GET", r"^/api/settings$"),
         ("GET", r"^/api/users$"),
     )
@@ -519,7 +564,7 @@ _EDITOR_HTTP_RULES = tuple(
         # live endpoint is `/api/backend/opencode/providers`, a Settings surface --
         # base URLs, masked API keys, active auth type, tool-call permission
         # state -- and reaching it runs `ensure_running()`, which can install a
-        # plugin, restart, or launch the daemon. Both stay Owner; the model
+        # plugin, restart, or launch the daemon. This stays Member; the Editor model
         # picker treats the refusal as "no catalog" instead.
         ("GET", r"^/api/models/agents/[^/]+/models$"),
         ("GET", r"^/api/claude/models$"),
@@ -527,7 +572,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
         # Files favorites live under /api/browse, not /api/files. Admit only this
-        # shared dependency — POST /api/browse and /mkdir stay Owner project-picker
+        # shared dependency — POST /api/browse and /mkdir are Member project-picker
         # routes.
         ("GET", r"^/api/browse/favorites$"),
         ("GET", r"^/api/cloud/token$"),
@@ -617,10 +662,9 @@ def required_instance_role(method: str, path: str) -> str | None:
     Non-API page/static reads are handled by the authenticated shell. Unknown
     API routes deliberately default to owner, so a newly added management route
     is never reachable by a role that predates it. The member rank widens only
-    the routes listed in ``_MEMBER_HTTP_RULES`` plus the read/ops quartet under
-    ``/api/remote-access``; access administration, credential and lifecycle
-    routes, ACL writes, and bulk Agent migration are Owner by that default
-    rather than by per-route exception.
+    the routes listed in ``_MEMBER_HTTP_RULES`` plus the explicit tunnel operations under
+    ``/api/remote-access``. Access administration, ACL writes, pairing, WeChat
+    login/binding and bulk Agent ownership migration remain Owner by default.
     """
 
     return http_authorization_policy(method, path).minimum_role

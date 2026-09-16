@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useState } from 'react';
 import { Bot, FolderOpen, HelpCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -87,6 +88,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   footerActions,
   containerClass = 'border-t border-border/60 px-5 py-4',
 }) => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
 
   const selectedVibeAgent = vibeAgents.find((agent) => agent.name === value.routing.agent_name) || null;
@@ -168,6 +171,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               <label className="text-xs font-medium uppercase text-muted">{t('channelList.requireBind')}</label>
               <div className="flex h-9 items-center">
                 <ToggleSwitch
+                  disabled={!canManageAccessMembers}
                   enabled={effective}
                   onClick={() => onChange({ require_bind: !effective })}
                 />

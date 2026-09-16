@@ -2944,6 +2944,8 @@
     "step5OpenLink": "打开版本管理"
   },
   "wechatConfig": {
+    "ownerBindingRequired": "扫码登录会同时授予用户访问权限，需要实例所有者操作。你可以在这里更新已有的机器人令牌和连接设置。",
+    "botToken": "机器人令牌",
     "eyebrow": "微信",
     "title": "微信设置",
     "subtitle": "使用微信扫描二维码以连接。",
