@@ -5,6 +5,8 @@ capability:
   canonical_tests:
     - tests/test_model_hub_api.py
     - tests/test_model_hub_config.py
+    - tests/test_model_hub_legacy_opencode_migration.py
+    - tests/test_member_management_parity.py
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
@@ -1090,6 +1092,13 @@ scenarios:
     reason: image-block terminal framing requires the private credential issued to a live backend turn
     owning_layer: future live-turn suite (turn gateway)
     evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
+  - id: MODEL-HUB-MIGRATION-001
+    name: Released OpenCode catalogs migrate before strict validation and restore settings saves
+    status: covered
+    kind: migration
+    layer: config-api
+    test: tests/test_model_hub_legacy_opencode_migration.py::test_legacy_selected_models_preserve_sources_routes_and_order
+    evidence: tests/test_member_management_parity.py::test_legacy_opencode_catalog_clears_recovery_and_allows_config_save
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
