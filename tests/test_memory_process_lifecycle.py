@@ -6,6 +6,7 @@ import asyncio
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import sys
 import tempfile
@@ -68,6 +69,12 @@ async def read_child_line(child, description):
     if not line:
         raise AssertionError(f"{description} exited before producing output")
     return line
+
+
+def native_test_python():
+    current_cmdline = psutil.Process().cmdline()
+    python_command = current_cmdline[0] if current_cmdline else sys.executable
+    return Path(shutil.which(python_command) or sys.executable).absolute()
 
 
 def settings():
@@ -562,8 +569,7 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
 ):
     """MEMORY-WAKE-204: unseen helper survives leader; context, not PGID, owns it."""
     with tempfile.TemporaryDirectory(prefix="mlate-", dir="/tmp") as temporary:
-        current_cmdline = psutil.Process().cmdline()
-        python = Path(current_cmdline[0] if current_cmdline else sys.executable)
+        python = native_test_python()
         home = Path(temporary).resolve()
         root = home / "memory/everos-root"
         root.mkdir(parents=True, mode=0o700)
@@ -597,44 +603,45 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
             env={"HOME": str(home), "EVEROS_ROOT": str(root), "AVIBE_MEMORY_CHILD_ROLE": role},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         )
-        assert await read_child_line(child, "sidecar readiness") == b"ready\n"
-
-        async def observe_helper():
-            line = await read_child_line(child, "helper PID")
-            try:
-                return psutil.Process(int(line)) if line else None
-            except ValueError as exc:
-                raise AssertionError(f"helper PID was not an integer: {line!r}") from exc
-            except psutil.NoSuchProcess:
-                return None
-
-        if timing == "term":
-            deliver_group = module._signal_owned_group
-
-            def group_delivery(*args):
-                delivered = deliver_group(*args)
-                if delivered and args[2] == signal.SIGTERM:
-                    # Ensure the native handler has begun before individual
-                    # delivery, so coalescing cannot hide a duplicate TERM.
-                    for _ in range(50):
-                        if (home / "term-count").exists():
-                            break
-                        time.sleep(0.002)
-                return delivered
-
-            monkeypatch.setattr(module, "_signal_owned_group", group_delivery)
-        helper_task = asyncio.create_task(observe_helper())
+        helper_task = None
         helper = None
-        host = module._SystemProcessHost()
-        owner = module.EverOSProcess(
-            python, effective_home=home, _host=host, settings=settings(),
-            provider_root_guard=lambda: None, stop_timeout_seconds=0.1,
-        )
-        owned = {child.pid: host.capture(child.pid)}
-        owner._process, owner._process_group, owner._owned_processes = child, child.pid, owned
-        owner._ownership.record_launch(child.pid, module._process_creation_stamp(owned[child.pid]), child.pid)
-        record_path = owner._ownership.record_path
         try:
+            assert await read_child_line(child, "sidecar readiness") == b"ready\n"
+
+            async def observe_helper():
+                line = await read_child_line(child, "helper PID")
+                try:
+                    return psutil.Process(int(line)) if line else None
+                except ValueError as exc:
+                    raise AssertionError(f"helper PID was not an integer: {line!r}") from exc
+                except psutil.NoSuchProcess:
+                    return None
+
+            if timing == "term":
+                deliver_group = module._signal_owned_group
+
+                def group_delivery(*args):
+                    delivered = deliver_group(*args)
+                    if delivered and args[2] == signal.SIGTERM:
+                        # Ensure the native handler has begun before individual
+                        # delivery, so coalescing cannot hide a duplicate TERM.
+                        for _ in range(50):
+                            if (home / "term-count").exists():
+                                break
+                            time.sleep(0.002)
+                    return delivered
+
+                monkeypatch.setattr(module, "_signal_owned_group", group_delivery)
+            helper_task = asyncio.create_task(observe_helper())
+            host = module._SystemProcessHost()
+            owner = module.EverOSProcess(
+                python, effective_home=home, _host=host, settings=settings(),
+                provider_root_guard=lambda: None, stop_timeout_seconds=0.1,
+            )
+            owned = {child.pid: host.capture(child.pid)}
+            owner._process, owner._process_group, owner._owned_processes = child, child.pid, owned
+            owner._ownership.record_launch(child.pid, module._process_creation_stamp(owned[child.pid]), child.pid)
+            record_path = owner._ownership.record_path
             if consumer == "probe":
                 async def probe_spawn(*args, **kwargs):
                     assert kwargs["env"]["AVIBE_MEMORY_CHILD_ROLE"] == role
@@ -692,14 +699,15 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
             try:
                 await dispose(child)
             finally:
-                if not helper_task.done():
+                if helper_task is not None and helper is None:
                     try:
                         helper = await asyncio.wait_for(
                             helper_task,
                             _CHILD_IO_TIMEOUT_SECONDS,
                         )
                     except (asyncio.TimeoutError, AssertionError):
-                        helper_task.cancel()
+                        if not helper_task.done():
+                            helper_task.cancel()
                         await asyncio.gather(helper_task, return_exceptions=True)
                 if helper is not None and module._reference_state(helper, helper.pid) is True:
                     try:
@@ -713,6 +721,63 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                         )
                     except (psutil.NoSuchProcess, psutil.TimeoutExpired) as exc:
                         raise AssertionError("test helper did not exit during cleanup") from exc
+
+
+async def test_native_late_group_helper_cleanup_consumes_completed_observation(monkeypatch):
+    captured_helpers = []
+    helper_reported = asyncio.Event()
+    original_read_child_line = read_child_line
+
+    async def capture_helper_line(child, description):
+        line = await original_read_child_line(child, description)
+        if description == "helper PID":
+            captured_helpers.append(psutil.Process(int(line)))
+            helper_reported.set()
+        return line
+
+    async def fail_after_helper_report(self, *args, **kwargs):
+        await asyncio.wait_for(helper_reported.wait(), _CHILD_IO_TIMEOUT_SECONDS)
+        await asyncio.sleep(0.02)
+        raise RuntimeError("review-injected cleanup failure after helper PID output")
+
+    monkeypatch.setattr(sys.modules[__name__], "read_child_line", capture_helper_line)
+    monkeypatch.setattr(module._SystemProcessHost, "wait_for_exit", fail_after_helper_report)
+    try:
+        with pytest.raises(RuntimeError, match="review-injected cleanup failure"):
+            await test_native_late_group_helper_is_classified_before_cleanup(
+                monkeypatch, "stop", "term", None,
+            )
+        assert captured_helpers
+        for helper in captured_helpers:
+            assert module._reference_state(helper, helper.pid) is not True
+    finally:
+        for helper in captured_helpers:
+            if module._reference_state(helper, helper.pid) is True:
+                helper.kill()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(helper.wait, _CHILD_CLEANUP_TIMEOUT_SECONDS),
+                        _CHILD_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                    pass
+
+
+@pytest.mark.parametrize(
+    ("argv0", "resolved"),
+    [
+        ("python3", "/standalone/bin/python3"),
+        ("/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python",
+         "/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python"),
+    ],
+    ids=["path-invoked", "framework"],
+)
+async def test_native_test_python_uses_absolute_runnable_interpreter(monkeypatch, argv0, resolved):
+    monkeypatch.setattr(psutil, "Process", lambda: SimpleNamespace(cmdline=lambda: [argv0]))
+    monkeypatch.setattr(shutil, "which", lambda command: resolved)
+
+    assert native_test_python() == Path(resolved)
+    assert native_test_python().is_absolute()
 
 
 @pytest.mark.parametrize("discovery", ["socket", "root", "sync"])
