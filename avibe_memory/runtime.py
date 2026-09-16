@@ -702,19 +702,6 @@ class MemoryRuntime:
         if callable(cancel_nowait):
             cancel_nowait()
 
-    def artifact_admitted(self) -> bool:
-        """Return whether the pinned artifact is valid for a reset admission."""
-
-        try:
-            status = self._artifact_manager.status()
-            return (
-                self._artifact_manager.resolve_python() is not None
-                and status.get("status") == "ready"
-                and status.get("reason") is None
-            )
-        except Exception:
-            return False
-
     def _active_artifact_identity(self) -> tuple[Path, str] | None:
         """Snapshot the verified active binary, not the selected manifest."""
 
@@ -2263,21 +2250,19 @@ class MemoryRuntime:
                     "state": "disabled",
                     "error": "memory_disabled",
                 }
-            artifact_admitted = await self._lifecycle_checkpoint(
-                run_blocking(self.artifact_admitted)
-            )
             artifact_status = await self._lifecycle_checkpoint(
                 run_blocking(self._artifact_manager.status)
             )
-            # Admission proves the old artifact is usable; it does not prove it
-            # matches this package's manifest. Startup uses this same Wake path,
-            # including when a release changes bytes without changing EverOS's
-            # version. Unknown/development manifests are not update authority.
+            previous_artifact = await self._lifecycle_checkpoint(
+                run_blocking(self._active_artifact_identity)
+            )
+            # Active usability and selected-manifest currency are independent
+            # of the last install attempt's diagnostic. Retained failure evidence
+            # must not make a verified old artifact unusable or authorize a retry
+            # against an unknown/rejected selection. Same-version byte/contract
+            # changes still converge when the installable manifest proves it.
             manifest_changed = artifact_status.get("matches_manifest") is False
-            if not artifact_admitted or manifest_changed:
-                previous_artifact = await self._lifecycle_checkpoint(
-                    run_blocking(self._active_artifact_identity)
-                )
+            if previous_artifact is None or manifest_changed:
                 if self.available:
                     async with self._reconcile_lock, self.module.lifecycle():
                         self._require_lifecycle_work()

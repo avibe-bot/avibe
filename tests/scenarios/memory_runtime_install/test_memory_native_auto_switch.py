@@ -249,38 +249,85 @@ async def test_failed_update_resumes_only_the_retained_admitted_artifact(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rejected", ("unavailable", "version", "lock", "format", "sync", "platform", "malformed", "missing"))
-async def test_rejected_selected_manifest_does_not_authorize_automatic_install(
-    tmp_path, monkeypatch, released_runtime, rejected,
+@pytest.mark.parametrize("entrypoint", ("startup", "running-wake"))
+@pytest.mark.parametrize("prior_failure", (False, True), ids=("clean", "retained-failure"))
+@pytest.mark.parametrize(
+    "selection",
+    ("current", "unavailable", "version", "lock", "format", "sync", "platform", "malformed", "missing"),
+)
+async def test_selected_manifest_requires_proven_mismatch_to_replace_a_usable_artifact(
+    tmp_path, monkeypatch, memory_runtime_factory, released_runtime,
+    selection, prior_failure, entrypoint,
 ):
-    """MEMORY-RUNTIME-INSTALL-004: unusable selections grant no cutover authority."""
+    """MEMORY-RUNTIME-INSTALL-004/005: prior failure is not new install authority."""
 
-    make, _home, _config = released_runtime
-    runtime, manager, _processes = make(_release(tmp_path, "old"))
+    make, home, config = released_runtime
+    old_manifest = _release(tmp_path, "old")
+    runtime, manager, processes = make(old_manifest)
     assert await runtime.wake() == {"ok": True, "state": "running"}
     old_python = manager.resolve_python()
+    old_fingerprint = manager.artifact_fingerprint()
+    sentinel = home / "memory" / "everos-root" / "user-记忆.txt"
+    sentinel.write_text("保留历史失败和已有记忆 café 🌱", encoding="utf-8")
+    before_config = asdict(config)
+    if prior_failure:
+        failed_manifest = _release(tmp_path, "failed-update")
+        (failed_manifest.parent / "memory-runtime-1.2.3-linux-arm64.tar.gz").unlink()
+        monkeypatch.setattr(manager, "manifest_path", failed_manifest)
+        failed = await runtime.wake()
+        assert failed["ok"] is True
+        assert failed["artifact_update"]["ok"] is False
+        assert manager.resolve_python() == old_python
+    failure_reason = manager.status()["reason"]
+    assert bool(failure_reason) is prior_failure
+
     new_manifest = _release(tmp_path, "new")
     payload = json.loads(new_manifest.read_text())
-    if rejected == "unavailable":
+    if selection == "unavailable":
         payload["release_state"] = "unavailable"
-    elif rejected == "version":
+    elif selection == "version":
         payload["everos_version"] = "0.0.0"
-    elif rejected == "lock":
+    elif selection == "lock":
         payload["lock_sha256"] = "b" * 64
-    elif rejected == "format":
+    elif selection == "format":
         payload["provider_root_format"] = ""
-    elif rejected == "sync":
+    elif selection == "sync":
         payload["sync_bootstrap_revision"] = 999
-    elif rejected == "platform":
+    elif selection == "platform":
         payload["archives"] = {"unavailable-platform": next(iter(payload["archives"].values()))}
     new_manifest.write_text(json.dumps(payload), encoding="utf-8")
-    if rejected == "malformed":
+    if selection == "malformed":
         new_manifest.write_text("{invalid-json", encoding="utf-8")
-    elif rejected == "missing":
+    elif selection == "missing":
         new_manifest.unlink()
-    monkeypatch.setattr(manager, "manifest_path", new_manifest)
-    monkeypatch.setattr(manager, "ensure", lambda **_: pytest.fail("rejected manifest triggered install"))
+    elif selection == "current":
+        new_manifest = old_manifest
+    if entrypoint == "startup":
+        await memory_runtime_factory.close(runtime)
+        runtime, manager, processes = make(new_manifest)
+    else:
+        monkeypatch.setattr(manager, "manifest_path", new_manifest)
+    unexpected_installs = []
 
-    assert manager.status()["matches_manifest"] is None
+    def unexpected_install(**kwargs):
+        # Return a normal failure so the negative-control run also proves clean
+        # lifecycle teardown, rather than injecting BaseException into its task.
+        unexpected_installs.append(kwargs)
+        return {"ok": False, "reason": "memory_runtime_install_failed"}
+
+    monkeypatch.setattr(manager, "ensure", unexpected_install)
+
+    assert manager.status()["matches_manifest"] is (True if selection == "current" else None)
+    assert manager.status()["reason"] == failure_reason
+    result = await runtime.wake()
+    assert unexpected_installs == []
+    assert result == {"ok": True, "state": "running"}
     assert await runtime.wake() == {"ok": True, "state": "running"}
+    assert unexpected_installs == []
     assert manager.resolve_python() == old_python
+    assert manager.artifact_fingerprint() == old_fingerprint
+    assert manager.status()["reason"] == failure_reason  # Evidence is not cleared.
+    assert sum(process.running for process in processes.created) == 1
+    assert processes.supervised[-1].python == old_python
+    assert sentinel.read_text(encoding="utf-8") == "保留历史失败和已有记忆 café 🌱"
+    assert asdict(config) == before_config

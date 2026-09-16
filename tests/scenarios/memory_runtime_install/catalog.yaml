@@ -59,7 +59,7 @@ scenarios:
     then: Wake stops old execution, admits and activates the selected artifact, preserves data/config, and does not reinstall on the next Wake
     related_tests:
       - tests/test_memory_wake.py::test_unknown_or_current_manifest_does_not_install
-      - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py::test_rejected_selected_manifest_does_not_authorize_automatic_install
+      - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py::test_selected_manifest_requires_proven_mismatch_to_replace_a_usable_artifact
       - tests/test_memory_wake.py::test_manifest_switch_requires_proven_stop_and_keeps_direct_install_guard
       - tests/test_memory_wake.py::test_preinstall_abort_resumes_capture_only_for_still_running_old_runtime
       - tests/test_memory_wake.py::test_cancelled_artifact_install_joins_before_releasing_lease
@@ -74,6 +74,7 @@ scenarios:
     then: Existing pointer/data remain intact, the exact admitted old runtime can resume, and update failure stays visible
     related_tests:
       - tests/test_memory_wake.py::test_update_failure_never_wakes_an_unverified_or_changed_artifact
+      - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py::test_selected_manifest_requires_proven_mismatch_to_replace_a_usable_artifact
       - tests/test_ui_memory_routes.py::test_memory_wake_preserves_failed_update_with_old_runtime_available
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
       - ui/src/components/settings/SettingsDependenciesPage.test.tsx

@@ -108,3 +108,31 @@ manifest authority. No repeated class or circuit-breaker threshold was reached.
   both settings-page failed-update toast consumers.
 - Released-native unattended host upgrade and real search are not exercised
   by these isolated source tests. No deployment or publication is authorized.
+
+## Round 2 authority circuit breaker
+
+Selected-manifest authority recurred on two findings-bearing heads; root paused
+editing and independently diagnosed the complete review inventory before
+continuing. A prior failed candidate remains in status even when the unchanged
+old artifact is verified. The older admission predicate conflated that history
+with current unusability, bypassing the rejected-manifest guard on a later Wake.
+
+Reuse the existing verified active identity for the whole Wake decision and
+fallback, removing the redundant admission predicate. A missing/unusable
+identity still enters repair; a usable identity only enters selected-artifact
+installation on a proven installable-manifest mismatch. Historical failure
+remains in dependency status and is not cleared to authorize availability.
+This changes no persistent schema, configuration, installer or release guard.
+
+The scenario matrix now crosses clean/failed update history, startup/running
+Wake, and eight rejected selections plus an already-current selection. The
+unchanged reviewed implementation fails all 18 retained-failure variants while
+passing all 18 clean controls; these are actual installer-call failures with
+clean teardown. The initial negative control raised a pytest BaseException
+inside the install task and produced teardown noise; it was replaced by a
+normal structured failure/recorded-call probe before production code changed.
+
+After the correction, 102 focused tests and 1039 expanded Python tests pass;
+the same 11 real-EverOS/package-matrix prerequisite skips remain explicit.
+Changed-file Ruff and whitespace checks pass. The prior 66 UI tests and UI
+types/lint/build cover unchanged UI bytes; fresh exact-head CI is still required.

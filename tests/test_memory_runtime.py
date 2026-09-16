@@ -386,7 +386,11 @@ async def test_revoked_lifecycle_stops_before_provider_root_side_effects(
 
     monkeypatch.setattr(runtime, "_reconcile_released_ownership", truthy)
     monkeypatch.setattr(runtime, "_probe_processing", truthy)
-    monkeypatch.setattr(runtime, "artifact_admitted", lambda: True)
+    monkeypatch.setattr(
+        runtime._artifact_manager, "status",
+        lambda: {"installed": True, "status": "ready", "reason": None},
+    )
+    monkeypatch.setattr(runtime._artifact_manager, "artifact_fingerprint", lambda: "fixture")
     monkeypatch.setattr(runtime._artifact_manager, "resolve_python", lambda: Path("python"))
     monkeypatch.setattr(runtime._supervisor, "stop", delayed_stop)
     monkeypatch.setattr(
