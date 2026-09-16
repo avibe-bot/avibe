@@ -317,6 +317,72 @@ def _step(job: dict, name: str) -> dict:
     return step
 
 
+def test_official_finalization_serializes_cross_version_decision_and_publication():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
+    job = workflow["jobs"]["finalize-github-release"]
+    # A literal group is shared by every tag, branch and event. Keep only the
+    # critical finalization job serialized; builds must remain independent.
+    assert job["concurrency"] == {
+        "group": "avibe-official-release-finalization",
+        "cancel-in-progress": False,
+        "queue": "max",
+    }
+    assert "concurrency" not in workflow
+    assert "concurrency" not in workflow["jobs"]["build"]
+    assert "wait-notes" in _step(job, "Wait for exact-source release notes")["run"]
+    finalize = _step(job, "Publish GitHub Release")["run"]
+    assert 'LATEST_MODE="auto"' in finalize
+    assert "python scripts/github_release.py finalize" in finalize
+    assert not job.get("continue-on-error")
+
+
+def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
+    job = _job("publish.yml", "build")
+    lint = _job("lint.yml", "install-upgrade-shards")
+    setup = _step(job, "Install pinned uv")
+    ci_setup = _step(lint, "Install pinned uv")
+    consumer = _step(job, "Run release install and upgrade regressions")
+    assert setup["run"] == ci_setup["run"]
+    assert "--only-binary=:all: --no-deps uv==0.12.10" in setup["run"]
+    assert job["steps"].index(setup) < job["steps"].index(consumer)
+    assert job["steps"].index(consumer) < job["steps"].index(_step(job, "Upload GitHub release assets"))
+    assert "tests/e2e/test_upgrade_command.py" in consumer["run"]
+    assert not setup.get("if") and not setup.get("continue-on-error")
+    assert not consumer.get("if") and not consumer.get("continue-on-error")
+
+
+@pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
+@pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
+def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(tag, build_result, cancelled, event):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
+    jobs = workflow["jobs"]
+    preview_condition = "startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
+    for name in ("resolve-show-runtime-ref", "memory-runtime-bundles"):
+        assert jobs[name]["if"] == preview_condition
+    assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
+    assert jobs["build-assets"]["needs"] == ["show-runtime-bundles", "memory-runtime-bundles"]
+    assert jobs["release"]["needs"] == "build-assets"
+    # Evaluate the actual bounded job expression for both event kinds. This
+    # catches skipped-needs propagation without replacing the condition itself.
+    expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
+    expression = expression.replace("needs.build-assets.result", "build_result")
+    expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
+    expression = expression.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+    expression = " ".join(expression.split())
+    result = eval(expression, {"__builtins__": {}}, {
+        "build_result": build_result, "input_tag": tag if event == "workflow_dispatch" else "",
+        "ref": "master" if event == "workflow_dispatch" else tag,
+        "cancelled": lambda: cancelled,
+        "startsWith": lambda value, prefix: value.startswith(prefix),
+    })
+    expected = not cancelled and (
+        build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
+    )
+    assert result == expected
+
+
 @pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
 def test_release_verification_is_workflow_owned_after_tagged_artifacts_are_built(
     workflow_name: str, job_name: str, checkout_name: str, workflow_ref: str,

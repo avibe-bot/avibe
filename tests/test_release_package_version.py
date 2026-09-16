@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 from packaging.version import Version
 
-from scripts.release_package_version import package_version_from_release_tag
+from scripts.release_package_version import (
+    latest_official_release,
+    official_stable_version_key,
+    package_version_from_release_tag,
+)
 
 
 @pytest.mark.parametrize(
@@ -64,3 +68,38 @@ def test_package_release_workflows_pin_scm_version_to_release_tag() -> None:
         assert "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" in workflow
         assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" in workflow
         assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" in workflow
+
+
+@pytest.mark.parametrize("tag", [
+    None, 310, "", "model-hub-engine-v7.2.149-1", "gh-v3.1.0",
+    "v3.2.0rc1", "v3.2.0.dev1", "v3.2.0a1.post2", "v03.01.00",
+    "v3.1.0+local", "v3.1.0 ", " v3.1.0",
+])
+def test_only_canonical_official_stable_versions_can_be_latest(tag):
+    assert official_stable_version_key(tag) is None
+
+
+def test_stable_release_order_matches_package_version_order():
+    tags = ["v3.0.9", "v3.0.10", "v3.1.0", "v3.1.0.post0", "v3.1.0.post2", "v4.0.0"]
+    assert sorted(reversed(tags), key=official_stable_version_key) == sorted(
+        tags, key=lambda tag: Version(tag[1:]),
+    )
+
+
+def test_latest_official_release_ignores_repository_latest_and_publication_order():
+    tags = ["v3.1.0.post1", "v3.1.0", "v3.0.14", "model-hub-engine-v99.0.0",
+            "gh-v9.0.0", "v9.0.0rc1"]
+    releases = [{"tag_name": tag, "draft": False, "prerelease": False} for tag in tags]
+    releases += [
+        {"tag_name": "v8.0.0", "draft": True, "prerelease": False},
+        {"tag_name": "v7.0.0", "draft": False, "prerelease": True},
+    ]
+    assert latest_official_release(releases) == releases[0]
+    assert latest_official_release(reversed(releases)) == releases[0]
+    assert latest_official_release([]) is None
+
+
+@pytest.mark.parametrize("releases", [[None], [{"tag_name": "v3.1.0"}]])
+def test_latest_selection_rejects_malformed_release_evidence(releases):
+    with pytest.raises(ValueError):
+        latest_official_release(releases)

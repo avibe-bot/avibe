@@ -18,9 +18,12 @@ from urllib.parse import quote
 
 NOTES_READY_MARKER_PREFIX = "<!-- avibe:release-notes=ready source="
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
-package_version_from_release_tag = run_path(
+_version_helpers = run_path(
     str(Path(__file__).with_name("release_package_version.py"))
-)["package_version_from_release_tag"]
+)
+package_version_from_release_tag = _version_helpers["package_version_from_release_tag"]
+official_stable_version_key = _version_helpers["official_stable_version_key"]
+latest_official_release = _version_helpers["latest_official_release"]
 
 
 class ReleaseError(RuntimeError):
@@ -290,6 +293,20 @@ def finalize_release(
     _validate_publication_tag(tag)
     if get_release(repo, tag) is None:
         raise ReleaseError(f"Cannot finalize missing GitHub Release {tag}")
+    if latest == "auto":
+        key = official_stable_version_key(tag)
+        if prerelease or key is None:
+            latest = "false"
+        else:
+            completed = _run_gh(["api", "--paginate", "--slurp", f"repos/{repo}/releases?per_page=100"])
+            try:
+                pages = json.loads(completed.stdout)
+                if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+                    raise ValueError("GitHub returned an invalid paginated release collection")
+                newest = latest_official_release(release for page in pages for release in page)
+            except ValueError as exc:
+                raise ReleaseError(f"Cannot select latest official release: {exc}") from exc
+            latest = "true" if newest is None or official_stable_version_key(newest["tag_name"]) <= key else "false"
 
     arguments = [
         "release",
@@ -376,7 +393,7 @@ def _parser() -> argparse.ArgumentParser:
     finalize.add_argument("--repo", required=True)
     finalize.add_argument("--tag", required=True)
     finalize.add_argument("--prerelease", choices=("true", "false"), required=True)
-    finalize.add_argument("--latest", choices=("true", "false", "preserve"), required=True)
+    finalize.add_argument("--latest", choices=("auto", "true", "false", "preserve"), required=True)
     return parser
 
 
