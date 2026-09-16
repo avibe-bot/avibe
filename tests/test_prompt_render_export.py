@@ -91,9 +91,26 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     if skill_mode in {"single", "pages"}:
         assert ids[ids.index("base-capabilities-body") + 1] == "skills-prompt"
         assert production.count(prompt_text("skills-prompt")) == 1
+        assert (
+            "Consider whether any available Skills would help in the current situation. "
+            "Load those you choose with `vibe skill load -- <name>`; "
+            "reuse any already loaded in this conversation."
+        ) in production
+        assert "If the user requests a Skill by exact name, use that Skill." in production
         assert "vibe skill load -- <name>" in production
         assert ("vibe skill list --page 2" in production) == (skill_mode == "pages")
         assert "- skill-00: Description skill-00" in production
+    elif skill_mode == "manual":
+        assert (
+            "If the user requests a Skill by exact name, load it with "
+            "`vibe skill load -- <name>` or reuse it if already loaded in this conversation."
+        ) in production
+        assert "Consider whether any available Skills" not in production
+    else:
+        assert "skills-prompt" not in ids
+        assert "skills-manual-prompt" not in ids
+    assert "Before acting on a task covered" not in production
+    assert "reuse an earlier successful load that remains in context" not in production
     assert ("## Personal Memory" in production) == memory
     assert ("preferences.md" in production) != memory
 
@@ -422,9 +439,9 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
     assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
 
 
-def test_agent_tail_and_snapshot_cleanup_preserve_all_other_injection_bytes(monkeypatch):
+def test_skill_loading_guidance_preserves_all_other_injection_bytes(monkeypatch):
     outputs = []
-    changed = {"runtime-snapshot-open", "agent-instructions"}
+    changed = {"skills-prompt", "skills-manual-prompt"}
     for backend, memory, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
@@ -432,6 +449,6 @@ def test_agent_tail_and_snapshot_cleanup_preserve_all_other_injection_bytes(monk
         blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
         outputs.append("".join(block["text"] for block in blocks if block["id"] not in changed))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
-    # Captured independently from 03e42c205f3da668c3ef8580d68d6cead2a00410,
-    # omitting only the approved snapshot preamble and relocated Agent block.
-    assert digest == "8a6403a158b7fba7d0164ae40ceac7d1945935e9612d79b5588de4ef9d1e0dfe"
+    # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
+    # omitting only the two approved Skill-loading guidance blocks.
+    assert digest == "fd82657d51e3193f54f939a3f159e7c7034a40d0b44388399e34a4aa17b14ea6"

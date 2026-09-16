@@ -1,4 +1,4 @@
 ## Skills
 
-If the user requests a Skill by exact name, ensure its content is in context: reuse an earlier successful load that remains in context; otherwise run `vibe skill load -- <name>` before proceeding.
+If the user requests a Skill by exact name, load it with `vibe skill load -- <name>` or reuse it if already loaded in this conversation.
 Otherwise, do not guess skill names.

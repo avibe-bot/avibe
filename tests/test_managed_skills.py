@@ -536,11 +536,14 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
     assert prompt.count("\n- skill-") == CATALOG_PAGE_SIZE
     assert "`vibe skill list --page 2`" in prompt
     assert "ordinary tasks do not require scanning every page" in prompt
-    assert "Before acting on a task covered by a listed Skill" in prompt
     assert (
-        "reuse an earlier successful load that remains in context; otherwise run "
-        "`vibe skill load -- <name>`"
+        "Consider whether any available Skills would help in the current situation. "
+        "Load those you choose with `vibe skill load -- <name>`; "
+        "reuse any already loaded in this conversation."
     ) in prompt
+    assert "If the user requests a Skill by exact name, use that Skill." in prompt
+    assert "Before acting on a task covered" not in prompt
+    assert "remains in context" not in prompt
     assert "For non-explicit requests, only load Skill names listed here" in prompt
     assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
     assert str(tmp_path) not in prompt
@@ -588,9 +591,12 @@ def test_manual_only_skill_is_loadable_but_not_advertised(tmp_path: Path) -> Non
     manual_prompt = render_skill_catalog_prompt([manual])
     assert "`vibe skill load -- <name>`" in manual_prompt
     assert (
-        "reuse an earlier successful load that remains in context; otherwise run "
-        "`vibe skill load -- <name>`"
+        "If the user requests a Skill by exact name, load it with "
+        "`vibe skill load -- <name>` or reuse it if already loaded in this conversation."
     ) in manual_prompt
+    assert "Otherwise, do not guess skill names." in manual_prompt
+    assert "Consider whether" not in manual_prompt
+    assert "remains in context" not in manual_prompt
     assert "- manual:" not in manual_prompt
     assert "Run only when explicitly requested." not in manual_prompt
 
