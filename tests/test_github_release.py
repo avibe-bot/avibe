@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from itertools import permutations
 import subprocess
 from pathlib import Path
 
@@ -451,6 +452,114 @@ def test_finalize_waits_for_release_and_latest_readback(
     assert sleeps == [1, 1]
 
 
+@pytest.mark.parametrize("newer", [False, True])
+def test_auto_latest_uses_all_official_versions_instead_of_engine_latest(monkeypatch, newer):
+    calls = []
+    selected_latest = "model-hub-engine-v7.2.149-1"
+    release_reads = iter([_release_payload(draft=True), _release_payload(draft=False)])
+    releases = [
+        {"tag_name": selected_latest, "draft": False, "prerelease": False},
+        {"tag_name": "v3.0.13", "draft": False, "prerelease": False},
+        {"tag_name": "v99.0.0", "draft": True, "prerelease": False},
+        {"tag_name": "v88.0.0rc1", "draft": False, "prerelease": False},
+    ]
+    if newer:
+        releases.append({"tag_name": "v3.1.0", "draft": False, "prerelease": False})
+
+    def fake_run(arguments, *, check=True):
+        nonlocal selected_latest
+        calls.append(arguments)
+        if "--paginate" in arguments:
+            assert "--slurp" in arguments
+            return _completed(arguments, stdout=json.dumps([releases[:2], releases[2:]]))
+        if arguments[:2] == ["release", "edit"]:
+            if "--latest" in arguments:
+                selected_latest = TAG
+            return _completed(arguments)
+        if arguments[1].endswith("/releases/latest"):
+            return _completed(arguments, stdout=selected_latest + "\n")
+        return _completed(arguments, stdout=next(release_reads))
+
+    monkeypatch.setattr(github_release, "_run_gh", fake_run)
+    state = github_release.finalize_release(repo=REPO, tag=TAG, prerelease=False, latest="auto")
+    assert not state.draft
+    edit = next(call for call in calls if call[:2] == ["release", "edit"])
+    assert ("--latest" in edit) is not newer
+    assert ("--latest=false" in edit) is newer
+    assert calls.index(edit) > next(i for i, call in enumerate(calls) if "--paginate" in call)
+
+
+@pytest.mark.parametrize("order", list(permutations(("v3.0.14", "v3.0.15", "v3.1.0"))))
+def test_serialized_finalizers_keep_highest_version_for_every_admission_order(monkeypatch, order):
+    # All releases start as drafts, as with overlapping push/dispatch builds.
+    # The workflow concurrency contract admits one complete finalizer at a time.
+    releases = {
+        tag: {
+            "tag_name": tag, "draft": True, "prerelease": False, "body": "notes",
+            "html_url": f"https://github.com/{REPO}/releases/tag/{tag}",
+        }
+        for tag in order
+    }
+    latest = "model-hub-engine-v7.2.149-1"
+    writes = []
+    inventories = []
+
+    def fake_run(arguments, *, check=True):
+        nonlocal latest
+        if arguments[:2] == ["release", "edit"]:
+            tag = arguments[2]
+            assert arguments[3:5] == ["--repo", REPO]
+            assert "--draft=false" in arguments
+            releases[tag]["draft"] = False
+            if "--latest" in arguments:
+                latest = tag
+            else:
+                assert "--latest=false" in arguments
+            writes.append(tag)
+            return _completed(arguments)
+        assert arguments[0] == "api"
+        if "--paginate" in arguments:
+            inventories.append({tag for tag, item in releases.items() if not item["draft"]})
+            return _completed(arguments, stdout=json.dumps([list(releases.values())]))
+        if arguments[1].endswith("/releases/latest"):
+            return _completed(arguments, stdout=latest + "\n")
+        tag = arguments[1].rsplit("/", 1)[-1]
+        if releases[tag]["draft"]:
+            assert not check
+            return _completed(arguments, returncode=1, stderr="gh: Not Found (HTTP 404)")
+        return _completed(arguments, stdout=json.dumps(releases[tag]))
+
+    monkeypatch.setattr(github_release, "_run_gh", fake_run)
+    admitted = set()
+    for tag in order:
+        previous_reads = len(inventories)
+        state = github_release.finalize_release(repo=REPO, tag=tag, prerelease=False, latest="auto")
+        assert state.tag == tag and not state.draft
+        # Both the draft fallback and auto-Latest decision read fresh state.
+        assert inventories[previous_reads:] == [admitted, admitted]
+        admitted = admitted | {tag}
+        assert latest == max(admitted, key=github_release.official_stable_version_key)
+    assert writes == list(order)
+    assert latest == "v3.1.0"
+
+
+@pytest.mark.parametrize("payload", ["not json", "{}", "[{}]", "[[null]]",
+                                      '[[{"tag_name":"v3.1.0"}]]'])
+def test_auto_latest_does_not_publish_on_unreadable_selection(monkeypatch, payload):
+    calls = []
+
+    def fake_run(arguments, *, check=True):
+        calls.append(arguments)
+        if "--paginate" in arguments:
+            return _completed(arguments, stdout=payload)
+        return _completed(arguments, stdout=_release_payload(draft=True))
+
+    monkeypatch.setattr(github_release, "_run_gh", fake_run)
+    with pytest.raises(github_release.ReleaseError, match="Cannot select latest"):
+        github_release.finalize_release(repo=REPO, tag=TAG, prerelease=False, latest="auto")
+    assert not any(call[:2] == ["release", "edit"] for call in calls)
+
+
 def test_release_workflows_stage_then_finalize_once() -> None:
     root = Path(__file__).resolve().parents[1]
     publish = (root / ".github/workflows/publish.yml").read_text(encoding="utf-8")
@@ -488,5 +597,7 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     assert "python scripts/github_release.py finalize" not in official_step
     assert github_release.NOTES_READY_MARKER_PREFIX in notes
     assert "run=${GITHUB_RUN_ID}" in notes
+    assert 'LATEST_MODE="auto"' in publish
+    assert 'elif [ "${{ github.event_name }}" = "push" ]' not in publish
     assert "<!-- avibe:update-notification=none -->" in notes
     assert "<!-- vibe-remote:update-notification=none -->" in notes
