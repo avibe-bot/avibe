@@ -1069,13 +1069,12 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                 if recovery.recovered and blocked
                 else ()
             )
-            changed = False
             watches: tuple[ManagedWatch, ...] = ()
             store_error: Exception | None = None
             fused = self.service._store_error_fused
             if recovery.recovered and not fused:
                 try:
-                    changed = self.service.store.maybe_reload()
+                    self.service.store.maybe_reload()
                     watches = tuple(
                         ManagedWatch.from_dict(watch.to_dict())
                         for watch in self.service.store.list_watches()
@@ -1088,7 +1087,6 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                 {
                     "recovery": recovery,
                     "unblocked": unblocked,
-                    "changed": changed,
                     "watches": watches,
                     "store_error": store_error,
                     "fused": fused,
@@ -1113,11 +1111,9 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
             )
         self.service._recovery_pending = False
         if observation["unblocked"]:
-            self.service._reconcile_dirty = True
             self.service._runtime_state_dirty = True
         store_error = observation.get("store_error")
         if store_error is not None:
-            self.service._reconcile_dirty = True
             self.service._handle_reconcile_store_error(store_error)
             return self.service._store_error_fused
         if observation.get("fused") or self.service._store_error_fused:
@@ -1126,18 +1122,18 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                 return not self.service._runtime_state_dirty
             return True
         try:
-            if observation["changed"] or self.service._reconcile_dirty:
-                if self.service.reconcile_watches(observation["watches"]):
-                    self.service._runtime_state_dirty = True
+            # Another shared-store reader may have consumed maybe_reload's change
+            # result. Reconcile the snapshot, not which reader refreshed it; the
+            # active-task map already makes unchanged reconciliation idempotent.
+            if self.service.reconcile_watches(observation["watches"]):
+                self.service._runtime_state_dirty = True
             if self.service._runtime_state_dirty:
                 await self.service._persist_runtime_state()
                 if self.service._runtime_state_dirty:
                     return False
             self.service._store_reconcile_failures = 0
-            self.service._reconcile_dirty = False
             return True
         except Exception as exc:
-            self.service._reconcile_dirty = True
             self.service._handle_reconcile_store_error(exc)
             return self.service._store_error_fused
 
@@ -1158,6 +1154,7 @@ class ManagedWatchService:
         self._startup_task: Optional[asyncio.Task] = None
         self._reconcile_task: Optional[asyncio.Task] = None
         self._active_tasks: dict[str, asyncio.Task] = {}
+        self._canceling_watch_ids: set[str] = set()
         self._active_pids: dict[str, int] = {}
         self._active_process_identities: dict[str, PersistedProcessIdentity] = {}
         self._watch_started_at: dict[str, str] = {}
@@ -1168,7 +1165,6 @@ class ManagedWatchService:
         self._store_reconcile_failures = 0
         self._recovery_pending = True
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
-        self._reconcile_dirty = True
         self._runtime_state_dirty = True
         self._runtime_state_revision = 0
         self._store_worker_lock = threading.Lock()
@@ -1242,8 +1238,6 @@ class ManagedWatchService:
         notify = getattr(supervisor, "notify", None)
         if callable(notify):
             notify(RuntimeWorkLane.WATCH_DEFINITIONS)
-        else:
-            self._reconcile_dirty = True
 
     def _schedule_runtime_work_wake(self, delay: float) -> None:
         supervisor = getattr(self.controller, "runtime_work_supervisor", None)
@@ -1281,9 +1275,7 @@ class ManagedWatchService:
                     if self.reconcile_watches():
                         self._runtime_state_dirty = True
                     self._write_runtime_state()
-                    self._reconcile_dirty = False
                 except Exception as exc:
-                    self._reconcile_dirty = True
                     self._handle_reconcile_store_error(exc)
             if self._running and self._owns_service_instance() and self._supports_runtime_work_lane():
                 self._register_runtime_work_lane()
@@ -1586,6 +1578,7 @@ class ManagedWatchService:
         if self._active_tasks:
             await asyncio.gather(*self._active_tasks.values(), return_exceptions=True)
         self._active_tasks.clear()
+        self._canceling_watch_ids.clear()
         self._active_pids.clear()
         self._active_process_identities.clear()
         self._watch_started_at.clear()
@@ -1614,7 +1607,6 @@ class ManagedWatchService:
                     await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
                     continue
                 self._recovery_pending = False
-                self._reconcile_dirty = True
                 self._runtime_state_dirty = True
             if self._store_error_fused:
                 await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
@@ -1633,20 +1625,16 @@ class ManagedWatchService:
                 else:
                     unblocked = ()
                 if self._apply_recovery_unblocked(unblocked):
-                    self._reconcile_dirty = True
                     self._runtime_state_dirty = True
-                should_reconcile = self.store.maybe_reload() or self._reconcile_dirty
-                if should_reconcile:
-                    if self.reconcile_watches():
-                        self._runtime_state_dirty = True
+                self.store.maybe_reload()
+                if self.reconcile_watches():
+                    self._runtime_state_dirty = True
                 if self._runtime_state_dirty:
                     self._write_runtime_state()
                 self._store_reconcile_failures = 0
-                self._reconcile_dirty = False
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._reconcile_dirty = True
                 self._handle_reconcile_store_error(exc)
             await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
 
@@ -1677,18 +1665,26 @@ class ManagedWatchService:
         for watch_id, task in list(self._active_tasks.items()):
             if watch_id in desired_ids:
                 continue
-            task.cancel()
-            changed = True
+            if self._cancel_watch(watch_id, task):
+                changed = True
 
         return changed
 
+    def _cancel_watch(self, watch_id: str, task: asyncio.Task) -> bool:
+        # Repeated scans or shutdown must not interrupt asynchronous teardown.
+        # Track our request explicitly, including on Python 3.10.
+        if watch_id in self._canceling_watch_ids or not task.cancel():
+            return False
+        self._canceling_watch_ids.add(watch_id)
+        return True
+
     def _on_watch_done(self, watch_id: str) -> None:
         self._active_tasks.pop(watch_id, None)
+        self._canceling_watch_ids.discard(watch_id)
         self._active_pids.pop(watch_id, None)
         self._active_process_identities.pop(watch_id, None)
         self._watch_started_at.pop(watch_id, None)
         self._write_runtime_state()
-        self._reconcile_dirty = True
 
     def _runtime_state_payload(self) -> dict[str, Any]:
         """Assemble the loop-owned runtime projection without storage I/O."""
@@ -1847,9 +1843,9 @@ class ManagedWatchService:
             self._reconcile_task.cancel()
         if self._legacy_probe_task and self._legacy_probe_task is not current_task:
             self._legacy_probe_task.cancel()
-        for task in list(self._active_tasks.values()):
+        for watch_id, task in list(self._active_tasks.items()):
             if task is not current_task:
-                task.cancel()
+                self._cancel_watch(watch_id, task)
         self._runtime_state_dirty = True
         self._write_runtime_state()
 
