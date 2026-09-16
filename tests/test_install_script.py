@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -20,6 +21,29 @@ PUBLIC_INSTALL_COMMAND = (
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(textwrap.dedent(content), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def _write_console_launcher(path: Path, driver: str) -> None:
+    """Use the real packaged entrypoint shape around an isolated CLI double."""
+    module = path.parent / "test-module" / "vibe"
+    module.mkdir(parents=True, exist_ok=True)
+    (module / "__init__.py").write_text("", encoding="utf-8")
+    (module / "cli.py").write_text(
+        "import subprocess, sys\n"
+        f"def main():\n    return subprocess.call(['bash', '-c', {textwrap.dedent(driver)!r}, *sys.argv])\n",
+        encoding="utf-8",
+    )
+    _write_executable(
+        path,
+        f"""\
+        #!{sys.executable}
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "test-module"))
+        from vibe.cli import main
+        sys.exit(main())
+        """,
+    )
 
 
 def _run(command: str, *, cwd: Path, env: dict[str, str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -54,7 +78,7 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
 
         bin_dir="${{UV_TOOL_BIN_DIR:-$HOME/.local/bin}}"
         mkdir -p "$bin_dir"
-        cat > "$bin_dir/vibe" <<'EOF'
+        cat > "$bin_dir/vibe-test-driver" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
         if [ "${{VIBE_TEST_REQUIRE_CANONICAL_HOME:-}}" = "1" ] && \
@@ -153,6 +177,23 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         else
             echo "started"
         fi
+        EOF
+        mkdir -p "$bin_dir/test-module/vibe"
+        touch "$bin_dir/test-module/vibe/__init__.py"
+        cat > "$bin_dir/test-module/vibe/cli.py" <<'EOF'
+        import subprocess, sys
+        from pathlib import Path
+        def main():
+            driver = Path(__file__).resolve().parents[2] / "vibe-test-driver"
+            return subprocess.call(["bash", "-c", driver.read_text(), *sys.argv])
+        EOF
+        cat > "$bin_dir/vibe" <<'EOF'
+        #!{sys.executable}
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "test-module"))
+        from vibe.cli import main
+        sys.exit(main())
         EOF
         chmod +x "$bin_dir/vibe"
         if [ "${{VIBE_TEST_LEGACY_ACTIVATION:-}}" = "1" ]; then
@@ -437,7 +478,7 @@ def test_install_script_recovers_an_existing_3_0_13_generation(tmp_path):
     old_generation = home_dir / ".avibe" / "runtime" / "install-generations" / "3.0.13"
     old_vibe = old_generation / "tools" / "avibe-os" / "bin" / "vibe"
     old_vibe.parent.mkdir(parents=True)
-    _write_executable(
+    _write_console_launcher(
         old_vibe,
         """\
         #!/usr/bin/env bash
@@ -984,7 +1025,8 @@ def test_install_script_existing_entrypoint_preference_keeps_directory_guards(tm
     if excluded == "broken-link":
         excluded_launcher.symlink_to(tmp_path / "absent")
     else:
-        _write_executable(excluded_launcher, "#!/bin/sh\necho old-excluded\n")
+        _write_console_launcher(excluded_launcher, "#!/bin/sh\necho old-excluded\n")
+    original_bytes = None if excluded == "broken-link" else excluded_launcher.read_bytes()
     if excluded == "not-executable":
         excluded_launcher.chmod(0o644)
     if excluded == "read-only":
@@ -1008,7 +1050,7 @@ def test_install_script_existing_entrypoint_preference_keeps_directory_guards(tm
     if excluded == "broken-link":
         assert excluded_launcher.readlink() == tmp_path / "absent"
     else:
-        assert excluded_launcher.read_text() == "#!/bin/sh\necho old-excluded\n"
+        assert excluded_launcher.read_bytes() == original_bytes
 
 
 def test_install_script_reuses_first_eligible_existing_entrypoint(tmp_path):
@@ -1020,7 +1062,8 @@ def test_install_script_reuses_first_eligible_existing_entrypoint(tmp_path):
     _write_fake_uv(bins[0] / "uv", tmp_path / "uv-log")
     old_script = "#!/bin/sh\necho old-conventional-install\n"
     for directory in bins[1:]:
-        _write_executable(directory / "vibe", old_script)
+        _write_console_launcher(directory / "vibe", old_script)
+    untouched_bytes = (bins[2] / "vibe").read_bytes()
     env = {
         **os.environ, "HOME": str(home_dir), "AVIBE_HOME": str(home_dir / ".avibe"),
         "PATH": os.pathsep.join([*(str(directory) for directory in bins), "/usr/bin", "/bin"]),
@@ -1030,8 +1073,74 @@ def test_install_script_reuses_first_eligible_existing_entrypoint(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (bins[0] / "vibe").exists()
     assert (bins[1] / "vibe").is_symlink()
-    assert (bins[2] / "vibe").read_text() == old_script
+    assert (bins[2] / "vibe").read_bytes() == untouched_bytes
     assert "avibe-os 9.9.9" in _vibe_version(env, cwd=tmp_path).stdout
+
+
+@pytest.mark.parametrize("occupied_first", [False, True])
+@pytest.mark.parametrize("entry", ["script", "symlink", "broken-link", "non-executable", "directory"])
+def test_install_script_preserves_unowned_vibe_without_executing_it(tmp_path, occupied_first, entry):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    free_bin = tmp_path / "free-bin"
+    occupied_bin = tmp_path / "occupied-bin"
+    free_bin.mkdir()
+    occupied_bin.mkdir()
+    _write_fake_uv(free_bin / "uv", tmp_path / "uv-log")
+    probe_log = tmp_path / "unowned-executed"
+    unrelated = tmp_path / "unrelated-program"
+    _write_executable(unrelated, f"#!/bin/sh\nprintf called >> '{probe_log}'\necho another-product\n")
+    original = unrelated.read_bytes()
+    occupant = occupied_bin / "vibe"
+    if entry in {"symlink", "broken-link"}:
+        occupant.symlink_to(unrelated if entry == "symlink" else tmp_path / "missing")
+    elif entry == "directory":
+        occupant.mkdir()
+    else:
+        _write_executable(occupant, unrelated.read_text())
+        if entry == "non-executable":
+            occupant.chmod(0o644)
+    order = [occupied_bin, free_bin] if occupied_first else [free_bin, occupied_bin]
+    result = _install({
+        **os.environ, "HOME": str(home_dir), "AVIBE_HOME": str(home_dir / ".avibe"),
+        "PATH": os.pathsep.join([*(str(item) for item in order), "/usr/bin", "/bin"]),
+    }, cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not probe_log.exists()
+    assert unrelated.read_bytes() == original
+    if entry in {"symlink", "broken-link"}:
+        assert occupant.readlink() == (unrelated if entry == "symlink" else tmp_path / "missing")
+    elif entry == "directory":
+        assert occupant.is_dir()
+        assert not tuple(occupant.iterdir())
+    else:
+        assert not occupant.is_symlink()
+        assert occupant.read_bytes() == original
+    assert (free_bin / "vibe").is_symlink()
+
+
+def test_install_script_activation_fallback_refuses_an_unowned_destination(tmp_path):
+    home_dir = tmp_path / "home"
+    stable_bin = home_dir / ".local" / "bin"
+    stable_bin.mkdir(parents=True)
+    probe_log = tmp_path / "unowned-executed"
+    original = f"#!/bin/sh\nprintf called >> '{probe_log}'\n"
+    _write_executable(stable_bin / "vibe", original)
+    uv_log = tmp_path / "uv-log"
+    _write_fake_uv(stable_bin / "uv", uv_log)
+    # Exercise the actual last-resort activation destination without main's
+    # selection pass; an empty selection must not bypass the ownership guard.
+    source = INSTALL_SCRIPT.read_text().rsplit('\nmain "$@"', 1)[0]
+    result = _run(source + "\nuv_tool_install avibe-os\n", cwd=tmp_path, env={
+        **os.environ, "HOME": str(home_dir), "AVIBE_HOME": str(home_dir / ".avibe"),
+        "PATH": os.pathsep.join([str(stable_bin), "/usr/bin", "/bin"]),
+    })
+    assert result.returncode != 0
+    assert "Refusing to replace an unrecognized vibe entrypoint" in result.stdout
+    assert (stable_bin / "vibe").read_text() == original
+    assert not probe_log.exists()
+    assert not uv_log.exists()
+    assert not (home_dir / ".avibe" / "runtime" / "install-generations").exists()
 
 
 def test_install_script_skips_relative_path_entries_for_tool_bin(tmp_path):

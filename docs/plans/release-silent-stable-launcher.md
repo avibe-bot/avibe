@@ -12,14 +12,18 @@ Two failures observed during the packaged preview trial have separate owners:
    fallback, both current/legacy notification markers, and the exact source/run
    readiness marker remain intact. Remote lookup or source mismatch fails before
    notes mutation; it must not silently turn a silent release into a notification.
-2. The POSIX installer first reuses an executable `vibe` entrypoint in an
+2. The POSIX installer first reuses a recognized Avibe `vibe` entrypoint in an
    eligible writable directory on the original PATH, in PATH order. Keep the
    entrypoint directory, not its resolved package-generation directory.
    Relative, transient, and sbin entries remain ineligible for this preference.
    Explicit generation/tool-environment bins are transient too, consistent with
    the shared activation owner's existing stable-launcher boundary.
-   With no eligible existing entrypoint, retain the fresh-install selection
-   order. Off-PATH, broken, and non-executable entries do not override PATH.
+   Recognize the shipped `vibe.cli:main` console script statically, including
+   legacy pip/uv installations. Never execute an unknown same-name command to
+   discover ownership. With no eligible existing entrypoint, retain selection
+   order among safe destinations. Occupied unrecognized paths, including broken
+   links, are not available for fresh installation or fallback activation.
+   Off-PATH, broken, and non-executable entries do not override PATH.
    Staging, source-generation snapshot, and shared atomic activation stay owned
    by the existing installer protocol.
 
@@ -34,13 +38,15 @@ is needed for this failure.
   lightweight tags, prose-only mentions, existing-body fallback, idempotence,
   unavailable remote refs, and mismatched remote sources.
 - Run the complete POSIX installer in isolated homes with its existing fake
-  package producer and activation protocol. Check the final launcher, original
+  package producer, real console-script shape, and activation protocol. Check
+  unowned executable/file/link/directory occupants in both PATH orders without
+  executing or overwriting them. Check the final launcher, original
   generation preservation, absence of a second entry, source snapshot, PATH
   precedence, and excluded directories. Failure must preserve the old launcher.
 - Run adjacent release/installer tests, changed Python lint, shell syntax, and
   whitespace checks. PR review and exact-head CI remain required.
 
-Local result: 506 tests passed with zero skips across the installer, actual
+Local result: 517 tests passed with zero skips across the installer, actual
 notes/public-verification shell, release state machine, update notification
 consumer, upgrade/activation flow, and package integrity suites. Changed-file
 Ruff 0.4.9, Bash syntax, whitespace, and UI build passed. Before the fix, the
@@ -48,6 +54,10 @@ new regressions reproduced lost annotation intent, commit-prose false positives,
 missing/mismatched remote acceptance, and lost stable-launcher source identity.
 The task environment needed its own editable package/UI build for isolated
 upgrade subprocess probes; no production package was installed.
+Ownership regressions failed before the installer guard and passed afterward;
+the current managed/legacy launcher fixtures use executable Python entrypoints,
+not arbitrary same-name shell programs. Unknown custom wrappers are preserved,
+not probed or automatically adopted.
 
 ## Boundaries and known-by-design
 
@@ -57,8 +67,5 @@ Official v3.1.0 remains paused. This work does not change release package
 ownership, platform matrices, verification gates, or activation semantics.
 PR creation/review is authorized; merge awaits a separate owner instruction.
 
-The independent Show diagnosis reproduced Markdown SSR failure caused by a
-page's eager Leaflet import. Moving that import into its existing client-side
-effect fixed both routes in a scratch copy using the installed renderer.
-That is a page-authoring issue, not evidence of a preview regression; the real
-page remains unchanged and is outside these two source fixes.
+Separately authorized Show Page repairs are outside this repository change and
+do not expand its release, deployment, or merge authority.

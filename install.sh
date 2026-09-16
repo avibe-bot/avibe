@@ -156,6 +156,20 @@ is_transient_bin_dir() {
     return 1
 }
 
+is_avibe_launcher() {
+    # pip and uv generate this console script from vibe.cli:main, including
+    # legacy vibe-remote installs. Inspect it; never execute an unknown command
+    # merely because it happens to be named vibe. Symlinks retain their logical
+    # public directory while these reads follow the installed script.
+    [ -f "$1" ] && [ -x "$1" ] &&
+        LC_ALL=C grep -qE '^from vibe[.]cli import main[[:space:]]*$' "$1" &&
+        LC_ALL=C grep -qE '^[[:space:]]*sys[.]exit\(main\(\)\)[[:space:]]*$' "$1"
+}
+
+launcher_destination_is_available() {
+    { [ ! -e "$1/vibe" ] && [ ! -L "$1/vibe" ]; } || is_avibe_launcher "$1/vibe"
+}
+
 choose_tool_bin_dir() {
     local dir
     local fallback_sbin_dir=""
@@ -169,7 +183,7 @@ choose_tool_bin_dir() {
         dir="${dir%/}"
         if [ -n "$dir" ] && is_absolute_dir "$dir" &&
             ! is_transient_bin_dir "$dir" && ! is_sbin_dir "$dir" &&
-            [ -f "$dir/vibe" ] && [ -x "$dir/vibe" ] && [ -w "$dir" ]; then
+            [ -w "$dir" ] && is_avibe_launcher "$dir/vibe"; then
             IFS="$old_ifs"
             echo "$dir"
             return 0
@@ -177,7 +191,8 @@ choose_tool_bin_dir() {
     done
 
     for dir in $ORIGINAL_PATH; do
-        if [ -n "$dir" ] && is_absolute_dir "$dir" && ! is_transient_bin_dir "$dir" && ensure_writable_dir "$dir"; then
+        if [ -n "$dir" ] && is_absolute_dir "$dir" && ! is_transient_bin_dir "$dir" &&
+            launcher_destination_is_available "$dir" && ensure_writable_dir "$dir"; then
             if is_sbin_dir "$dir"; then
                 if [ -z "$fallback_sbin_dir" ]; then
                     fallback_sbin_dir="$dir"
@@ -199,7 +214,7 @@ choose_tool_bin_dir() {
     )
 
     for dir in "${preferred_dirs[@]}"; do
-        if is_absolute_dir "$dir" && ensure_writable_dir "$dir"; then
+        if is_absolute_dir "$dir" && launcher_destination_is_available "$dir" && ensure_writable_dir "$dir"; then
             echo "$dir"
             return 0
         fi
@@ -438,6 +453,10 @@ uv_tool_install() {
     local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
     local previous_target=""
     local source_snapshot=""
+    if ! launcher_destination_is_available "$stable_bin_dir"; then
+        warn "Refusing to replace an unrecognized vibe entrypoint in $stable_bin_dir"
+        return 1
+    fi
     mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
     if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
         previous_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
