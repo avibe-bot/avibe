@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
 import pytest
+
+from tests.e2e.github_release_fixture import create_certificate, make_server
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +30,10 @@ INITIAL_RELEASE_WHEEL_URL = (
 )
 INITIAL_RELEASE_WHEEL_SHA256 = "994adbfd23228ea387f0479db8a4efe0ef121847bd04efa550486203a6b03542"
 TEST_RELEASE_VERSION = "9999.0.0"
+MEMORY_RELEASE_PATH = (
+    f"/avibe-bot/avibe/releases/download/v{TEST_RELEASE_VERSION}/"
+    f"avibe_memory-{TEST_RELEASE_VERSION}-py3-none-any.whl"
+)
 
 _UPGRADE_WAIT_HELPERS = r"""
 report_upgrade_failure() {
@@ -150,6 +160,41 @@ def _docker_available() -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0
+
+
+def test_github_companion_supplier_uses_verified_https_outside_the_index(tmp_path):
+    ca, cert, key = create_certificate(tmp_path / "fixture CA 中文")
+    root = tmp_path / "github assets"
+    asset = root / MEMORY_RELEASE_PATH.lstrip("/")
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"fixture companion")
+    server = make_server(root, cert, key)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # Connect locally without changing host DNS/trust. Hostname verification
+        # is still for the real URL selected by the unmodified package planner.
+        trusted = ssl.create_default_context(cafile=str(ca))
+        for context, hostname in (
+            (ssl.create_default_context(), "github.com"), (trusted, "wrong.example"),
+        ):
+            with socket.create_connection(server.server_address, timeout=5) as raw:
+                with pytest.raises(ssl.SSLCertVerificationError):
+                    context.wrap_socket(raw, server_hostname=hostname)
+        for path, expected_status in ((MEMORY_RELEASE_PATH, 200), ("/missing.whl", 404)):
+            with socket.create_connection(server.server_address, timeout=5) as raw:
+                with trusted.wrap_socket(raw, server_hostname="github.com") as connection:
+                    connection.sendall(f"GET {path} HTTP/1.1\r\nHost: github.com\r\nConnection: close\r\n\r\n".encode())
+                    response = http.client.HTTPResponse(connection)
+                    response.begin()
+                    assert response.status == expected_status
+                    data = response.read()
+                    if expected_status == 200:
+                        assert data == asset.read_bytes()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _build_test_wheel(
@@ -326,6 +371,22 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
             distribution="avibe_memory",
         )
         assert memory_wheel_path.exists()
+        # The index contains ONLY core. Memory must be obtained from the exact
+        # HTTPS URL selected by installed, unmodified production code.
+        core_index = fixtures_dir / "core-index"
+        core_index.mkdir()
+        shutil.copy2(wheel_path, core_index / wheel_path.name)
+        github_root = fixtures_dir / "github"
+        memory_asset = github_root / MEMORY_RELEASE_PATH.lstrip("/")
+        memory_asset.parent.mkdir(parents=True)
+        shutil.move(memory_wheel_path, memory_asset)
+        create_certificate(fixtures_dir / "tls")
+        verify_memory_origin = (
+            "import json; from importlib.metadata import distribution; "
+            "record=json.loads(distribution('avibe-memory').read_text('direct_url.json')); "
+            f"assert record['url'] == 'https://github.com{MEMORY_RELEASE_PATH}'; "
+            f"assert record['archive_info']['hashes']['sha256'] == '{hashlib.sha256(memory_asset.read_bytes()).hexdigest()}'"
+        )
 
         memory_payload = {
             "enabled": True,
@@ -382,13 +443,28 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json vibe check-update",
                 '"$upgraded_python" -c "import importlib.util; from config.v2_config import V2Config; '
                 "assert V2Config.load().memory.enabled; assert importlib.util.find_spec('avibe_memory') is None\"",
-                "export UV_FIND_LINKS=/fixtures",
-                "export PIP_FIND_LINKS=/fixtures",
+                "export UV_FIND_LINKS=/fixtures/core-index",
+                "export PIP_FIND_LINKS=/fixtures/core-index",
+                # Restrict the fixture DNS/CA changes to this disposable
+                # container, after all genuine old-version downloads/upgrade.
+                # Keep normal CA roots for unrelated package dependencies.
+                "cat /etc/ssl/certs/ca-certificates.crt /fixtures/tls/ca.pem > /tmp/fixture-ca.pem",
+                "export SSL_CERT_FILE=/tmp/fixture-ca.pem",
+                "export PIP_CERT=/tmp/fixture-ca.pem",
+                "export NO_PROXY=github.com,127.0.0.1,localhost",
+                "export no_proxy=\"$NO_PROXY\"",
+                "printf '\\n127.0.0.1 github.com\\n' >> /etc/hosts",
+                '("$upgraded_python" /work/tests/e2e/github_release_fixture.py '
+                "--root /fixtures/github --cert /fixtures/tls/server.pem --key /fixtures/tls/server.key "
+                "> /tmp/github-fixture.log 2>&1 &)",
+                f'wait_until 30 1 "fixture HTTPS supplier" curl --silent --fail --cacert /fixtures/tls/ca.pem '
+                f'--output /dev/null https://github.com{MEMORY_RELEASE_PATH}',
                 '"$upgraded_launcher"',
                 f'wait_until 120 1 "avibe-memory {TEST_RELEASE_VERSION} to become available" memory_runtime_ready',
                 '"$current_python" -c "from config.v2_config import V2Config; '
                 f"from importlib.metadata import version; assert V2Config.load().memory.enabled; assert version('avibe-os') == '{TEST_RELEASE_VERSION}'; "
                 f"assert version('avibe-memory') == '{TEST_RELEASE_VERSION}'\"",
+                f'"$current_python" -c {shlex.quote(verify_memory_origin)}',
                 'test "$current_python" != "$upgraded_python"',
                 '"$upgraded_python" -c "import certifi, importlib.util; from pathlib import Path; '
                 "assert Path(certifi.where()).is_file(); assert importlib.util.find_spec('vibe.api') is not None; "

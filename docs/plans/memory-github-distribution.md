@@ -5,8 +5,12 @@
 The owner approved GitHub-only distribution of the optional Memory package on
 2026-09-16. Core remains on PyPI. This replaces the separate Memory PyPI
 publisher, not Memory itself. The root owns implementation, gated integration,
-and publication of the next available stable version. Already published tags
-and assets are immutable; this change does not install or restart local Avibe.
+and gated publication. The owner explicitly chose replacement of the partially
+published GitHub v3.1.0 on 2026-09-16, not a new version. That one-time operation
+must preserve prior publication evidence and reconfirm PyPI absence before
+withdrawal. Generic workflows still reject changed existing assets; they do
+not implement withdrawal or an overwrite bypass. This change does not install
+or restart local Avibe.
 
 ## Invariants
 
@@ -24,6 +28,10 @@ and assets are immutable; this change does not install or restart local Avibe.
   for Memory, new updater, rollback protocol, or runtime preparation.
 - Official release order is complete published GitHub assets, anonymous public
   byte verification of the companion wheel and sdist, then core PyPI.
+- Both upload workflows compare all existing package/runtime bytes before any
+  asset upload, retain identical assets, and upload only missing assets.
+  Artifact filenames use normalized package versions; release URLs retain the
+  original supported tag spelling.
 - Existing source/editable workflows remain local and preserve the new Memory
   subprocess-lifecycle fix and dependency floor.
 
@@ -34,7 +42,9 @@ They cannot be transparently repaired by new code. Users of that path must
 update core through the official installer/core-only installation entry first.
 On the next normal startup, enabled Memory uses the existing reconciler to
 obtain the matching GitHub companion. Disabled Memory remains core-only.
-Do not promise an in-place old-client update works or change old assets.
+Do not promise every old client's in-place update works. The released 3.0.13
+core-only first hop is exercised separately; the next startup must obtain
+Memory through its GitHub URL, not the package index.
 
 ## Validation
 

@@ -3362,7 +3362,7 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
 
 
 @pytest.mark.parametrize("origin", [None, RELEASE_CORE_URL], ids=["pypi-core", "github-preview"])
-def test_memory_indep_027_repair_installs_companion_from_the_corresponding_release(
+def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
     monkeypatch, origin,
 ) -> None:
     """A core-only install converges from the corresponding GitHub Release.

@@ -19,7 +19,11 @@ WORKFLOWS = (
 
 
 @pytest.mark.parametrize("failure", [None, "missing-wheel", "missing-sdist", "mismatch", "unpublished"])
-def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, failure):
+@pytest.mark.parametrize(
+    ("tag", "version"),
+    [("v3.1.0", "3.1.0"), ("v3.2.0-rc1", "3.2.0rc1"), ("gh-v3.2.0.dev01", "3.2.0.dev1")],
+)
+def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, failure, tag, version):
     workspace = tmp_path / "public release 中文"
     dist = workspace / "dist"
     scripts = workspace / "scripts"
@@ -29,8 +33,8 @@ def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, f
         directory.mkdir(parents=True)
     shutil.copy2(ROOT / "scripts/release_package_version.py", scripts)
     assets = {
-        "avibe_memory-3.1.1-py3-none-any.whl": b"companion wheel",
-        "avibe_memory-3.1.1.tar.gz": b"companion sdist",
+        f"avibe_memory-{version}-py3-none-any.whl": b"companion wheel",
+        f"avibe_memory-{version}.tar.gz": b"companion sdist",
     }
     for name, data in assets.items():
         (dist / name).write_bytes(data)
@@ -45,7 +49,7 @@ def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, f
         "args = sys.argv[1:]\n"
         "assert not any('authorization' in arg.lower() for arg in args)\n"
         "url = args[-1]\n"
-        "assert url.startswith('https://github.com/avibe-bot/avibe/releases/download/v3.1.1/')\n"
+        f"assert url.startswith('https://github.com/avibe-bot/avibe/releases/download/{tag}/')\n"
         "with pathlib.Path('fetches.jsonl').open('a') as log: log.write(json.dumps(url) + '\\n')\n"
         f"sys.exit(22) if {failure == 'unpublished'!r} else None\n"
         "asset = url.rsplit('/', 1)[1]\n"
@@ -66,7 +70,7 @@ def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, f
             **os.environ,
             "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
             "RUNNER_TEMP": str(runtime_tmp),
-            "RELEASE_TAG": "v3.1.1",
+            "RELEASE_TAG": tag,
             "GITHUB_REPOSITORY": "avibe-bot/avibe",
         },
         capture_output=True, text=True, timeout=15,
@@ -79,6 +83,117 @@ def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, f
     for path in dist.iterdir():
         assert path.read_bytes() == assets[path.name]
 
+
+@pytest.mark.parametrize("workflow_name", ["publish.yml", "release_ai.yml"])
+@pytest.mark.parametrize(
+    "state",
+    ["empty", "identical", "partial", "core-mismatch", "memory-wheel-mismatch",
+     "memory-sdist-mismatch", "runtime-mismatch", "missing-wheel", "empty-sdist", "read-failure"],
+)
+def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_name, state):
+    workspace = tmp_path / "release source 中文"
+    dist = workspace / "dist"
+    runtime = workspace / ("runtime-artifacts" if workflow_name == "publish.yml" else "dist")
+    binaries = tmp_path / "bin"
+    temporary = tmp_path / "temp"
+    for path in {workspace, dist, runtime, binaries, temporary}:
+        path.mkdir(parents=True, exist_ok=True)
+    packages = {
+        f"{package}-3.1.0{suffix}": f"{package}{suffix}".encode()
+        for package in ("avibe_os", "avibe_memory")
+        for suffix in ("-py3-none-any.whl", ".tar.gz")
+    }
+    if workflow_name == "publish.yml":
+        # Preserve the optional legacy package upload path too.
+        packages["vibe_remote-3.0.14-py3-none-any.whl"] = b"legacy shim"
+    runtimes = {
+        **{f"vibe-show-runtime-node-{platform}.tgz": platform.encode()
+           for platform in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64")},
+        **{f"memory-runtime-1.2.3-{platform}.tar.gz": platform.encode()
+           for platform in ("linux-x64", "linux-arm64", "darwin-arm64")},
+        "show-runtime-manifest.json": b"show manifest",
+        "memory-runtime-manifest.json": b"memory manifest",
+    }
+    for directory, assets in ((dist, packages), (runtime, runtimes)):
+        for name, data in assets.items():
+            (directory / name).write_bytes(data)
+    all_assets = {**packages, **runtimes}
+    existing = dict(all_assets) if state == "identical" else {}
+    if state not in {"empty", "identical"}:
+        existing = {name: all_assets[name] for name in (
+            "avibe_os-3.1.0-py3-none-any.whl", "avibe_memory-3.1.0-py3-none-any.whl",
+            "avibe_memory-3.1.0.tar.gz", "show-runtime-manifest.json",
+        )}
+    mismatch = {
+        "core-mismatch": "avibe_os-3.1.0-py3-none-any.whl",
+        "memory-wheel-mismatch": "avibe_memory-3.1.0-py3-none-any.whl",
+        "memory-sdist-mismatch": "avibe_memory-3.1.0.tar.gz",
+        "runtime-mismatch": "show-runtime-manifest.json",
+    }.get(state)
+    if mismatch:
+        existing[mismatch] = b"already published different bytes"
+    if state == "missing-wheel":
+        (dist / "avibe_memory-3.1.0-py3-none-any.whl").unlink()
+    if state == "empty-sdist":
+        (dist / "avibe_memory-3.1.0.tar.gz").write_bytes(b"")
+
+    # Only gh and the metadata helper are simulated; run the complete upload
+    # shell, including real file comparisons, globs, temp cleanup and ordering.
+    gh = binaries / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        f"existing = {existing!r}\n"
+        "with pathlib.Path('events.jsonl').open('a') as stream:\n"
+        "    stream.write(json.dumps(args) + '\\n')\n"
+        "if args[1] == 'view':\n"
+        f"    sys.exit(1) if {state == 'read-failure'!r} else None\n"
+        "    print('\\n'.join(existing))\n"
+        "elif args[1] == 'download':\n"
+        "    name = args[args.index('--pattern') + 1]\n"
+        "    (pathlib.Path(args[args.index('--dir') + 1]) / name).write_bytes(existing[name])\n"
+        "elif args[1] == 'upload':\n"
+        "    assert '--clobber' not in args\n"
+        "    for path in args[args.index('--repo') + 2:]:\n"
+        "        assert pathlib.Path(path).name not in existing\n"
+        "        assert pathlib.Path(path).is_file()\n"
+        "else: raise AssertionError(args)\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    python = binaries / "python"
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    if workflow_name == "publish.yml":
+        command = _step(_job(workflow_name, "build"), "Upload GitHub release assets")["run"]
+        command = command.replace("${{ needs.resolve-tag.outputs.tag }}", "v3.1.0")
+    else:
+        command = _step(_job(workflow_name, "release"), "Create GitHub-only Release")["run"]
+        command = command.replace("${{ steps.tag.outputs.tag }}", "gh-v3.1.0")
+        command = command.replace("${{ steps.release_type.outputs.prerelease }}", "true")
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+        cwd=workspace, env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                            "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe"},
+        capture_output=True, text=True, timeout=20,
+    )
+    success = state in {"empty", "identical", "partial"}
+    assert (result.returncode == 0) is success, result.stdout + result.stderr
+    events = [json.loads(line) for line in (workspace / "events.jsonl").read_text().splitlines()]
+    uploads = [event for event in events if event[1] == "upload"]
+    if not success:
+        assert not uploads
+    else:
+        uploaded = [Path(path).name for event in uploads for path in event[event.index("--repo") + 2:]]
+        assert len(uploaded) == len(set(uploaded))
+        assert set(uploaded) == set(all_assets) - set(existing)
+        if uploads:
+            first_upload = events.index(uploads[0])
+            assert all(event[1] != "download" for event in events[first_upload:])
+        kinds = [name in packages for name in uploaded]
+        assert kinds == sorted(kinds), "Runtime uploads must complete before package uploads"
+    assert not list(temporary.iterdir())
 
 def _job(workflow_name: str, job_name: str) -> dict:
     workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text(encoding="utf-8"))

@@ -445,6 +445,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ needs.resolve-tag.outputs.tag }}"
           python release-automation/scripts/github_release.py ensure-draft \
             --repo "$GITHUB_REPOSITORY" \
@@ -452,35 +453,46 @@ jobs:
             --title "$TAG" \
             --notes "Release assets for $TAG."
 
-          # Runtime archives + manifests are IMMUTABLE per tag and must NOT be
-          # re-clobbered. Builds are normalized and pinned, but the wheel published
-          # to PyPI is itself immutable. Replacing any hosted runtime byte after that
-          # point would desync the wheel's manifest and break integrity checks.
-          #
-          # Verify immutability BEFORE mutating ANY release asset (including dist/*), so a
-          # mismatch fails the job without having already replaced the wheel/sdist. Upload
-          # each runtime asset only if absent; if it already exists, require byte-identity.
+          # All artifacts are immutable per tag, including the GitHub-only
+          # companion. Compare every existing byte BEFORE uploading anything.
           existing="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           tmp="$(mktemp -d)"
+          trap 'rm -r -- "$tmp"' EXIT
           runtime_to_upload=()
+          package_to_upload=()
+          package_paths=(
+            dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
+            dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz
+          )
+          # The existing v3.0.x shim remains part of those releases only.
+          for path in dist/vibe_remote-*.whl dist/vibe_remote-*.tar.gz; do
+            if [ -e "$path" ]; then package_paths+=("$path"); fi
+          done
           for path in \
             runtime-artifacts/vibe-show-runtime-node-*.tgz \
             runtime-artifacts/show-runtime-manifest.json \
             runtime-artifacts/memory-runtime-*.tar.gz \
-            runtime-artifacts/memory-runtime-manifest.json; do
+            runtime-artifacts/memory-runtime-manifest.json \
+            "${package_paths[@]}"; do
+            if [ ! -s "$path" ]; then
+              echo "::error::Missing or empty release asset: $path" >&2
+              exit 1
+            fi
             name="$(basename "$path")"
             if grep -qxF "$name" <<<"$existing"; then
-              rm -f "$tmp/$name"
               gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern "$name" --dir "$tmp" --clobber
               if cmp -s "$tmp/$name" "$path"; then
                 echo "Release asset '$name' already present and byte-identical; skipping (immutable per tag)."
               else
                 echo "::error::Release asset '$name' already exists for $TAG but differs from this run's build." >&2
-                echo "::error::Overwriting it would desync the release from the PyPI wheel's manifest. Cut a NEW version instead of re-running the release." >&2
+                echo "::error::Published package and runtime bytes are immutable; cut a new version." >&2
                 exit 1
               fi
             else
-              runtime_to_upload+=("$path")
+              case "$path" in
+                runtime-artifacts/*) runtime_to_upload+=("$path") ;;
+                *) package_to_upload+=("$path") ;;
+              esac
             fi
           done
 
@@ -488,8 +500,9 @@ jobs:
           if [ "${#runtime_to_upload[@]}" -gt 0 ]; then
             gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" "${runtime_to_upload[@]}"
           fi
-          # Python distributions are safe to refresh (PyPI itself is skip-existing).
-          gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber
+          if [ "${#package_to_upload[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" "${package_to_upload[@]}"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6

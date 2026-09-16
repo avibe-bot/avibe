@@ -364,10 +364,12 @@ def test_github_only_release_uploads_both_distribution_pairs() -> None:
     release_upload = _step(release_job, "Create GitHub-only Release")["run"]
 
     assert artifact_upload["with"]["path"] == "dist/"
-    assert "for path in dist/*" in release_upload
-    assert 'package_assets+=("$path")' in release_upload
+    assert "dist/avibe_os-*.whl dist/avibe_os-*.tar.gz" in release_upload
+    assert "dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz" in release_upload
+    assert 'package_to_upload+=("$path")' in release_upload
     assert 'gh release upload "$TAG"' in release_upload
-    assert '"${package_assets[@]}" --clobber' in release_upload
+    assert '"${package_to_upload[@]}"' in release_upload
+    assert not any("--clobber" in line for line in release_upload.splitlines() if "gh release upload" in line)
 
 
 def test_official_draft_uploads_both_verified_distribution_pairs() -> None:
@@ -378,7 +380,10 @@ def test_official_draft_uploads_both_verified_distribution_pairs() -> None:
     assert names.index("Verify Python distribution asset matrix") < names.index(
         "Upload GitHub release assets"
     )
-    assert 'gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber' in release_upload
+    assert "dist/avibe_os-*.whl dist/avibe_os-*.tar.gz" in release_upload
+    assert "dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz" in release_upload
+    assert 'gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" "${package_to_upload[@]}"' in release_upload
+    assert not any("--clobber" in line for line in release_upload.splitlines() if "gh release upload" in line)
 
 
 def test_official_release_verifies_public_github_memory_before_core() -> None:
