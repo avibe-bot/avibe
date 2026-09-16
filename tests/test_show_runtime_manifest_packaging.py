@@ -162,3 +162,108 @@ def test_prepare_manifest_rejects_a_release_asset_digest_mismatch(tmp_path: Path
 
     with pytest.raises(RuntimeError, match="digest mismatch"):
         prepare_manifest(tmp_path / "manifest.json", release_tag=RELEASE_TAG, opener=opener)
+
+
+@pytest.mark.parametrize("newest_broken", [False, True])
+def test_default_supplier_paginates_official_releases_before_validating_assets(tmp_path, newest_broken):
+    content = (json.dumps(_manifest()) + "\n").encode()
+    url = f"https://github.com/avibe-bot/avibe/releases/download/{RELEASE_TAG}/show-runtime-manifest.json"
+    official = {
+        "tag_name": RELEASE_TAG, "draft": False, "prerelease": False,
+        "assets": [{"name": "show-runtime-manifest.json", "browser_download_url": url,
+                    "digest": "sha256:" + hashlib.sha256(content).hexdigest()}],
+    }
+    first = [
+        {"tag_name": f"model-hub-engine-v99.0.{index}", "draft": False, "prerelease": False}
+        for index in range(100)
+    ]
+    second = [
+        official,
+        {"tag_name": "v3.0.7", "draft": False, "prerelease": False, "assets": []},
+        {"tag_name": "v9.0.0", "draft": True, "prerelease": False},
+        {"tag_name": "v8.0.0", "draft": False, "prerelease": True},
+        {"tag_name": "v7.0.0rc1", "draft": False, "prerelease": False},
+        {"tag_name": "gh-v6.0.0", "draft": False, "prerelease": False},
+    ]
+    if newest_broken:
+        second.append({"tag_name": "v4.0.0", "draft": False, "prerelease": False, "assets": []})
+    requests = []
+
+    def opener(request, timeout):
+        requests.append(request.full_url)
+        if request.full_url == url:
+            return _Response(content)
+        assert request.full_url.startswith("https://api.github.com/repos/avibe-bot/avibe/releases?")
+        assert "/latest" not in request.full_url
+        if request.full_url.endswith("&page=1"):
+            return _Response(json.dumps(first).encode())
+        assert request.full_url.endswith("&page=2")
+        return _Response(json.dumps(second).encode())
+
+    output = tmp_path / "manifest.json"
+    if newest_broken:
+        output.write_bytes(b"previous verified manifest")
+        with pytest.raises(RuntimeError, match="v4.0.0 must contain exactly one"):
+            prepare_manifest(output, opener=opener)
+        assert output.read_bytes() == b"previous verified manifest"
+        assert requests == [
+            f"https://api.github.com/repos/avibe-bot/avibe/releases?per_page=100&page={page}"
+            for page in (1, 2)
+        ]
+    else:
+        assert prepare_manifest(output, opener=opener)["runtime_version"] == RUNTIME_VERSION
+        assert output.read_bytes() == content
+        assert len(requests) == 3
+
+
+@pytest.mark.parametrize("payload", [[], {}, [None], [{"tag_name": "v3.1.0"}]])
+def test_default_supplier_fails_closed_without_complete_release_evidence(tmp_path, payload):
+    output = tmp_path / "manifest.json"
+    with pytest.raises(RuntimeError):
+        prepare_manifest(output, opener=lambda *args, **kwargs: _Response(json.dumps(payload).encode()))
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mismatch", ["tag", "repository", "asset-tag"])
+def test_explicit_supplier_cannot_redirect_manifest_identity(tmp_path, mismatch):
+    content = json.dumps(_manifest()).encode()
+    tag = "v3.0.9" if mismatch == "tag" else RELEASE_TAG
+    repo = "other/repo" if mismatch == "repository" else "avibe-bot/avibe"
+    asset_tag = "v3.0.9" if mismatch == "asset-tag" else RELEASE_TAG
+    payload = {
+        "tag_name": tag,
+        "assets": [{"name": "show-runtime-manifest.json",
+                    "browser_download_url": f"https://github.com/{repo}/releases/download/{asset_tag}/show-runtime-manifest.json",
+                    "digest": "sha256:" + hashlib.sha256(content).hexdigest()}],
+    }
+    requests = []
+
+    def opener(request, timeout):
+        requests.append(request.full_url)
+        assert "/releases/tags/" in request.full_url
+        return _Response(json.dumps(payload).encode())
+
+    with pytest.raises(RuntimeError, match="requested tag|invalid manifest download URL"):
+        prepare_manifest(tmp_path / "manifest.json", release_tag=RELEASE_TAG, opener=opener)
+    assert len(requests) == 1
+
+
+def test_manifest_build_helpers_are_in_the_sdist_contract(tmp_path):
+    import runpy
+    import shutil
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib
+
+    repository = Path(__file__).resolve().parents[1]
+    config = tomllib.loads((repository / "pyproject.toml").read_text())
+    included = config["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    # Recreate the actual explicitly shipped helper set away from this checkout.
+    for name in included:
+        if name.startswith("scripts/") and "*" not in name:
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(repository / name, target)
+    helpers = runpy.run_path(str(tmp_path / "scripts/show_runtime_manifest_asset.py"))
+    assert helpers["validate_manifest_bytes"](json.dumps(_manifest()).encode()) == _manifest()

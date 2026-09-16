@@ -28,6 +28,7 @@ permissions:
 
 jobs:
   resolve-show-runtime-ref:
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
@@ -109,6 +110,7 @@ jobs:
             show-router-${{ matrix.artifact }}.tsx
 
   memory-runtime-bundles:
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -342,6 +344,11 @@ jobs:
 
   release:
     needs: build-assets
+    # Official assets belong to publish.yml; only previews require this build.
+    if: >-
+      ${{ !cancelled() && (needs.build-assets.result == 'success' ||
+          (needs.build-assets.result == 'skipped' &&
+           !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

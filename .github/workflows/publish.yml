@@ -320,6 +320,10 @@ jobs:
       - name: Install build and test dependencies
         run: pip install -e . build pytest
 
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
       - name: Build Python distributions
         run: |
           python -m build --outdir dist packaging/avibe-memory
@@ -659,11 +663,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          LATEST_MODE="preserve"
+          LATEST_MODE="auto"
           if [ "${{ needs.resolve-tag.outputs.prerelease }}" = "true" ]; then
             LATEST_MODE="false"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            LATEST_MODE="true"
           fi
 
           python scripts/github_release.py finalize \

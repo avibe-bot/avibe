@@ -133,6 +133,7 @@ include = [
     "main.py",
     "scripts/prepare_local_show_runtime_manifest.py",
     "scripts/show_runtime_manifest_asset.py",
+    "scripts/release_package_version.py",
     "ui/dist/**",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
