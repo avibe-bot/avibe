@@ -102,6 +102,14 @@ async def dispose_helper(helper):
         raise AssertionError("test helper did not exit during cleanup") from exc
 
 
+def helper_from_marker(home):
+    try:
+        pid = int((home / "helper-spawned").read_text())
+        return psutil.Process(pid)
+    except (FileNotFoundError, ValueError, psutil.NoSuchProcess):
+        return None
+
+
 async def dispose_captured_child(captured_child):
     child = captured_child.get("process")
     if child is not None:
@@ -759,6 +767,8 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
             except BaseException as exc:
                 cleanup_error = exc
             finally:
+                if helper is None:
+                    helper = helper_from_marker(home)
                 try:
                     await dispose(child)
                 except BaseException as exc:
@@ -826,7 +836,14 @@ async def wait_for_helper_marker(captured_child):
     raise AssertionError("helper spawn marker did not appear")
 
 
-async def test_native_late_group_helper_cleanup_observes_spawned_helper_before_failure(monkeypatch):
+@pytest.mark.parametrize(
+    "helper_report_delay",
+    [0.5, _CHILD_IO_TIMEOUT_SECONDS + 0.5],
+    ids=["reported-before-deadline", "observation-timeout"],
+)
+async def test_native_late_group_helper_cleanup_observes_spawned_helper_before_failure(
+    monkeypatch, helper_report_delay,
+):
     captured_child = {}
     captured_helpers = []
     original_spawn = asyncio.create_subprocess_exec
@@ -846,7 +863,7 @@ async def test_native_late_group_helper_cleanup_observes_spawned_helper_before_f
     try:
         with pytest.raises(RuntimeError, match="review-injected failure after helper spawn"):
             await test_native_late_group_helper_is_classified_before_cleanup(
-                monkeypatch, "stop", "term", None, helper_report_delay=0.5,
+                monkeypatch, "stop", "term", None, helper_report_delay=helper_report_delay,
             )
         assert captured_helpers
         assert all(module._reference_state(helper, helper.pid) is not True for helper in captured_helpers)
@@ -862,7 +879,14 @@ async def test_native_late_group_helper_cleanup_observes_spawned_helper_before_f
                 await dispose_helper(helper)
 
 
-async def test_native_late_group_helper_cleanup_survives_pending_observation_cancellation(monkeypatch):
+@pytest.mark.parametrize(
+    "helper_report_delay",
+    [0.5, _CHILD_IO_TIMEOUT_SECONDS + 0.5],
+    ids=["reported-before-deadline", "observation-timeout"],
+)
+async def test_native_late_group_helper_cleanup_survives_pending_observation_cancellation(
+    monkeypatch, helper_report_delay,
+):
     captured_child = {}
     captured_helpers = []
     original_spawn = asyncio.create_subprocess_exec
@@ -876,7 +900,7 @@ async def test_native_late_group_helper_cleanup_survives_pending_observation_can
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
     target = asyncio.create_task(
         test_native_late_group_helper_is_classified_before_cleanup(
-            monkeypatch, "stop", "before", None, helper_report_delay=0.5,
+            monkeypatch, "stop", "before", None, helper_report_delay=helper_report_delay,
         )
     )
     try:
