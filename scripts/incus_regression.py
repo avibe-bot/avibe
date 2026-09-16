@@ -2540,7 +2540,7 @@ def build_base_image(args: argparse.Namespace) -> int:
                 mkdir -p "$avibe_home/.local/bin" "$avibe_home/.npm-global"
                 # Persist a user-writable npm prefix so claude-code/codex install here
                 # AND future npm-based self-updates by the avibe user stay writable.
-                printf 'prefix=%s/.npm-global\n' "$avibe_home" > "$avibe_home/.npmrc"
+                printf 'prefix=%s/.npm-global\\n' "$avibe_home" > "$avibe_home/.npmrc"
                 npm install -g @anthropic-ai/claude-code @openai/codex
                 ln -sf "$avibe_home/.npm-global/bin/claude" "$avibe_home/.local/bin/claude"
                 ln -sf "$avibe_home/.npm-global/bin/codex" "$avibe_home/.local/bin/codex"
