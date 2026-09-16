@@ -863,6 +863,159 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     subprocess.run(["bash", "-n"], input=next(command[-1] for command in commands if "apt-get update" in command[-1]), text=True, check=True)
 
 
+def _build_base_script_and_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, fail_stage: str = ""):
+    """INCUS-BOOTSTRAP-001: execute the recipe without Incus or real installers."""
+    bin_dir = tmp_path / "bin"
+    service_home = tmp_path / "service home 测试"
+    outer_home = tmp_path / "outer-home"
+    for path in (bin_dir, service_home, outer_home):
+        path.mkdir()
+    # Restrict PATH to stubs and these filesystem/shell utilities. An unexpected
+    # command must fail rather than fall through to a host package manager.
+    for name in ("bash", "sh", "mkdir", "ln", "chmod", "cat"):
+        executable = shutil.which(name)
+        assert executable is not None, f"{name} is required for the bootstrap recipe test"
+        (bin_dir / name).symlink_to(executable)
+    bash_path = str((bin_dir / "bash").resolve())
+
+    def write_stub(name: str, body: str) -> None:
+        path = bin_dir / name
+        path.write_text(
+            '#!/bin/sh\nset -eu\nprintf "%s|%s\\n" "${0##*/}" "$HOME" >> "$TEST_TRACE"\n' + body,
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    for name in ("apt-get", "useradd", "cloud-init", "node", "askill"):
+        write_stub(name, 'printf "%s complete\\n" "${0##*/}"\n')
+    write_stub("id", "exit 1\n")
+    write_stub(
+        "sudo",
+        r'''
+[ "$*" = '-H -u avibe -- bash -s' ] || exit 99
+shift 4
+export HOME="${TEST_SERVICE_HOME:?}"
+exec "$@"
+''',
+    )
+    write_stub(
+        "npm",
+        r'''
+if [ "${1:-}" = install ]; then
+    [ "$TEST_FAIL_STAGE" != npm ] || exit 17
+    mkdir -p "$HOME/.npm-global/bin"
+    for name in claude codex; do
+        cat > "$HOME/.npm-global/bin/$name" <<'BACKEND'
+#!/bin/sh
+printf '%s|%s\n' "${0##*/}" "$HOME" >> "$TEST_TRACE"
+BACKEND
+        chmod +x "$HOME/.npm-global/bin/$name"
+    done
+fi
+''',
+    )
+    write_stub(
+        "curl",
+        r'''
+case "$*" in
+    '-fsSL https://opencode.ai/install')
+        [ "$TEST_FAIL_STAGE" != opencode-download ] || exit 23
+        cat <<'INSTALLER'
+mkdir -p "$HOME/.opencode/bin"
+cat > "$HOME/.opencode/bin/opencode" <<'BACKEND'
+#!/bin/sh
+printf '%s|%s\n' "${0##*/}" "$HOME" >> "$TEST_TRACE"
+BACKEND
+chmod +x "$HOME/.opencode/bin/opencode"
+INSTALLER
+        ;;
+    '-fsSL https://deb.nodesource.com/setup_20.x'|'-fsSL https://askill.sh')
+        printf 'exit 0\n' ;;
+    *) exit 98 ;;
+esac
+''',
+    )
+    commands = []
+    execution_results = []
+    real_run = subprocess.run
+
+    def run(command, *, check=False, **kwargs):
+        assert command[0] == "test-incus", "Only the Incus boundary is stubbed"
+        commands.append(command)
+        if command[1] == "exec":
+            # Execute the captured body, never a login shell: profiles may reset
+            # PATH/HOME and escape the stubs. Inherit no credentials or BASH_ENV.
+            result = real_run(
+                [bash_path, "--noprofile", "--norc", "-c", command[-1]],
+                cwd=tmp_path,
+                env={
+                    "PATH": str(bin_dir),
+                    "HOME": str(outer_home),
+                    "TEST_SERVICE_HOME": str(service_home),
+                    "TEST_FAIL_STAGE": fail_stage,
+                    "TEST_TRACE": str(tmp_path / "trace"),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            execution_results.append(result)
+        else:
+            result = subprocess.CompletedProcess(command, 0, "", "")
+        if check:
+            result.check_returncode()
+        return result
+
+    monkeypatch.setattr(incus_regression.subprocess, "run", run)
+    monkeypatch.setenv("INCUS_CMD", "test-incus")
+    args = argparse.Namespace(
+        dry_run=False,
+        remote=None,
+        source_image="ubuntu",
+        temp_instance="test-temp",
+        image="test-image",
+        storage_pool="default",
+        network="incusbr0",
+    )
+    return args, commands, service_home, outer_home, execution_results
+
+
+def test_build_base_executes_backend_heredoc_and_post_bootstrap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args, commands, service_home, outer_home, results = _build_base_script_and_runner(monkeypatch, tmp_path)
+
+    assert incus_regression.build_base_image(args) == 0
+
+    assert (service_home / ".npmrc").read_bytes() == f"prefix={service_home}/.npm-global\n".encode()
+    assert not (outer_home / ".npmrc").exists()
+    events = (tmp_path / "trace").read_text(encoding="utf-8").splitlines()
+    assert events[events.index(f"sudo|{outer_home}") + 1:] == [
+        f"npm|{service_home}", f"curl|{service_home}",
+        f"claude|{service_home}", f"codex|{service_home}", f"opencode|{service_home}",
+        f"curl|{outer_home}", f"askill|{outer_home}", f"node|{outer_home}", f"npm|{outer_home}",
+        f"cloud-init|{outer_home}",
+    ]
+    assert "askill complete\n" in results[0].stdout
+    assert results[0].stderr == ""
+    assert sum(command[1] == "publish" for command in commands) == 1
+    for name in ("claude", "codex", "opencode"):
+        assert (service_home / ".local/bin" / name).is_file()
+
+
+@pytest.mark.parametrize(("fail_stage", "exit_code"), [("npm", 17), ("opencode-download", 23)])
+def test_build_base_backend_failure_prevents_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_stage: str, exit_code: int
+) -> None:
+    args, commands, _, outer_home, _ = _build_base_script_and_runner(monkeypatch, tmp_path, fail_stage=fail_stage)
+
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        incus_regression.build_base_image(args)
+
+    assert excinfo.value.returncode == exit_code
+    events = (tmp_path / "trace").read_text(encoding="utf-8").splitlines()
+    assert f"askill|{outer_home}" not in events
+    assert [command[1] for command in commands] == ["delete", "launch", "exec"]
+
+
 def test_source_exclude_drops_runtime_and_dependency_dirs() -> None:
     assert incus_regression.should_exclude(".runtime/state.json")
     assert incus_regression.should_exclude("ui/node_modules/pkg/index.js")
