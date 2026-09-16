@@ -407,6 +407,7 @@ jobs:
           path: release-automation
           sparse-checkout: |
             scripts/github_release.py
+            scripts/release_package_version.py
             tests/test_memory_distribution.py
           sparse-checkout-cone-mode: false
 
@@ -546,7 +547,11 @@ jobs:
             test -s "dist/$asset"
             # Anonymous HTTPS fetch proves availability to end-user installers,
             # not merely to the workflow's authenticated GitHub identity.
-            curl --fail --location --retry 5 --proto '=https' --proto-redir '=https' \
+            # Fresh public URLs may briefly return 404. Retry only this
+            # idempotent download, within finite attempt and time bounds.
+            curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
+              --retry-max-time 60 --connect-timeout 10 --max-time 30 \
+              --proto '=https' --proto-redir '=https' \
               --output "$download_dir/$asset" \
               "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}"
             if ! cmp -s "dist/$asset" "$download_dir/$asset"; then

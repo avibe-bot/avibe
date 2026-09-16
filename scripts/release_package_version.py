@@ -37,6 +37,11 @@ def package_version_from_release_tag(tag: str) -> str:
         result += f"{separator}{match['phase']}{int(match['phase_number'])}"
     if match["post_number"] is not None:
         result += f".post{int(match['post_number'])}"
+    if normalized.startswith("v") and normalized != f"v{result}":
+        raise ValueError(
+            f"official release tag must use canonical spelling v{result}; "
+            "index-installed core resolves its Memory companion by that exact tag"
+        )
     return result
 
 

@@ -14,6 +14,22 @@ TAG = "v3.0.14"
 SOURCE_SHA = "a" * 40
 
 
+@pytest.mark.parametrize("tag", ["v3.2.0-rc1", "v03.02.00", "v3.2.0.post01"])
+@pytest.mark.parametrize("operation", ["ensure", "notes", "finalize"])
+def test_noncanonical_official_tag_fails_before_any_release_request(monkeypatch, tmp_path, tag, operation):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid publication identity must fail before any GitHub request")
+
+    monkeypatch.setattr(github_release, "_run_gh", forbidden)
+    with pytest.raises(github_release.ReleaseError, match="canonical spelling"):
+        if operation == "ensure":
+            github_release.ensure_draft(repo=REPO, tag=tag, title=tag, notes="notes", notes_file=None)
+        elif operation == "notes":
+            github_release.update_notes(repo=REPO, tag=tag, title=tag, notes_file=tmp_path / "notes.md")
+        else:
+            github_release.finalize_release(repo=REPO, tag=tag, prerelease=True, latest="false")
+
+
 def _completed(
     arguments: list[str],
     *,

@@ -2710,6 +2710,23 @@ def test_forward_index_target_does_not_inherit_current_preview_origin(monkeypatc
     assert not any("gh-v" in item for item in plan.command)
 
 
+@pytest.mark.parametrize(
+    "tag", ["v3.1.0", "v3.2.0rc1", "v3.2.0.post1", "gh-v3.2.0-rc1", "gh-v03.02.00"],
+)
+def test_publication_tag_producer_and_installed_memory_consumer_select_same_directory(tag):
+    from scripts.release_package_version import package_version_from_release_tag
+
+    version = package_version_from_release_tag(tag)
+    base = "https://github.com/avibe-bot/avibe/releases/download"
+    core = (
+        f"{base}/{tag}/avibe_os-{version}-py3-none-any.whl"
+        if tag.startswith("gh-v") else f"avibe-os=={version}"
+    )
+    assert vibe_upgrade.memory_release_spec(version, core) == (
+        f"{base}/{tag}/avibe_memory-{version}-py3-none-any.whl"
+    )
+
+
 @pytest.mark.parametrize("version", ["3.1.1.dev1", "3.1.1+local", "bad"])
 def test_memory_asset_source_rejects_unpublished_versions(version):
     with pytest.raises(ValueError, match="published target"):

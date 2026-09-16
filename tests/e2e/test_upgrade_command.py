@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e.github_release_fixture import create_certificate, make_server
+from tests.e2e.github_release_fixture import create_certificate, make_server, verify_archive_origin
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -195,6 +195,32 @@ def test_github_companion_supplier_uses_verified_https_outside_the_index(tmp_pat
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [{"hashes": {"sha256": "a" * 64}}, {"hash": "sha256=" + "a" * 64},
+     {"hashes": {"sha256": "a" * 64}, "hash": "sha256=" + "a" * 64}],
+)
+def test_companion_origin_accepts_both_pep610_hash_representations(archive):
+    verify_archive_origin({"url": "https://github.com/exact.whl", "archive_info": archive},
+                          "https://github.com/exact.whl", "a" * 64)
+
+
+@pytest.mark.parametrize(
+    ("url", "archive"),
+    [("https://wrong.example/exact.whl", {"hash": "sha256=" + "a" * 64}),
+     ("https://github.com/exact.whl", {}),
+     ("https://github.com/exact.whl", {"hashes": {}}),
+     ("https://github.com/exact.whl", {"hash": "sha256=" + "b" * 64}),
+     ("https://github.com/exact.whl", {"hashes": {"sha256": "b" * 64}}),
+     ("https://github.com/exact.whl", {"hashes": {"sha256": "a" * 64}, "hash": "sha256=" + "b" * 64}),
+     ("https://github.com/exact.whl", {"hashes": {}, "hash": "sha256=" + "a" * 64})],
+)
+def test_companion_origin_rejects_missing_wrong_or_conflicting_hashes(url, archive):
+    with pytest.raises(AssertionError):
+        verify_archive_origin({"url": url, "archive_info": archive},
+                              "https://github.com/exact.whl", "a" * 64)
 
 
 def _build_test_wheel(
@@ -382,10 +408,11 @@ def test_memory_indep_026_upgrade_command_bridges_released_3_0_13_generation():
         shutil.move(memory_wheel_path, memory_asset)
         create_certificate(fixtures_dir / "tls")
         verify_memory_origin = (
-            "import json; from importlib.metadata import distribution; "
+            "import json; from importlib.metadata import distribution; from runpy import run_path; "
             "record=json.loads(distribution('avibe-memory').read_text('direct_url.json')); "
-            f"assert record['url'] == 'https://github.com{MEMORY_RELEASE_PATH}'; "
-            f"assert record['archive_info']['hashes']['sha256'] == '{hashlib.sha256(memory_asset.read_bytes()).hexdigest()}'"
+            "verify=run_path('/work/tests/e2e/github_release_fixture.py')['verify_archive_origin']; "
+            f"verify(record, 'https://github.com{MEMORY_RELEASE_PATH}', "
+            f"'{hashlib.sha256(memory_asset.read_bytes()).hexdigest()}')"
         )
 
         memory_payload = {

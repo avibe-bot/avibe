@@ -20,6 +20,9 @@ or restart local Avibe.
   an empty compatibility spelling; enabling Memory uses the existing package
   reconciler, not Python extras.
 - A PyPI core install selects the companion wheel at official `v<version>`.
+  Official tags must use that canonical normalized spelling; the shared
+  publication owner rejects aliases before any release mutation, even when
+  a workflow dispatch builds older source. Existing official tags are canonical.
   An exact core wheel from this repository's GitHub Release selects its same
   tag, including `gh-v` previews. Forward upgrades derive this from their
   target artifact, never the currently installed preview's origin.
@@ -28,6 +31,8 @@ or restart local Avibe.
   for Memory, new updater, rollback protocol, or runtime preparation.
 - Official release order is complete published GitHub assets, anonymous public
   byte verification of the companion wheel and sdist, then core PyPI.
+  Anonymous download propagation (including transient 404) has bounded
+  retries. Successfully downloaded but different bytes fail immediately.
 - Both upload workflows compare all existing package/runtime bytes before any
   asset upload, retain identical assets, and upload only missing assets.
   Artifact filenames use normalized package versions; release URLs retain the

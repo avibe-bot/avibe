@@ -15,11 +15,12 @@ from scripts.release_package_version import package_version_from_release_tag
         ("v3.0.10rc1", "3.0.10rc1"),
         ("gh-v3.0.10rc1", "3.0.10rc1"),
         ("gh-v4.1.0b2", "4.1.0b2"),
-        ("v3.2.0-rc1", "3.2.0rc1"),
+        ("v3.2.0rc1", "3.2.0rc1"),
+        ("gh-v3.2.0-rc1", "3.2.0rc1"),
         ("gh-v3.2.0.rc01", "3.2.0rc1"),
-        ("v03.02.00-dev01", "3.2.0.dev1"),
-        ("v3.2.0.post01", "3.2.0.post1"),
-        ("v3.2.0-a01.post02", "3.2.0a1.post2"),
+        ("gh-v03.02.00-dev01", "3.2.0.dev1"),
+        ("v3.2.0.post1", "3.2.0.post1"),
+        ("gh-v3.2.0-a01.post02", "3.2.0a1.post2"),
     ],
 )
 def test_package_version_from_release_tag(tag: str, expected: str) -> None:
@@ -36,7 +37,13 @@ def test_supported_tag_grammar_matches_build_backend_normalization(
 ) -> None:
     version = f"{release}{separator}{phase}{number}"
     for suffix in (["", ".post01"] if phase != "dev" else [""]):
-        assert package_version_from_release_tag(prefix + version + suffix) == str(Version(version + suffix))
+        spelling = version + suffix
+        canonical = str(Version(spelling))
+        if prefix == "v" and spelling != canonical:
+            with pytest.raises(ValueError, match="canonical spelling"):
+                package_version_from_release_tag(prefix + spelling)
+        else:
+            assert package_version_from_release_tag(prefix + spelling) == canonical
 
 
 @pytest.mark.parametrize(

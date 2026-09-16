@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+from http.server import BaseHTTPRequestHandler
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import shutil
+import threading
 
 import pytest
 import yaml
+
+from tests.e2e.github_release_fixture import create_certificate, make_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +26,8 @@ WORKFLOWS = (
 @pytest.mark.parametrize("failure", [None, "missing-wheel", "missing-sdist", "mismatch", "unpublished"])
 @pytest.mark.parametrize(
     ("tag", "version"),
-    [("v3.1.0", "3.1.0"), ("v3.2.0-rc1", "3.2.0rc1"), ("gh-v3.2.0.dev01", "3.2.0.dev1")],
+    [("v3.1.0", "3.1.0"), ("v3.2.0rc1", "3.2.0rc1"),
+     ("gh-v3.2.0-rc1", "3.2.0rc1"), ("gh-v3.2.0.dev01", "3.2.0.dev1")],
 )
 def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, failure, tag, version):
     workspace = tmp_path / "public release 中文"
@@ -83,6 +89,112 @@ def test_public_companion_gate_checks_both_exact_assets_without_auth(tmp_path, f
     for path in dist.iterdir():
         assert path.read_bytes() == assets[path.name]
 
+
+@pytest.mark.parametrize("availability", ["transient-404", "permanent-404", "wrong-bytes"])
+def test_public_gate_with_real_curl_retries_availability_but_never_integrity(tmp_path, availability):
+    workspace = tmp_path / "published 中文"
+    dist = workspace / "dist"
+    scripts = workspace / "scripts"
+    binaries = tmp_path / "bin"
+    temporary = tmp_path / "runner temp"
+    for directory in (dist, scripts, binaries, temporary):
+        directory.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/release_package_version.py", scripts)
+    assets = {
+        "avibe_memory-3.1.0-py3-none-any.whl": b"exact wheel bytes",
+        "avibe_memory-3.1.0.tar.gz": b"exact sdist bytes",
+    }
+    for name, data in assets.items():
+        (dist / name).write_bytes(data)
+    attempts = {}
+
+    class ReleaseHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            assert self.headers["Host"] == "github.com"
+            assert self.headers.get("Authorization") is None
+            prefix = "/avibe-bot/avibe/releases/download/v3.1.0/"
+            assert self.path.startswith(prefix)
+            name = self.path.removeprefix(prefix)
+            attempts[name] = attempts.get(name, 0) + 1
+            missing = availability == "permanent-404" or (
+                availability == "transient-404" and attempts[name] == 1
+            )
+            body = b"not yet public" if missing else assets[name]
+            if availability == "wrong-bytes":
+                body = b"incorrect successful download"
+            self.send_response(404 if missing else 200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    ca, cert, key = create_certificate(tmp_path / "TLS 中文")
+    server = make_server(tmp_path, cert, key, handler=ReleaseHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        actual_curl = shutil.which("curl")
+        assert actual_curl
+        curl = binaries / "curl"
+        # Redirect only the test connection, never the requested URL or TLS
+        # hostname. Execute actual curl with the workflow's unchanged options.
+        curl.write_text(
+            "#!/bin/sh\nexec " + shlex.join([
+                actual_curl, "--disable", "--noproxy", "*", "--cacert", str(ca),
+                "--connect-to", f"github.com:443:127.0.0.1:{server.server_port}",
+            ]) + ' "$@"\n', encoding="utf-8",
+        )
+        curl.chmod(0o755)
+        (binaries / "python").symlink_to(sys.executable)
+        command = _step(_job("publish.yml", "verify-avibe-memory-release"),
+                        "Verify public GitHub companion distributions")["run"]
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+            cwd=workspace,
+            env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                 "RUNNER_TEMP": str(temporary), "RELEASE_TAG": "v3.1.0",
+                 "GITHUB_REPOSITORY": "avibe-bot/avibe"},
+            capture_output=True, text=True, timeout=45,
+        )
+        assert (result.returncode == 0) is (availability == "transient-404"), result.stderr
+        if availability == "transient-404":
+            assert attempts == {name: 2 for name in assets}
+        else:
+            assert attempts == {
+                "avibe_memory-3.1.0-py3-none-any.whl": 6 if availability == "permanent-404" else 1,
+            }
+        assert {p.name: p.read_bytes() for p in dist.iterdir()} == assets
+        assert not list(temporary.iterdir())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
+@pytest.mark.parametrize("tag", ["v3.2.0-rc1", "v03.02.00"])
+def test_noncanonical_official_tags_fail_before_artifact_construction(
+    tmp_path, workflow_name, job_name, checkout_name, workflow_ref, tag,
+):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copy2(ROOT / "scripts/release_package_version.py", scripts)
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    (binaries / "python").symlink_to(sys.executable)
+    command = _step(_job(workflow_name, job_name), "Pin package version to release tag")["run"]
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", command + "\ntouch artifact-construction-reached"],
+        cwd=tmp_path, env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                          "RELEASE_TAG": tag, "GITHUB_ENV": str(tmp_path / "github-env")},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode != 0
+    assert "canonical spelling" in result.stderr
+    assert not (tmp_path / "artifact-construction-reached").exists()
+    assert not (tmp_path / "github-env").exists()
 
 @pytest.mark.parametrize("workflow_name", ["publish.yml", "release_ai.yml"])
 @pytest.mark.parametrize(
@@ -228,6 +340,7 @@ def test_release_verification_is_workflow_owned_after_tagged_artifacts_are_built
     expected_files = {"tests/test_memory_distribution.py"}
     if workflow_name == "publish.yml":
         expected_files.add("scripts/github_release.py")
+        expected_files.add("scripts/release_package_version.py")
     assert set(checkout["with"]["sparse-checkout"].splitlines()) == expected_files
     assert steps.index(source) < steps.index(build) < steps.index(checkout) < steps.index(verify)
     assert all(not step.get("if") and not step.get("continue-on-error") for step in (checkout, verify))

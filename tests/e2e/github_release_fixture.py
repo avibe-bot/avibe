@@ -45,9 +45,24 @@ def create_certificate(directory: Path) -> tuple[Path, Path, Path]:
     return ca, cert, key
 
 
-def make_server(root: Path, cert: Path, key: Path, *, port: int = 0) -> ThreadingHTTPServer:
+def verify_archive_origin(record: dict, url: str, sha256: str) -> None:
+    """Require exact provenance across both specified PEP610 hash encodings."""
+    assert record["url"] == url
+    archive = record["archive_info"]
+    hashes = archive.get("hashes")
+    legacy = archive.get("hash")
+    if hashes is not None:
+        assert hashes.get("sha256") == sha256
+        if legacy is not None:
+            algorithm, separator, digest = legacy.partition("=")
+            assert separator and hashes.get(algorithm) == digest
+    else:
+        assert legacy == f"sha256={sha256}"
+
+
+def make_server(root: Path, cert: Path, key: Path, *, port: int = 0, handler=None) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
-        ("127.0.0.1", port), partial(SimpleHTTPRequestHandler, directory=str(root)),
+        ("127.0.0.1", port), handler or partial(SimpleHTTPRequestHandler, directory=str(root)),
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
