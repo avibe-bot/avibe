@@ -19,6 +19,9 @@ import avibe_memory.process as module
 
 pytestmark = pytest.mark.asyncio
 
+_CHILD_IO_TIMEOUT_SECONDS = 3
+_CHILD_CLEANUP_TIMEOUT_SECONDS = 3
+
 
 async def spawn(tmp_path, code="import time; time.sleep(60)"):
     return await asyncio.create_subprocess_exec(
@@ -41,8 +44,30 @@ async def spawn(tmp_path, code="import time; time.sleep(60)"):
 
 async def dispose(child):
     if child.returncode is None:
-        child.kill()
-    await child.wait()
+        try:
+            child.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(child.wait(), _CHILD_CLEANUP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise AssertionError("test child did not exit during cleanup") from exc
+
+
+async def read_child_line(child, description):
+    try:
+        line = await asyncio.wait_for(
+            child.stdout.readline(),
+            _CHILD_IO_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise AssertionError(
+            f"{description} did not produce output within "
+            f"{_CHILD_IO_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    if not line:
+        raise AssertionError(f"{description} exited before producing output")
+    return line
 
 
 def settings():
@@ -537,6 +562,8 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
 ):
     """MEMORY-WAKE-204: unseen helper survives leader; context, not PGID, owns it."""
     with tempfile.TemporaryDirectory(prefix="mlate-", dir="/tmp") as temporary:
+        current_cmdline = psutil.Process().cmdline()
+        python = Path(current_cmdline[0] if current_cmdline else sys.executable)
         home = Path(temporary).resolve()
         root = home / "memory/everos-root"
         root.mkdir(parents=True, mode=0o700)
@@ -565,16 +592,19 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
         socket_path = home / "memory/.rt/everos.sock"
         role = "processing_probe" if consumer == "probe" else "sidecar"
         child = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "avibe_memory.sidecar", "--uds", str(socket_path),
+            str(python), "-m", "avibe_memory.sidecar", "--uds", str(socket_path),
             cwd=home, start_new_session=True,
             env={"HOME": str(home), "EVEROS_ROOT": str(root), "AVIBE_MEMORY_CHILD_ROLE": role},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         )
-        assert await child.stdout.readline() == b"ready\n"
+        assert await read_child_line(child, "sidecar readiness") == b"ready\n"
+
         async def observe_helper():
-            line = await child.stdout.readline()
+            line = await read_child_line(child, "helper PID")
             try:
                 return psutil.Process(int(line)) if line else None
+            except ValueError as exc:
+                raise AssertionError(f"helper PID was not an integer: {line!r}") from exc
             except psutil.NoSuchProcess:
                 return None
 
@@ -597,7 +627,7 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
         helper = None
         host = module._SystemProcessHost()
         owner = module.EverOSProcess(
-            sys.executable, effective_home=home, _host=host, settings=settings(),
+            python, effective_home=home, _host=host, settings=settings(),
             provider_root_guard=lambda: None, stop_timeout_seconds=0.1,
         )
         owned = {child.pid: host.capture(child.pid)}
@@ -626,7 +656,7 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                 child.stdin.write(b"go\n")
                 await child.stdin.drain()
                 helper = await helper_task
-                await child.wait()
+                await asyncio.wait_for(child.wait(), _CHILD_IO_TIMEOUT_SECONDS)
                 assert helper.pid not in owned
                 if mismatch == "unreadable":
                     original_environment = module._disclosed_process_environment
@@ -650,7 +680,7 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                 else:
                     await owner.stop()
                 if helper is None:
-                    helper = await helper_task if child.returncode is None else None
+                    helper = await asyncio.wait_for(helper_task, _CHILD_IO_TIMEOUT_SECONDS)
                 assert child.returncode is not None
                 assert not module._snapshot_process_group(child.pid)
                 assert (home / "term-count").read_text() == "1"
@@ -659,10 +689,30 @@ async def test_native_late_group_helper_is_classified_before_cleanup(
                 if consumer in {"stop", "watch"}:
                     assert not owner.retains_active_config  # Replacement admission is clear.
         finally:
-            await dispose(child)
-            helper = await asyncio.wait_for(helper_task, 2)
-            if helper is not None and module._reference_state(helper, helper.pid) is True:
-                helper.kill()
+            try:
+                await dispose(child)
+            finally:
+                if not helper_task.done():
+                    try:
+                        helper = await asyncio.wait_for(
+                            helper_task,
+                            _CHILD_IO_TIMEOUT_SECONDS,
+                        )
+                    except (asyncio.TimeoutError, AssertionError):
+                        helper_task.cancel()
+                        await asyncio.gather(helper_task, return_exceptions=True)
+                if helper is not None and module._reference_state(helper, helper.pid) is True:
+                    try:
+                        helper.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(helper.wait, _CHILD_CLEANUP_TIMEOUT_SECONDS),
+                            _CHILD_CLEANUP_TIMEOUT_SECONDS,
+                        )
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired) as exc:
+                        raise AssertionError("test helper did not exit during cleanup") from exc
 
 
 @pytest.mark.parametrize("discovery", ["socket", "root", "sync"])
