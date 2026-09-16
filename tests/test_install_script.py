@@ -6,6 +6,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = REPO_ROOT / "install.sh"
@@ -914,6 +916,122 @@ def test_install_script_prefers_original_path_order(tmp_path):
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
     _assert_staged_uv_bin(uv_log, home_dir)
+
+
+@pytest.mark.parametrize("candidate_fails", [False, True])
+def test_install_script_reuses_existing_stable_launcher_after_path_changes(tmp_path, candidate_fails):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    stable_bin = home_dir / ".local" / "bin"
+    stable_bin.mkdir(parents=True)
+    first_bin = tmp_path / "Framework Python bin"
+    first_bin.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(first_bin / "uv", uv_log)
+    env = {
+        **os.environ,
+        "HOME": str(home_dir),
+        "AVIBE_HOME": str(home_dir / ".avibe"),
+        "PATH": os.pathsep.join([str(stable_bin), str(first_bin), "/usr/bin", "/bin"]),
+    }
+    first = _install(env, cwd=tmp_path)
+    assert first.returncode == 0, first.stdout + first.stderr
+    launcher = stable_bin / "vibe"
+    old_target = launcher.resolve()
+    old_bytes = old_target.read_bytes()
+    env["PATH"] = os.pathsep.join([str(first_bin), str(stable_bin), "/usr/bin", "/bin"])
+    env["VIBE_TEST_REQUIRE_SOURCE_GENERATION"] = "1"
+    if candidate_fails:
+        env["VIBE_TEST_CANDIDATE_PROBE_FAIL"] = "1"
+        # One exact candidate; do not exercise unrelated index fallbacks.
+        env["AVIBE_INSTALL_PACKAGE_SPEC"] = "avibe-os==9.9.9"
+    second = _install(env, cwd=tmp_path)
+
+    assert (second.returncode == 0) is (not candidate_fails), second.stdout + second.stderr
+    assert launcher.is_symlink()
+    assert (launcher.resolve() == old_target) is candidate_fails
+    assert old_target.read_bytes() == old_bytes
+    assert not (first_bin / "vibe").exists()
+    assert not (first_bin / ".legacy-activation").exists()
+    version = _vibe_version(env, cwd=tmp_path)
+    assert version.returncode == 0, version.stdout + version.stderr
+    assert "avibe-os 9.9.9" in version.stdout
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    ["relative", "venv", "pyenv", "mise", "sbin", "not-executable", "broken-link", "read-only",
+     "atomic-generation", "uv-environment"],
+)
+def test_install_script_existing_entrypoint_preference_keeps_directory_guards(tmp_path, excluded):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    first_bin = tmp_path / "first-bin"
+    first_bin.mkdir()
+    excluded_bin = {
+        "relative": tmp_path / "relative-bin",
+        "venv": tmp_path / ".venv" / "bin",
+        "pyenv": tmp_path / ".pyenv" / "versions" / "3.12.0" / "bin",
+        "mise": tmp_path / ".local/share/mise/installs/python/3.12.0/bin",
+        "sbin": tmp_path / "usr" / "sbin",
+        "atomic-generation": home_dir / ".avibe/runtime/install-generations/old/bin",
+        "uv-environment": home_dir / ".local/share/uv/tools/avibe-os/bin",
+    }.get(excluded, tmp_path / "ineligible-bin")
+    excluded_bin.mkdir(parents=True)
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(first_bin / "uv", uv_log)
+    excluded_launcher = excluded_bin / "vibe"
+    if excluded == "broken-link":
+        excluded_launcher.symlink_to(tmp_path / "absent")
+    else:
+        _write_executable(excluded_launcher, "#!/bin/sh\necho old-excluded\n")
+    if excluded == "not-executable":
+        excluded_launcher.chmod(0o644)
+    if excluded == "read-only":
+        excluded_bin.chmod(0o555)
+        if os.access(excluded_bin, os.W_OK):
+            excluded_bin.chmod(0o755)
+            pytest.skip("Privileged test process can write mode-0555 directories")
+    path_entry = "relative-bin" if excluded == "relative" else str(excluded_bin)
+    env = {
+        **os.environ,
+        "HOME": str(home_dir),
+        "AVIBE_HOME": str(home_dir / ".avibe"),
+        "PATH": os.pathsep.join([str(first_bin), path_entry, "/usr/bin", "/bin"]),
+    }
+    try:
+        result = _install(env, cwd=tmp_path)
+    finally:
+        excluded_bin.chmod(0o755)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (first_bin / "vibe").is_symlink()
+    if excluded == "broken-link":
+        assert excluded_launcher.readlink() == tmp_path / "absent"
+    else:
+        assert excluded_launcher.read_text() == "#!/bin/sh\necho old-excluded\n"
+
+
+def test_install_script_reuses_first_eligible_existing_entrypoint(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    bins = [tmp_path / name for name in ("empty-bin", "first-existing", "second-existing")]
+    for directory in bins:
+        directory.mkdir()
+    _write_fake_uv(bins[0] / "uv", tmp_path / "uv-log")
+    old_script = "#!/bin/sh\necho old-conventional-install\n"
+    for directory in bins[1:]:
+        _write_executable(directory / "vibe", old_script)
+    env = {
+        **os.environ, "HOME": str(home_dir), "AVIBE_HOME": str(home_dir / ".avibe"),
+        "PATH": os.pathsep.join([*(str(directory) for directory in bins), "/usr/bin", "/bin"]),
+        "VIBE_TEST_REQUIRE_SOURCE_GENERATION": "1",
+    }
+    result = _install(env, cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (bins[0] / "vibe").exists()
+    assert (bins[1] / "vibe").is_symlink()
+    assert (bins[2] / "vibe").read_text() == old_script
+    assert "avibe-os 9.9.9" in _vibe_version(env, cwd=tmp_path).stdout
 
 
 def test_install_script_skips_relative_path_entries_for_tool_bin(tmp_path):

@@ -123,9 +123,13 @@ is_transient_bin_dir() {
     local dir="$1"
 
     case "$dir" in
-        */.venv/bin|*/venv/bin|*/env/bin|*/.pyenv/shims|*/.pyenv/versions/*/bin|*/.local/share/mise/installs/*/bin|*/.mise/installs/*/bin)
+        */.venv/bin|*/venv/bin|*/env/bin|*/.pyenv/shims|*/.pyenv/versions/*/bin|*/.local/share/mise/installs/*/bin|*/.mise/installs/*/bin|*/uv/tools/*/bin)
             return 0
             ;;
+    esac
+
+    case "$dir" in
+        "$AVIBE_RUNTIME_HOME"/runtime/install-generations/*) return 0 ;;
     esac
 
     if [ -n "${VIRTUAL_ENV:-}" ] && [ "$dir" = "${VIRTUAL_ENV%/}/bin" ]; then
@@ -158,6 +162,20 @@ choose_tool_bin_dir() {
 
     local old_ifs="$IFS"
     IFS=":"
+    # Reinstall through the established public entrypoint before choosing a new
+    # writable directory. Do not resolve its symlink into a package generation:
+    # the shared activation owner must keep switching this stable launcher.
+    for dir in $ORIGINAL_PATH; do
+        dir="${dir%/}"
+        if [ -n "$dir" ] && is_absolute_dir "$dir" &&
+            ! is_transient_bin_dir "$dir" && ! is_sbin_dir "$dir" &&
+            [ -f "$dir/vibe" ] && [ -x "$dir/vibe" ] && [ -w "$dir" ]; then
+            IFS="$old_ifs"
+            echo "$dir"
+            return 0
+        fi
+    done
+
     for dir in $ORIGINAL_PATH; do
         if [ -n "$dir" ] && is_absolute_dir "$dir" && ! is_transient_bin_dir "$dir" && ensure_writable_dir "$dir"; then
             if is_sbin_dir "$dir"; then
