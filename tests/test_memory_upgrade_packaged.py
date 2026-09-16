@@ -68,7 +68,7 @@ def _venv(path: Path) -> Path:
 @pytest.fixture(scope="module")
 def packaged_release_wheels(tmp_path_factory: pytest.TempPathFactory) -> Path:
     wheelhouse = tmp_path_factory.mktemp("packaged-release-wheels")
-    for version in ("3.0.14", "3.0.15"):
+    for version in ("3.0.14", "3.0.15", "3.0.15.dev1"):
         _build_release_wheels(version, wheelhouse)
     return wheelhouse
 
@@ -154,13 +154,14 @@ def _plan_env(wheelhouse: Path) -> dict[str, str]:
 
 
 @pytest.fixture
-def companion_release(tmp_path: Path, wheelhouse: Path, monkeypatch):
+def companion_release(tmp_path: Path, wheelhouse: Path, monkeypatch, request):
     """Memory is served as an HTTP release asset, never from the package index."""
 
     assets = tmp_path / "release assets 中文"
-    tag = assets / "v3.0.15"
+    version = getattr(request, "param", "3.0.15")
+    tag = assets / f"v{version}"
     tag.mkdir(parents=True)
-    wheel = next(wheelhouse.glob("avibe_memory-3.0.15-*.whl"))
+    wheel = next(wheelhouse.glob(f"avibe_memory-{version}-*.whl"))
     shutil.move(wheel, tag / wheel.name)
     # Core and ordinary dependencies remain in the simulated package index.
     server = ThreadingHTTPServer(
@@ -171,11 +172,32 @@ def companion_release(tmp_path: Path, wheelhouse: Path, monkeypatch):
     base = f"http://127.0.0.1:{server.server_port}"
     monkeypatch.setattr("vibe.upgrade.RELEASE_DOWNLOAD_BASE_URL", base)
     try:
-        yield tag / wheel.name, f"{base}/v3.0.15/{wheel.name}"
+        yield tag / wheel.name, f"{base}/v{version}/{wheel.name}"
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def _assert_installed_index_core_admission(python: Path, version: str, tmp_path: Path) -> None:
+    """Read the actual installed API; index installs carry no PEP610 origin."""
+
+    env = {**os.environ, "AVIBE_HOME": str(tmp_path / "admission-home"), "PYTHONPATH": ""}
+    env.pop("VIBE_BUILD_METADATA_PATH", None)
+    result = subprocess.run(
+        [str(python), "-c", """
+import sys
+from importlib.metadata import distribution
+from vibe import api
+from vibe.upgrade import release_asset_specs
+version = sys.argv[1]
+assert distribution("avibe-os").read_text("direct_url.json") is None
+assert release_asset_specs(version) is None
+assert api._published_running_version() == version
+""", version],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.integration
@@ -245,6 +267,7 @@ assert not any(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("companion_release", ["3.0.15", "3.0.15.dev1"], indirect=True)
 def test_packaged_memory_shape_survives_synchronous_upgrade(
     tmp_path: Path,
     packaged_dependency_seed: Path,
@@ -262,23 +285,25 @@ def test_packaged_memory_shape_survives_synchronous_upgrade(
     env = _plan_env(wheelhouse)
     assert _installed_versions(python)["avibe-os"] == "3.0.14"
     assert _installed_versions(python)["avibe-memory"] == "3.0.14"
+    target_version = companion_release[0].parent.name.removeprefix("v")
 
     forward = build_upgrade_plan(
         python_executable=str(python),
         base_env=env,
         memory_enabled=True,
         memory_package=True,
-        target_version="3.0.15",
+        target_version=target_version,
         package_spec="avibe-os",
     )
     assert "avibe-os" in forward.command
     assert f"avibe-memory @ {companion_release[1]}" in forward.command
-    assert not list(wheelhouse.glob("avibe_memory-3.0.15-*.whl"))
+    assert not list(wheelhouse.glob(f"avibe_memory-{target_version}-*.whl"))
     result = execute_upgrade_plan(forward, cwd=tmp_path, capture_output=True, text=True, check=False, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
     upgraded = _installed_versions(python)
-    assert upgraded["avibe-os"] == "3.0.15"
-    assert upgraded["avibe-memory"] == "3.0.15"
+    assert upgraded["avibe-os"] == target_version
+    assert upgraded["avibe-memory"] == target_version
+    _assert_installed_index_core_admission(python, target_version, tmp_path)
 
 
 @pytest.mark.integration
@@ -302,6 +327,7 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("companion_release", ["3.0.15", "3.0.15.dev1"], indirect=True)
 def test_packaged_missing_memory_fails_before_install(
     tmp_path: Path, packaged_dependency_seed: Path, wheelhouse: Path, companion_release,
 ) -> None:
@@ -310,12 +336,13 @@ def test_packaged_missing_memory_fails_before_install(
     for wheel in wheelhouse.glob("avibe_memory-*.whl"):
         wheel.unlink()
     companion_release[0].unlink()
+    target_version = companion_release[0].parent.name.removeprefix("v")
     plan = build_upgrade_plan(
         python_executable=str(python),
         base_env=_plan_env(wheelhouse),
         memory_enabled=True,
         memory_package=True,
-        target_version="3.0.15",
+        target_version=target_version,
         package_spec="avibe-os",
     )
     result = execute_upgrade_plan(plan, cwd=tmp_path, capture_output=True, text=True, check=False, timeout=600)
@@ -326,6 +353,7 @@ def test_packaged_missing_memory_fails_before_install(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("companion_release", ["3.0.15", "3.0.15.dev1"], indirect=True)
 def test_core_only_bootstrap_then_exact_github_companion_repair(
     tmp_path: Path, packaged_dependency_seed: Path, wheelhouse: Path, companion_release,
 ) -> None:
@@ -333,27 +361,30 @@ def test_core_only_bootstrap_then_exact_github_companion_repair(
 
     python = _venv(tmp_path / "bootstrap-venv")
     _install_initial(python, wheelhouse, memory=False, dependency_seed=packaged_dependency_seed)
+    target_version = companion_release[0].parent.name.removeprefix("v")
     core = build_upgrade_plan(
         python_executable=str(python), base_env=_plan_env(wheelhouse),
-        memory_package=False, package_spec="avibe-os",
+        memory_package=False, package_spec=f"avibe-os=={target_version}",
     )
     result = execute_upgrade_plan(core, cwd=tmp_path, capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert _installed_versions(python)["avibe-os"] == "3.0.15"
+    assert _installed_versions(python)["avibe-os"] == target_version
     assert "avibe-memory" not in _installed_versions(python)
+    _assert_installed_index_core_admission(python, target_version, tmp_path)
     repair = build_upgrade_plan(
         python_executable=str(python), base_env=_plan_env(wheelhouse),
-        version="3.0.15", memory_package=True,
+        version=target_version, memory_package=True,
     )
     assert f"avibe-memory @ {companion_release[1]}" in repair.command
     result = execute_upgrade_plan(repair, cwd=tmp_path, capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
     versions = _installed_versions(python)
-    assert versions["avibe-os"] == versions["avibe-memory"] == "3.0.15"
+    assert versions["avibe-os"] == versions["avibe-memory"] == target_version
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("companion_release", ["3.0.15", "3.0.15.dev1"], indirect=True)
 def test_packaged_uv_upgrade_uses_github_companion_before_activation(
     tmp_path: Path, packaged_dependency_seed: Path, wheelhouse: Path, companion_release,
     monkeypatch, missing: bool,
@@ -385,9 +416,10 @@ def test_packaged_uv_upgrade_uses_github_companion_before_activation(
     monkeypatch.setattr("vibe.upgrade.atomic_uv_install_root", lambda: tmp_path / "candidate-generations")
     if missing:
         companion_release[0].unlink()
+    target_version = companion_release[0].parent.name.removeprefix("v")
     plan = build_upgrade_plan(
         python_executable=str(python), uv_path=uv, vibe_path=str(launcher),
-        base_env=env, memory_package=True, target_version="3.0.15",
+        base_env=env, memory_package=True, target_version=target_version,
         package_spec="avibe-os",
     )
     assert plan.activation is not None and not plan.preflight_error
@@ -399,4 +431,7 @@ def test_packaged_uv_upgrade_uses_github_companion_before_activation(
     assert old["avibe-os"] == old["avibe-memory"] == "3.0.14"
     if not missing:
         candidate = _installed_versions(_python(Path(plan.env["UV_TOOL_DIR"]) / "avibe-os"))
-        assert candidate["avibe-os"] == candidate["avibe-memory"] == "3.0.15"
+        assert candidate["avibe-os"] == candidate["avibe-memory"] == target_version
+        _assert_installed_index_core_admission(
+            _python(Path(plan.env["UV_TOOL_DIR"]) / "avibe-os"), target_version, tmp_path,
+        )

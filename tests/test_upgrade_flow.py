@@ -1308,6 +1308,7 @@ def test_a_forward_upgrade_on_an_undamaged_install_is_left_to_the_installer(monk
         # agree with the code, so there is nothing to force -- the count of
         # distributions is not by itself a disagreement.
         ("two distributions provide it and both agree", ["avibe-os", "vibe-remote"], "3.0.11", "3.0.11"),
+        ("public dev metadata agrees", ["avibe-os"], "3.2.0.dev1", "3.2.0.dev1"),
         # A regression build. Its version describes a tree, not a release, so a
         # disagreement with published metadata is expected rather than evidence.
         ("the running version names no release", ["avibe-os"], "3.0.11", "0.0.0.dev0+abc1234"),
@@ -2711,7 +2712,10 @@ def test_forward_index_target_does_not_inherit_current_preview_origin(monkeypatc
 
 
 @pytest.mark.parametrize(
-    "tag", ["v3.1.0", "v3.2.0rc1", "v3.2.0.post1", "gh-v3.2.0-rc1", "gh-v03.02.00"],
+    "tag", [
+        "v3.1.0", "v3.2.0a1", "v3.2.0b1", "v3.2.0rc1", "v3.2.0.dev1",
+        "v3.2.0.post1", "gh-v3.2.0-rc1", "gh-v03.02.00",
+    ],
 )
 def test_publication_tag_producer_and_installed_memory_consumer_select_same_directory(tag):
     from scripts.release_package_version import package_version_from_release_tag
@@ -2727,10 +2731,52 @@ def test_publication_tag_producer_and_installed_memory_consumer_select_same_dire
     )
 
 
-@pytest.mark.parametrize("version", ["3.1.1.dev1", "3.1.1+local", "bad"])
+@pytest.mark.parametrize("version", ["3.1.1.dev1+local", "3.1.1+local", "bad"])
 def test_memory_asset_source_rejects_unpublished_versions(version):
     with pytest.raises(ValueError, match="published target"):
         vibe_upgrade.memory_release_spec(version, "avibe-os")
+
+
+@pytest.mark.parametrize("tag", [
+    "v3.1.0", "v3.2.0a1", "v3.2.0b1", "v3.2.0rc1", "v3.2.0.dev0",
+    "v3.2.0.dev1", "v3.2.0.post1",
+])
+@pytest.mark.parametrize("method", ["pip", "uv"])
+@pytest.mark.parametrize("selection", ["exact", "forward-pin", "forward-latest"])
+def test_official_index_release_reaches_every_install_command(
+    monkeypatch, tmp_path, tag, method, selection,
+):
+    from scripts.release_package_version import package_version_from_release_tag
+
+    version = package_version_from_release_tag(tag)
+    # No PEP610 record is the normal index-install shape, including dev.
+    _installed_from(monkeypatch, None)
+    assert release_asset_specs(version) is None
+    monkeypatch.setattr(vibe_upgrade, "is_uv_tool_install", lambda _: method == "uv")
+    monkeypatch.setattr(vibe_upgrade, "is_legacy_uv_tool_install", lambda _: False)
+    monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv" if method == "uv" else None)
+    monkeypatch.setattr(vibe_upgrade, "atomic_uv_install_root", lambda: tmp_path / "generations")
+    core = "avibe-os" if selection == "forward-latest" else f"avibe-os=={version}"
+    source = {"version": version} if selection == "exact" else {
+        "package_spec": core, "target_version": version,
+    }
+    plan = build_upgrade_plan(
+        python_executable="/fixture/bin/python",
+        vibe_path=str(tmp_path / "bin" / "vibe"),
+        base_env={"PATH": "/usr/bin"},
+        memory_package=True,
+        **source,
+    )
+    assert plan.method == method
+    assert plan.preflight_error is None
+    assert (plan.activation is not None) is (method == "uv")
+    commands = [c for c in (plan.command, plan.preflight_command, plan.preflight_fallback_command) if c]
+    assert len(commands) >= 2
+    memory = f"avibe-memory @ {vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/{tag}/avibe_memory-{version}-py3-none-any.whl"
+    for command in commands:
+        assert core in command
+        assert memory in command
+        assert not any("[memory]" in item or item.startswith("avibe-memory==") for item in command)
 
 
 @pytest.mark.parametrize("tag", [
@@ -2796,14 +2842,24 @@ def test_published_dev_origin_reaches_every_install_command(
     ("3.2.0.dev1+local", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1+local/avibe_os-3.2.0.dev1+local-py3-none-any.whl"),
     ("3.2.0+local", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0+local/avibe_os-3.2.0+local-py3-none-any.whl"),
 ])
-def test_dev_or_local_build_requires_exact_core_release_evidence(monkeypatch, version, origin):
+def test_unrecognized_origin_cannot_redirect_the_memory_companion(monkeypatch, version, origin):
     _installed_from(monkeypatch, origin)
     assert release_asset_specs(version) is None
     for spec in ([origin, f"avibe-os @ {origin}"] if origin else ["avibe-os", f"avibe-os=={version}"]):
-        with pytest.raises(ValueError, match="published target"):
-            vibe_upgrade.memory_release_spec(version, spec)
-        with pytest.raises(ValueError, match="target release version"):
-            build_upgrade_plan(memory_package=True, package_spec=spec, target_version=version)
+        if "+local" in version:
+            with pytest.raises(ValueError, match="published target"):
+                vibe_upgrade.memory_release_spec(version, spec)
+            with pytest.raises(ValueError, match="target release version"):
+                build_upgrade_plan(memory_package=True, package_spec=spec, target_version=version)
+        else:
+            # Public dev versions have the same canonical fallback as stable
+            # releases. A false origin never supplies a preview tag or host.
+            assert vibe_upgrade.memory_release_spec(version, spec) == (
+                f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/v{version}/"
+                f"avibe_memory-{version}-py3-none-any.whl"
+            )
+            plan = build_upgrade_plan(memory_package=True, package_spec=spec, target_version=version)
+            assert _official_memory(version) in plan.command
 
 
 def test_get_safe_cwd_returns_absolute_existing_dir():

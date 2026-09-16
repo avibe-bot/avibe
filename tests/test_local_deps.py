@@ -3361,11 +3361,21 @@ def test_memory_package_dependency_job_targets_the_running_version_wherever_it_c
     )
 
 
-@pytest.mark.parametrize("tag", [
-    None, f"gh-v{REPAIR_VERSION}", "gh-v3.2.0.dev1", "gh-v03.02.00dev01", "v3.2.0.dev1",
-], ids=["pypi-core", "github-preview", "github-dev", "github-dev-alias", "official-dev-origin"])
+@pytest.mark.parametrize("tag,direct", [
+    (f"v{REPAIR_VERSION}", False),
+    ("v3.2.0a1", False),
+    ("v3.2.0b1", False),
+    ("v3.2.0rc1", False),
+    ("v3.2.0.dev0", False),
+    ("v3.2.0.dev1", False),
+    ("v3.2.0.post1", False),
+    (f"gh-v{REPAIR_VERSION}", True),
+    ("gh-v3.2.0.dev1", True),
+    ("gh-v03.02.00dev01", True),
+    ("v3.2.0.dev1", True),
+])
 def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
-    monkeypatch, tmp_path, tag,
+    monkeypatch, tmp_path, tag, direct,
 ) -> None:
     """A core-only install converges from the corresponding GitHub Release.
 
@@ -3375,15 +3385,15 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
 
     from scripts.release_package_version import package_version_from_release_tag
 
-    current_version = package_version_from_release_tag(tag) if tag else REPAIR_VERSION
-    release = f"https://github.com/avibe-bot/avibe/releases/download/{tag or f'v{current_version}'}/"
-    origin = f"{release}avibe_os-{current_version}-py3-none-any.whl" if tag else None
+    current_version = package_version_from_release_tag(tag)
+    release = f"https://github.com/avibe-bot/avibe/releases/download/{tag}/"
+    origin = f"{release}avibe_os-{current_version}-py3-none-any.whl" if direct else None
     calls: dict[str, object] = {}
     monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
     monkeypatch.setattr("vibe.__version__", current_version)
     monkeypatch.setattr(api, "_load_memory_requirement", lambda: api._MemoryRequirementProjection(True, "required"))
     monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: api._MemoryPackageMetadata(0, None))
-    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
     monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: tmp_path / "repair.json")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
@@ -3427,20 +3437,25 @@ def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
 
 
 @pytest.mark.parametrize("version,origin,build_kind", [
-    ("3.2.0.dev1", None, "package"),
-    ("3.2.0.dev1", "https://example.test/avibe_os-3.2.0.dev1-py3-none-any.whl", "package"),
-    ("3.2.0.dev1", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev2/avibe_os-3.2.0.dev1-py3-none-any.whl", "package"),
+    ("3.2.0.dev1+local", None, "package"),
+    ("3.2.0+local", None, "package"),
+    ("invalid", None, "package"),
+    ("3.2.0.dev1", None, "source"),
+    ("3.2.0", None, "source"),
     ("3.2.0.dev1+local", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev1+local/avibe_os-3.2.0.dev1+local-py3-none-any.whl", "package"),
     ("3.2.0.dev1", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1-py3-none-any.whl", "source"),
 ])
-def test_unproven_dev_or_source_build_cannot_enter_memory_repair(
-    monkeypatch, version, origin, build_kind,
+def test_local_or_source_build_cannot_enter_memory_repair(
+    monkeypatch, tmp_path, version, origin, build_kind,
 ):
     monkeypatch.setattr("vibe.__version__", version)
     monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _: origin)
     monkeypatch.setattr(api, "_load_memory_requirement", lambda: api._MemoryRequirementProjection(True, "required"))
     monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: api._MemoryPackageMetadata(0, None))
-    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind=build_kind))
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    if build_kind == "source":
+        # An unreadable source marker must never become a package install.
+        monkeypatch.setenv("VIBE_BUILD_METADATA_PATH", str(tmp_path / "missing-source.json"))
     monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", Mock(side_effect=ImportError("missing")))
     monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
     build = Mock(side_effect=AssertionError("operator-only build must not plan an install"))

@@ -1105,9 +1105,10 @@ def _distributions_providing_this_package() -> list[str]:
 def _providers_recording_a_published_release() -> list[tuple[str, str]]:
     """Every distribution providing this package, with the release it records.
 
-    Unpublished recordings are dropped rather than reported. A `dev` or local
-    version records the tree it was built from, so it can neither confirm nor
-    contradict a released one, and an environment that answers nothing at all --
+    Local-version recordings are dropped rather than reported. They identify
+    a source tree rather than a public release, so they can neither confirm nor
+    contradict a released one. Public dev versions can be published just like
+    other prereleases. An environment that answers nothing at all --
     no provider, unreadable metadata, nothing published -- comes back empty. Both
     callers read empty as "no evidence", never as evidence of disagreement.
     """
@@ -1186,10 +1187,10 @@ def get_current_uv_tool_dir(python_executable: str | None = None) -> str | None:
 def _names_a_published_release(version: str) -> bool:
     """Whether the version alone can identify a release for an index install.
 
-    Without an explicit release origin, dev/local versions may describe only
-    the source tree; the regression builder emits that shape. A matching
-    GitHub wheel origin is stronger evidence for a published dev release and
-    is checked separately by the release-pair verifier.
+    Public dev versions are supported by the official release producer too.
+    Only local labels identify source builds; a dev suffix is not provenance.
+    Eligibility does not prove availability: installer preflights must still
+    resolve the matching core/companion pair before activation.
 
     Asking the property instead of listing the strings is what stops the next
     unlisted shape from costing the same attempt. Unparseable reads as
@@ -1200,7 +1201,7 @@ def _names_a_published_release(version: str) -> bool:
     match = _VERSION_RE.match(version)
     if match is None:
         return False
-    return not (match.group("dev") or match.group("local"))
+    return not match.group("local")
 
 
 def _published_version(value: str | None) -> str | None:
@@ -1249,8 +1250,6 @@ def _memory_target_version(package_spec: str, target_version: str | None) -> str
             _, version = parse_sdist_filename(filename)
         except InvalidSdistFilename:
             return None
-    if _release_asset_pair(str(version), artifact) is not None:
-        return str(version)
     return _published_version(str(version))
 
 

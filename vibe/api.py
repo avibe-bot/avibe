@@ -8820,8 +8820,8 @@ def _published_running_version() -> str | None:
         return None
     if version.local is not None:
         return None
-    if version.is_devrelease and release_asset_specs(str(version)) is None:
-        return None
+    # Official index releases include dev versions. Source deployment is
+    # rejected independently by readiness; a dev suffix is not provenance.
     return str(version)
 
 
