@@ -182,8 +182,8 @@ When model-invocable Skills exist, Avibe injects this shape:
 ## Skills
 
 Skills provide specialized instructions and workflows for specific tasks.
-Before acting on a task covered by a listed Skill, ensure its content is in context: reuse an earlier successful load that remains in context; otherwise run `vibe skill load -- <name>`.
-If the user requests a Skill by exact name, apply this rule to that name.
+Consider whether any available Skills would help in the current situation. Load those you choose with `vibe skill load -- <name>`; reuse any already loaded in this conversation.
+If the user requests a Skill by exact name, use that Skill.
 For non-explicit requests, only load Skill names listed here or returned by `vibe skill list`; do not guess names.
 Use `vibe skill list --page 2` only when more discovery is useful; ordinary tasks do not require scanning every page.
 
@@ -205,11 +205,17 @@ and retains only exact-name guidance:
 ```md
 ## Skills
 
-If the user requests a Skill by exact name, ensure its content is in context: reuse an earlier successful load that remains in context; otherwise run `vibe skill load -- <name>` before proceeding.
+If the user requests a Skill by exact name, load it with `vibe skill load -- <name>` or reuse it if already loaded in this conversation.
 Otherwise, do not guess skill names.
 ```
 
 When no Skills resolve, Avibe omits the block.
+
+Skill selection is judgment-led rather than a mandatory task-coverage match.
+Already-loaded Skills are reused within the conversation without a separate
+context-presence test. Explicit user requests, manual-only visibility, and
+name-discovery boundaries remain unchanged. This is shared prompt guidance,
+not a runtime load cache or a guarantee that Skill text survives compaction.
 
 ### 6.2 List command
 
