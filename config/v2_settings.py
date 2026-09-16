@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import hmac
@@ -547,12 +548,15 @@ class SettingsStore:
 
     def _load(self) -> None:
         self.settings = self._service.load_state()
+        self._loaded_state = copy.deepcopy(self.settings)
         self._generation += 1
 
     def save(self, *, user_context=None) -> None:
         with self._reload_lock:
             try:
-                revision = self._service.save_state(self.settings, user_context=user_context)
+                revision = self._service.save_state(
+                    self.settings, user_context=user_context, baseline=self._loaded_state
+                )
             except Exception:
                 # Restore the durable snapshot after a refused transaction before
                 # this store can be read or saved again.
@@ -561,6 +565,7 @@ class SettingsStore:
             # Use the exact revision committed by this transaction. Reading the
             # current value here could absorb a later external write without loading it.
             self._observed_revision = revision
+            self._loaded_state = copy.deepcopy(self.settings)
             self._generation += 1
 
     # --- Channel helpers ---

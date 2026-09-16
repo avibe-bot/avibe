@@ -3938,39 +3938,10 @@ class V2Config:
             return config
 
         migrated_payload, migrated, migration_warnings = _migrate_config_payload_on_load(payload)
-        candidate = migrated_payload
-        recovery_warnings: list[str] = []
-        recovered_sections: set[str] = set()
-        whole_config_recovery = False
-        while True:
-            try:
-                config = cls.from_payload(candidate)
-                break
-            except (TypeError, ValueError) as exc:
-                section = _recovery_section_for_error(exc)
-                field_name = _recovery_field_for_error(section, exc)
-                # Keyed by whatever this pass will actually repair, so the
-                # dedupe that stops the loop cannot mistake a second unreadable
-                # field of a field-scoped section for no progress and discard
-                # the whole file.
-                recovered = section if field_name is None else f"{section}.{field_name}"
-                if section is None or recovered in recovered_sections:
-                    warning = f"Config could not be loaded; using recovery defaults: {exc}"
-                    logger.error("%s", warning)
-                    config = cls.default()
-                    recovery_warnings.append(warning)
-                    whole_config_recovery = True
-                    break
-                if not _reset_recoverable_config_section(candidate, section, field_name):
-                    warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
-                    logger.error("%s", warning)
-                    config = cls.default()
-                    recovery_warnings.append(warning)
-                    whole_config_recovery = True
-                    break
-                recovered_sections.add(recovered)
-                recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
-
+        config = cls._recover_payload(migrated_payload)
+        recovery_warnings = config.load_warnings
+        recovered_sections = config.recovered_sections
+        whole_config_recovery = config.whole_config_recovery
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
         if (
             persist_migrations
@@ -4010,6 +3981,46 @@ class V2Config:
                 backup,
             )
         config.load_warnings = all_warnings
+        config.recovered_sections = tuple(sorted(recovered_sections))
+        config.whole_config_recovery = whole_config_recovery
+        return config
+
+    @classmethod
+    def _recover_payload(cls, candidate: dict) -> "V2Config":
+        """Parse stored data with recovery defaults, without file IO or locks."""
+        recovery_warnings: list[str] = []
+        recovered_sections: set[str] = set()
+        whole_config_recovery = False
+        while True:
+            try:
+                config = cls.from_payload(candidate)
+                break
+            except (TypeError, ValueError) as exc:
+                section = _recovery_section_for_error(exc)
+                field_name = _recovery_field_for_error(section, exc)
+                # Keyed by whatever this pass will actually repair, so the
+                # dedupe that stops the loop cannot mistake a second unreadable
+                # field of a field-scoped section for no progress and discard
+                # the whole file.
+                recovered = section if field_name is None else f"{section}.{field_name}"
+                if section is None or recovered in recovered_sections:
+                    warning = f"Config could not be loaded; using recovery defaults: {exc}"
+                    logger.error("%s", warning)
+                    config = cls.default()
+                    recovery_warnings.append(warning)
+                    whole_config_recovery = True
+                    break
+                if not _reset_recoverable_config_section(candidate, section, field_name):
+                    warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
+                    logger.error("%s", warning)
+                    config = cls.default()
+                    recovery_warnings.append(warning)
+                    whole_config_recovery = True
+                    break
+                recovered_sections.add(recovered)
+                recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
+
+        config.load_warnings = tuple(recovery_warnings)
         config.recovered_sections = tuple(sorted(recovered_sections))
         config.whole_config_recovery = whole_config_recovery
         return config

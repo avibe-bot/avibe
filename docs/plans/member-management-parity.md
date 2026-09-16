@@ -119,6 +119,17 @@ settings; neither the Owner write nor a later Member comparison may authorize it
 Reuse the existing settings writer and transaction rather than adding another
 permissions or persistence model.
 
+Request isolation must also preserve concurrent ordinary writes. Under the same
+SQLite write lock, apply only the request's changes relative to its loaded
+baseline to the fresh state; never replay an entire stale database snapshot.
+Untouched scopes and their concurrent creation/deletion must survive. Evaluate
+the resulting access effects against that fresh state before committing, without
+silently removing explicitly requested forbidden changes. Keep existing Agent
+binding conflict checks and effective thread-policy checks in this transaction.
+If protected policy changed since the Member's baseline was loaded, refuse the
+stale save before merging: an explicit unchanged role/binding echo must not be
+silently discarded. The caller can reload and retry against current policy.
+
 Runtime semantics govern that comparison: `core/auth.py` checks the selected
 channel/thread record's explicit `require_bind`. Channel `None`/`False` means
 unrestricted by binding; platform defaults only seed new configuration. A thread

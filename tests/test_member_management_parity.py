@@ -7,6 +7,7 @@ only provider/host/runtime effects are stubbed, after the authorization seam.
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import re
 from pathlib import Path
@@ -15,7 +16,7 @@ import pytest
 
 from config import paths
 from config.v2_config import V2Config
-from config.v2_settings import ChannelSettings, GuildSettings, SettingsStore, UserSettings
+from config.v2_settings import BindCode, ChannelSettings, GuildSettings, SettingsStore, UserSettings
 from storage.importer import ensure_sqlite_state
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_peer, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
@@ -532,3 +533,283 @@ def test_uncommitted_member_candidate_cannot_escape_through_owner_request(manage
     assert after.guilds == before.guilds
     assert after.channels["telegram::chat"].require_bind
     assert after.channels["slack::ordinary"].enabled
+
+
+@pytest.mark.parametrize("role", ["member", "owner"])
+@pytest.mark.parametrize("surface", ["users", "channels", "thread", "thread_delete", "guilds", "config_guilds"])
+def test_overlapping_settings_requests_keep_both_scopes(management_http, monkeypatch, role, surface):
+    """Successful private writes merge into the lock-fresh state, not a stale whole snapshot."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"bound": UserSettings()})
+    store.set_channels_for_platform("telegram", {"chat": ChannelSettings(require_bind=True)})
+    store.set_channels_for_platform("slack", {
+        "ordinary": ChannelSettings(custom_cwd="/before"),
+        "removed": ChannelSettings(),
+    })
+    store.update_thread("chat", "7", ChannelSettings(require_bind=True), platform="telegram")
+    store.set_guilds_for_platform("discord", {"blocked": GuildSettings(enabled=False)}, default_enabled=True)
+    store.save()
+    first, owner = management_http(role), management_http("owner")
+    prepared, committed = Event(), Event()
+    save = SettingsStore.save
+
+    def paused_save(candidate, *, user_context=None):
+        if user_context is not None and not prepared.is_set():
+            prepared.set()
+            assert committed.wait(10)
+        return save(candidate, user_context=user_context)
+
+    monkeypatch.setattr(SettingsStore, "save", paused_save)
+    mutations = {
+        "users": ("POST", "/api/users", {"platform": "telegram", "users": {"bound": {"custom_cwd": "/first"}}}),
+        "channels": ("POST", "/api/settings", {"platform": "telegram", "channels": {"chat": {"custom_cwd": "/first"}}}),
+        "thread": ("POST", "/api/settings/thread", {
+            "platform": "telegram", "channel_id": "chat", "thread_id": "7", "settings": {"custom_cwd": "/first"},
+        }),
+        "thread_delete": ("DELETE", "/api/settings/thread?platform=telegram&channel_id=chat&thread_id=7", None),
+        "guilds": ("POST", "/api/settings", {"platform": "discord", "guilds": {"blocked": {"enabled": False}}}),
+        "config_guilds": ("POST", "/api/config", {"discord": {"guild_denylist": ["blocked"]}}),
+    }
+    method, route, payload = mutations[surface]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(first, method, route, payload=payload)
+        assert prepared.wait(10)
+        try:
+            if surface == "config_guilds":
+                # The config writer holds config lock; overlap the existing
+                # controller writer, not a second request needing that lock.
+                def controller_save():
+                    store.set_channels_for_platform("slack", {
+                        "ordinary": ChannelSettings(custom_cwd="/second"),
+                        "added": ChannelSettings(enabled=True),
+                    })
+                    store.save()
+
+                pool.submit(controller_save).result(timeout=10)
+            else:
+                response = pool.submit(owner, "POST", "/api/settings", payload={
+                    "platform": "slack", "channels": {
+                        "ordinary": {"custom_cwd": "/second"}, "added": {"enabled": True},
+                    },
+                }).result(timeout=10)
+                assert response.status_code == 200, response.get_json()
+        finally:
+            committed.set()
+        response = pending.result(timeout=10)
+    assert response.status_code == 200, response.get_json()
+    after = store._service.load_state()
+    assert after.channels["slack::ordinary"].custom_cwd == "/second"
+    assert after.channels["slack::added"].enabled
+    assert "slack::removed" not in after.channels
+    if surface in {"users", "channels", "thread"}:
+        changed = {
+            "users": after.users["telegram::bound"],
+            "channels": after.channels["telegram::chat"],
+            "thread": after.threads["telegram::chat/7"],
+        }
+        assert changed[surface].custom_cwd == "/first"
+    elif surface == "thread_delete":
+        assert not after.threads
+
+
+@pytest.mark.parametrize("mutation", ["remove", "role", "disable"])
+def test_private_member_dm_save_refuses_changed_membership(management_http, monkeypatch, mutation):
+    """The real HTTP candidate must not resurrect or rewrite a concurrently changed user."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"bound": UserSettings()})
+    store.save()
+    request = management_http()
+    prepared, committed = Event(), Event()
+    save = SettingsStore.save
+
+    def paused_save(candidate, *, user_context=None):
+        if user_context is not None:
+            prepared.set()
+            assert committed.wait(10)
+        return save(candidate, user_context=user_context)
+
+    monkeypatch.setattr(SettingsStore, "save", paused_save)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(request, "POST", "/api/users", payload={
+            "platform": "telegram", "users": {"bound": {"custom_cwd": "/stale"}},
+        })
+        assert prepared.wait(10)
+        try:
+            if mutation == "remove":
+                store.set_users_for_platform("telegram", {})
+            elif mutation == "role":
+                store.get_user("bound", platform="telegram").is_admin = True
+            else:
+                store.get_user("bound", platform="telegram").enabled = False
+            pool.submit(store.save).result(timeout=10)
+            fresh = store._service.load_state()
+        finally:
+            committed.set()
+        response = pending.result(timeout=10)
+    assert response.status_code == 403, response.get_json()
+    assert store._service.load_state() == fresh
+
+
+def test_member_stale_access_snapshot_cannot_replay_untouched_rows(management_http, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    store = SettingsStore.get_instance()
+    store.set_channels_for_platform("telegram", {"chat": ChannelSettings()})
+    store.set_users_for_platform("telegram", {"changed": UserSettings(), "removed": UserSettings()})
+    store.set_guilds_for_platform("discord", {"before": GuildSettings()}, default_enabled=False)
+    store.settings.bind_codes = [BindCode("old", "one_time", "now")]
+    store.save()
+    request = management_http()
+    prepared, committed = Event(), Event()
+    save = SettingsStore.save
+
+    def paused_save(candidate, *, user_context=None):
+        if user_context is not None:
+            prepared.set()
+            assert committed.wait(10)
+        return save(candidate, user_context=user_context)
+
+    monkeypatch.setattr(SettingsStore, "save", paused_save)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(request, "POST", "/api/settings", payload={
+            "platform": "telegram", "channels": {"chat": {"custom_cwd": "/ordinary"}},
+        })
+        assert prepared.wait(10)
+        try:
+            store.set_users_for_platform("telegram", {
+                "changed": UserSettings(is_admin=True, enabled=False), "added": UserSettings(),
+            })
+            store.set_guilds_for_platform("discord", {"after": GuildSettings()}, default_enabled=False)
+            store.settings.bind_codes = [BindCode("new", "one_time", "now")]
+            pool.submit(store.save).result(timeout=10)
+            fresh = store._service.load_state()
+        finally:
+            committed.set()
+        response = pending.result(timeout=10)
+    assert response.status_code == 403, response.get_json()
+    after = store._service.load_state()
+    assert after.channels["telegram::chat"].custom_cwd is None
+    assert after.users == fresh.users
+    assert after.guilds == fresh.guilds and after.guild_default_enabled == fresh.guild_default_enabled
+    assert after.bind_codes == fresh.bind_codes
+
+
+@pytest.mark.parametrize("field", ["is_admin", "enabled", "require_bind"])
+def test_member_explicit_unchanged_access_echo_is_checked_against_fresh_state(management_http, monkeypatch, field):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"bound": UserSettings(is_admin=False, enabled=True)})
+    store.set_channels_for_platform("telegram", {"chat": ChannelSettings(require_bind=False)})
+    store.save()
+    request = management_http()
+    prepared, committed = Event(), Event()
+    save = SettingsStore.save
+
+    def paused_save(candidate, *, user_context=None):
+        if user_context is not None:
+            prepared.set()
+            assert committed.wait(10)
+        return save(candidate, user_context=user_context)
+
+    monkeypatch.setattr(SettingsStore, "save", paused_save)
+    if field == "require_bind":
+        route = "/api/settings"
+        payload = {"platform": "telegram", "channels": {"chat": {field: False}}}
+    else:
+        route = "/api/users"
+        payload = {"platform": "telegram", "users": {"bound": {field: field == "enabled"}}}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(request, "POST", route, payload=payload)
+        assert prepared.wait(10)
+        try:
+            if field == "require_bind":
+                store.find_channel("chat", platform="telegram").require_bind = True
+            else:
+                setattr(store.get_user("bound", platform="telegram"), field, field == "is_admin")
+            pool.submit(store.save).result(timeout=10)
+            fresh = store._service.load_state()
+        finally:
+            committed.set()
+        response = pending.result(timeout=10)
+    assert response.status_code == 403, response.get_json()
+    assert store._service.load_state() == fresh
+
+
+@pytest.mark.parametrize("raw", [
+    b"{", b"[]", b"null", b"\xff", b'{"discord": []}',
+    b'{"discord": {"bot_token": 12}}', b'{"discord": {"thread_auto_archive_minutes": 13}}',
+])
+def test_member_settings_save_uses_config_recovery_semantics(management_http, raw):
+    config_path = paths.get_config_path()
+    config_path.write_bytes(raw)
+    # Startup accepts these released/damaged shapes with recovery defaults.
+    recovered = V2Config.load()
+    assert recovered.load_warnings
+    result = api.save_settings({"platform": "telegram", "channels": {"safe": {"enabled": True}}}, user_context=MEMBER)
+    assert "safe" in result["channels"]
+    with contextlib.closing(SettingsStore()) as saved:
+        assert saved.find_channel("safe", platform="telegram").enabled
+    assert config_path.read_bytes() == raw  # The policy read never persists recovery.
+
+
+@pytest.mark.parametrize("discord", [[], "invalid", {"bot_token": 12}])
+@pytest.mark.parametrize("surface", ["channels", "thread", "users"])
+def test_remote_member_can_save_with_recovered_discord_section(management_http, discord, surface):
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"bound": UserSettings()})
+    store.save()
+    request = management_http()
+    config_path = paths.get_config_path()
+    payload = json.loads(config_path.read_text())
+    payload["discord"] = discord
+    config_path.write_text(json.dumps(payload))
+    mutations = {
+        "channels": ("/api/settings", {"platform": "telegram", "channels": {"safe": {"enabled": True}}}),
+        "thread": ("/api/settings/thread", {
+            "platform": "telegram", "channel_id": "safe", "thread_id": "7", "settings": {"enabled": True},
+        }),
+        "users": ("/api/users", {"platform": "telegram", "users": {"bound": {"custom_cwd": "/recovered"}}}),
+    }
+    route, body = mutations[surface]
+    response = request("POST", route, payload=body)
+    assert response.status_code == 200, response.get_json()
+    after = store._service.load_state()
+    if surface == "channels":
+        assert after.channels["telegram::safe"].enabled
+    elif surface == "thread":
+        assert after.threads["telegram::safe/7"].enabled
+    else:
+        assert after.users["telegram::bound"].custom_cwd == "/recovered"
+    # Unrelated remote identity remains intact and the raw file is not repaired here.
+    assert json.loads(config_path.read_text()) == payload
+
+
+def test_recovery_keeps_valid_legacy_guild_admission_policy(management_http):
+    request = management_http()
+    config_path = paths.get_config_path()
+    payload = json.loads(config_path.read_text())
+    payload["discord"] = {"guild_allowlist": ["allowed"], "guild_denylist": ["blocked"]}
+    payload["runtime"] = []
+    config_path.write_text(json.dumps(payload))
+    recovered = V2Config.load()
+    assert recovered.load_warnings
+    assert recovered.discord.guild_allowlist == ["allowed"]
+    response = request("POST", "/api/settings", payload={
+        "platform": "discord", "guild_allowlist": ["attacker"],
+    })
+    assert response.status_code == 403, response.get_json()
+    response = request("POST", "/api/settings", payload={
+        "platform": "discord", "guilds": {"allowed": {"enabled": True}, "blocked": {"enabled": False}},
+        "guild_default_enabled": False,
+    })
+    assert response.status_code == 200, response.get_json()
+    assert json.loads(config_path.read_text()) == payload

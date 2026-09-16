@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,36 @@ SETTINGS_VERSION = 1
 GUILD_POLICY_KIND = "guild_policy"
 
 
+def _merge_settings_changes(
+    current: SettingsState, candidate: SettingsState, baseline: SettingsState
+) -> SettingsState:
+    """Apply changed scopes only, retaining other transactions' committed rows."""
+    def merge_rows(fresh, draft, original):
+        merged = dict(fresh)
+        for key in original.keys() - draft.keys():
+            merged.pop(key, None)
+        for key, item in draft.items():
+            previous = original.get(key)
+            if item != previous or getattr(item, "_agent_name_at_load", None) != getattr(
+                previous, "_agent_name_at_load", None
+            ):
+                merged[key] = item
+        return merged
+
+    merged = SettingsState()
+    for name in ("channels", "threads", "users", "guilds", "guild_default_enabled"):
+        setattr(merged, name, merge_rows(getattr(current, name), getattr(candidate, name), getattr(baseline, name)))
+    merged.guild_scope_platforms = (
+        current.guild_scope_platforms - (baseline.guild_scope_platforms - candidate.guild_scope_platforms)
+    ) | (candidate.guild_scope_platforms - baseline.guild_scope_platforms)
+    merged.bind_codes = list(merge_rows(
+        {item.code: item for item in current.bind_codes},
+        {item.code: item for item in candidate.bind_codes},
+        {item.code: item for item in baseline.bind_codes},
+    ).values())
+    return merged
+
+
 def _require_preserved_access_policy(current: SettingsState, candidate: SettingsState) -> None:
     """Compare access effects against the snapshot held by the SQLite write lock."""
     from vibe.authorization import InstanceAuthorizationError
@@ -45,15 +75,22 @@ def _require_preserved_access_policy(current: SettingsState, candidate: Settings
     # Read the atomic config file directly: V2Config.load can itself migrate and
     # acquire the config lock, inverting the config -> SQLite writer lock order.
     from config import paths
+    from config.v2_config import V2Config, _migrate_config_payload_on_load
 
     legacy_guilds = None
     if "discord" not in current.guild_scope_platforms or "discord" not in candidate.guild_scope_platforms:
         try:
             config_payload = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
             config_payload = {}
-        discord = config_payload.get("discord") or {}
-        allowed, denied = discord.get("guild_allowlist") or [], discord.get("guild_denylist") or []
+        if isinstance(config_payload, dict):
+            migrated, _, _ = _migrate_config_payload_on_load(config_payload)
+            config = V2Config._recover_payload(migrated)
+        else:
+            config = V2Config.default()
+        discord = config.discord
+        allowed = getattr(discord, "guild_allowlist", None) or []
+        denied = getattr(discord, "guild_denylist", None) or []
         default = not bool(allowed)
         entries = {str(key): True for key in allowed}
         entries.update({str(key): False for key in denied})
@@ -152,18 +189,29 @@ class SQLiteSettingsService:
             bind_codes=self._load_bind_codes(conn),
         )
 
-    def save_state(self, state: SettingsState, *, user_context: Any = None) -> str:
+    def save_state(
+        self, state: SettingsState, *, user_context: Any = None, baseline: SettingsState | None = None
+    ) -> str:
         from vibe.authorization import require_instance_role
 
         # General config still accepts Editor preferences and may round-trip
         # the legacy Discord scope projection. HTTP/API management callers
         # require Member before entering; every non-owner preserves access here.
         context = require_instance_role(user_context, "editor")
+        draft = state
         saved_bindings: list[tuple[ChannelSettings | UserSettings, RoutingSettings]] = []
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
+            current = self._load_state(conn)
+            if baseline is not None and not context.can_manage_access_members:
+                # A protected-field echo may equal the loaded value but no
+                # longer equal the authoritative value. Reject that stale
+                # snapshot before delta merging could silently drop the echo.
+                _require_preserved_access_policy(current, baseline)
+            if baseline is not None:
+                state = _merge_settings_changes(current, draft, baseline)
             if not context.can_manage_access_members:
-                _require_preserved_access_policy(self._load_state(conn), state)
+                _require_preserved_access_policy(current, state)
             now = _utc_now_iso()
             # Per-row reconcile (NOT a delete-everything rewrite): upsert each
             # managed scope's settings, then delete only the managed rows that
@@ -328,6 +376,9 @@ class SQLiteSettingsService:
         for item, routing in saved_bindings:
             item.routing = routing
             item._agent_name_at_load = routing.agent_name
+        # Publish the committed snapshot only after the transaction succeeds.
+        for field in fields(SettingsState):
+            setattr(draft, field.name, getattr(state, field.name))
         return revision
 
     @staticmethod

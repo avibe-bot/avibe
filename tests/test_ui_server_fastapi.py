@@ -322,12 +322,13 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     monkeypatch.setattr(
         api,
         "save_thread_settings",
-        lambda payload: saved_payloads.append(payload) or {"ok": True, "settings": payload["settings"]},
+        lambda payload, *, user_context: saved_payloads.append(payload)
+        or {"ok": True, "settings": payload["settings"]},
     )
     monkeypatch.setattr(
         api,
         "delete_thread_settings",
-        lambda platform, channel_id, thread_id: deleted_scopes.append(
+        lambda platform, channel_id, thread_id, *, user_context: deleted_scopes.append(
             (platform, channel_id, thread_id)
         )
         or {"ok": True, "removed": True},
