@@ -1148,10 +1148,16 @@ def save_config(
     *,
     validate_remote_access_network: bool = True,
     generic_remote_access: bool = False,
+    user_context: Any = None,
 ) -> V2Config:
     """Save general settings while preserving Memory's dedicated settings block."""
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
+    from vibe.authorization import require_instance_role
+
+    context = require_instance_role(user_context, "editor")
+    if not context.can_manage_instance:
+        payload = editor_config_write_payload(payload)
 
     # This read-only projection is returned by GET /api/config so the browser
     # can explain a recovered load; it must never become persisted config data.
@@ -1231,6 +1237,10 @@ def save_config(
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        if not context.can_manage_access_members:
+            from core.services.settings import default_config
+
+            _require_preserved_config_access(base_config or default_config(), config)
         connector_controls_changed = (
             base_config is not None
             and _remote_access_connector_control_signature(config)
@@ -1257,13 +1267,13 @@ def save_config(
             )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         if guild_scope_update is not None:
-            _save_discord_guild_scope_update(*guild_scope_update)
+            _save_discord_guild_scope_update(*guild_scope_update, user_context=context)
         elif base_config is not None:
             store = SettingsStore.get_instance()
             if not store.has_guild_scope_for_platform("discord"):
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
-                    _save_discord_guild_scope_update(*existing_update, store=store)
+                    _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
         config.save()
         try:
             from core.message_mirror import reset_activity_flag_cache
@@ -1290,6 +1300,26 @@ def save_config(
                 exc_info=True,
             )
     return persisted
+
+
+def _require_preserved_config_access(current: V2Config, candidate: V2Config) -> None:
+    """Generic manager saves cannot change admission or pairing, even via aliases."""
+    from vibe.authorization import InstanceAuthorizationError
+
+    def policy(config):
+        return (
+            config.remote_access,
+            config.ui.trusted_public_origins,
+            tuple(
+                bool(getattr(getattr(config, p), "require_bind", False))
+                for p in ("slack", "discord", "telegram", "lark", "wechat")
+            ),
+            getattr(config.telegram, "allowed_user_ids", None) or [],
+            getattr(config.telegram, "allowed_chat_ids", None) or [],
+        )
+
+    if policy(current) != policy(candidate):
+        raise InstanceAuthorizationError("owner")
 
 
 def save_memory_config(
@@ -5248,85 +5278,97 @@ def _normalize_show_message_types_for_platform(show_message_types: Optional[list
     return normalized
 
 
-def save_settings(payload: dict) -> dict:
-    store = SettingsStore.get_instance()
-    platform = payload.get("platform") or _current_platform()
+def save_settings(payload: dict, *, user_context: Any = None) -> dict:
+    from vibe.authorization import require_instance_role
 
-    if "channels" in payload:
-        channels = {}
-        for channel_id, channel_payload in (payload.get("channels") or {}).items():
-            channels[channel_id] = ChannelSettings(
-                enabled=channel_payload.get("enabled", True),
-                show_message_types=_normalize_show_message_types_for_platform(
-                    channel_payload.get("show_message_types"), platform
-                ),
-                custom_cwd=channel_payload.get("custom_cwd"),
-                routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
-                require_mention=channel_payload.get("require_mention"),
-                require_bind=channel_payload.get("require_bind"),
-                _agent_name_at_load=channel_payload.get(
-                    "expected_agent_name", _UNSET_AGENT_BINDING
-                ),
-            )
-        store.set_channels_for_platform(platform, channels)
-    if "guilds" in payload or "guild_allowlist" in payload:
-        guilds, default_enabled = _guild_scope_update_from_settings_payload(store, platform, payload)
-        store.set_guilds_for_platform(platform, guilds, default_enabled=default_enabled)
-    store.save()
-    return _settings_to_payload(store, platform=platform)
+    require_instance_role(user_context, "member")
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        platform = payload.get("platform") or _current_platform()
+
+        if "channels" in payload:
+            channels = {}
+            for channel_id, channel_payload in (payload.get("channels") or {}).items():
+                existing = store.find_channel(channel_id, platform=platform)
+                channels[channel_id] = ChannelSettings(
+                    enabled=channel_payload.get("enabled", True),
+                    show_message_types=_normalize_show_message_types_for_platform(
+                        channel_payload.get("show_message_types"), platform
+                    ),
+                    custom_cwd=channel_payload.get("custom_cwd"),
+                    routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
+                    require_mention=channel_payload.get("require_mention"),
+                    require_bind=channel_payload.get("require_bind", existing.require_bind if existing else None),
+                    _agent_name_at_load=channel_payload.get(
+                        "expected_agent_name", _UNSET_AGENT_BINDING
+                    ),
+                )
+            store.set_channels_for_platform(platform, channels)
+        if "guilds" in payload or "guild_allowlist" in payload:
+            guilds, default_enabled = _guild_scope_update_from_settings_payload(store, platform, payload)
+            store.set_guilds_for_platform(platform, guilds, default_enabled=default_enabled)
+        store.save(user_context=user_context)
+        return _settings_to_payload(store, platform=platform)
 
 
-def save_thread_settings(payload: dict) -> dict:
+def save_thread_settings(payload: dict, *, user_context: Any = None) -> dict:
     """Create or replace one child-thread settings override."""
-    store = SettingsStore.get_instance()
-    platform = str(payload.get("platform") or _current_platform())
-    channel_id = str(payload.get("channel_id") or "").strip()
-    thread_id = str(payload.get("thread_id") or "").strip()
-    settings_payload = payload.get("settings")
-    if platform != "telegram":
-        return {"ok": False, "error": "thread settings currently support Telegram only"}
-    if not channel_id or not thread_id or not isinstance(settings_payload, dict):
-        return {"ok": False, "error": "channel_id, thread_id, and settings are required"}
+    from vibe.authorization import require_instance_role
 
-    existing = store.find_thread(channel_id, thread_id, platform=platform)
-    base = existing
-    if base is None:
-        base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
-    routing_payload = settings_payload.get("routing")
-    routing = (
-        _parse_routing(_normalize_backend_routing_payload(routing_payload))
-        if isinstance(routing_payload, dict)
-        else base.routing
-    )
-    require_mention = settings_payload.get("require_mention", base.require_mention)
-    if existing is None and require_mention is None:
-        platform_config = _stored_platform_config(platform)
-        require_mention = bool(getattr(platform_config, "require_mention", True))
-    settings = ChannelSettings(
-        enabled=bool(settings_payload.get("enabled", base.enabled)),
-        show_message_types=_normalize_show_message_types_for_platform(
-            settings_payload.get("show_message_types", base.show_message_types),
-            platform,
-        ),
-        custom_cwd=settings_payload.get("custom_cwd", base.custom_cwd),
-        routing=routing,
-        require_mention=require_mention,
-        require_bind=settings_payload.get("require_bind", base.require_bind),
-        _agent_name_at_load=settings_payload.get(
-            "expected_agent_name", _UNSET_AGENT_BINDING
-        ),
-    )
-    store.update_thread(channel_id, thread_id, settings, platform=platform)
-    return {
-        "ok": True,
-        "channel_id": channel_id,
-        "thread_id": thread_id,
-        "settings": _scope_settings_payload(settings, platform),
-    }
+    require_instance_role(user_context, "member")
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        platform = str(payload.get("platform") or _current_platform())
+        channel_id = str(payload.get("channel_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or "").strip()
+        settings_payload = payload.get("settings")
+        if platform != "telegram":
+            return {"ok": False, "error": "thread settings currently support Telegram only"}
+        if not channel_id or not thread_id or not isinstance(settings_payload, dict):
+            return {"ok": False, "error": "channel_id, thread_id, and settings are required"}
+
+        existing = store.find_thread(channel_id, thread_id, platform=platform)
+        base = existing
+        if base is None:
+            base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
+        routing_payload = settings_payload.get("routing")
+        routing = (
+            _parse_routing(_normalize_backend_routing_payload(routing_payload))
+            if isinstance(routing_payload, dict)
+            else base.routing
+        )
+        require_mention = settings_payload.get("require_mention", base.require_mention)
+        if existing is None and require_mention is None:
+            platform_config = _stored_platform_config(platform)
+            require_mention = bool(getattr(platform_config, "require_mention", True))
+        settings = ChannelSettings(
+            enabled=bool(settings_payload.get("enabled", base.enabled)),
+            show_message_types=_normalize_show_message_types_for_platform(
+                settings_payload.get("show_message_types", base.show_message_types),
+                platform,
+            ),
+            custom_cwd=settings_payload.get("custom_cwd", base.custom_cwd),
+            routing=routing,
+            require_mention=require_mention,
+            require_bind=settings_payload.get("require_bind", base.require_bind),
+            _agent_name_at_load=settings_payload.get(
+                "expected_agent_name", _UNSET_AGENT_BINDING
+            ),
+        )
+        store.update_thread(channel_id, thread_id, settings, platform=platform, user_context=user_context)
+        return {
+            "ok": True,
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "settings": _scope_settings_payload(settings, platform),
+        }
 
 
-def delete_thread_settings(platform: str, channel_id: str, thread_id: str) -> dict:
+def delete_thread_settings(platform: str, channel_id: str, thread_id: str, *, user_context: Any = None) -> dict:
     """Remove one child-thread override so it inherits its parent channel again."""
+    from vibe.authorization import require_instance_role
+
+    require_instance_role(user_context, "member")
     platform = str(platform or "").strip()
     channel_id = str(channel_id or "").strip()
     thread_id = str(thread_id or "").strip()
@@ -5334,9 +5376,10 @@ def delete_thread_settings(platform: str, channel_id: str, thread_id: str) -> di
         return {"ok": False, "error": "thread settings currently support Telegram only"}
     if not channel_id or not thread_id:
         return {"ok": False, "error": "channel_id and thread_id are required"}
-    store = SettingsStore.get_instance()
-    removed = store.delete_thread(channel_id, thread_id, platform=platform)
-    return {"ok": True, "removed": removed, "channel_id": channel_id, "thread_id": thread_id}
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        removed = store.delete_thread(channel_id, thread_id, platform=platform, user_context=user_context)
+        return {"ok": True, "removed": removed, "channel_id": channel_id, "thread_id": thread_id}
 
 
 def _guild_scope_update_from_settings_payload(
@@ -5420,10 +5463,16 @@ def _save_discord_guild_scope_update(
     guilds: dict[str, GuildSettings],
     default_enabled: bool,
     store: Optional[SettingsStore] = None,
+    *,
+    user_context: Any = None,
 ) -> None:
-    target_store = store or SettingsStore.get_instance()
-    target_store.set_guilds_for_platform("discord", guilds, default_enabled=default_enabled)
-    target_store.save()
+    # Config writes and legacy migrations need the same private candidate as
+    # channel/DM writes; another Owner request must never commit this draft.
+    with contextlib.closing(SettingsStore(store.settings_path if store else None)) as candidate:
+        candidate.set_guilds_for_platform("discord", guilds, default_enabled=default_enabled)
+        candidate.save(user_context=user_context)
+    if store is not None:
+        store.maybe_reload()
 
 
 def _extract_settings_scopes_from_config_payload(
@@ -5634,7 +5683,9 @@ async def telegram_auth_test_async(bot_token: str, proxy_url: str | None = None)
         return {"ok": False, "error": str(exc)}
 
 
-def delete_channel_scope(platform: str, native_id: str, scope_type: str = "channel") -> dict:
+def delete_channel_scope(
+    platform: str, native_id: str, scope_type: str = "channel", *, user_context: Any = None,
+) -> dict:
     """Permanently remove a discovered channel/chat scope and its settings.
 
     Restricted to ``channel`` scopes: this endpoint exists only to clear stale
@@ -5643,6 +5694,7 @@ def delete_channel_scope(platform: str, native_id: str, scope_type: str = "chann
     so any non-channel scope type is rejected.
     """
     from core import chat_discovery
+    from vibe.authorization import InstanceAuthorizationError
 
     platform = str(platform or "").strip()
     native_id = str(native_id or "").strip()
@@ -5652,7 +5704,9 @@ def delete_channel_scope(platform: str, native_id: str, scope_type: str = "chann
     if scope_type != "channel":
         return {"ok": False, "error": "only channel scopes can be removed here"}
     try:
-        outcome = chat_discovery.delete_scope(platform, native_id, scope_type="channel")
+        outcome = chat_discovery.delete_scope(platform, native_id, scope_type="channel", user_context=user_context)
+    except InstanceAuthorizationError:
+        raise
     except Exception as exc:
         logger.warning("Failed to delete %s scope %s: %s", platform, native_id, exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -13800,38 +13854,42 @@ def get_users(platform: Optional[str] = None) -> dict:
     return {"ok": True, "users": users}
 
 
-def save_users(payload: dict) -> dict:
+def save_users(payload: dict, *, user_context: Any = None) -> dict:
     """Save user settings (bulk update from UI)."""
-    store = SettingsStore.get_instance()
-    platform = payload.get("platform") or _current_platform()
+    from vibe.authorization import require_instance_role
 
-    users = {}
-    for user_id, up in (payload.get("users") or {}).items():
-        if not isinstance(up, dict):
-            continue
-        # Preserve dm_chat_id from existing user (not editable via UI)
-        existing = store.get_user(user_id, platform=platform)
-        users[user_id] = UserSettings(
-            display_name=up.get("display_name", ""),
-            is_admin=up.get("is_admin", False),
-            bound_at=up.get("bound_at", ""),
-            enabled=up.get("enabled", True),
-            show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
-            custom_cwd=up.get("custom_cwd"),
-            routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
-            dm_chat_id=existing.dm_chat_id if existing else "",
-            pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
-            _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),
-        )
+    require_instance_role(user_context, "member")
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        platform = payload.get("platform") or _current_platform()
 
-    # Merge instead of replace: update existing users and add new ones,
-    # but preserve users not included in the payload (e.g. concurrently bound)
-    current_users = store.get_users_for_platform(platform)
-    for uid, user_settings in users.items():
-        current_users[uid] = user_settings
-    store.set_users_for_platform(platform, current_users)
-    store.save()
-    return get_users(platform)
+        users = {}
+        for user_id, up in (payload.get("users") or {}).items():
+            if not isinstance(up, dict):
+                continue
+            # Preserve dm_chat_id from existing user (not editable via UI)
+            existing = store.get_user(user_id, platform=platform)
+            users[user_id] = UserSettings(
+                display_name=up.get("display_name", ""),
+                is_admin=up.get("is_admin", existing.is_admin if existing else False),
+                bound_at=up.get("bound_at", existing.bound_at if existing else ""),
+                enabled=up.get("enabled", existing.enabled if existing else True),
+                show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
+                custom_cwd=up.get("custom_cwd"),
+                routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
+                dm_chat_id=existing.dm_chat_id if existing else "",
+                pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
+                _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),
+            )
+
+        # Merge instead of replace: update existing users and add new ones,
+        # but preserve users not included in the payload (e.g. concurrently bound)
+        current_users = store.get_users_for_platform(platform)
+        for uid, user_settings in users.items():
+            current_users[uid] = user_settings
+        store.set_users_for_platform(platform, current_users)
+        store.save(user_context=user_context)
+        return get_users(platform)
 
 
 def toggle_admin(user_id: str, is_admin: bool, platform: Optional[str] = None) -> dict:

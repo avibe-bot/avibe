@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Shield,
@@ -44,6 +45,8 @@ const getDiscordGuildAllowlist = (source: any): string[] => {
 // Mirrors design.pen XCWAT (Slack creds wizard step) adapted for Discord.
 // 920-wide WizardCard, mint eyebrow, accordion rows with mint-bordered active row.
 export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -375,6 +378,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                         <div className="flex items-center gap-3">
                           <button
                             type="button"
+                            disabled={!canManageAccessMembers}
                             onClick={selectAllGuilds}
                             className="text-[11px] font-medium text-cyan-ink transition hover:text-cyan-ink/80"
                           >
@@ -382,7 +386,9 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                           </button>
                           <button
                             type="button"
+                            disabled={!canManageAccessMembers}
                             onClick={() => {
+                              if (!canManageAccessMembers) return;
                               setGuildSelectionTouched(true);
                               setSelectedGuilds([]);
                             }}
@@ -404,6 +410,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                           >
                             <input
                               type="checkbox"
+                              disabled={!canManageAccessMembers}
                               checked={selectedGuilds.includes(g.id)}
                               onChange={(e) => toggleGuild(g.id, e.target.checked)}
                               className="size-4 accent-mint"

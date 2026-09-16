@@ -5,6 +5,7 @@ capability:
   canonical_tests:
     - tests/scenarios/permissions/test_permissions_scenarios.py
     - tests/test_permissions.py
+    - tests/test_member_management_parity.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete
@@ -119,3 +120,13 @@ scenarios:
     given: A paired Instance Owner calls the retired show_page Resource ACL endpoint
     when: The local boundary validates the resource kind before any Backend contact
     then: Both read and write are rejected as invalid_resource_kind with no Backend request
+
+  - id: PERMISSIONS-013
+    name: Instance Member manages settings while preserving access administration
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_member_management_parity.py::test_member_channel_and_dm_preferences_preserve_access_state
+    given: A signed Organization instance Member and existing bound users and channels
+    when: The Member saves channel operation and DM preferences and attempts access mutations
+    then: Ordinary writes persist while user creation, role changes and reactivation are refused without mutation

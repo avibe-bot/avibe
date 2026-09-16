@@ -133,7 +133,7 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("const hasSavedBotToken = hasUsableSecret(data.wechat, 'bot_token', botToken);", source)
         self.assertIn("const isAlreadyBound = loginState === 'idle' && !botToken && hasSavedBotToken;", source)
         self.assertIn("loginState === 'idle' && !botToken && !isAlreadyBound", source)
-        self.assertIn("if (!autoStartLogin) return;", source)
+        self.assertIn("if (!autoStartLogin || !canManageAccessMembers) return;", source)
 
         settings_source = Path("ui/src/components/settings/SettingsPlatformsPage.tsx").read_text(encoding="utf-8")
         self.assertIn("autoStartLogin={false}", settings_source)

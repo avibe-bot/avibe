@@ -217,7 +217,7 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
     for method, path in editor_routes:
         assert http_authorization_policy(method, path).minimum_role == "editor"
 
-    for method, path in (("GET", "/api/future-owner-capability"), ("POST", "/api/control")):
+    for method, path in (("GET", "/api/future-owner-capability"), ("DELETE", "/api/control")):
         assert http_authorization_policy(method, path).minimum_role == "owner"
 
     assert (
@@ -226,9 +226,9 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
     )
     assert http_authorization_policy("GET", "/show/ses-1/").minimum_role == "viewer"
     assert http_authorization_policy("POST", "/api/remote-access/vibe-cloud/pair").minimum_role == "owner"
-    assert http_authorization_policy("POST", "/api/remote-access/start").minimum_role == "owner"
-    assert http_authorization_policy("POST", "/api/remote-access/stop").minimum_role == "owner"
-    assert http_authorization_policy("POST", "/api/remote-access/settings").minimum_role == "owner"
+    assert http_authorization_policy("POST", "/api/remote-access/start").minimum_role == "member"
+    assert http_authorization_policy("POST", "/api/remote-access/stop").minimum_role == "member"
+    assert http_authorization_policy("POST", "/api/remote-access/settings").minimum_role == "member"
     assert http_authorization_policy("POST", "/api/remote-access/future-unpair").minimum_role == "owner"
     assert http_authorization_policy("GET", "/api/remote-access/status").minimum_role == "member"
 
@@ -341,48 +341,26 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/remote-access/network-interfaces"),
         ("POST", "/api/remote-access/optimize-route"),
         ("POST", "/api/remote-access/diagnostics"),
+        ("POST", "/api/remote-access/start"),
+        ("POST", "/api/remote-access/stop"),
+        ("POST", "/api/remote-access/settings"),
     )
     for method, path in member_examples:
         assert http_authorization_policy(method, path).minimum_role == "member", path
 
     owner_examples = (
-        # Unknown APIs, present and future, keep the role they had before the
-        # member rank existed.
         ("GET", "/api/future-owner-capability"),
-        ("POST", "/api/control"),
-        ("POST", "/api/upgrade"),
-        ("POST", "/api/logs"),
-        # Classifying the read-only catalogs above does not widen /api/backend:
-        # credential, custom-provider, install, and runtime routes keep Owner by
-        # the unknown-route default. That includes OpenCode's provider catalog --
-        # it is the Settings surface (base URLs, masked keys, active auth type,
-        # tool-call permission state) and reading it starts the daemon, so unlike
-        # the Claude and Codex snapshots it is not a catalog a lower rank may
-        # read. The model picker treats its 403 as "no catalog".
-        ("GET", "/api/backend/opencode/providers"),
-        ("POST", "/api/backend/codex/auth"),
-        ("POST", "/api/backend/claude/auth"),
-        ("POST", "/api/backend/opencode/auth"),
-        ("DELETE", "/api/backend/opencode/auth/anthropic"),
-        ("POST", "/api/backend/opencode/providers"),
         ("POST", "/api/backend/opencode/future-mutation"),
-        ("POST", "/api/claude/models/refresh"),
         ("POST", "/api/codex/future-mutation"),
-        # Access administration and bearer credentials.
         ("PUT", "/api/permissions/authorized-users"),
         ("GET", "/api/users/bind-codes"),
         ("POST", "/api/users/first-bind-code"),
-        # ACL writes and the IM access boundary.
         ("PUT", "/api/permissions/projects/project-1/access"),
         ("PUT", "/api/permissions/resources/agent/agent-1/access"),
-        ("POST", "/api/settings"),
-        ("POST", "/api/settings/thread"),
-        # Host reach.
-        ("POST", "/api/browse"),
-        ("POST", "/api/browse/mkdir"),
-        # Bulk migration.
         ("GET", "/api/agent-onboarding"),
         ("POST", "/api/agent-onboarding"),
+        ("POST", "/api/wechat/qr_login/start"),
+        ("POST", "/api/wechat/qr_login/poll"),
     )
     for method, path in owner_examples:
         assert http_authorization_policy(method, path).minimum_role == "owner", path
@@ -393,6 +371,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", r"^/api/remote-access/network-interfaces$"),
         ("POST", r"^/api/remote-access/optimize-route$"),
         ("POST", r"^/api/remote-access/diagnostics$"),
+        ("POST", r"^/api/remote-access/(?:start|stop|settings)$"),
     }
 
 
@@ -409,7 +388,7 @@ def test_member_reachable_routes_are_bounded_by_declaration() -> None:
     So the fallback is Owner and the member surface is the allow-list, and this
     is the property that replaces those exceptions: every registered ``/api``
     route resolves to an explicit tier; a route resolves to member only because
-    ``_MEMBER_HTTP_RULES`` or the remote-access ops quartet says so; and a route
+    ``_MEMBER_HTTP_RULES`` or the explicit remote-access operations says so; and a route
     the router does not have yet resolves to Owner. A management route added
     tomorrow therefore keeps exactly the role it would have had before this rank
     existed.
@@ -467,11 +446,8 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
     route picker shares the catalog loader and is an editor surface, so editor is
     the floor for the catalogs; the rest of the page is member management.
 
-    OpenCode is the exception the test also pins. It has no catalog separable
-    from its Settings surface, so its read stays Owner and the picker degrades to
-    a typed model id -- silently, because the loader declares that refusal
-    expected. "Completes its load" therefore means "issues no request whose 403
-    the user is told about", not "every backend answers".
+    OpenCode provider management is available to Member; Editor retains its
+    existing typed-model fallback.
     """
 
     page_load_reads = (
@@ -498,15 +474,11 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         for method, path in (*page_load_reads, *catalog_reads):
             minimum_role = http_authorization_policy(method, path).minimum_role
             assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
-    # The counterparts a member page load must not announce. Bulk onboarding is a
-    # one-way instance-wide migration and must not be requested at all; the
-    # OpenCode provider catalog may be requested but its refusal is expected data
-    # for the picker. Both stay Owner, so a toast from either is a UI defect
-    # rather than a policy gap.
+    assert http_authorization_policy("GET", "/api/backend/opencode/providers").minimum_role == "member"
+    # Bulk onboarding claims ownership and remains Owner-only.
     owner_only_page_neighbours = (
         ("GET", "/api/agent-onboarding"),
         ("POST", "/api/agent-onboarding"),
-        ("GET", "/api/backend/opencode/providers"),
     )
     for method, path in owner_only_page_neighbours:
         minimum_role = http_authorization_policy(method, path).minimum_role
@@ -533,7 +505,57 @@ def test_backend_catalog_surface_follows_the_agent_management_boundary() -> None
         ("DELETE", "/api/models/sources/src-1/models/model-1"),
     )
     for method, source_path in source_model_mutations:
-        assert http_authorization_policy(method, source_path).minimum_role == "owner"
+        assert http_authorization_policy(method, source_path).minimum_role == "member"
+
+
+def test_all_registered_model_hub_routes_follow_instance_management_roles() -> None:
+    """Inventory the live API independently of the authorization allow-list."""
+    from vibe.ui_server import app
+
+    endpoints = {
+        (method, _sample_path(route.path))
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api/models/")
+        for method in route.methods or ()
+    }
+    assert len(endpoints) >= 40
+    for method, path in endpoints:
+        picker = method == "GET" and re.fullmatch(r"/api/models/agents/[^/]+/models", path)
+        minimum_role = http_authorization_policy(method, path).minimum_role
+        assert minimum_role == ("editor" if picker else "member"), (method, path)
+        for kind in ("personal", "organization"):
+            for organization_role in ("owner", "admin", "member", None):
+                for role in ("owner", "member", "editor", "viewer", None):
+                    context = AuthorizationContext(
+                        instance_role=role,
+                        instance_kind=kind,
+                        organization_role=organization_role,
+                        is_remote=True,
+                    )
+                    expected = role in {"owner", "member"} or bool(picker and role == "editor")
+                    assert context.has_role(minimum_role) is expected, (
+                        kind, organization_role, role, method, path,
+                    )
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "PUT", "PATCH", "DELETE"])
+def test_model_hub_unknown_siblings_remain_owner_only(method: str) -> None:
+    for path in (
+        "/api/models/future-management",
+        "/api/models/runtime/future-operation",
+        "/api/models/oauth/future-operation",
+        "/api/models/migration/future-operation",
+        "/api/models/sources/src-1/future-operation",
+        "/api/models/agents/claude/future-operation",
+    ):
+        assert http_authorization_policy(method, path).minimum_role == "owner"
+
+
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+def test_model_hub_source_model_ids_can_contain_slashes(method: str) -> None:
+    assert http_authorization_policy(
+        method, "/api/models/sources/src-1/models/provider/模型",
+    ).minimum_role == "member"
 
 
 def test_workbench_events_follow_role_boundaries() -> None:
@@ -622,6 +644,9 @@ _REMOTE_ACCESS_MEMBER_OPS = frozenset(
         ("GET", "/api/remote-access/network-interfaces"),
         ("POST", "/api/remote-access/optimize-route"),
         ("POST", "/api/remote-access/diagnostics"),
+        ("POST", "/api/remote-access/start"),
+        ("POST", "/api/remote-access/stop"),
+        ("POST", "/api/remote-access/settings"),
     }
 )
 
@@ -727,7 +752,7 @@ def test_registered_remote_access_writes_default_to_owner(monkeypatch, tmp_path)
 
     Introspect the live router so a newly added pair/unpair/settings sibling
     fails this test until it is classified. Viewer and editor stay 403 on the
-    whole namespace, matching master. Member keeps the four ops that cannot
+    whole namespace, matching master. Member keeps the operations that cannot
     change pairing identity.
     """
 
@@ -791,11 +816,10 @@ _ACCESS_ADMINISTRATION_NAMESPACES = (
     "/api/agent-onboarding",
 )
 
-# The only route in those namespaces allowed below Owner: it discloses the member
-# set without disclosing or minting a credential, matching the cloud allowlist
-# whose GET is member and whose PUT is Owner. Everything else registered in the
-# namespaces now or later must be Owner, which is what the sweep asserts.
-_ACCESS_ADMINISTRATION_MEMBER_READS = frozenset({("GET", "/api/users")})
+# Members may read users and update ordinary existing-user preferences. The
+# locked writer independently rejects membership effects in POST /api/users.
+# Other routes in these namespaces remain Owner-only.
+_ACCESS_ADMINISTRATION_MEMBER_SETTINGS = frozenset({("GET", "/api/users"), ("POST", "/api/users")})
 
 
 def _registered_access_administration_routes():
@@ -869,7 +893,7 @@ def test_registered_access_administration_routes_are_owner_only(monkeypatch, tmp
 
     for method, path in routes:
         policy = http_authorization_policy(method, _sample_path(path))
-        if (method, path) in _ACCESS_ADMINISTRATION_MEMBER_READS:
+        if (method, path) in _ACCESS_ADMINISTRATION_MEMBER_SETTINGS:
             assert policy.minimum_role == "member", f"{method} {path}"
         else:
             assert policy.minimum_role == "owner", f"{method} {path} must be Owner-only"
@@ -907,24 +931,8 @@ def test_registered_access_administration_routes_are_owner_only(monkeypatch, tmp
                 assert response.get_json()["error"] == "instance_access_forbidden"
 
 
-def test_agent_cli_install_is_owner_only(monkeypatch, tmp_path) -> None:
-    """Installing a backend CLI is host lifecycle, so it stays above member.
-
-    The handler shells out to a package manager, a self-update, or a curl
-    script, records the resulting CLI path, and can restart the backend. That is
-    the "dependency installs" bullet the member policy declares Owner, and it
-    had been on the member allow-list while the comment above that table said
-    otherwise -- the table is hand-written, so the policy and its entries can
-    disagree silently.
-
-    Enforcement is by absence: neither route is declared, so both inherit the
-    unknown-route Owner default and need no exception entry. Asserting the
-    absence *and* the 403 it produces keeps those two from drifting apart, and
-    the owner leg proves the routes are still live rather than unreachable for
-    everyone. The install implementation is stubbed, so no package manager runs
-    and the assertion at the end is what proves it: only the owner leg ever
-    reached the handler.
-    """
+def test_agent_cli_install_follows_instance_management(monkeypatch, tmp_path) -> None:
+    """Both managers reach the host operation; Editor/Viewer cannot."""
 
     from tests.ui_server_test_helpers import (
         csrf_headers,
@@ -956,11 +964,7 @@ def test_agent_cli_install_is_owner_only(monkeypatch, tmp_path) -> None:
         ("GET", "/api/agent/claude/install/job-1"),
     )
     for method, path in routes:
-        assert not any(
-            rule_method == method and pattern.fullmatch(path)
-            for rule_method, pattern in _MEMBER_HTTP_RULES
-        ), f"{method} {path} must not be declared on the member allow-list"
-        assert http_authorization_policy(method, path).minimum_role == "owner", f"{method} {path}"
+        assert http_authorization_policy(method, path).minimum_role == "member"
 
     for role in ("viewer", "editor", "member", "owner"):
         client = app.test_client()
@@ -985,15 +989,15 @@ def test_agent_cli_install_is_owner_only(monkeypatch, tmp_path) -> None:
             if method != "GET":
                 kwargs["json"] = {}
             response = client.request(method, path, **kwargs)
-            if role == "owner":
+            if role in {"owner", "member"}:
                 assert response.status_code == 200, f"{role} {method} {path}"
                 assert response.get_json()["ok"] is True, f"{role} {method} {path}"
             else:
                 assert response.status_code == 403, f"{role} {method} {path}"
                 assert response.get_json()["error"] == "instance_access_forbidden"
 
-    assert reached == [("start", "claude"), ("status", "job-1")], (
-        "only the owner leg may reach the install handler"
+    assert reached == [("start", "claude"), ("status", "job-1")] * 2, (
+        "only manager legs may reach the install handler"
     )
 
 
@@ -1040,7 +1044,7 @@ def test_access_administration_handlers_gate_without_the_route_policy(monkeypatc
     )
     headers = csrf_headers(client, base_url="https://alex.avibe.bot")
     for method, path in _registered_access_administration_routes():
-        if (method, path) in _ACCESS_ADMINISTRATION_MEMBER_READS:
+        if (method, path) in _ACCESS_ADMINISTRATION_MEMBER_SETTINGS:
             continue
         request_path = _sample_path(path)
         kwargs = {
@@ -1079,10 +1083,8 @@ def test_member_config_write_cannot_change_pairing_identity(
 ) -> None:
     """Member POST /api/config cannot change pairing identity in any value shape.
 
-    The refusal is the Editor allowlist, which every writer below Owner now runs:
-    ``remote_access`` is not a field they may set, so the write is rejected
-    outright rather than accepted with one key quietly removed. Stored pairing is
-    asserted unchanged either way — the point is the identity, not the status code.
+    Compare protected access effects at the locked writer, including malformed
+    replacement shapes. No refusal may mutate the stored pairing.
     """
 
     from config.v2_config import V2Config
@@ -1129,11 +1131,7 @@ def test_member_config_write_cannot_change_pairing_identity(
         environ_base=remote_peer(),
     )
 
-    assert response.status_code == 400
-    assert response.get_json()["error"] == {
-        "code": "editor_config_write_forbidden",
-        "message": "editor_config_write_forbidden",
-    }
+    assert response.status_code in {400, 403}
     after = V2Config.load().remote_access.vibe_cloud
     assert after.instance_id == before.instance_id == "inst_123"
     assert after.backend_url == before.backend_url == "https://backend.example"
@@ -1293,9 +1291,8 @@ def test_member_can_set_instance_default_agent(monkeypatch, tmp_path) -> None:
         domain="alex.avibe.bot",
     )
     owner_headers = csrf_headers(owner_client, base_url="https://alex.avibe.bot")
-    # Owner-only is the whole gate. The same Agent the member could not publish
-    # is accepted from the Owner, because the target's audience is a use-time
-    # question rather than a bind-time one.
+    # Owner retains the same management operation; target audience remains a
+    # use-time decision rather than a bind-time restriction.
     owner_response = owner_client.post(
         "/api/agents/default",
         json={"name": "member-private"},

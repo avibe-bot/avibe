@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bot,
@@ -444,6 +445,8 @@ const Modal: React.FC<{ title: string; onClose: () => void; children: React.Reac
 // ─── User List Page ──────────────────────────────────────────────────────
 
 export const UserList: React.FC = () => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -522,7 +525,7 @@ export const UserList: React.FC = () => {
     });
   }, [aggregated, searchQuery, showDisabled]);
 
-  const persistUsers = async (platform: string, next: Record<string, UserConfig>) => {
+  const persistUsers = async (platform: string, next: Record<string, Partial<UserConfig>>) => {
     setLoading(true);
     try {
       await api.saveUsers({ users: next }, platform);
@@ -543,7 +546,10 @@ export const UserList: React.FC = () => {
     }
     const nextPlatformUsers = { ...platformUsers, [userId]: next };
     setUsersByPlatform((prev) => ({ ...prev, [platform]: nextPlatformUsers }));
-    void persistUsers(platform, nextPlatformUsers);
+    void persistUsers(platform, { [userId]: canManageAccessMembers ? next : {
+      display_name: next.display_name, custom_cwd: next.custom_cwd,
+      routing: next.routing, show_message_types: next.show_message_types,
+    } });
   };
 
   const handleToggleAdmin = async (platform: string, userId: string, isAdmin: boolean) => {
@@ -652,10 +658,10 @@ export const UserList: React.FC = () => {
         </div>
 
         {/* Bind code card */}
-        <BindCodeCard
+        {canManageAccessMembers && <BindCodeCard
           refreshTrigger={refreshTrigger}
           onCodesChanged={() => setRefreshTrigger((v) => v + 1)}
-        />
+        />}
 
         {/* List header */}
         <div className="flex items-center justify-between px-1 py-2">
@@ -706,7 +712,7 @@ export const UserList: React.FC = () => {
 
               const updateRow = (patch: Partial<UserConfig>) => updateUser(u.platform, u.userId, patch);
               const toggleEnabled = () => updateRow({ enabled: !userConfig.enabled });
-              const toggleAdmin = () => handleToggleAdmin(u.platform, u.userId, !userConfig.is_admin);
+              const toggleAdmin = () => canManageAccessMembers && handleToggleAdmin(u.platform, u.userId, !userConfig.is_admin);
 
               return (
                 <div
@@ -737,6 +743,7 @@ export const UserList: React.FC = () => {
                     {/* Enabled toggle */}
                     <span onClick={(e) => e.stopPropagation()}>
                       <ToggleSwitch
+                        disabled={!canManageAccessMembers}
                         enabled={userConfig.enabled}
                         onClick={toggleEnabled}
                       />
@@ -780,7 +787,8 @@ export const UserList: React.FC = () => {
                     ) : (
                       <span
                         role="button"
-                        tabIndex={0}
+                        tabIndex={canManageAccessMembers ? 0 : -1}
+                        aria-disabled={!canManageAccessMembers}
                         aria-pressed={userConfig.is_admin}
                         onClick={(e) => { e.stopPropagation(); toggleAdmin(); }}
                         onKeyDown={(e) => {
@@ -829,6 +837,7 @@ export const UserList: React.FC = () => {
                           type="button"
                           variant="secondary"
                           size="xs"
+                          disabled={!canManageAccessMembers}
                           onClick={() => handleRemoveUser(u.platform, u.userId)}
                           title={t('userList.removeUser')}
                           className="text-muted hover:border-destructive/40 hover:text-destructive-ink"

@@ -3488,6 +3488,8 @@ def test_telegram_topic_settings_materialize_inherited_mention_default(tmp_path,
 
         assert saved["ok"] is True
         assert saved["settings"]["require_mention"] is False
+        # The API commits through a private store; consumers refresh by revision.
+        assert store.maybe_reload() is True
         assert store.find_thread("-1001", "42", platform="telegram").require_mention is False
     finally:
         SettingsStore.reset_instance()

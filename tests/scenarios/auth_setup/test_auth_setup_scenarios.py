@@ -3314,3 +3314,46 @@ def test_custom_auto_policy_response_cannot_reject_or_exclude_credentials(
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("role", ["member", "owner"])
+def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, role):
+    """AUTH-SETUP-301: signed remote management reaches native credential storage."""
+    import json
+    from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_peer, remote_session_cookie
+    from vibe import api, remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True, instance_kind="organization")
+    client = app.test_client()
+    base_url = "https://alex.avibe.bot"
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, remote_session_cookie(
+        config, f"{role}@example.com", role, role=role, access_source="organization_group",
+        organization_id="org-1", organization_member_id=f"membership-{role}",
+        organization_role="member", group_ids=[],
+    ), domain="alex.avibe.bot")
+    headers = csrf_headers(client, base_url=base_url)
+
+    def request(method, path, *, payload=None):
+        return client.request(method, path, json=payload, headers=headers, base_url=base_url, environ_base=remote_peer())
+    from vibe import claude_config
+    native_dir = tmp_path / "test-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(native_dir))
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: object())
+    monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda service: {"ok": True})
+    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
+    monkeypatch.setattr(claude_config, "read_claude_oauth_signed_in", lambda: False)
+    refreshed = []
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kw: refreshed.append(name) or {"ok": True})
+    response = request("POST", "/api/backend/claude/auth", payload={
+        "auth_mode": "api_key", "api_key": "isolated-test-credential", "base_url": "https://provider.invalid",
+    })
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["ok"], response.get_json()
+    saved = json.loads((native_dir / "settings.json").read_text())
+    assert saved["env"]["ANTHROPIC_API_KEY"] == "isolated-test-credential"
+    assert refreshed == ["claude"]
+    readback = request("GET", "/api/backend/claude/auth")
+    assert readback.status_code == 200
+    assert "isolated-test-credential" not in json.dumps(readback.get_json())

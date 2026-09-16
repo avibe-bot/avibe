@@ -126,7 +126,7 @@ Project ACL (`access_role` `editor|viewer`) is **out of scope**.
 ## HTTP / SSE policy (app)
 
 - Default `/api/` minimum stays fail-closed.
-- Member-reachable management routes are explicitly declared in `_MEMBER_HTTP_RULES`; unknown APIs remain Owner-only. Member-management, credential, host-lifecycle, ACL-write, and bulk-onboarding routes stay outside that allowlist.
+- Member-reachable management routes are explicitly declared in `_MEMBER_HTTP_RULES`; unknown APIs remain Owner-only. Ordinary instance management includes Model Hub, backend/platform credentials, host lifecycle, safe remote transport settings and existing DM preferences. Access-member/role administration, pairing identity, Project/Resource ACL writes, WeChat QR binding and bulk ownership onboarding remain protected. Mixed settings writes preserve access effects at the locked writer; see [Member management parity](member-management-parity.md).
 - `POST /api/agents/default` requires the member tier and its setter requires `can_manage_agents`. The default remains advisory: assigning a private or scope-policy Agent does not widen its ACL, and callers who cannot use it degrade to another usable Agent at resolution time.
 - Privileged SSE events (definitions/runs/vaults updated) currently require owner. **Member receives them** (they are instance-management events, not member-management). Implement by treating them as `has_role("member")`.
 - Editor SSE (`queue.updated`) and viewer SSE unchanged.

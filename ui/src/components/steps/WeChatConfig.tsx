@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -44,6 +45,8 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
   onCancel,
   autoStartLogin = true,
 }) => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const [applying, setApplying] = useState(false);
@@ -84,6 +87,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
   }, [stopPolling]);
 
   const startLogin = useCallback(async () => {
+    if (!canManageAccessMembers) return;
     setStarting(true);
     setLoginState('idle');
     setMessage('');
@@ -137,18 +141,18 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
     } finally {
       setStarting(false);
     }
-  }, [api, stopPolling, t]);
+  }, [api, stopPolling, t, canManageAccessMembers]);
 
   useEffect(() => {
     if (autoStartedRef.current) return;
-    if (!autoStartLogin) return;
+    if (!autoStartLogin || !canManageAccessMembers) return;
     if (starting) return;
     if (loginState !== 'idle') return;
     if (hasSavedBotToken) return;
 
     autoStartedRef.current = true;
     void startLogin();
-  }, [autoStartLogin, loginState, startLogin, starting, hasSavedBotToken]);
+  }, [autoStartLogin, loginState, startLogin, starting, hasSavedBotToken, canManageAccessMembers]);
 
   const startPolling = (key: string) => {
     stopPolling();
@@ -363,6 +367,15 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
         </div>
 
         <div className="space-y-4">
+          {!canManageAccessMembers && (
+            <div className="space-y-3 rounded-xl border border-border bg-background px-5 py-4">
+              <p className="text-sm text-muted">{t('wechatConfig.ownerBindingRequired')}</p>
+              <label className="block space-y-2 text-sm">
+                <span>{t('wechatConfig.botToken')}</span>
+                <Input type="password" value={botToken} onChange={(event) => setBotToken(event.target.value)} />
+              </label>
+            </div>
+          )}
           {/* Already bound */}
           {isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-6">
@@ -391,7 +404,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
                     autoStartedRef.current = true;
                     void startLogin();
                   }}
-                  disabled={starting}
+                  disabled={starting || !canManageAccessMembers}
                 >
                   <RefreshCw size={14} className={starting ? 'animate-spin' : ''} />
                   {t('wechatConfig.rebind')}
@@ -404,7 +417,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {loginState === 'idle' && !botToken && !isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-8 text-center">
               <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.06] text-cyan-ink">
-                {starting || autoStartLogin ? (
+                {starting || (autoStartLogin && canManageAccessMembers) ? (
                   <Loader2 size={26} className="animate-spin" />
                 ) : (
                   <Smartphone size={26} />
@@ -414,7 +427,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
                 {starting ? t('wechatConfig.starting') : t('wechatConfig.startDescription')}
               </p>
               {!autoStartLogin && !starting && (
-                <Button type="button" variant="brand" size="sm" className="mt-4" onClick={startLogin}>
+                <Button type="button" variant="brand" size="sm" className="mt-4" onClick={startLogin} disabled={!canManageAccessMembers}>
                   <RefreshCw size={14} strokeWidth={2.25} />
                   {t('wechatConfig.startLogin')}
                 </Button>
@@ -503,7 +516,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
                   <h3 className="text-[14px] font-semibold text-foreground">{t('wechatConfig.errorTitle')}</h3>
                   <p className="mt-1 text-[12px] text-destructive-ink">{message}</p>
                 </div>
-                <Button variant="brand" size="sm" onClick={startLogin} disabled={starting}>
+                <Button variant="brand" size="sm" onClick={startLogin} disabled={starting || !canManageAccessMembers}>
                   <RefreshCw size={14} strokeWidth={2.25} />
                   {t('wechatConfig.retry')}
                 </Button>

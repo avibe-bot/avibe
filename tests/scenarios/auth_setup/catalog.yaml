@@ -303,4 +303,11 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_reuses_persistent_app_server
+  - id: AUTH-SETUP-301
+    name: Instance Member saves backend credentials through signed remote HTTP
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_instance_manager_backend_credentials_round_trip
 next_priority: []
