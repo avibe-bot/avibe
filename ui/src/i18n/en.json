@@ -4609,6 +4609,7 @@
       "restartRunning": "Restarting…",
       "restartDescription": "Stops and restarts EverOS without deleting Memory data.",
       "completed": "Memory service is ready.",
+      "updateFailedStillRunning": "The Memory engine update failed. The previous verified engine is still running; no Memory data was deleted.",
       "failed": "Memory service could not start. No Memory data was deleted."
     },
     "repair": {

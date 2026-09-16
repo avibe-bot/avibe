@@ -15,3 +15,8 @@ observations:
       - MEMORY-RUNTIME-INSTALL-004
       - MEMORY-RUNTIME-INSTALL-005
     observation: A core/companion upgrade can leave a healthy same-version native artifact on earlier release bytes. Previous Wake tests equated admission with manifest currency and did not cross both real release selections. Wake now converges proven manifest mismatches under its existing operation lease without toggling persistent settings. Scenarios use actual archive integrity, pointer activation/rollback and nonempty Unicode root checks, with deterministic native/provider execution. Availability after a failed update is distinct from successful convergence; the failed attempt remains in dependency status and the Wake result.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-004
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-004
+      - MEMORY-RUNTIME-INSTALL-005
+    observation: Review exposed three missing consumer boundaries. A timed-out writer join must restore future intake only while the original sidecar remains admitted/running; unproved stop or shutdown stays fenced and degraded. Manifest currency is meaningful only for installable selections, not the unavailable source manifest or rejected pins/contracts. The public Web allowlist and both Wake toast consumers must preserve and display an update failure independently of retained runtime availability. Regression tests now exercise all three boundaries; raw install diagnostics are not copied into the public result.

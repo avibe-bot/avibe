@@ -52,7 +52,7 @@ authorized by this source-fix task. Deliver a reviewed PR with full CI first.
 - [x] Run focused/broader tests and changed-file Ruff.
 - [ ] Independent root review, exact-head Codex review, complete lint CI.
 
-## Local validation
+## Initial local validation
 
 - The selected runtime, supervisor, artifact, disabled-isolation, dependency,
   upgrade, distribution and internal-server suites: 968 passed, 11 skipped.
@@ -76,3 +76,35 @@ authorized by this source-fix task. Deliver a reviewed PR with full CI first.
 but the identical admitted old artifact passes root/readiness checks, Wake also
 returns `artifact_update` with the unsuccessful install result. Dependency
 status retains the reason and manifest mismatch; this is not upgrade success.
+
+## Review boundary corrections
+
+Round 1 reviewed one findings-bearing head and three distinct classes:
+pre-install lifecycle compensation, public failure propagation, and selected
+manifest authority. No repeated class or circuit-breaker threshold was reached.
+
+- Restore capture intake on a pre-install abort only when the original admitted
+  sidecar is still running/current. A pending writer close retains its own fence
+  until cleanup ends; incomplete stop and shutdown remain closed. Record abort
+  reasons in status rather than leaving an apparently healthy paused writer.
+- Compute `matches_manifest` only for installable selections. Unavailable,
+  malformed, unsupported or incompatible-build source manifests are unknown,
+  not update authority. This refines the existing producer field, adding no flag.
+- The Web Wake response retains only bounded `artifact_update.ok/reason`
+  information. Both settings consumers show a localized failed-update message
+  even when the prior engine remains available. Raw download diagnostics are
+  not exposed. Supervisor recovery keeps its original availability semantics.
+
+### Round 1 validation
+
+- Expanded Python selection, including the Web response consumer: 1011 passed,
+  11 skipped, zero failures/errors. The same pinned-EverOS and CI-built package
+  prerequisites account for all skips; they remain explicit CI gates.
+- 66 UI tests pass across both settings consumers and their shared Memory
+  helper suite. Test typechecking, baseline-aware UI lint, UI build,
+  changed-file Ruff and whitespace checks also pass.
+- Added eight rejected-manifest variants, three pre-install abort variants
+  with actual writer admission checks, a public HTTP response contract, and
+  both settings-page failed-update toast consumers.
+- Released-native unattended host upgrade and real search are not exercised
+  by these isolated source tests. No deployment or publication is authorized.

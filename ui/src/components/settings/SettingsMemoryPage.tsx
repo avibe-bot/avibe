@@ -26,7 +26,7 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memoryErrorMessage } from '../../lib/memoryRead';
+import { memoryErrorMessage, memoryWakeFailureMessage } from '../../lib/memoryRead';
 import {
   isMemoryProcessingRecordReason,
   memoryStatusSourceReasonLabel,
@@ -125,9 +125,10 @@ export const SettingsMemoryPage: React.FC = () => {
     setWaking(true);
     try {
       const result = await api.wakeMemory();
+      const failure = memoryWakeFailureMessage(t, result);
       showToast(
-        result.ok ? t('memory.runtimeAction.completed') : memoryErrorMessage(t, result.error),
-        result.ok ? 'success' : 'error',
+        failure ?? t('memory.runtimeAction.completed'),
+        failure ? 'error' : 'success',
       );
     } catch {
       showToast(t('memory.runtimeAction.failed'), 'error');

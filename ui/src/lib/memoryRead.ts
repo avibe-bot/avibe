@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import type { MemoryWakeResult } from '../context/ApiContext';
 
 // Backend forbidden path (`_memory_forbidden_response`) returns exactly this closed shape for
 // every Memory route when the request is neither direct-loopback nor an authenticated
@@ -60,4 +61,10 @@ export const memoryErrorMessage = (
     providerErrorCode || '',
   ].filter(Boolean);
   return details.length > 0 ? `${base}: ${details.join(' · ')}` : base;
+};
+
+/** Availability after fallback is not a successful selected-artifact update. */
+export const memoryWakeFailureMessage = (t: TFunction, result: MemoryWakeResult): string | null => {
+  if (!result.ok) return memoryErrorMessage(t, result.error);
+  return result.artifact_update?.ok === false ? t('memory.runtimeAction.updateFailedStillRunning') : null;
 };

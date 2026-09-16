@@ -576,8 +576,57 @@ async def test_manifest_switch_requires_proven_stop_and_keeps_direct_install_gua
         result = await runtime.wake()
         assert result["ok"] is False
         assert artifact.ensure_calls == []
+        assert runtime.runtime_state() == "degraded"
+        assert runtime.module.reserve_capture_capacity() == "disabled"
     finally:
         child.stop_failure = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("abort", ("quiesce", "writer-close", "stop-before-effect"))
+async def test_preinstall_abort_resumes_capture_only_for_still_running_old_runtime(
+    tmp_path, monkeypatch, memory_runtime_factory, abort,
+):
+    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: FakeMemoryProvider())
+    processes = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        _config(), artifact_manager=artifact, process_factory=processes, effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    artifact.status_payload["matches_manifest"] = False
+    pending = runtime.module.reserve_capture_capacity()
+    assert not isinstance(pending, str)
+    quiesce = runtime.module.quiesce_claims
+
+    async def bounded_quiesce(**_kwargs):
+        # Real writer close completes, but a held capture reservation exceeds
+        # the join deadline. The old process is still usable.
+        return await quiesce(timeout_seconds=0.001)
+
+    async def fail_before_stopping():
+        raise RuntimeError("fixture pre-install abort")
+
+    with monkeypatch.context() as scope:
+        if abort == "quiesce":
+            scope.setattr(runtime.module, "quiesce_claims", bounded_quiesce)
+        else:
+            runtime.module.release_capture_capacity(pending)
+            scope.setattr(
+                runtime if abort == "writer-close" else runtime._supervisor,
+                "_close_writer" if abort == "writer-close" else "stop",
+                fail_before_stopping,
+            )
+        result = await runtime.wake()
+
+    runtime.module.release_capture_capacity(pending)
+    assert result["ok"] is False
+    assert runtime.runtime_state() == "degraded"  # Abort remains observable.
+    assert artifact.ensure_calls == []
+    assert processes.supervised[-1].running
+    admitted = runtime.module.reserve_capture_capacity()
+    assert not isinstance(admitted, str)
+    runtime.module.release_capture_capacity(admitted)
 
 
 @pytest.mark.asyncio

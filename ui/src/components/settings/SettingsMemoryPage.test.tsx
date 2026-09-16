@@ -291,6 +291,20 @@ describe('SettingsMemoryPage', () => {
     expect(api.deleteMemoryData).not.toHaveBeenCalled();
   });
 
+  it('reports a failed native update even when the old runtime remains available', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('degraded'));
+    api.wakeMemory.mockResolvedValue({
+      ok: true, state: 'running',
+      artifact_update: { ok: false, reason: 'memory_runtime_install_failed' },
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.retryButton' }));
+    expect(await screen.findByText('memory.runtimeAction.updateFailedStillRunning')).toBeTruthy();
+    expect(screen.queryByText('memory.runtimeAction.completed')).toBeNull();
+    expect(api.repairMemory).not.toHaveBeenCalled();
+    expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
   it.each(['starting', 'needs_repair'] as const)('hides runtime restart actions while Memory is %s', async (state) => {
     api.getMemoryStatus.mockResolvedValue(status(state));
     renderPage();

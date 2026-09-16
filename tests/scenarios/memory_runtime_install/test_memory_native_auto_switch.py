@@ -246,3 +246,41 @@ async def test_failed_update_resumes_only_the_retained_admitted_artifact(
     assert again["ok"] is True
     assert again["artifact_update"]["ok"] is False
     assert manager.resolve_python() == old_python
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejected", ("unavailable", "version", "lock", "format", "sync", "platform", "malformed", "missing"))
+async def test_rejected_selected_manifest_does_not_authorize_automatic_install(
+    tmp_path, monkeypatch, released_runtime, rejected,
+):
+    """MEMORY-RUNTIME-INSTALL-004: unusable selections grant no cutover authority."""
+
+    make, _home, _config = released_runtime
+    runtime, manager, _processes = make(_release(tmp_path, "old"))
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    old_python = manager.resolve_python()
+    new_manifest = _release(tmp_path, "new")
+    payload = json.loads(new_manifest.read_text())
+    if rejected == "unavailable":
+        payload["release_state"] = "unavailable"
+    elif rejected == "version":
+        payload["everos_version"] = "0.0.0"
+    elif rejected == "lock":
+        payload["lock_sha256"] = "b" * 64
+    elif rejected == "format":
+        payload["provider_root_format"] = ""
+    elif rejected == "sync":
+        payload["sync_bootstrap_revision"] = 999
+    elif rejected == "platform":
+        payload["archives"] = {"unavailable-platform": next(iter(payload["archives"].values()))}
+    new_manifest.write_text(json.dumps(payload), encoding="utf-8")
+    if rejected == "malformed":
+        new_manifest.write_text("{invalid-json", encoding="utf-8")
+    elif rejected == "missing":
+        new_manifest.unlink()
+    monkeypatch.setattr(manager, "manifest_path", new_manifest)
+    monkeypatch.setattr(manager, "ensure", lambda **_: pytest.fail("rejected manifest triggered install"))
+
+    assert manager.status()["matches_manifest"] is None
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    assert manager.resolve_python() == old_python

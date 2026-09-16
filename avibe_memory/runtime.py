@@ -2282,26 +2282,35 @@ class MemoryRuntime:
                     async with self._reconcile_lock, self.module.lifecycle():
                         self._require_lifecycle_work()
                         self.module.pause_claims()
-                        quiesced = await self._lifecycle_checkpoint(
-                            self.module.quiesce_claims(timeout_seconds=5.0)
-                        )
-                        if not quiesced:
-                            return {
-                                "ok": False,
-                                "state": "degraded",
-                                "error": "memory_runtime_busy",
-                            }
-                        await self._lifecycle_checkpoint(self._close_writer())
                         try:
+                            quiesced = await self._lifecycle_checkpoint(
+                                self.module.quiesce_claims(timeout_seconds=5.0)
+                            )
+                            if not quiesced:
+                                self._runtime_error = "memory_runtime_busy"
+                                return {
+                                    "ok": False,
+                                    "state": "degraded",
+                                    "error": self._runtime_error,
+                                }
+                            await self._lifecycle_checkpoint(self._close_writer())
                             await self._lifecycle_checkpoint(self._supervisor.stop())
                         except MemoryRuntimeBusyError:
                             raise
                         except Exception:
+                            self._runtime_error = "memory_wake_failed"
                             return {
                                 "ok": False,
                                 "state": "degraded",
-                                "error": "memory_wake_failed",
+                                "error": self._runtime_error,
                             }
+                        finally:
+                            # A pre-install abort must not permanently fence the
+                            # still-running admitted old child. A pending writer
+                            # close retains its own fence until cleanup settles;
+                            # unproved sidecar health or shutdown stays closed.
+                            if previous_artifact is not None and self._sidecar_ready_is_current():
+                                self.module.resume_claims()
                 installed = await self._lifecycle_checkpoint(
                     self._install_artifact_with_lease()
                 )

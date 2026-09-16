@@ -2221,9 +2221,10 @@ export type MemoryProcessingRecordDetailResult =
     }
   | MemoryFailure;
 
-export type MemoryWakeResult =
+export type MemoryWakeResult = (
   | { ok: true; state: 'running' }
-  | { ok: false; state?: MemoryStatus['state']; error?: string };
+  | { ok: false; state?: MemoryStatus['state']; error?: string }
+) & { artifact_update?: { ok: boolean; reason?: string | null } };
 
 export type MemoryDataOperationResult = {
   ok: boolean;
