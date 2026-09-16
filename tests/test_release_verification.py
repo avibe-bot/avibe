@@ -317,6 +317,25 @@ def _step(job: dict, name: str) -> dict:
     return step
 
 
+def test_official_finalization_serializes_cross_version_decision_and_publication():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
+    job = workflow["jobs"]["finalize-github-release"]
+    # A literal group is shared by every tag, branch and event. Keep only the
+    # critical finalization job serialized; builds must remain independent.
+    assert job["concurrency"] == {
+        "group": "avibe-official-release-finalization",
+        "cancel-in-progress": False,
+        "queue": "max",
+    }
+    assert "concurrency" not in workflow
+    assert "concurrency" not in workflow["jobs"]["build"]
+    assert "wait-notes" in _step(job, "Wait for exact-source release notes")["run"]
+    finalize = _step(job, "Publish GitHub Release")["run"]
+    assert 'LATEST_MODE="auto"' in finalize
+    assert "python scripts/github_release.py finalize" in finalize
+    assert not job.get("continue-on-error")
+
+
 def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     job = _job("publish.yml", "build")
     lint = _job("lint.yml", "install-upgrade-shards")

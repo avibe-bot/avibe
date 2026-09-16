@@ -32,6 +32,10 @@ merged separately before explicitly targeting that tag.
 - Let the existing finalizer select Latest for stable official publication,
   including recovery dispatches, without displacing a newer official version.
   Preserve explicit false/preserve modes and all read-back checks.
+- Serialize the complete official finalization job with one static,
+  repository-wide concurrency group. Queue pending finalizers without cancelling
+  the active one, so concurrent push/recovery drafts cannot both make a stale
+  Latest decision. Keep builds and notes parallel.
 
 No runtime code, new production dependency, asset overwrite bypass, test skip,
 native engine, production configuration, installation, or service change.
@@ -45,6 +49,9 @@ build/finalization and exact-source notes ownership remains authoritative.
   exclusions, explicit tags, invalid newest assets and byte-digest rejection.
 - Exercise finalizer decisions against a newer official release and unrelated
   Latest, including exact remote command/read-back behavior.
+- Exercise every admitted order of initially draft official releases, and bind
+  the workflow's comparison/edit/readback to one shared job concurrency group
+  with non-cancelling `queue: max` admission.
 - Retain package, all-platform/Windows shell, runtime guard, real pip/uv and
   Docker installer, notes/source, immutable upload, and public companion gates.
 - Run focused consuming tests and changed-file Ruff, then exact-head Codex
@@ -58,7 +65,10 @@ erase. Publication cannot be reported complete from workflow success alone.
 
 ## Local validation evidence
 
-- Release/version/supplier/finalizer/workflow consumers: 340 passed, zero skips.
+- Release/version/supplier/finalizer/workflow consumers: initially 340 passed;
+  347 passed after adding cross-version finalization admission coverage, zero
+  skips. The new workflow concurrency test failed before the fix. Actual
+  finalizers retain the highest version in all six orders of three drafts.
 - Native runtime and migration release guards: 698 passed, zero skips.
 - Actual pip and workflow-pinned uv 0.12.10 HTTPS provenance: 2 passed
   (28 unrelated cases explicitly deselected).

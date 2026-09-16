@@ -633,6 +633,12 @@ jobs:
     needs:
       - resolve-tag
       - build
+    # Latest is repository-wide: serialize its read/decide/edit across tags
+    # and push/dispatch runs, without cancelling another queued publication.
+    concurrency:
+      group: avibe-official-release-finalization
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     permissions:
       actions: read
