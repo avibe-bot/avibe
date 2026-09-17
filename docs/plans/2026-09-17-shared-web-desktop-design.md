@@ -1,18 +1,24 @@
 # Shared Web and Desktop design implementation
 
-## Owner decisions and delivery boundary
+## Current status: planning only; implementation paused
 
-Owner session: `sestqz5wvu5ty`. Approved 2026-09-17.
+Owner session: `sestqz5wvu5ty`. Latest instruction: 2026-09-17 11:44 Asia/Shanghai.
+
+Only this contract may be refined now. Wait until the owner confirms that all design work is complete and implementation may start. A file save, elapsed time, a partial Dark/Light/English update, an old lane brief, or an automatic callback is not a resumption signal. Do not dispatch/resume implementation, edit product/test code, push implementation branches, open implementation PRs, deploy, or integrate branches during this pause. No automatic restart task or waiter remains armed.
+
+When the owner gives the start signal: inspect the complete final Dark/Light and Chinese/English design set through Pencil, reconcile this draft in one pass, explicitly fetch the then-latest master, refresh the isolated lane baselines, freeze final contracts, and only then dispatch implementation. The source SHA below records the planning snapshot, not the future implementation base. The implementation lanes and technical contracts below describe planned work, not currently active assignments.
+
+## Owner decisions and delivery boundary
 
 - Implement the common React/Python application from latest `origin/master` first.
 - Then bring the shared work into the existing `desktop` integration branch and implement native-only behavior there. The existing Tauri shell is the host; native menus/window controls are not HTML product UI.
 - One installed assistant with one successfully applied subscription or API-key connection is sufficient to enter the workspace. Existing valid connections count. The user explicitly clicks Enter workspace; successful authorization alone never completes setup.
 - Reuse Settings -> Backends authorization and save semantics. Reuse the existing AgentRoutePicker and DirectoryBrowser interactions.
 - Keep existing product logo assets. Logo exploration boards are out of scope.
-- Latest Chinese Dark screens in `design_desktop.pen` are the visual baseline. Owner will supply updated Light/English designs. Preserve working Light/System and English, add proper i18n now, and reconcile final visuals/copy when those designs arrive. Pending design polish does not block shared behavior.
-- Implementation is authorized; publishing releases, changing the local running service, and merging PRs are not authorized by this instruction.
+- The design is shared by Web and Desktop. Owner is completing Light theme and English designs; wait for the complete approved design set before product implementation. The currently inspected Chinese Dark screens are planning evidence only. Final implementation must align both themes and languages together, preserve System mode, and use existing i18n ownership.
+- Current authorization is contract documentation only. The owner explicitly paused implementation pending design completion. Future implementation still follows shared master work first, desktop-specific integration second; merging, releasing, or changing the local running service requires its own applicable authorization.
 
-Initial shared source: `7c028d74ebc4eb82b39a09991fcb09c8400253b0`.
+Planning source snapshot: `7c028d74ebc4eb82b39a09991fcb09c8400253b0`.
 Design source: `/Users/max/workspace/ai/avibe/avibe-docs/design_desktop.pen`.
 Read design via native Pencil MCP (the document is already open); never edit/save the owner's working design. Use shared `design.pen` for referenced existing pickers.
 Related handoff: `/Users/max/workspace/ai/avibe/avibe-docs/docs/plans/2026-09-15-desktop-first-task-design.md`. Latest owner decisions and latest Dark root annotations supersede older conflicting onboarding notes.
@@ -29,7 +35,7 @@ Related handoff: `/Users/max/workspace/ai/avibe/avibe-docs/docs/plans/2026-09-15
 8. Shared UI remains usable at mobile widths and with keyboard/reduced-motion, and in English/Chinese and existing light/dark/system modes. 1200x800 is the desktop design reference, not a fixed browser viewport.
 9. Existing project/session/inbox data, authorization gates, Apps, Memory, and permissions remain reachable. Mock-only example data and omitted settings are not product migrations.
 
-## Frozen cross-lane contracts
+## Draft cross-lane contracts for final design reconciliation
 
 ### Existing routes and config
 
@@ -47,7 +53,7 @@ Related handoff: `/Users/max/workspace/ai/avibe/avibe-docs/docs/plans/2026-09-15
 - Shared i18n JSON files are divided by key ownership: onboarding owns only new `onboarding.*` subtree and necessary existing `welcome.*`/wizard/auth keys; shell owns only new `sharedWorkspace.*` and `settings.general.*` plus necessary workbench/navigation keys. Do not reformat whole JSON or modify sibling keys. These two files are the only permitted file overlap, with disjoint key edits; orchestrator verifies integration by key, not by trusting text merge.
 - Existing brand logos remain unchanged. No new generated brand assets.
 
-## Implementation lanes and exclusive file ownership
+## Proposed implementation lanes and exclusive file ownership
 
 ### O: onboarding and authentication (Codex)
 
@@ -77,7 +83,7 @@ Deliver sidebar248 with header search/inbox and actual count; fixed navigation g
 
 ## Verification and delivery gates
 
-Each lane works in its own worktree and opens a real non-draft PR targeting `master`, never merges. Both fork from the same locally committed contract baseline; this is an explicit orchestrator allowance to keep the contract versioned without directly committing/merging into protected master. Both PRs carry the identical plan commit; after one lands the other must rebase to remove the already-landed contract. No stacked PRs or product dependency between lanes is intended.
+Each lane works in its own worktree and opens a real non-draft PR targeting `master`, never merges. After the owner resumes implementation, both fork from the same freshly prepared locally committed contract baseline based on then-latest master; this is an explicit orchestrator allowance to keep the contract versioned without directly committing/merging into protected master. Both PRs carry the identical plan commit; after one lands the other must rebase to remove the already-landed contract. No stacked PRs or product dependency between lanes is intended.
 
 Load `pr-delivery-loop` and `background-watch-hook`; use exact-head Codex bot pass, zero unresolved threads across all heads, and all expected CI successful. One forever combined PR/CI watch per lane with timeout0; notify orchestrator at first PR creation so it arms its independent gate watch before subsequent pushes. Inventory findings by reviewed head and root-cause class before fixing; repeated class on two reviewed heads or three findings heads after model rewrite stops patching for orchestrator diagnosis.
 
@@ -85,6 +91,14 @@ Run focused behavior tests, auth_setup scenario cases for onboarding, required U
 
 ## Follow-on and pending inputs
 
-- Owner updated Light/English design: pending, reconcile content/layout when supplied while keeping both operational now.
+- Complete owner-approved Dark/Light and Chinese/English design set: pending and a prerequisite for implementation. Receive the owner start signal, reconcile the final set and this contract, then refresh master before dispatch.
 - Stage2 native desktop: after shared work is integrated, update from the shared master result and implement system Settings/menu/window specifics in desktop-based task worktrees. Preserve loopback/capability boundaries and existing lifecycle. No desktop->master wholesale merge is implied.
 - Master merge and release: wait for explicit owner instruction after concrete PR gates and acceptance evidence.
+
+## Pause verification
+
+On 2026-09-17, two implementation runs had been dispatched before the owner clarified the design-completion gate. Both were canceled and their session queues were verified empty. Both isolated implementation worktrees remained clean at the contract-only commit `ee14c1ad9`; neither had product-code changes or later implementation commits. The scheduled implementation liveness task was removed and no implementation watch remained armed. Preserve the worktrees as paused preparation, never treat their former briefs as a live mandate.
+
+- Onboarding: session `sestvg9hbksrs`, canceled run `2c40a884e87f`, branch `feat/shared-onboarding`.
+- Shared shell/home/General: session `seshdfv3uqjxj`, canceled run `54372ae4d030`, branch `feat/shared-workspace-ui`.
+- Authoritative contract: branch `feat/shared-web-design-contract`; synchronize this pause into both prepared worktrees without starting their agents.
