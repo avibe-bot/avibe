@@ -32,7 +32,7 @@ import {
   memoryRuntimeSidecarRunning,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
-import { memoryErrorMessage } from '@/lib/memoryRead';
+import { memoryWakeFailureMessage } from '@/lib/memoryRead';
 import { useDependencyChecks } from './useDependencyChecks';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
@@ -112,9 +112,10 @@ export const SettingsDependenciesPage: React.FC = () => {
       if (recoverRuntime) {
         // Wake owns stop proof and artifact recovery for an active runtime.
         const result = await api.wakeMemory();
+        const failure = memoryWakeFailureMessage(t, result);
         showToast(
-          result.ok ? t('memory.runtimeAction.completed') : memoryErrorMessage(t, result.error),
-          result.ok ? 'success' : 'error',
+          failure ?? t('memory.runtimeAction.completed'),
+          failure ? 'error' : 'success',
         );
         return;
       }

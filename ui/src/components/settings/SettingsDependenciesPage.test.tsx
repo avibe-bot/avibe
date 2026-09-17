@@ -461,6 +461,22 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     expect(api.installDependency).not.toHaveBeenCalled();
   });
 
+  it('does not toast update success merely because the previous native engine restarted', async () => {
+    stubDependencies({ ok: true, deps: [dependency({ installed: false, status: 'missing', action_class: 'repairable' })] });
+    api.getMemoryStatus.mockResolvedValue({ status: 'ok', state: 'degraded' });
+    api.wakeMemory.mockResolvedValue({
+      ok: true, state: 'running',
+      artifact_update: { ok: false, reason: 'memory_runtime_install_failed' },
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.retryButton' }));
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'memory.runtimeAction.updateFailedStillRunning', 'error',
+    ));
+    expect(showToast).not.toHaveBeenCalledWith('memory.runtimeAction.completed', 'success');
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
   it.each([
     'memory_runtime_preparation_failed',
     'memory_runtime_preparation_import_timeout',

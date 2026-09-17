@@ -381,6 +381,14 @@ def _memory_operation_response(payload: dict, status_code: int) -> Response:
         "roots",
     }
     public = {key: payload[key] for key in allowed if key in payload}
+    update = payload.get("artifact_update")
+    if isinstance(update, dict) and isinstance(update.get("ok"), bool):
+        public["artifact_update"] = {
+            "ok": update["ok"],
+            "reason": _memory_closed_error(
+                {"error": update.get("reason")}, fallback="memory_runtime_install_failed"
+            ) if update["ok"] is False else None,
+        }
     if payload.get("ok") is not True and "error" not in public:
         public["error"] = "memory_sidecar_unavailable"
     return _memory_response(public, status_code=status_code)

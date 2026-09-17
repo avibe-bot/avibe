@@ -328,6 +328,40 @@ def test_memory_wake_is_non_destructive_and_preserves_closed_result(
     assert calls == [True]
 
 
+def test_memory_wake_preserves_failed_update_with_old_runtime_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+
+    async def wake():
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "state": "running",
+                "artifact_update": {
+                    "ok": False,
+                    "reason": "memory_runtime_install_failed",
+                    "download_error": {"private_detail": "not-public"},
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_wake", wake)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/wake", json={},
+        headers=csrf_headers(client, BASE_URL), **_request_options(),
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": True, "state": "running",
+        "artifact_update": {"ok": False, "reason": "memory_runtime_install_failed"},
+    }
+
+
 def _assert_memory_destructive_route_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

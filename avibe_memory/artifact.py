@@ -197,8 +197,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         self._install_reason = None
         latest_failure = self._read_latest_install_failure()
         manifest = self._load_manifest(allow_network=False)
-        if manifest is not None:
-            self._manifest_installable(manifest)
+        manifest_installable = manifest is not None and self._manifest_installable(manifest)
         archive = self._manifest_archive_for_platform(manifest) if manifest else None
         pointer, invalid = self._read_active_pointer()
         try:
@@ -219,7 +218,10 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         invalid = invalid or (pointer is not None and binary is None)
         selected_version = manifest.runtime_version if manifest is not None else None
         matches_manifest = None
-        if binary is not None and manifest is not None and archive is not None:
+        # Only an installable selection can authorize convergence. Source builds
+        # and rejected manifests may describe different bytes without offering
+        # any artifact that can safely replace the admitted active pointer.
+        if binary is not None and manifest_installable and archive is not None:
             try:
                 matches_manifest = (
                     self._verified_manifest_binary(

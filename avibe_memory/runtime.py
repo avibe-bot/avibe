@@ -702,18 +702,17 @@ class MemoryRuntime:
         if callable(cancel_nowait):
             cancel_nowait()
 
-    def artifact_admitted(self) -> bool:
-        """Return whether the pinned artifact is valid for a reset admission."""
+    def _active_artifact_identity(self) -> tuple[Path, str] | None:
+        """Snapshot the verified active binary, not the selected manifest."""
 
-        try:
-            status = self._artifact_manager.status()
-            return (
-                self._artifact_manager.resolve_python() is not None
-                and status.get("status") == "ready"
-                and status.get("reason") is None
-            )
-        except Exception:
-            return False
+        status = self._artifact_manager.status()
+        if status.get("installed") is not True or status.get("status") != "ready":
+            return None
+        python = self._artifact_manager.resolve_python()
+        fingerprint = self._artifact_manager.artifact_fingerprint()
+        if python is None or fingerprint is None:
+            return None
+        return python, fingerprint
 
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
@@ -2182,7 +2181,7 @@ class MemoryRuntime:
         *,
         operation_lease_held: bool = False,
     ) -> dict[str, Any]:
-        """Validate the artifact and non-destructively wake the existing root."""
+        """Converge the selected artifact and non-destructively wake its root."""
 
         if self._closing:
             return {
@@ -2251,38 +2250,73 @@ class MemoryRuntime:
                     "state": "disabled",
                     "error": "memory_disabled",
                 }
-            artifact_admitted = await self._lifecycle_checkpoint(
-                run_blocking(self.artifact_admitted)
+            artifact_status = await self._lifecycle_checkpoint(
+                run_blocking(self._artifact_manager.status)
             )
-            if not artifact_admitted:
+            previous_artifact = await self._lifecycle_checkpoint(
+                run_blocking(self._active_artifact_identity)
+            )
+            # Active usability and selected-manifest currency are independent
+            # of the last install attempt's diagnostic. Retained failure evidence
+            # must not make a verified old artifact unusable or authorize a retry
+            # against an unknown/rejected selection. Same-version byte/contract
+            # changes still converge when the installable manifest proves it.
+            manifest_changed = artifact_status.get("matches_manifest") is False
+            if previous_artifact is None or manifest_changed:
                 if self.available:
                     async with self._reconcile_lock, self.module.lifecycle():
                         self._require_lifecycle_work()
                         self.module.pause_claims()
-                        quiesced = await self._lifecycle_checkpoint(
-                            self.module.quiesce_claims(timeout_seconds=5.0)
-                        )
-                        if not quiesced:
-                            return {
-                                "ok": False,
-                                "state": "degraded",
-                                "error": "memory_runtime_busy",
-                            }
-                        await self._lifecycle_checkpoint(self._close_writer())
                         try:
+                            quiesced = await self._lifecycle_checkpoint(
+                                self.module.quiesce_claims(timeout_seconds=5.0)
+                            )
+                            if not quiesced:
+                                self._runtime_error = "memory_runtime_busy"
+                                return {
+                                    "ok": False,
+                                    "state": "degraded",
+                                    "error": self._runtime_error,
+                                }
+                            await self._lifecycle_checkpoint(self._close_writer())
                             await self._lifecycle_checkpoint(self._supervisor.stop())
                         except MemoryRuntimeBusyError:
                             raise
                         except Exception:
+                            self._runtime_error = "memory_wake_failed"
                             return {
                                 "ok": False,
                                 "state": "degraded",
-                                "error": "memory_wake_failed",
+                                "error": self._runtime_error,
                             }
+                        finally:
+                            # A pre-install abort must not permanently fence the
+                            # still-running admitted old child. A pending writer
+                            # close retains its own fence until cleanup settles;
+                            # unproved sidecar health or shutdown stays closed.
+                            if previous_artifact is not None and self._sidecar_ready_is_current():
+                                self.module.resume_claims()
                 installed = await self._lifecycle_checkpoint(
                     self._install_artifact_with_lease()
                 )
                 if installed.get("ok") is not True:
+                    # The installer owns pointer rollback. Only resume the exact
+                    # verified artifact it left in place; never restore pointers
+                    # or erase data here. _wake_locked rechecks the old root and
+                    # actual native readiness, while dependency status retains
+                    # the failed update rather than claiming manifest currency.
+                    active_artifact = await self._lifecycle_checkpoint(
+                        run_blocking(self._active_artifact_identity)
+                    )
+                    if previous_artifact is not None and active_artifact == previous_artifact:
+                        logger.warning(
+                            "Memory artifact update failed; waking the retained artifact: %s",
+                            installed.get("reason") or "memory_runtime_install_failed",
+                        )
+                        async with self._reconcile_lock:
+                            self._require_lifecycle_work()
+                            result = await self._wake_locked()
+                        return {**result, "artifact_update": installed}
                     self._runtime_error = str(
                         installed.get("reason") or "memory_wake_failed"
                     )

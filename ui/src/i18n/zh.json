@@ -4609,6 +4609,7 @@
       "restartRunning": "正在重启…",
       "restartDescription": "停止并重新启动 EverOS，不会删除记忆数据。",
       "completed": "记忆服务已就绪。",
+      "updateFailedStillRunning": "记忆引擎更新失败，已验证的旧引擎仍在运行，未删除任何记忆数据。",
       "failed": "无法启动记忆服务，未删除任何记忆数据。"
     },
     "repair": {
