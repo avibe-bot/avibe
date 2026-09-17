@@ -1,10 +1,12 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
 import type { RemoteAccessStatus } from '../context/ApiContext';
+import { InstanceAuthorizationProvider } from '../context/InstanceAuthorizationProvider';
+import { normalizeSessionInfo, OWNER_INSTANCE_CAPABILITIES } from '../lib/sessionInfo';
 
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
@@ -67,8 +69,17 @@ const runningStatus = (overrides: Partial<RemoteAccessStatus> = {}): RemoteAcces
   ...overrides,
 });
 
-function renderPage() {
-  return render(<RemoteAccess />);
+function renderPage(role: 'member' | 'owner' = 'owner') {
+  const session = normalizeSessionInfo({
+    remote: true, authenticated: true, authorization_state: 'current',
+    instance_role: role, instance_kind: 'organization',
+    capabilities: {
+      ...OWNER_INSTANCE_CAPABILITIES,
+      is_instance_owner: role === 'owner',
+      can_manage_access_members: role === 'owner',
+    },
+  });
+  return render(<InstanceAuthorizationProvider session={session}><RemoteAccess /></InstanceAuthorizationProvider>);
 }
 
 describe('RemoteAccess', () => {
@@ -103,4 +114,49 @@ describe('RemoteAccess', () => {
     expect(screen.queryByText('remoteAccess.networkTechnicalDetails')).toBeNull();
     expect(screen.queryByText('remoteAccess.networkPath')).toBeNull();
   });
+  it('PERMISSIONS-018 keeps Member transport usable while pairing is disabled', async () => {
+    api.stopRemoteAccess.mockResolvedValue(runningStatus({ running: false }));
+    api.startRemoteAccess.mockResolvedValue(runningStatus());
+    api.optimizeRemoteAccessRoute.mockResolvedValue(runningStatus());
+    renderPage('member');
+    const repair = await screen.findByRole('button', { name: 'remoteAccess.repair' });
+    expect((repair as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(repair);
+    expect(screen.queryByLabelText('remoteAccess.pairingKey')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'remoteAccess.optimizeRoute' }));
+    await waitFor(() => expect(api.optimizeRemoteAccessRoute).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'common.stop' }));
+    await waitFor(() => expect(api.stopRemoteAccess).toHaveBeenCalledOnce());
+    await waitFor(() => expect((screen.getByRole('button', { name: 'common.start' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'common.start' }));
+    await waitFor(() => expect(api.startRemoteAccess).toHaveBeenCalledOnce());
+    expect(api.pairVibeCloudRemoteAccess).not.toHaveBeenCalled();
+  });
+
+  it('PERMISSIONS-018 explains unpaired Member access without a pair request', async () => {
+    api.remoteAccessStatus.mockResolvedValue(runningStatus({ paired: false, running: false }));
+    renderPage('member');
+    await screen.findByText('remoteAccess.ownerPairingRequired');
+    const input = screen.getByLabelText('remoteAccess.pairingKey');
+    expect((input as HTMLInputElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: 'synthetic-key' } });
+    const pair = screen.getByRole('button', { name: 'remoteAccess.pair' });
+    expect((pair as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(pair);
+    expect(api.pairVibeCloudRemoteAccess).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('PERMISSIONS-018 preserves Owner pairing (paired=%s)', async (paired) => {
+    api.remoteAccessStatus.mockResolvedValue(runningStatus({ paired, running: paired }));
+    api.pairVibeCloudRemoteAccess.mockResolvedValue(runningStatus());
+    renderPage('owner');
+    if (paired) fireEvent.click(await screen.findByRole('button', { name: 'remoteAccess.repair' }));
+    const input = await screen.findByLabelText('remoteAccess.pairingKey');
+    fireEvent.change(input, { target: { value: 'synthetic-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'remoteAccess.pair' }));
+    await waitFor(() => expect(api.pairVibeCloudRemoteAccess).toHaveBeenCalledWith({
+      backend_url: 'https://avibe.bot', pairing_key: 'synthetic-key', device_name: 'avibe',
+    }));
+  });
+
 });

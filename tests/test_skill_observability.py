@@ -356,19 +356,23 @@ def test_invalid_observations_do_not_write(engine, mutate):
     assert counts(engine) == (0, None)
 
 
-def test_owner_only_sql_access_including_cte(engine):
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer", None])
+def test_manager_sql_access_including_cte(engine, role):
     from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
     from vibe.authorization import AuthorizationContext
 
     write(engine, load())
-    remote = AuthorizationContext(is_remote=True, instance_role="editor")
+    remote = AuthorizationContext(is_remote=True, instance_role=role)
     for table in ("skill_usage_daily", "agent_events"):
+        query = f"WITH stats AS (SELECT * FROM {table}) SELECT count(*) AS n FROM stats"
+        if role in {"member", "owner"}:
+            assert run_read_only_query(query, page_request=None, user_context=remote).rows == [{"n": 1}]
+        else:
+            with pytest.raises(ReadOnlyQueryError):
+                run_read_only_query(query, page_request=None, user_context=remote)
+    for query in ("DELETE FROM skill_usage_daily", "SELECT * FROM vault_secrets"):
         with pytest.raises(ReadOnlyQueryError):
-            run_read_only_query(
-                f"WITH stats AS (SELECT * FROM {table}) SELECT count(*) FROM stats",
-                page_request=None,
-                user_context=remote,
-            )
+            run_read_only_query(query, page_request=None, user_context=remote)
     assert run_read_only_query("SELECT count(*) AS n FROM skill_usage_daily", page_request=None).rows == [{"n": 1}]
 
 
@@ -584,7 +588,7 @@ def test_skill_usage_errors_follow_cli_language(monkeypatch, capsys, language, o
     monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(
         "storage.resource_access_service.resolve_resource_access_context",
-        lambda _caller: SimpleNamespace(is_instance_owner=owner),
+        lambda _caller: SimpleNamespace(can_manage_instance=owner),
     )
     assert cli.cmd_data_skill_usage(SimpleNamespace(clear=clear, yes=yes)) == 1
     captured = capsys.readouterr()
@@ -606,3 +610,18 @@ def test_skill_usage_help_follows_cli_language(monkeypatch, capsys, language):
     output = capsys.readouterr().out
     for key in ("helpCommand", "helpClear", "helpYes"):
         assert t(f"data.skillUsage.{key}", language) in output
+
+
+@pytest.mark.parametrize("role", ["owner", "member"])
+def test_manager_cli_skill_diagnostics_use_real_storage(engine, monkeypatch, capsys, role):
+    from vibe import cli
+    from vibe.authorization import AuthorizationContext
+
+    write(engine, load())
+    monkeypatch.setattr(cli, "caller_resource_user_context", lambda _caller: AuthorizationContext(instance_role=role))
+    assert cli.cmd_data_skill_usage(SimpleNamespace(clear=False, yes=False)) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert counts(engine) == (1, 1)
+    assert cli.cmd_data_skill_usage(SimpleNamespace(clear=True, yes=True)) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert counts(engine) == (0, None)

@@ -199,7 +199,7 @@ def test_highest_match_is_capped_by_instance_role(tmp_path) -> None:
         ) == "editor"
         assert project_access_service.get_effective_project_role(
             conn, _context("member"), project["id"]
-        ) == "editor"
+        ) == "member"
 
 
 def test_project_binding_rejects_member_access_role(tmp_path) -> None:
@@ -347,7 +347,7 @@ def test_archived_or_missing_project_intent_is_rejected(tmp_path) -> None:
     assert result.error_code == "project_not_found"
 
 
-def test_archived_project_denies_non_owner_effective_roles(tmp_path) -> None:
+def test_archived_project_denies_lower_role_effective_roles(tmp_path) -> None:
     engine, project = _engine_with_project(tmp_path)
     editor = _context("editor")
     with engine.begin() as conn:

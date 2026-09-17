@@ -1145,12 +1145,8 @@ class ShowPageStore:
             return
         from storage import project_access_service
 
-        scope_id = connection.execute(
-            select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id).limit(1)
-        ).scalar_one_or_none()
-        project_id = project_access_service.project_id_from_scope_id(scope_id)
-        if project_id is None or not project_access_service.role_allows(
-            project_access_service.get_effective_project_role(connection, user_context, project_id),
+        if not project_access_service.role_allows(
+            project_access_service.get_effective_session_role(connection, user_context, session_id),
             "editor",
         ):
             raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")

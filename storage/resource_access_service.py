@@ -1323,7 +1323,9 @@ def _policy_allows(
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
 ) -> bool:
-    if context.is_instance_owner:
+    # Current-instance operators use every supported resource without rewriting
+    # its stored ownership or ACL. Protected Vault proofs are enforced by use.
+    if context.can_manage_instance:
         return True
     if resource_kind == "agent" and context.is_personal_instance:
         return context.can_use_resource(resource_kind)

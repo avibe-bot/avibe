@@ -151,7 +151,7 @@ def validate_project_access_intent(intent: Any) -> dict[str, Any]:
     }
 
 
-def _active_project_scope(conn: Connection, project_id: str) -> str | None:
+def _project_scope(conn: Connection, project_id: str, *, include_archived: bool = False) -> str | None:
     scope_id = project_scope_id(project_id)
     row = conn.execute(
         select(scopes.c.id, scope_settings.c.enabled)
@@ -163,13 +163,13 @@ def _active_project_scope(conn: Connection, project_id: str) -> str | None:
         )
         .limit(1)
     ).first()
-    if row is None or row.enabled == 0:
+    if row is None or (row.enabled == 0 and not include_archived):
         return None
     return str(row.id)
 
 
 def is_active_project(conn: Connection, project_id: str) -> bool:
-    return _active_project_scope(conn, project_id) is not None
+    return _project_scope(conn, project_id) is not None
 
 
 def apply_project_access_intent(
@@ -194,7 +194,7 @@ def apply_project_access_intent(
 
     project_id = normalized["project_id"]
     revision = normalized["revision"]
-    scope_id = _active_project_scope(conn, project_id)
+    scope_id = _project_scope(conn, project_id)
     if scope_id is None:
         return ProjectAccessIntentResult(
             project_id=project_id,
@@ -314,6 +314,10 @@ def get_effective_project_role(
 ) -> str | None:
     if context.is_instance_owner:
         return "owner"
+    if context.can_manage_projects:
+        # Project archive is reversible. Managers must still see its record to
+        # reopen the folder; session archive/execution guards remain separate.
+        return context.instance_role if _project_scope(conn, project_id, include_archived=True) else None
     if not is_active_project(conn, project_id):
         return None
     instance_role = context.instance_role
@@ -343,7 +347,9 @@ def can_chat_project(conn: Connection, context: AuthorizationContext, project_id
 
 
 def can_manage_project(conn: Connection, context: AuthorizationContext, project_id: str) -> bool:
-    return get_effective_project_role(conn, context, project_id) == "owner"
+    return context.can_manage_projects and role_allows(
+        get_effective_project_role(conn, context, project_id), "member"
+    )
 
 
 def filter_accessible_projects(
@@ -365,7 +371,11 @@ def get_effective_session_role(
 ) -> str | None:
     project_id = get_session_project_id(conn, session_id)
     if project_id is None:
-        return "owner" if context.is_instance_owner else None
+        if context.is_instance_owner:
+            return "owner"
+        if context.can_manage_instance and session_exists(conn, session_id):
+            return context.instance_role
+        return None
     return get_effective_project_role(conn, context, project_id)
 
 

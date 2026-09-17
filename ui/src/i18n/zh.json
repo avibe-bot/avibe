@@ -1902,6 +1902,7 @@
     }
   },
   "remoteAccess": {
+    "ownerPairingRequired": "配对会更改实例身份，需要实例所有者权限。",
     "badge": "Avibe Cloud Provider",
     "title": "远程访问",
     "subtitle": "通过私有 avibe.bot 地址，从另一台设备打开这个本机 Web UI。你的数据和 Agent 仍然运行在这台机器上。",

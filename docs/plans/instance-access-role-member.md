@@ -1,5 +1,15 @@
 # Instance access role `member` (owner minus member management)
 
+> **Superseded Member operation scope (2026-09-17):**
+> [Instance Member operations](member-instance-operations.md) is authoritative for
+> Member resource use and runtime visibility on both instance kinds. Member is a
+> current-instance operator; the older Organization Agent/Project/session ACL
+> restrictions below are historical and no longer apply to Member. Editor/Viewer,
+> true Owner identity, access-administration and ownership safeguards remain.
+> Existing Show publication policy and shared inbox read-state semantics remain
+> unchanged. Shipped pre-catalog Member selection/session fallbacks are retained;
+> new Task/Watch binding names still require catalog entries.
+
 Issue: https://github.com/avibe-bot/avibe/issues/1596
 Related: https://github.com/avibe-bot/avibe/pull/1562 (Personal editor resource-ACL semantics — the capability model this role plugs into)
 

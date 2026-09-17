@@ -510,7 +510,7 @@ def test_unpinned_session_dispatches_the_agent_the_default_degraded_to(monkeypat
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
     engine = get_cached_sqlite_engine()
-    member = _organization_context("member-1", instance_role="member")
+    member = _organization_context("editor-1", instance_role="editor")
     try:
         # The configured instance default is another owner's private Agent; the
         # caller is entitled to others.

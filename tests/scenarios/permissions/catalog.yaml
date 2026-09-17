@@ -6,6 +6,7 @@ capability:
     - tests/scenarios/permissions/test_permissions_scenarios.py
     - tests/test_permissions.py
     - tests/test_member_management_parity.py
+    - tests/scenarios/permissions/test_member_instance_operations.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete
@@ -130,3 +131,63 @@ scenarios:
     given: A signed Organization instance Member and existing bound users and channels
     when: The Member saves channel operation and DM preferences and attempts access mutations
     then: Ordinary writes persist while user creation, role changes and reactivation are refused without mutation
+
+  - id: PERMISSIONS-014
+    name: Member operates current-instance Agents Projects and sessions
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_member_instance_operations.py::test_permissions_014_member_signed_agent_session_lifecycle
+    given: A signed Member has a policy-less built-in Agent and restricted or standalone sessions
+    when: The Member discovers selects mutates chats forks and opens Show
+    then: Operations succeed with original ACL and ownership rows unchanged
+
+  - id: PERMISSIONS-015
+    name: Member cannot administer access or bypass execution preconditions
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_member_instance_operations.py::test_permissions_015_access_administration_and_missing_resources
+    given: Member operation scope is instance-wide
+    when: The Member attempts access grants pairing onboarding or a disabled Agent
+    then: Protected effects are denied and real resource checks remain
+
+  - id: PERMISSIONS-016
+    name: Management events reach Member through the real SSE stream
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_member_instance_operations.py::test_permissions_016_real_sse_management_and_session_delivery
+    given: The real broker has Member Owner Editor and Viewer subscribers
+    when: Publisher-shaped management and session events are emitted
+    then: Member and Owner receive operations while lower roles stay scoped and unknown events remain Owner-only
+
+  - id: PERMISSIONS-017
+    name: Broader notification visibility preserves subject identity
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_member_instance_operations.py::test_permissions_017_notifications_keep_recipient_identity
+    given: Two signed users hold separate push subscriptions
+    when: Member reads badges and delayed recipients are authorized
+    then: Member sees instance records without rewriting or combining subscription keys
+
+  - id: PERMISSIONS-018
+    name: RemoteAccess pairing controls reflect true Owner identity
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: ui/src/components/RemoteAccess.test.tsx::PERMISSIONS-018 keeps Member transport usable while pairing is disabled
+    given: The existing component renders with actual Member or Owner capability providers
+    when: Paired and unpaired users interact with pairing and transport controls
+    then: Member cannot submit pairing but can operate transport while Owner pairing remains usable
+
+  - id: PERMISSIONS-019
+    name: Instance operational diagnostics admit Member and preserve query safety
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_skill_observability.py::test_manager_sql_access_including_cte
+    given: Test-owned Skill statistics and raw observations exist
+    when: All roles query statistics and managers use the diagnostics CLI
+    then: Member and Owner can inspect and clear statistics while lower-role denial read-only SQL and raw-secret denial remain

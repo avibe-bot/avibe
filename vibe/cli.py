@@ -7294,7 +7294,7 @@ def _print_data_retention_human(payload: dict, language: str) -> None:
 
 
 def cmd_data_skill_usage(args):
-    """Instance-owner maintenance; statistics remain off the user-facing UI."""
+    """Instance-management diagnostics; statistics remain off the user-facing UI."""
     try:
         from storage.resource_access_service import resolve_resource_access_context
         from storage import skill_observability
@@ -7303,7 +7303,7 @@ def cmd_data_skill_usage(args):
 
         language = _configured_cli_language()
         caller = caller_resource_user_context(caller_context_from_env())
-        if not resolve_resource_access_context(caller).is_instance_owner:
+        if not resolve_resource_access_context(caller).can_manage_instance:
             raise TaskCliError(i18n_t("data.skillUsage.ownerRequired", language), code="forbidden")
         if args.clear and not args.yes:
             raise TaskCliError(i18n_t("data.skillUsage.confirmationRequired", language), code="confirmation_required")

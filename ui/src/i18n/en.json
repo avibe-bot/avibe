@@ -1902,6 +1902,7 @@
     }
   },
   "remoteAccess": {
+    "ownerPairingRequired": "Pairing changes the instance identity and requires the instance Owner.",
     "badge": "Avibe Cloud provider",
     "title": "Remote Access",
     "subtitle": "Open this local Web UI from another device through a private avibe.bot URL. Your data and agents still run on this machine.",

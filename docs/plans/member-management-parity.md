@@ -1,5 +1,15 @@
 # Instance Member management parity
 
+> **Superseded Member operation scope (2026-09-17):**
+> [Instance Member operations](member-instance-operations.md) is authoritative for
+> Member resource use and runtime visibility on both instance kinds. Member is a
+> current-instance operator; the older Organization Agent/Project/session ACL
+> restrictions below are historical and no longer apply to Member. Editor/Viewer,
+> true Owner identity, access-administration and ownership safeguards remain.
+> Existing Show publication policy and shared inbox read-state semantics remain
+> unchanged. Shipped pre-catalog Member selection/session fallbacks are retained;
+> new Task/Watch binding names still require catalog entries.
+
 Status: authoritative implementation contract, 2026-09-16.
 Orchestrator: Avibe Session `sescctptxwqdq`.
 Implementation Session: `sesb5c3sb2ayz`.

@@ -148,8 +148,8 @@ def _dumps_metadata(metadata: dict[str, Any]) -> str:
     return json.dumps(metadata)
 
 
-def _has_runtime_owner_access(context: AuthorizationContext) -> bool:
-    return context.is_instance_owner
+def _has_runtime_management_access(context: AuthorizationContext) -> bool:
+    return context.can_manage_instance
 
 
 def _include_local_details(context: AuthorizationContext) -> bool:
@@ -185,7 +185,7 @@ def list_sessions(
 
     context = require_instance_role(authorization_context, "viewer")
     query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
-    if not _has_runtime_owner_access(context):
+    if not _has_runtime_management_access(context):
         accessible_scope_ids = {
             project_access_service.project_scope_id(project_id)
             for project_id in project_access_service.accessible_project_ids(conn, context)
@@ -279,7 +279,7 @@ def get_session(
     ).mappings().first()
     if row is None:
         raise LookupError(f"Session not found: {session_id}")
-    if not _has_runtime_owner_access(context):
+    if not _has_runtime_management_access(context):
         project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
         if project_id is None or not project_access_service.can_read_project(
             conn, context, project_id
@@ -373,7 +373,7 @@ def create_session(
     """
 
     authorization = require_instance_role(authorization_context, "editor")
-    if not _has_runtime_owner_access(authorization):
+    if not _has_runtime_management_access(authorization):
         project_id = project_access_service.project_id_from_scope_id(scope_id)
         if project_id is None or not project_access_service.can_chat_project(
             conn, authorization, project_id
@@ -663,7 +663,7 @@ def update_session(
     # reads). Same split as ``sessions_service.bind_agent_session_by_id``.
     if existing.status == "archived":
         raise SessionArchivedError(session_id)
-    if not _has_runtime_owner_access(authorization):
+    if not _has_runtime_management_access(authorization):
         project_id = project_access_service.project_id_from_scope_id(existing.scope_id)
         if project_id is None or not project_access_service.can_chat_project(
             conn, authorization, project_id
@@ -1428,7 +1428,7 @@ def archive_session(
     ).scalar_one_or_none()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
-    if not _has_runtime_owner_access(context):
+    if not _has_runtime_management_access(context):
         if not project_access_service.role_allows(
             project_access_service.get_effective_session_role(conn, context, session_id),
             "editor",

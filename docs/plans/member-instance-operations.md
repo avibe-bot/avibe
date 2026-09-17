@@ -1,6 +1,6 @@
 # Instance Member operations
 
-Status: approved behavior contract, implementation in progress (2026-09-17).
+Status: approved behavior contract, implementation under validation (2026-09-17).
 Orchestrator: Avibe Session `sesnps2m743r5`.
 Baseline: `06a864947` on `avibe-bot/avibe` master.
 Branch: `fix/member-instance-operations`.
@@ -45,19 +45,34 @@ authoritative. Update those documents to make this precedence explicit.
    operational scope; do not mint another role or a redundant permission axis.
    Memory principal isolation, terminal attachment identity, per-user preferences,
    notification subscriptions and protected Vault authorization/proofs still
-   apply where they also apply to Owner. IM binding/admin is a separate identity
-   system and is not elevated by a cloud Instance Member grant.
+   apply where they also apply to Owner. Preserve the existing shared
+   `messages.read_at` and global Workbench toggle semantics; this repair does not
+   introduce per-person read state or merge identity where it already isolates.
+   IM binding/admin is a separate identity system and is not elevated by a cloud Instance Member grant.
 4. **Preserve other roles.** Editor, Viewer, unauthenticated and invalid-context
    behavior remain unchanged. Existing restrictive resource rules still apply to
    those roles. Preserve CSRF, signed identity validation, resource existence,
    Agent enabled/available checks and other ordinary execution preconditions.
-   Missing Agent catalog names are not made valid merely for apparent parity.
+   Preserve shipped Member pre-catalog selection/session fallbacks. Do not expand
+   the separate Owner-only missing-name fallback for new Task/Watch bindings:
+   those Member bindings still require an existing catalog Agent.
 5. **Effect-based policy, bounded implementation.** Evolve the existing central
    capabilities and route policy. Member operational permission should follow
    that common decision, while access/identity effects retain explicit gates.
    Do not default-allow unknown APIs, redefine Owner, or rebuild the complete
    four-role policy framework. Registered routes must remain deliberately
    classified and covered by the existing complete-router invariant.
+6. **Project/session identity and Show policy.** Effective Member roles stay
+   `member`, never synthetic `owner`. Project archive is reversible: Member
+   can list archived Projects explicitly, read their record context and reopen
+   their folder like Owner. Missing Projects still fail; Editor/Viewer keep
+   archived-Project denial. Archived sessions remain inert under the existing
+   mutation/fork/execution guards. Project bootstrap, Show and deferred execution
+   use the same effective-role decision rather than treating archive as an ACL.
+   Show's single `/p` publication/link-visibility/limited-email axis already admits Editors.
+   Only session-dependent create/get/ensure authorization changes here; existing
+   sharing/owner-control guards stay unchanged. Unified publication/role design
+   is deferred with Editor/Viewer.
 
 ## Required consumers
 
@@ -94,6 +109,9 @@ Allowed production scope: `vibe/authorization.py`, `vibe/ui_server.py`,
 `core/services/session_fork.py`, `core/show_pages.py`,
 `core/web_push_notifications.py`, and existing Harness/resource consumer modules
 only where a traced Member authorization call path requires alignment.
+PM-approved narrow extension (2026-09-17): `vibe/i18n/en.json` and
+`vibe/i18n/zh.json`, only the existing `data.skillUsage.ownerRequired` value,
+so the diagnostic denial accurately names Member or Owner; no new key.
 UI scope: `ui/src/components/RemoteAccess.tsx`, its focused tests, and existing
 EN/ZH translation files only as necessary. Related focused tests, permission
 scenario catalog/harness and concise permission documentation are allowed.
@@ -151,6 +169,52 @@ orchestrator with the concrete call path first.
 
 - [x] Complete and independently verify the three-lane baseline audit.
 - [x] Recover the owner discussion and freeze the approved Member semantics.
-- [ ] Implement and validate in the isolated task worktree.
+- [x] Implement and validate in the isolated task worktree.
 - [ ] Complete exact-head review and CI; independently verify the final diff.
 - [ ] Present the concrete merge-ready PR and residual acceptance steps.
+
+## Implementation and evidence map
+
+The existing management capabilities own current-instance operations. Resource
+use, Project/session projection, runtime list/graph/search/inbox/media, callback
+source metadata, notification badge visibility and SSE filtering consume that
+scope. Owner identity and protected access writers remain independent. The
+runtime helper was renamed only at its consumers; bulk onboarding retains an
+explicit true-Owner guard. No schema, dependencies or cloud aggregation changed.
+
+- PERMISSIONS-014: Personal/Organization signed HTTP + CSRF Agent/session
+  lifecycle, ACL-shape comparison, Project archive/restore and mutation/reuse,
+  real Show store, real fork reservation, runtime discovery and persisted Harness
+  bindings. Signed HTTP Deliveries also pass the real execution-time
+  `SessionTurnManager._remote_delivery_execution_denial` before provider acceptance
+  is stubbed; a changed pairing still rejects those persisted Deliveries.
+- PERMISSIONS-015: protected access/pairing/onboarding denials, missing resources,
+  disabled Agent, existing lower-role and compatibility checks.
+- PERMISSIONS-016: actual SSE generator and broker with publisher-shaped Vault,
+  definition, sessionless run, tunnel-quality and session events; unknown events
+  stay Owner-only and Editor/Viewer remain scoped.
+- PERMISSIONS-017: per-subject Web Push subscription storage and badge/delivery
+  filtering; message authorship remains the signed subject. Callback source
+  enrichment now follows the same instance operation scope.
+- PERMISSIONS-018: RemoteAccess rendered with the actual authorization provider;
+  paired/unpaired Member pairing cannot submit, transport works and Owner pairs.
+- PERMISSIONS-019: real skill diagnostics/clear storage and read-only SQL including
+  CTEs; Member admitted, lower roles denied, SQL writes/raw Vault secrets denied.
+
+Known by design: Show publication policy is unchanged; inbox read markers and
+Workbench toggles retain their existing shared semantics. Memory principal,
+terminal attachment identity, Vault proofs, IM admin and protected mixed writes
+are unchanged. Historical Member selection/session fallbacks remain supported;
+new Task/Watch names still resolve the catalog. Local tests stub execution IPC
+and provider/host effects after authorization; no tenant or live provider result
+is claimed. Post-merge acceptance still needs an authorized real Member browser
+conversation and live transport/session updates in the regression instance.
+
+Focused local evidence: 493 Python tests across permissions, Agent/Project/session
+ACL consumers, messages/notifications, forks and diagnostics; 188 retained
+Skills/terminal/Memory-admission/Permissions scenarios; 32 Show sharing cases;
+6 RemoteAccess render tests; changed-file Ruff and production UI build. An
+additional broad Show run was interrupted during unrelated runtime preparation
+network I/O after three cases; it is not counted as passing. Targeted sharing
+coverage above replaces that irrelevant preparation path. CI supplies the full
+repository gate. All state is test-owned; execution/provider IPC is stubbed.

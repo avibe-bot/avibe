@@ -2456,8 +2456,8 @@ def _request_authorization_context(context: Any = None):
     return resolved
 
 
-def _has_runtime_owner_access(context: Any) -> bool:
-    return bool(context is not None and context.is_instance_owner)
+def _has_runtime_management_access(context: Any) -> bool:
+    return bool(context is not None and context.can_manage_instance)
 
 
 def _access_administration_forbidden(context: Any = None):
@@ -2495,7 +2495,7 @@ def _runtime_record_agent_refs(record: Any) -> tuple[str | None, str | None]:
 def _runtime_record_visible(context: Any, record: Any, *, connection: Any | None = None) -> bool:
     """Return whether a Project-bound Agent runtime record is authorized.
 
-    Owners see every record. Everyone else must pass both the Project ACL for
+    Instance managers see every record. Other roles must pass both the Project ACL for
     the bound session (when one exists) and the Agent ACL for the selected
     Agent (when one exists). Harness definitions and runs intentionally do not
     use this helper because Harness has no additional resource ACL in this MVP.
@@ -2503,7 +2503,7 @@ def _runtime_record_visible(context: Any, record: Any, *, connection: Any | None
 
     if context is None:
         return False
-    if _has_runtime_owner_access(context):
+    if _has_runtime_management_access(context):
         return True
     session_id = _runtime_record_session_id(record)
     agent_id, agent_name = _runtime_record_agent_refs(record)
@@ -2561,7 +2561,7 @@ def _running_agent_counts(agents: list[Any] | tuple[Any, ...] | None) -> dict[st
 
 
 def _authorized_graph_payload(context: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    if _has_runtime_owner_access(context):
+    if _has_runtime_management_access(context):
         return payload
     from core.services.agent_graph import _counts as graph_counts
 
@@ -2891,11 +2891,11 @@ def _project_access_resource(path: str) -> tuple[str, str] | None:
 
 @app.before_request
 def enforce_project_role_capabilities():
-    """Narrow remote non-owner Project/session routes through applied Project ACLs."""
+    """Narrow non-manager Project/session routes through applied Project ACLs."""
     if _remote_auth_exempt_path():
         return None
     context = getattr(g, "authorization_context", None)
-    if context is None or _has_runtime_owner_access(context):
+    if context is None or _has_runtime_management_access(context):
         return None
 
     from storage import project_access_service
@@ -2914,18 +2914,8 @@ def enforce_project_role_capabilities():
     )
     if minimum_instance_role not in {"viewer", "editor", "member"}:
         return None
-    # A ``member`` route is instance-wide Project administration, but it still
-    # names one Project, and the instance role does not say *which* Projects the
-    # caller may touch. Ceiling this at "editor" is what let a member mutate a
-    # restricted Project by id that ``list_projects`` hides from them.
-    #
-    # The floor for those routes is the Project ACL's *visibility* floor, not
-    # "member": a member holding an explicit editor binding on a restricted
-    # Project has an effective Project role of editor, so demanding a "member"
-    # Project role would refuse the very Projects the list shows them. The
-    # instance-role half of the authorization is already enforced by the HTTP
-    # policy before this hook runs; this half only asks whether the Project is
-    # theirs to see.
+    # Lower roles retain Project ACL floors. Member management was already
+    # admitted above; this fallback keeps route and resource policy distinct.
     required_project_role = "viewer" if minimum_instance_role == "member" else minimum_instance_role
     resource = _project_access_resource(request.path)
     if resource is None:
@@ -3626,7 +3616,7 @@ def _websocket_context_authorized(
 ) -> bool:
     if not context.has_role(minimum_role):
         return False
-    if project_session_id is None or _has_runtime_owner_access(context):
+    if project_session_id is None or _has_runtime_management_access(context):
         return True
     if minimum_role == "viewer":
         return context.has_role("viewer")
@@ -3638,7 +3628,7 @@ def _project_session_access_allowed(context: Any, session_id: str, minimum_role:
 
     if context is None:
         return False
-    if _has_runtime_owner_access(context):
+    if _has_runtime_management_access(context):
         return True
     if not context.has_role(minimum_role):
         return False
@@ -5146,7 +5136,7 @@ def vibe_agent_onboarding():
         # instance-wide one-way Agent migration, not member management. The store
         # repeats the check in ``_require_agent_onboarding_access`` so non-HTTP
         # callers are gated too; both layers ask the same question.
-        if not _has_runtime_owner_access(user_context):
+        if user_context is None or not user_context.is_instance_owner:
             return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         if request.method == "POST":
             return jsonify(api.onboard_vibe_agents(user_context=user_context))
@@ -5174,7 +5164,7 @@ async def running_agents_get():
     body = result.get("body") or {}
     context = _request_authorization_context()
     agents = _filter_runtime_records(context, body.get("agents") or [])
-    counts = body.get("counts") if _has_runtime_owner_access(context) else _running_agent_counts(agents)
+    counts = body.get("counts") if _has_runtime_management_access(context) else _running_agent_counts(agents)
     return jsonify({**body, "agents": agents, "counts": counts})
 
 
@@ -5830,7 +5820,7 @@ def _is_remote_show_page_request() -> bool:
 
 def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
     context = _request_authorization_context(context)
-    if context is None or _has_runtime_owner_access(context):
+    if context is None or _has_runtime_management_access(context):
         return payload
     from storage import project_access_service
 
@@ -5863,7 +5853,7 @@ def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) ->
 
 def _show_page_payloads_for_request(payloads: list[dict], context: Any = None) -> list[dict]:
     context = _request_authorization_context(context)
-    if context is None or _has_runtime_owner_access(context):
+    if context is None or _has_runtime_management_access(context):
         return payloads
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -8278,10 +8268,10 @@ def _projects_engine():
 
 
 def _accessible_project_scope_ids_for_context(conn, context) -> list[str] | None:
-    """Return a principal's readable Project scopes; owners need no SQL filter."""
+    """Return a principal's readable Project scopes; managers need no SQL filter."""
     from storage import project_access_service
 
-    if context is None or _has_runtime_owner_access(context):
+    if context is None or _has_runtime_management_access(context):
         return None
     return sorted(
         project_access_service.project_scope_id(project_id)
@@ -10677,7 +10667,7 @@ def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
         # Project/session role below must not stack on top, or an admitted
         # Instance Viewer who is outside the page's Project loses the screenshot.
         return True
-    if context is None or _has_runtime_owner_access(context):
+    if context is None or _has_runtime_management_access(context):
         return True
     session_ids = media_service.referenced_session_ids(conn, token)
     if session_ids:
@@ -11918,7 +11908,7 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
         # ACL. Project ACL gates page creation/editing, while §3.2 instance
         # admission gates Viewer reads and live event delivery.
         return context.has_role("viewer")
-    if _has_runtime_owner_access(context):
+    if _has_runtime_management_access(context):
         return True
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
         return True
@@ -12164,7 +12154,7 @@ async def workbench_events():
                     if (
                         event_type == "authorization.changed"
                         and authorization_context is not None
-                        and not _has_runtime_owner_access(authorization_context)
+                        and not _has_runtime_management_access(authorization_context)
                     ):
                         payload = json.dumps(
                             {

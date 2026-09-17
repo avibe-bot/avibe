@@ -1770,7 +1770,7 @@ def test_pre_member_resource_user_context_snapshot_keeps_editor_role() -> None:
     assert not restored.can_manage_instance
 
 
-def test_organization_member_remains_subject_to_resource_acl_for_use(tmp_path, sqlite_schema_db_factory) -> None:
+def test_instance_member_operates_resources_without_rewriting_acl(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
     sqlite_schema_db_factory(db)
     engine = create_sqlite_engine(db)
@@ -1783,13 +1783,13 @@ def test_organization_member_remains_subject_to_resource_acl_for_use(tmp_path, s
                 group_ids=frozenset({"group-sales"}),
             )
             assert member.can_manage_instance
-            assert not resource_access_service.can_use_resource(
+            assert resource_access_service.can_use_resource(
                 member, "agent", "private-agent", connection=connection
             )
             assert resource_access_service.can_use_resource(
                 member, "agent", "public-agent", connection=connection
             )
-            assert not resource_access_service.can_use_resource(
+            assert resource_access_service.can_use_resource(
                 member, "agent", "scoped-agent", connection=connection
             )
     finally:

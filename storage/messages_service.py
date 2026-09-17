@@ -307,7 +307,7 @@ def _attach_harness_provenance(
         ).mappings():
             project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
             if (
-                not context.is_instance_owner
+                not context.can_manage_instance
                 and (
                     project_id is None
                     or not project_access_service.can_read_project(conn, context, project_id)

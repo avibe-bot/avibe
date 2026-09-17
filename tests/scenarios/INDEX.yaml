@@ -221,6 +221,7 @@ capabilities:
     observations: tests/scenarios/permissions/observations.yaml
     scenario_tests:
       - tests/scenarios/permissions/test_permissions_scenarios.py
+      - tests/scenarios/permissions/test_member_instance_operations.py
     harness:
       - tests/scenario_harness/permissions.py
     unit_or_contract_tests:
