@@ -199,6 +199,7 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     # Harness/session assertions can bind themselves to the live Agent session.
     for name in (
         "AVIBE_SESSION_ID",
+        "AVIBE_CALLER_SESSION_PROOF",
         "AVIBE_RUN_ID",
         "AVIBE_NATIVE_SESSION_ID",
         "AVIBE_CALLER_SOURCE",

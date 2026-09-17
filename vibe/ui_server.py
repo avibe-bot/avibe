@@ -12260,7 +12260,7 @@ def _harness_store():
     # context manager makes ownership explicit at every call site.
     from storage.background import SQLiteBackgroundTaskStore
 
-    store = SQLiteBackgroundTaskStore()
+    store = SQLiteBackgroundTaskStore(include_private_metadata=False)
     try:
         yield store
     finally:

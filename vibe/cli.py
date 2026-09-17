@@ -2569,6 +2569,8 @@ def _task_payload(task, *, brief: bool = False):
             "enabled": task.enabled,
         }
     payload = task.to_dict()
+    payload["metadata"] = dict(payload.get("metadata") or {})
+    payload["metadata"].pop("delegated_memory_owner", None)
     payload.update(derived)
     return payload
 
@@ -2695,7 +2697,7 @@ def _task_store() -> ScheduledTaskStore:
 def _definition_read_store():
     """Own the canonical read projection store used by CLI read commands."""
 
-    store = SQLiteBackgroundTaskStore()
+    store = SQLiteBackgroundTaskStore(include_private_metadata=False)
     try:
         yield store
     finally:
@@ -3655,6 +3657,8 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
             "last_error": watch.last_error,
         }
     payload = watch.to_dict()
+    payload["metadata"] = dict(payload.get("metadata") or {})
+    payload["metadata"].pop("delegated_memory_owner", None)
     payload.update(derived)
     return payload
 

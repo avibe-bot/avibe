@@ -87,10 +87,6 @@ def _new_message_id() -> str:
     return f"msg_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
 
-_PRIVATE_WEB_PUSH_METADATA_PREFIX = "_web_push_"
-_PRIVATE_RESOURCE_USER_CONTEXT_KEY = "resource_user_context"
-
-
 def _row_to_payload(
     row: dict[str, Any],
     *,
@@ -121,12 +117,9 @@ def _row_to_payload(
     if not isinstance(metadata, dict):
         metadata = {}
     elif not include_private_metadata:
-        metadata = {
-            key: value
-            for key, value in metadata.items()
-            if key != _PRIVATE_RESOURCE_USER_CONTEXT_KEY
-            and not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
-        }
+        from storage.message_deliveries import public_message_metadata
+
+        metadata = public_message_metadata(metadata)
     return {
         "id": row["id"],
         "scope_id": row.get("scope_id"),

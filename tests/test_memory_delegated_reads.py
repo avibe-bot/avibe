@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
@@ -23,6 +24,28 @@ from tests.test_session_delivery_fsm import (
     managers,  # noqa: F401 -- imported pytest fixture
 )
 from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+
+@pytest.fixture(autouse=True)
+def delegated_owner_transport(monkeypatch, tmp_path):
+    """Real client serialization + ASGI endpoint + verifier, no admitted flag."""
+    from core.caller_context import caller_env_for_platform_payload
+
+    app = create_app(_memory_controller())
+
+    class InternalTransport(httpx.BaseTransport):
+        def handle_request(self, request):
+            async def dispatch():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    response = await client.request(request.method, str(request.url),
+                                                    headers=request.headers, content=request.read())
+                    return httpx.Response(response.status_code, headers=response.headers, content=response.content)
+            return asyncio.run(dispatch())
+
+    monkeypatch.setattr("vibe.internal_client._verified_socket_path", lambda _path: tmp_path / "test.sock")
+    monkeypatch.setattr("vibe.internal_client.httpx.HTTPTransport", lambda **_kwargs: InternalTransport())
+    for key, value in caller_env_for_platform_payload(_context().platform_specific, message=_context()).items():
+        monkeypatch.setenv(key, value)
 
 
 def _memory_controller():
@@ -115,7 +138,7 @@ def test_delegated_read_survives_definition_and_controller_restart(managers, mon
         observed.append(await _search(direct))
         assert await _search(direct, project="notes") == observed[0]
         assert direct.memory_scope_for_cli_session("ses_fsm") == observed[0]
-        definition = _create_definition(kind, tmp_path / f"{kind}.json")
+        definition = await asyncio.to_thread(_create_definition, kind, tmp_path / f"{kind}.json")
         definitions.append(definition)
         assert definition.metadata["delegated_memory_owner"]["user_id"] == "local"
         scheduler = ScheduledTaskService(controller=direct, store=ScheduledTaskStore(tmp_path / "dispatch.json"))
@@ -149,6 +172,12 @@ def test_delegated_read_survives_definition_and_controller_restart(managers, mon
         manager._terminalize_durable_turn(
             first.turn_id, "completed", settled_by="terminal_result", evidence_kind="fixture", resume_successors=False
         )
+        # Restart drops the ephemeral process key; persisted owner facts alone
+        # restore read scope, and a new shell receives a fresh Session proof.
+        import secrets
+        from core.caller_context import caller_env_for_platform_payload
+
+        monkeypatch.setattr("core.caller_context._SESSION_PROOF_KEY", secrets.token_bytes(32))
         restarted = _memory_controller()
         fresh.controller.config.memory = SimpleNamespace(enabled=True)
 
@@ -180,7 +209,9 @@ def test_delegated_read_survives_definition_and_controller_restart(managers, mon
                 )
                 assert response.status_code == 403
             # Task -> Watch must use the stamped owner, not the synthetic author.
-            chained = _create_definition("watch", tmp_path / "chained.json")
+            for key, value in caller_env_for_platform_payload(ctx.platform_specific, message=ctx).items():
+                monkeypatch.setenv(key, value)
+            chained = await asyncio.to_thread(_create_definition, "watch", tmp_path / "chained.json")
             assert chained.metadata["delegated_memory_owner"] == definition.metadata["delegated_memory_owner"]
             completed.append(True)
 
@@ -265,11 +296,11 @@ def test_remote_delegations_isolate_users_and_recheck_revoked_binding(managers, 
                     run_at="2099-01-01T00:00:00+00:00",
                 )
                 metadata = {"created_by": {"caller": {"session_id": "ses_fsm", "user_id": "remote:other"}}}
-                task = store.add_task(**args, metadata=metadata, user_context=resource)
+                task = await asyncio.to_thread(store.add_task, **args, metadata=metadata, user_context=resource)
                 # A different subject cannot take the current Delivery's owner.
                 from dataclasses import replace
 
-                forged = store.add_task(**args, metadata=metadata, user_context=replace(resource, subject="other"))
+                forged = await asyncio.to_thread(store.add_task, **args, metadata=metadata, user_context=replace(resource, subject="other"))
                 assert "delegated_memory_owner" not in forged.metadata
                 scheduler = ScheduledTaskService(controller=controller, store=store)
                 continued = await scheduler._build_context(
@@ -314,3 +345,126 @@ def test_remote_delegations_isolate_users_and_recheck_revoked_binding(managers, 
             assert controller.memory_search_payload.call_count == 1
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("proof_kind", ["other_session", "missing", "tampered", "valid"])
+def test_im_session_override_rejected(managers, monkeypatch, tmp_path, proof_kind):
+    """MEMORY-SEARCH-025: actual IM owner resists ordinary CLI locator overrides."""
+    from core.caller_context import caller_context_from_env, caller_env_for_platform_payload, AVIBE_CALLER_SESSION_PROOF_ENV
+
+    manager, _fresh, engine, _other_engine, _starts = managers
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    observed = []
+
+    async def victim_active(_session, context, _text, **_kwargs):
+        source = "ses_fsm" if proof_kind == "valid" else "attacker_session"
+        source_context = _context(source)
+        proof = caller_env_for_platform_payload(source_context.platform_specific, message=source_context)[AVIBE_CALLER_SESSION_PROOF_ENV]
+        monkeypatch.setenv(AVIBE_CALLER_SESSION_PROOF_ENV, {"missing": "", "tampered": "伪造"}.get(proof_kind, proof))
+        # A different Agent can replace these ordinary CLI environment locators.
+        monkeypatch.setenv("AVIBE_SESSION_ID", "ses_fsm")
+        monkeypatch.setenv("AVIBE_CALLER_PLATFORM", "slack")
+        monkeypatch.setenv("AVIBE_CALLER_USER_ID", "attacker")
+        caller = caller_context_from_env()
+        definition = await asyncio.to_thread(
+            _create_definition, "scheduled", tmp_path / "spoofed.json",
+            owner_metadata={"created_by": {"caller": caller.to_metadata()}},
+        )
+        observed.append(definition.metadata.get("delegated_memory_owner"))
+
+    manager._run = victim_active
+    asyncio.run(manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="victim work",
+                        platform="slack", scope_id="slack::user::victim",
+                        author_id="victim", message_kind="original"),
+        context=_context(),
+    ))
+    assert observed == ([{"platform": "slack", "user_id": "victim", "is_dm": True}] if proof_kind == "valid" else [None])
+
+
+def test_public_continuation_payloads_hide_owner(managers):
+    """Queued Delivery and accepted Message redact both known owner locations."""
+    from storage.messages_service import get_message
+
+    manager, _fresh, engine, _other_engine, _starts = managers
+    owner = {"platform": "slack", "user_id": "private-user", "is_dm": True}
+    private = {"delegated_memory_owner": owner}
+    metadata = {
+        **private,
+        "visible": "retained",
+        "scheduled_provenance": {"platform_specific": {"message_metadata": {**private, "visible": "nested"}}},
+    }
+    observed = []
+
+    async def accept(_session, context, _text, **_kwargs):
+        with engine.connect() as conn:
+            turn = message_deliveries.active_turn(conn, "ses_fsm")
+            delivery = message_deliveries.delivery_for_turn(conn, turn["id"])
+        raw = message_deliveries.delivery_payload(delivery)
+        public = message_deliveries.public_delivery_payload(delivery)
+        assert raw["metadata"]["delegated_memory_owner"] == owner
+        observed.append(public["metadata"])
+        token = context.platform_specific["turn_token"]
+        manager._active_identity = lambda _backend, _session, logical: (logical, f"native-{logical}")
+        manager.on_native_start(context, backend="codex", runtime_key=f"runtime-{token}", runtime_turn_id=token)
+        with engine.connect() as conn:
+            delivery = message_deliveries.delivery_for_turn(conn, turn["id"])
+            accepted = get_message(conn, delivery["message_id"])
+            raw_message = message_deliveries.message_for_delivery(conn, delivery)
+        assert "delegated_memory_owner" in raw_message["metadata_json"]
+        observed.append(accepted["metadata"])
+
+    manager._run = accept
+    asyncio.run(manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="continuation", source="harness",
+                        author="system", metadata=metadata),
+        context=_context(),
+    ))
+    expected = {"visible": "retained", "scheduled_provenance": {
+        "platform_specific": {"message_metadata": {"visible": "nested"}},
+    }}
+    assert observed == [expected, expected]
+
+
+@pytest.mark.parametrize("kind", ["scheduled", "watch"])
+def test_public_definition_projection_preserves_sqlite_runtime_owner(managers, monkeypatch, tmp_path, kind):
+    """MEMORY-SEARCH-026: display reads and pause/resume preserve raw owners."""
+    from storage.background import SQLiteBackgroundTaskStore
+    from vibe.cli import _task_payload, _watch_payload
+
+    _manager, _fresh, engine, _other_engine, _starts = managers
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    db_path = engine.url.database
+    raw = SQLiteBackgroundTaskStore(db_path=Path(db_path))
+    public = SQLiteBackgroundTaskStore(db_path=Path(db_path), include_private_metadata=False)
+    definition = _create_definition(kind, tmp_path / f"{kind}.json")
+    owner = {"platform": "slack", "user_id": "fixture", "is_dm": True}
+    resource = {"sub": "fixture", "is_remote": True}
+    definition.metadata.update(delegated_memory_owner=owner, resource_user_context=resource)
+    try:
+        if kind == "scheduled":
+            raw.upsert_scheduled_task(definition.to_dict())
+            shown = public.get_scheduled_task(definition.id)
+            listed = public.list_scheduled_tasks()
+            assert public.set_definition_enabled(definition.id, False, definition_type=kind)
+            assert public.set_definition_enabled(definition.id, True, definition_type=kind)
+            fallback = _task_payload(definition)
+            monkeypatch.setattr("core.scheduled_tasks.SQLiteBackgroundTaskStore", lambda: raw)
+            restored = ScheduledTaskStore().get_task(definition.id)
+        else:
+            raw.upsert_watch(definition.to_dict())
+            shown = public.get_watch(definition.id)
+            listed = public.list_watches()
+            assert public.set_definition_enabled(definition.id, False, definition_type=kind)
+            assert public.set_definition_enabled(definition.id, True, definition_type=kind)
+            fallback = _watch_payload(definition, runtime_entry=None)
+            monkeypatch.setattr("core.watches.SQLiteBackgroundTaskStore", lambda: raw)
+            restored = ManagedWatchStore().get_watch(definition.id)
+        for item in [shown, *listed, fallback]:
+            assert "delegated_memory_owner" not in item["metadata"]
+            assert item["metadata"]["resource_user_context"] == resource
+        assert restored.metadata["delegated_memory_owner"] == owner
+        assert restored.metadata["resource_user_context"] == resource
+    finally:
+        public.close()
+        raw.close()

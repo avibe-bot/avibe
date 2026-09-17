@@ -521,13 +521,48 @@ def metadata_with_delegated_memory_owner(
     caller = created_by.get("caller") if isinstance(created_by, dict) else None
     if not session_id or not isinstance(caller, dict) or caller.get("session_id") != session_id:
         return result
+    import asyncio
+    import os
+    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV
+    from vibe.internal_client import delegated_memory_owner_sync, InternalServerUnavailable
+
+    proof = os.environ.get(AVIBE_CALLER_SESSION_PROOF_ENV, "")
+    if not proof:
+        return result
+    # Definition creation in a controller event loop must not synchronously
+    # call its own socket. Agent CLI creation runs outside that loop.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return result
+    try:
+        owner = delegated_memory_owner_sync(session_id, proof)
+    except InternalServerUnavailable:
+        return result
+    if not owner:
+        return result
+    # Resource Owner is not itself a Memory identity. In particular a caller
+    # cannot borrow another remote user's admitted Delivery by naming its Session.
+    if owner.get("platform") == "avibe":
+        remote = result.get("resource_user_context")
+        expected = f"remote:{remote.get('sub')}" if isinstance(remote, dict) and remote.get("sub") else "local"
+        if owner["user_id"] != expected:
+            return result
+    result["delegated_memory_owner"] = dict(owner)
+    return result
+
+
+def current_delivery_memory_owner(session_id: str) -> dict[str, Any] | None:
+    """Controller-only lookup, after authenticating the creating Session proof."""
     from storage.db import get_cached_sqlite_engine
 
     with get_cached_sqlite_engine().connect() as conn:
         turn = active_turn(conn, session_id)
         delivery = delivery_for_turn(conn, turn["id"]) if turn else None
         if delivery is None:
-            return result
+            return None
         # Acceptance moves the immutable content into Message and clears the
         # temporary Delivery snapshot. Follow that exact FK, never history.
         snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
@@ -548,16 +583,27 @@ def metadata_with_delegated_memory_owner(
         owner = (spec.get("message_metadata") or {}).get("delegated_memory_owner")
     else:
         owner = None
-    if not isinstance(owner, dict) or not owner.get("user_id"):
-        return result
-    # Resource Owner is not itself a Memory identity. In particular a caller
-    # cannot borrow another remote user's admitted Delivery by naming its Session.
-    if owner.get("platform") == "avibe":
-        remote = result.get("resource_user_context")
-        expected = f"remote:{remote.get('sub')}" if isinstance(remote, dict) and remote.get("sub") else "local"
-        if owner["user_id"] != expected:
-            return result
-    result["delegated_memory_owner"] = dict(owner)
+    return dict(owner) if isinstance(owner, dict) and owner.get("user_id") else None
+
+
+def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Hide execution identity in both queued and accepted public messages."""
+    def without_private_fields(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item for key, item in value.items()
+            if key not in {"resource_user_context", "delegated_memory_owner"}
+            and not str(key).startswith(("_web_push_", "_memory_"))
+        }
+
+    result = without_private_fields(metadata)
+    provenance = result.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
+    if isinstance(nested, dict):
+        result["scheduled_provenance"] = {
+            **provenance,
+            "platform_specific": {**spec, "message_metadata": without_private_fields(nested)},
+        }
     return result
 
 
@@ -571,12 +617,7 @@ def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     )
     metadata = payload.get("metadata")
     if isinstance(metadata, dict):
-        payload["metadata"] = {
-            key: value
-            for key, value in metadata.items()
-            if key != "resource_user_context"
-            and not str(key).startswith(("_web_push_", "_memory_"))
-        }
+        payload["metadata"] = public_message_metadata(metadata)
     return payload
 
 

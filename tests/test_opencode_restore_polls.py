@@ -168,6 +168,7 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
             "AVIBE_CALLER_REMOTE": "1",
             "AVIBE_CALLER_RESOURCE_CONTEXT": '{"sub":"user-1"}',
             "IGNORED_ENV": "must-not-pass",
+            "AVIBE_CALLER_SESSION_PROOF": "stale-process-proof",
         },
         "opencode_managed_skill_project_base": "/tmp",
         "opencode_managed_skill_builtin_snapshot": {
@@ -209,6 +210,9 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
         "/old-avibe-home/builtin-skills/" + "d" * 64
     )
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
+    from core.caller_context import verify_caller_session_proof
+
+    assert verify_caller_session_proof("ses_wb", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"])
     assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
 
 

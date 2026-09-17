@@ -1298,3 +1298,13 @@ def health_sync(
             return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
     except Exception:
         return False
+
+
+def delegated_memory_owner_sync(session_id: str, proof: str) -> dict[str, Any] | None:
+    """Resolve a delegated owner using an ephemeral host execution proof."""
+    result = _memory_request_sync(
+        "POST", "/internal/memory/delegated-owner",
+        payload={"session_id": session_id, "proof": proof}, timeout=5.0,
+    )
+    owner = result["body"].get("owner") if result["status_code"] == 200 else None
+    return owner if isinstance(owner, dict) else None

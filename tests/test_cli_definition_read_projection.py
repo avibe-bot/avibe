@@ -387,3 +387,34 @@ def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> Non
         assert (shown["lifecycle_detail"], shown["state"]) == ("normal", "completed")
     finally:
         store.close()
+
+
+def test_public_definition_routes_hide_owner_without_changing_runtime_metadata():
+    from tests.ui_server_test_helpers import csrf_headers
+
+    private = {"delegated_memory_owner": {"platform": "slack", "user_id": "fixture", "is_dm": True},
+               "resource_user_context": {"sub": "fixture"}}
+    store = SQLiteBackgroundTaskStore()
+    try:
+        _task(store, "private-task", metadata=private)
+        _watch(store, "private-watch", metadata=private)
+        client = app.test_client()
+        for plural, identifier, field, read in (
+            ("tasks", "private-task", "task", store.get_scheduled_task),
+            ("watches", "private-watch", "watch", store.get_watch),
+        ):
+            for query in ("", "?page=1&limit=20"):
+                response = client.get(f"/api/harness/{plural}{query}")
+                assert response.status_code == 200
+                row = next(item for item in response.get_json()[plural] if item["id"] == identifier)
+                assert "delegated_memory_owner" not in row["metadata"]
+            for enabled in (False, True):
+                response = client.patch(
+                    f"/api/harness/{plural}/{identifier}", json={"enabled": enabled},
+                    headers=csrf_headers(client),
+                )
+                assert response.status_code == 200
+                assert "delegated_memory_owner" not in response.get_json()[field]["metadata"]
+                assert all(read(identifier)["metadata"][key] == value for key, value in private.items())
+    finally:
+        store.close()

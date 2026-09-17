@@ -4,8 +4,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+import hashlib
+import hmac
+import secrets
 import os
 from typing import Any, Mapping, Optional
+
+AVIBE_CALLER_SESSION_PROOF_ENV = "AVIBE_CALLER_SESSION_PROOF"
+_SESSION_PROOF_KEY = secrets.token_bytes(32)
+
+
+def issue_caller_session_proof(session_id: str) -> str:
+    """Host-only execution transport proof, stable for this controller lifetime."""
+    return hmac.new(_SESSION_PROOF_KEY, session_id.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_caller_session_proof(session_id: str, proof: str) -> bool:
+    return bool(session_id and proof) and hmac.compare_digest(
+        issue_caller_session_proof(session_id).encode(), proof.encode()
+    )
+
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
@@ -464,4 +482,6 @@ def caller_env_for_platform_payload(
         return {}
     if session_stable_only:
         context = context.session_stable()
-    return context.to_env()
+    env = context.to_env()
+    env[AVIBE_CALLER_SESSION_PROOF_ENV] = issue_caller_session_proof(context.session_id)
+    return env

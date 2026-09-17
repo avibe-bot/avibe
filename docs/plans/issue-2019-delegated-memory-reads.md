@@ -52,8 +52,39 @@ metadata, never caller `user_id`. Store `delegated_memory_owner` (platform,
 user ID, private-message fact) in Task/Watch metadata; pass it in scheduled
 `message_metadata`, which the ordinary Delivery snapshot restores after restart.
 Existing resource metadata and IM bindings remain the current authorization
-checks. No historical search or new endpoint is needed. Synthetic read scopes
+checks. No historical search is needed. Synthetic read scopes
 are excluded from the existing write accessor; capture classification is unchanged.
+
+### Review-discovered creator binding correction
+
+PR #2023's first review exposed a normal CLI override: changing
+`AVIBE_SESSION_ID` could stamp another active IM user's owner. Session equality
+alone is not authentication. The orchestrator approved this bounded correction:
+
+- Shared `caller_env_for_platform_payload` issues `AVIBE_CALLER_SESSION_PROOF`,
+  an HMAC-SHA256 of the Session ID using one random controller-process key.
+  The deterministic proof is stable for Claude's session-cached environment.
+- Definition creation sends the proof and same target Session to the existing
+  Unix transport's `/internal/memory/delegated-owner` accessor. Constant-time
+  verification precedes the raw exact-Delivery lookup. There is no signing API.
+  Missing/bad proof or unavailable controller leaves ordinary definitions usable
+  but grants no delegated Memory identity. In-process event-loop creation does
+  not call its own socket synchronously and likewise leaves identity absent.
+- Only owner facts persist in definitions and scheduled Delivery provenance.
+  The key stays in memory. Proofs travel in existing execution transport (including
+  Codex shell scripts and OpenCode binding files); they are excluded from caller
+  metadata and OpenCode durable processing snapshots. OpenCode restores a fresh
+  proof from its host-owned poll Session identity. No registry, schema, per-task
+  credential, or backend-specific authorization policy is introduced.
+- Threat boundary: documented CLI locator overrides are untrusted; a same-UID
+  process editing host SQLite, transport files, or process memory is outside this
+  focused correction. Existing resource and Memory revocation checks still apply.
+- Public queued Delivery and accepted Message projections strip the internal
+  owner both directly and under the known scheduled provenance shape, preserving
+  raw stored values for continuation. Task/Watch public API and CLI projections
+  hide the new owner marker using an explicit display-only store option; default
+  runtime store reads preserve owner and existing resource context. Pause/resume
+  reads raw stored metadata, never the redacted display projection.
 
 - First delivery covers the issue's same-Session Task and Watch continuations. Shared code may naturally benefit other managed paths, but arbitrary cross-Session delegation, group Memory, and general Agent delegation redesign are not acceptance requirements for this fix.
 - Reuse existing current authorization and revocation checks. Do not recursively traverse execution ancestry on each search, build a parallel authorization service, or add extra per-stage checks for the same fact.
@@ -99,3 +130,16 @@ Owner acceptance: delegate a task that needs a known non-sensitive Memory fixtur
   checks passed (27 including new tests). Changed Python files pass Ruff.
 - Cleanup: runner delete found no project/instance (up never provisioned one);
   runner reconcile confirmed no local worktree regression environments remain.
+
+- First-review correction evidence: `MEMORY-SEARCH-025` exercises the actual
+  client/accessor/verifier/creation boundary for valid, missing, tampered and
+  another Session's proof. `026` checks public definition output, SQLite runtime
+  store reload and public pause/resume; queued/accepted Message consumer tests
+  cover nested provenance redaction. OpenCode transport/snapshot/restore and
+  Claude stable environment contracts reuse existing backend fixtures.
+- Final first-review focused run: 1,073 passed (1,060 existing cases and 13 new
+  continuation/proof/projection cases). Public API list/page/pause/resume tests
+  and SQLite runtime reload checks pass. Changed Python Ruff passes. Definitions
+  retain their existing public resource-context shape; only the new owner marker
+  is hidden there. Message/Delivery projections retain their prior private-field
+  filtering and additionally hide the owner at both known locations.

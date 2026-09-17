@@ -446,6 +446,12 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
         session_stable_only=True,
     )
     assert set(full) - set(scoped) == {AVIBE_CALLER_USER_ID_ENV, AVIBE_CALLER_MESSAGE_ID_ENV}
+    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV, validated_caller_env_snapshot
+
+    assert full[AVIBE_CALLER_SESSION_PROOF_ENV] == scoped[AVIBE_CALLER_SESSION_PROOF_ENV]
+    assert AVIBE_CALLER_SESSION_PROOF_ENV not in validated_caller_env_snapshot(full)
+    assert AVIBE_CALLER_SESSION_PROOF_ENV not in caller_context_from_env(full).to_metadata()
+
 
 
 def test_remote_workbench_caller_context_survives_env_and_claude_stable_form() -> None:
@@ -536,3 +542,13 @@ def test_a_dm_loses_nothing_to_the_session_scoped_form() -> None:
     )
     assert captured is not None
     assert captured.session_stable().session_key == "slack::user::U0AUTHOR"
+
+
+def test_processing_indicator_projection_excludes_execution_env():
+    from core.processing_indicator import ProcessingIndicatorHandle
+
+    handle = ProcessingIndicatorHandle.from_snapshot({
+        "platform": "slack", "user_id": "fixture",
+        "opencode_caller_context_env": {"AVIBE_CALLER_SESSION_PROOF": "private-proof"},
+    })
+    assert "opencode_caller_context_env" not in handle.to_snapshot()

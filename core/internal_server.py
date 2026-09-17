@@ -1677,6 +1677,17 @@ def create_app(
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
 
+    @app.post("/internal/memory/delegated-owner")
+    async def _delegated_memory_owner(request: Request) -> Any:
+        from core.caller_context import verify_caller_session_proof
+        from storage.message_deliveries import current_delivery_memory_owner
+
+        body = await request.json()
+        session_id, proof = body.get("session_id"), body.get("proof")
+        if not isinstance(session_id, str) or not isinstance(proof, str) or not verify_caller_session_proof(session_id, proof):
+            return JSONResponse(status_code=403, content={"owner": None})
+        return {"owner": current_delivery_memory_owner(session_id)}
+
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
         owner = _memory_read_owner(request)

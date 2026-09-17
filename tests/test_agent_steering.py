@@ -1037,6 +1037,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     class _Sessions:
         def add_active_poll(self, **kwargs):
+            snapshot = kwargs["processing_indicator"]["opencode_caller_context_env"]
+            assert "AVIBE_SESSION_ID" in snapshot
+            assert "AVIBE_CALLER_SESSION_PROOF" not in snapshot
             return None
 
         def remove_active_poll(self, session_id):
@@ -1088,6 +1091,10 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     binding_paths: list[str] = []
 
     def bind_caller_context(*args, **kwargs):
+        from core.caller_context import verify_caller_session_proof
+
+        env = kwargs["extra_env"]
+        assert verify_caller_session_proof(env["AVIBE_SESSION_ID"], env["AVIBE_CALLER_SESSION_PROOF"])
         binding_tokens.append(kwargs["binding_token"])
         binding_paths.append(kwargs["path"])
         return True

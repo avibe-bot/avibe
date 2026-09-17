@@ -159,3 +159,15 @@ scenarios:
     kind: authorization
     layer: scenario
     test: tests/test_memory_delegated_reads.py::test_remote_delegations_isolate_users_and_recheck_revoked_binding
+  - id: MEMORY-SEARCH-025
+    name: Session locator overrides cannot copy another IM user's delegated Memory owner
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_im_session_override_rejected
+  - id: MEMORY-SEARCH-026
+    name: Public continuation and definition payloads hide owner without erasing runtime identity
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_public_definition_projection_preserves_sqlite_runtime_owner
