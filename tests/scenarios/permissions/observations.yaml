@@ -59,3 +59,5 @@ observations:
       - retain Editor and Viewer restrictions and true signed principal identity
       - preserve shared inbox read markers and existing Show publication policy
       - validate actual signed HTTP storage and SSE consumers rather than capability predicates alone
+
+      - include released Member deferred snapshots in binding migration without reopening unattributed or later work

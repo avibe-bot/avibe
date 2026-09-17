@@ -55,7 +55,10 @@ authoritative. Update those documents to make this precedence explicit.
    Agent enabled/available checks and other ordinary execution preconditions.
    Preserve shipped Member pre-catalog selection/session fallbacks. Do not expand
    the separate Owner-only missing-name fallback for new Task/Watch bindings:
-   those Member bindings still require an existing catalog Agent.
+   those Member bindings still require an existing catalog Agent. Released Member
+   deferred snapshots participate in the existing binding migration. A repair of
+   a previously completed pass must prove its original pairing and row cutoff;
+   it cannot make later unbound work executable.
 5. **Effect-based policy, bounded implementation.** Evolve the existing central
    capabilities and route policy. Member operational permission should follow
    that common decision, while access/identity effects retain explicit gates.
@@ -187,7 +190,10 @@ explicit true-Owner guard. No schema, dependencies or cloud aggregation changed.
   real Show store, real fork reservation, runtime discovery and persisted Harness
   bindings. Signed HTTP Deliveries also pass the real execution-time
   `SessionTurnManager._remote_delivery_execution_denial` before provider acceptance
-  is stubbed; a changed pairing still rejects those persisted Deliveries.
+  is stubbed; a changed pairing still rejects those persisted Deliveries. Released
+  Task/Watch/Run/Delivery fixtures also exercise fresh and completed-marker
+  migration through Harness admission and the queued-chat execution recheck,
+  preserving principal attributes and recalculating the Delivery snapshot hash.
 - PERMISSIONS-015: protected access/pairing/onboarding denials, missing resources,
   disabled Agent, existing lower-role and compatibility checks.
 - PERMISSIONS-016: actual SSE generator and broker with publisher-shaped Vault,
@@ -209,6 +215,22 @@ new Task/Watch names still resolve the catalog. Local tests stub execution IPC
 and provider/host effects after authorization; no tenant or live provider result
 is claimed. Post-merge acceptance still needs an authorized real Member browser
 conversation and live transport/session updates in the regression instance.
+
+Completed-marker repair uses the existing key and only released versions 1/2
+with a valid absolute completion time, exact instance/kind and a matching ready
+binding. Only Member records created/submitted and last updated strictly before
+that original cutoff qualify. Completion retains the original timestamp and seals
+version 3; later rows cannot reopen the opportunity. Missing/corrupt/unknown or
+sealed provenance, equal-second/later/modified rows, another pairing, contradictory
+claims and terminal work remain unchanged. Ambiguous historical work may therefore
+remain denied; this repair does not guess identity or authorize recovery by
+re-pairing. Other roles do not enter the completed-marker repair.
+
+First review round: one findings-bearing head (`02b96d475`), one root cause
+(released deferred Member compatibility). The repair and stale Member Project/Vault
+expectations have 474 focused regression passes, including the negative marker,
+row, binding and terminal-work cases. Project/Resource ACL rows and protected
+Vault approval requirements remain intact.
 
 Focused local evidence: 493 Python tests across permissions, Agent/Project/session
 ACL consumers, messages/notifications, forks and diagnostics; 188 retained

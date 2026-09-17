@@ -754,10 +754,9 @@ def test_secret_management_follows_instance_manager_capability(vault, role):
 
 
 @pytest.mark.parametrize("policy", ["missing", "foreign"])
-def test_management_parity_does_not_bypass_direct_secret_use_policy(vault, policy):
-    # Direct service contexts retain ACL checks; validated remote Organization
-    # use intentionally has the existing Editor-or-higher behavior above.
-    context = _context("manager", instance_role="member", is_remote=False)
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer"])
+def test_direct_secret_operations_preserve_protected_approval_and_lower_role_acl(vault, policy, role):
+    context = _context("manager", instance_role=role, is_remote=False)
     with vault.begin() as conn:
         _create_secret(conn, "DIRECT_PRIVATE", protection="protected")
         resource_id = _secret_id(conn, "DIRECT_PRIVATE")
@@ -769,6 +768,15 @@ def test_management_parity_does_not_bypass_direct_secret_use_policy(vault, polic
                 access_level="private", group_ids=[], policy_revision=1,
                 last_applied_control_plane_revision=1,
             )
-        vault_service.update_secret_metadata(conn, "DIRECT_PRIVATE", description="managed", user_context=context)
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.resolve_secret_access(conn, "DIRECT_PRIVATE", session_id="ses-private", user_context=context)
+        before = [dict(row) for row in conn.execute(select(resource_access_policies)).mappings()]
+        if role in {"owner", "member"}:
+            vault_service.update_secret_metadata(conn, "DIRECT_PRIVATE", description="managed", user_context=context)
+            access = vault_service.resolve_secret_access(conn, "DIRECT_PRIVATE", session_id="ses-private", user_context=context)
+            assert access["status"] == "approval_required"
+            assert access["request"]["status"] == "pending"
+            assert access.get("envelope") is None
+            assert access["request"]["card"]["value"] is None
+        else:
+            with pytest.raises(vault_service.VaultSecretAccessError):
+                vault_service.resolve_secret_access(conn, "DIRECT_PRIVATE", session_id="ses-private", user_context=context)
+        assert [dict(row) for row in conn.execute(select(resource_access_policies)).mappings()] == before

@@ -697,13 +697,15 @@ def test_kindless_deferred_context_adopts_matching_validated_pairing(
         ("organization", "email", False),
     ],
 )
+@pytest.mark.parametrize(("instance_role", "completed_marker"), [("editor", False), ("member", False), ("member", True)])
 def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliveries(
     monkeypatch,
     tmp_path,
     paired_kind: str,
     access_source: str,
-    organization_claims: bool, sqlite_schema_db_factory,
+    organization_claims: bool, sqlite_schema_db_factory, instance_role, completed_marker,
 ) -> None:
+    """PERMISSIONS-014: released metadata reaches Harness and queued-chat consumers."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
     config.remote_access.vibe_cloud.enabled = True
@@ -713,8 +715,8 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
     config.save()
 
     legacy_context = {
-        "sub": "legacy-user",
-        "vibe_instance_role": "editor",
+        "sub": "legacy-user α",
+        "vibe_instance_role": instance_role,
         "vibe_instance_access_source": access_source,
         "claims_issued_at": 1_700_000_000,
     }
@@ -800,10 +802,19 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
                 session_id="session-1",
                 text="queued",
                 metadata=legacy_metadata,
+                now="2026-08-20T00:00:00Z",
             )
             from storage.importer import _run_sqlite_data_migrations
 
             _seed_ready_binding(connection, instance_id="paired-instance", instance_kind=paired_kind)
+            if completed_marker:
+                connection.execute(state_meta.insert().values(
+                    key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    value_json=json.dumps({
+                        "schema_version": 2, "state": "completed", "instance_id": "paired-instance",
+                        "instance_kind": paired_kind, "completed_at": "2026-08-21T00:00:00Z",
+                    }), updated_at="2026-08-21T00:00:00Z",
+                ))
             counts = _run_sqlite_data_migrations(connection)
             assert _migration_counts(counts) == {
                 "legacy_deferred_definitions": 2,
@@ -832,7 +843,10 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
                     instance_kind=paired_kind,
                     generation=started["generation"],
                 )
-                assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
+                restored = resource_access_service.resource_user_context_from_metadata(metadata)
+                assert restored is not None and restored.instance_role == instance_role
+                assert restored.subject == "legacy-user α"
+                assert resource_access_service.metadata_allows_harness_runtime(metadata)
 
             run_metadata = connection.execute(
                 select(agent_runs.c.metadata_json).where(agent_runs.c.definition_id == "legacy-task")
@@ -842,9 +856,10 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
             ]
             assert run_snapshot["vibe_instance_id"] == "paired-instance"
             assert run_snapshot["vibe_instance_kind"] == paired_kind
+            assert resource_access_service.metadata_allows_harness_runtime(json.loads(run_metadata))
 
             delivery = connection.execute(
-                select(message_deliveries.c.snapshot_json, message_deliveries.c.snapshot_sha256).where(
+                select(message_deliveries).where(
                     message_deliveries.c.session_id == "session-1"
                 )
             ).mappings().one()
@@ -860,6 +875,14 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
                 delivery["snapshot_json"].encode("utf-8")
             ).hexdigest()
 
+            if instance_role == "member":
+                from core.session_turns import SessionTurnManager
+                assert SessionTurnManager._remote_delivery_execution_denial(connection, dict(delivery)) is None
+            marker_after = _stored_migration_marker(connection)
+            if completed_marker:
+                assert json.loads(marker_after)["completed_at"] == "2026-08-21T00:00:00Z"
+            # A later imported/unbound row is not a new migration opportunity.
+            enqueue_queued(connection, scope_id=None, session_id="session-1", text="later", metadata=legacy_metadata)
             assert _migration_counts(_run_sqlite_data_migrations(
                 connection
             )) == {
@@ -867,8 +890,151 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
             }
+            assert _stored_migration_marker(connection) == marker_after
+            later = connection.execute(select(message_deliveries).where(message_deliveries.c.id != delivery["id"])).mappings().one()
+            assert "vibe_instance_id" not in json.loads(json.loads(later["snapshot_json"])["metadata_json"])[
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+            ]
     finally:
         store.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("case", [
+    "sealed", "missing_kind", "invalid_kind", "other_instance", "other_kind",
+    "corrupt", "unknown_state", "unknown_version", "missing_cutoff", "invalid_cutoff",
+    "naive_cutoff", "reconciling", "binding_mismatch", "binding_absent",
+    "snapshot_instance", "snapshot_kind", "snapshot_unknown_kind", "snapshot_org", "editor",
+    "new_row", "changed_row", "equal_second", "invalid_timestamp",
+])
+def test_completed_member_repair_preserves_unproven_rows(monkeypatch, tmp_path, sqlite_schema_db_factory, case):
+    """PERMISSIONS-014: a completed marker cannot attribute later or foreign work."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    sqlite_schema_db_factory(db)
+    engine = create_sqlite_engine(db)
+    old = "2026-08-20T00:00:00Z"
+    cutoff = "2026-08-21T00:00:00Z"
+    marker = {
+        "schema_version": 2, "state": "completed", "instance_id": "same-instance",
+        "instance_kind": "personal", "completed_at": cutoff,
+    }
+    overrides = {
+        "sealed": {"state": "sealed_unattributed"},
+        "missing_kind": {"instance_kind": None},
+        "invalid_kind": {"instance_kind": "enterprise"},
+        "other_instance": {"instance_id": "other-instance"},
+        "other_kind": {"instance_kind": "organization"},
+        "unknown_state": {"state": "future-state"},
+        "unknown_version": {"schema_version": 999},
+        "missing_cutoff": {"completed_at": None},
+        "invalid_cutoff": {"completed_at": "yesterday"},
+        "naive_cutoff": {"completed_at": "2026-08-21T00:00:00"},
+    }
+    marker.update(overrides.get(case, {}))
+    marker_json = "corrupt" if case == "corrupt" else json.dumps(marker)
+    snapshot = {"sub": "legacy-member α", "vibe_instance_role": "member", "vibe_instance_access_source": "email"}
+    snapshot.update({
+        "snapshot_instance": {"vibe_instance_id": "other-instance"},
+        "snapshot_kind": {"vibe_instance_kind": "organization"},
+        "snapshot_unknown_kind": {"vibe_instance_kind": "enterprise"},
+        "snapshot_org": {"vibe_organization_id": "old-org"},
+        "editor": {"vibe_instance_role": "editor"},
+    }.get(case, {}))
+    metadata_json = json.dumps({resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: snapshot})
+    later = "2026-08-22T00:00:00Z"
+    created_at = later if case == "new_row" else cutoff if case == "equal_second" else old
+    updated_at = later if case in {"new_row", "changed_row"} else cutoff if case == "equal_second" else old
+    if case == "invalid_timestamp":
+        updated_at = "invalid"
+    try:
+        with engine.begin() as conn:
+            conn.execute(state_meta.insert().values(
+                key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                value_json=marker_json, updated_at=cutoff,
+            ))
+            if case != "binding_absent":
+                _seed_ready_binding(conn, instance_id="other" if case == "binding_mismatch" else "same-instance", instance_kind="personal")
+                if case == "reconciling":
+                    conn.execute(state_meta.update().where(state_meta.c.key == "remote_access.instance_binding.v1").values(
+                        value_json=json.dumps({"schema_version": 1, "state": "reconciling", "instance_id": "same-instance",
+                                              "instance_kind": "personal", "generation": 1}),
+                    ))
+            for kind in ("scheduled", "watch"):
+                conn.execute(run_definitions.insert().values(
+                    id=kind, definition_type=kind, enabled=1, metadata_json=metadata_json,
+                    created_at=created_at, updated_at=updated_at,
+                ))
+            conn.execute(agent_runs.insert().values(
+                id="run", run_type="scheduled", status="queued", metadata_json=metadata_json,
+                created_at=created_at, updated_at=updated_at,
+            ))
+            conn.execute(agent_sessions.insert().values(
+                id="session", agent_backend="codex", agent_variant="default", session_anchor="session",
+                native_session_id="native", status="active", metadata_json="{}", created_at=old, updated_at=old,
+            ))
+            enqueue_queued(conn, scope_id=None, session_id="session", text="你好", metadata=json.loads(metadata_json), now=created_at)
+            conn.execute(message_deliveries.update().values(updated_at=updated_at))
+            tables = (run_definitions, agent_runs, message_deliveries)
+            before = [[dict(row) for row in conn.execute(select(table)).mappings()] for table in tables]
+            for _ in range(2):
+                assert _migration_counts(resource_access_service.migrate_legacy_deferred_resource_contexts(conn)) == _EMPTY_MIGRATION_COUNTS
+                assert [[dict(row) for row in conn.execute(select(table)).mappings()] for table in tables] == before
+            if case in overrides or case in {"corrupt", "reconciling", "binding_mismatch", "binding_absent"}:
+                assert _stored_migration_marker(conn) == marker_json
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("completed_marker", [False, True])
+def test_member_migration_preserves_terminal_records(monkeypatch, tmp_path, sqlite_schema_db_factory, completed_marker):
+    """Queued/reserved work may bind; retired Deliveries and completed Runs stay intact."""
+    from storage.delivery_states import DELIVERY_STATE_MATRIX
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    sqlite_schema_db_factory(db)
+    engine = create_sqlite_engine(db)
+    old = "2026-08-20T00:00:00Z"
+    metadata = {resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+        "sub": "member", "vibe_instance_role": "member", "vibe_instance_access_source": "email",
+    }}
+    try:
+        with engine.begin() as conn:
+            _seed_ready_binding(conn, instance_id="same-instance", instance_kind="personal")
+            if completed_marker:
+                conn.execute(state_meta.insert().values(
+                    key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    value_json=json.dumps({"schema_version": 2, "state": "completed", "instance_id": "same-instance",
+                                           "instance_kind": "personal", "completed_at": "2026-08-21T00:00:00Z"}), updated_at=old,
+                ))
+            conn.execute(agent_sessions.insert().values(
+                id="session", agent_backend="codex", agent_variant="default", session_anchor="session",
+                native_session_id="native", status="active", metadata_json="{}", created_at=old, updated_at=old,
+            ))
+            deliveries = {}
+            for state in ("reserved", "queued", "retired"):
+                payload = enqueue_queued(conn, scope_id=None, session_id="session", text=state, metadata=metadata, now=old)
+                delivery_id = payload["id"]
+                conn.execute(message_deliveries.update().where(message_deliveries.c.id == delivery_id).values(state=state))
+                deliveries[state] = dict(conn.execute(select(message_deliveries).where(message_deliveries.c.id == delivery_id)).mappings().one())
+            terminal_run = dict(id="terminal-run", run_type="agent_run", status="completed", metadata_json=json.dumps(metadata), created_at=old, updated_at=old)
+            conn.execute(agent_runs.insert().values(**terminal_run))
+            terminal_before = dict(conn.execute(select(agent_runs)).mappings().one())
+            counts = resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+            assert counts["legacy_deferred_deliveries"] == 2
+            assert dict(conn.execute(select(agent_runs)).mappings().one()) == terminal_before
+            for state, before in deliveries.items():
+                after = dict(conn.execute(select(message_deliveries).where(message_deliveries.c.id == before["id"])).mappings().one())
+                if DELIVERY_STATE_MATRIX[state].ordering == "terminal":
+                    assert after == before
+                else:
+                    assert after["state"] == state
+                    assert after["snapshot_sha256"] == hashlib.sha256(after["snapshot_json"].encode()).hexdigest()
+                    assert json.loads(json.loads(after["snapshot_json"])["metadata_json"])[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]["vibe_instance_id"] == "same-instance"
+    finally:
         engine.dispose()
 
 
