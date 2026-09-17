@@ -35,7 +35,7 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
   return (
     <Card className="onboarding-assistant" aria-label={label}>
       <div className="onboarding-assistant-main">
-        <div className="onboarding-assistant-logo"><BackendIcon backend={backend} variant="glyph" size={28} aria-hidden="true" /></div>
+        <div className="onboarding-assistant-logo"><BackendIcon backend={backend} variant="brand" brandFit="mark" size={28} aria-hidden="true" /></div>
         <div className="onboarding-assistant-identity">
           <h3>{label}</h3>
           <p title={t(`onboarding.setup.${backend}Description`)}>{t(connection ? `onboarding.setup.${connection}` : `onboarding.setup.${backend}Description`)}</p>

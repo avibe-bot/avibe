@@ -52,7 +52,7 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   const filtered = providers.filter((entry) => (method === 'api_key' ? !entry.local : entry.oauth_available)
     && `${entry.name} ${entry.id}`.toLowerCase().includes(query.toLowerCase()));
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent className="connection-dialog" closeLabel={t('common.close')}>
-    <div className="connection-heading"><div className="connection-logo"><BackendIcon backend={backend} variant="glyph" size={28} /></div>
+    <div className="connection-heading"><div className="connection-logo"><BackendIcon backend={backend} variant="brand" brandFit="mark" size={28} aria-hidden="true" /></div>
       <div><DialogTitle>{title}</DialogTitle><p>{t('onboarding.connection.target', { name: getBackendUiMeta(backend).label })}</p></div>
     </div>
     <DialogDescription className="connection-intro">{intro}</DialogDescription>

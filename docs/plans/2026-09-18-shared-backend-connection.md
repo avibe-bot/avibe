@@ -269,7 +269,9 @@ visible mint selection. Scoped focus-visible styling uses the existing ring
 token. Light primary white-on-mint is the approved pairing; disabled opacity .4
 and enabled state are verified separately, without a palette change.
 
-Existing backend glyph/tile accent differences are inherited and outside scope.
+The inherited generic backend glyphs were initially excluded. The owner’s
+2026-09-18 07:16 request supersedes that exclusion for onboarding brand marks
+only; unrelated Settings/Workbench glyphs and tile accents remain unchanged.
 Text-flow height differences (428 versus native 423/434; 536 versus 552) are
 accepted. EN Light and narrow compose approved tokens/copy because no complete
 authored counterparts exist. The frozen 16 captures stay unchanged; only small
@@ -421,7 +423,7 @@ parents, queued intent races, partial removal and model catalog ownership. No
 new store, schema, restart mechanism, generic events, polling or automatic model
 selection is introduced. Frozen captures apply only to unchanged presentation.
 
-Validation for the uncommitted round 3 repair:
+Validation for the round 3 repair committed as `c59df6fffc69fc9067e1afe7166db0cbcc89224a`:
 
 - Hermetic old-head comparison runs the current selected consumer tests against
   the committed `f6a556b` product sources in a temporary copy: 21 failures and
@@ -447,9 +449,48 @@ Validation for the uncommitted round 3 repair:
   desktop/narrow captures are under `/tmp/issue2011/r3-browser-model`. Presentation tokens,
   layout, locale strings and the existing disabled-provider visibility policy
   are unchanged.
-- Current remote head remains `f6a556b452fa9b5c6e41588a7df30766444e2e8c`,
-  with three genuine findings-bearing heads, 11 threads (five unresolved), and
-  failed lint35278050365. The two known CI fixture corrections are retained
-  exactly (binary diff SHA256 `ca392f40273ad265ea135e676dbbc688057f5b9ece4afbfd99436ce877a385c9`).
-  New local results do not change those remote gates. PM must inspect the quiet
-  complete diff and consumer evidence before authorizing commit/push.
+- Round 3 delivered at `c59df6fffc69fc9067e1afe7166db0cbcc89224a`: exact-head
+  Codex comment5722353880 passed, lint35284387433 and all18 jobs succeeded,
+  all11 threads resolved. PM independently confirmed readiness for owner visual
+  acceptance at 07:12; this is not owner acceptance or merge authorization.
+  Three historical findings-bearing heads and their diagnosed classes remain
+  recorded; subsequent bytes require fresh review/CI. Both original Watches
+  remain armed with unchanged cursors through verified merged/closed lifecycle.
+
+### Owner-requested onboarding brand marks (2026-09-18 07:19)
+
+The owner image and `avibe-docs/design_desktop.pen` govern this bounded visual
+correction. Source SHA256 is
+`115c69604b50e32823bcead4bd6c9269c8178b58d66a73b2e00db4a06d2caeb3`;
+PM's read-only extraction is `/tmp/issue2011/design/owner-logo-source.json`.
+The source file and packet are never modified.
+
+- Opt-in `BackendIcon` brand rendering uses the exact authored vector geometry,
+  Claude fill `#D97757`, and foreground/currentColor for Codex and OpenCode.
+  Existing block/glyph consumers and unknown-backend fallback keep their behavior.
+- Welcome `CollaborationStory` uses the bare 28px marks with full24x24 canvas
+  (dAO38/o2x2l0/Rxw0c and Light equivalents POffH/JYkg4/PK61u).
+  `AssistantRow` and `BackendConnectionDialog` retain existing logo wells;
+  OpenCode uses its authored22.4x28 path with viewBox4,2,16,20 inside the28px
+  frame (VE60T and dialog v9S8Li). No stretching or generic substitutes.
+- All onboarding identity consumers are these three call sites. AgentDetection's
+  remaining direct glyph is in the legacy Settings page branch, so it remains
+  unchanged. No global metadata/color mapping, layout, copy, auth, runtime,
+  model, dependency, Python or parallel-lane changes.
+- The scoped Impeccable refinement preserves the owner direction. Existing
+  consumer/build/lint/type checks and one desktop/390 Light/Dark browser batch
+  cover rendering, exact paths, fills, aspect and decorative accessibility.
+  Evidence goes to `/tmp/issue2011/owner-logo-render/`, preserving all earlier
+  captures. New screenshots require actual independent observer inspection;
+  an empty local image viewer is not visual signoff. PM must inspect the quiet
+  complete diff before any commit/push; no merge is authorized.
+
+The bounded logo batch passed four hermetic browser cases (desktop1200 and390,
+Light/Dark), freezing12 captures: Welcome collaboration, setup assistants and
+representative OpenCode dialog for each case. All exact source paths match;
+computed Claude fill is rgb(217,119,87), mono fill follows foreground, and
+OpenCode's fitted SVG is22.4x28 within the unchanged28px frame. The existing
+132 onboarding consumers, UI build, lint, test/i18n types, browser types,
+theme/catalog checks and diff check pass. One Impeccable detector pass returned
+no findings. The temporary capture harness is retained only in the evidence
+directory, not shipped. No Python rerun is needed for this static visual change.
