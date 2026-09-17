@@ -389,6 +389,8 @@ scenarios:
       - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_explicit_catalog_choices_reach_the_consumer
       - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_native_context_override_wins_over_catalog_planning
       - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_auto_compaction_consumes_resolved_limits
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_reloads_catalog_after_initialize
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_inherits_catalog_pin
   - id: MH-CLAUDE-LAUNCH-001
     name: Claude Hub turns preserve the configured Source and model despite native connection settings
     status: covered

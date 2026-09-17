@@ -15,6 +15,7 @@ import pytest
 
 from config.v2_config import ModelHubBackendModelConfig
 from modules.agents.codex.transport import CodexTransport
+from modules.agents.codex.transport import CodexRPCError
 from modules.agents.model_hub import (
     ModelHubLaunch,
     build_claude_hub_env,
@@ -24,7 +25,7 @@ from modules.agents.model_hub import (
 )
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
-from vibe.backend_model_catalog import _codex_hub_catalog_bytes
+from vibe.backend_model_catalog import _codex_hub_catalog_bytes, _publish_codex_hub_catalog
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -153,6 +154,67 @@ async def _codex_turn(binary, runtime, gateway, catalog, *, effort, native_confi
         params["turn"]["status"] for method, params in notifications if method == "turn/completed"
     ] == ["completed"] * turns
     return bodies, models, notifications, config["config"]
+
+
+def test_codex_reloads_catalog_after_initialize(codex_catalog_runtime):
+    """MH-PROTOCOL-004: a live app-server rereads its catalog for a new thread."""
+    binary, runtime, raw_catalog = codex_catalog_runtime
+    catalog_path = runtime.home / "reload-catalog.json"
+    catalog_path.write_bytes(_codex_hub_catalog_bytes(raw_catalog))
+
+    async def probe():
+        transport = CodexTransport(
+            binary=binary,
+            cwd=str(runtime.home),
+            runtime_args=["-c", f"model_catalog_json={json.dumps(str(catalog_path))}"],
+            runtime_env=runtime.env,
+        )
+        try:
+            await transport.start()
+            catalog_path.unlink()
+            with pytest.raises(CodexRPCError, match="failed to load configuration"):
+                await transport.send_request(
+                    "thread/start",
+                    {"cwd": str(runtime.home), "ephemeral": True},
+                )
+        finally:
+            await transport.stop()
+
+    asyncio.run(probe())
+
+
+def test_codex_inherits_catalog_pin(codex_catalog_runtime):
+    """MH-PROTOCOL-004: the child keeps its catalog after all parent pins close."""
+    binary, runtime, raw_catalog = codex_catalog_runtime
+    catalog = _publish_codex_hub_catalog(raw_catalog)
+    path = catalog.path
+
+    async def probe():
+        transport = CodexTransport(
+            binary=binary,
+            cwd=str(runtime.home),
+            runtime_args=["-c", f"model_catalog_json={json.dumps(str(path))}"],
+            runtime_env=runtime.env,
+            model_hub_catalog=catalog,
+        )
+        try:
+            await transport.start()
+            # Simulate loss of the parent's descriptor without killing pytest.
+            catalog.close()
+            transport._model_hub_catalog.close()
+            for index in range(4):
+                with _publish_codex_hub_catalog(raw_catalog, [{"id": f"successor-{index}"}]):
+                    pass
+            assert path.is_file()
+            thread = await transport.send_request(
+                "thread/start",
+                {"cwd": str(runtime.home), "ephemeral": True},
+            )
+            assert thread["thread"]["id"]
+        finally:
+            await transport.stop()
+
+    asyncio.run(probe())
 
 
 @pytest.mark.parametrize("effort", [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"])
