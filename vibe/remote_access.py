@@ -4516,7 +4516,9 @@ def _origin_host_for_pairing(config: V2Config) -> str:
 
     if address.is_loopback:
         return f"[{address.compressed}]" if address.version == 6 else address.compressed
-    if address.is_unspecified and address.version == 6:
+    # Cloud widens non-loopback IPv6 binds to ::. Its IPv6-only listener
+    # requires an IPv6 loopback origin, including for specific interface IPs.
+    if address.version == 6:
         return "[::1]"
     return "127.0.0.1"
 
