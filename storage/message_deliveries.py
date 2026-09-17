@@ -569,10 +569,18 @@ def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None
         delivery = delivery_for_turn(conn, turn["id"])
         if delivery is None:
             return None
-        # Acceptance moves the immutable content into Message and clears the
-        # temporary Delivery snapshot. Follow that exact FK, never history.
-        snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
-        payload = _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+        payload = execution_delivery_payload(conn, delivery)
+    return memory_owner_from_payload(payload)
+
+
+def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
+    """Read this exact Delivery's immutable content, including after acceptance."""
+    snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
+    return _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+
+
+def memory_owner_from_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One owner representation for authenticated humans and host continuations."""
     source_metadata = payload.get("metadata") or {}
     if payload.get("author") == "user" and payload.get("source") == "user":
         user_id = payload.get("author_id")
@@ -613,6 +621,19 @@ def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] 
     provenance = metadata.get("scheduled_provenance") if isinstance(metadata, Mapping) else None
     spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
     return provenance if isinstance(spec, Mapping) else None
+
+
+def memory_authority_for_payload(payload: Mapping[str, Any]) -> str:
+    """Compare human and delegated authority without credential-refresh noise."""
+    owner = memory_owner_from_payload(payload)
+    provenance = scheduled_delivery_provenance(payload)
+    metadata = provenance["platform_specific"].get("message_metadata") if provenance else payload.get("metadata")
+    resource = metadata.get("resource_user_context") if isinstance(metadata, Mapping) else None
+    if isinstance(resource, Mapping):
+        # Refreshing the same credential does not change its resource authority.
+        resource = {key: value for key, value in resource.items()
+                    if key not in {"claims_issued_at", "authorization_expires_at"}}
+    return _canonical_json([owner, resource])
 
 
 def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:

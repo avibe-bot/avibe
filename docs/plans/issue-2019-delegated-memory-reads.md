@@ -276,3 +276,49 @@ scheduled lifecycle test is unchanged. New `MEMORY-SEARCH-033` exercises the rea
 shared scheduled gate with owner metadata but no trigger: dispatch remains
 scheduled, host issuance omits proof, and HTTP reads deny without provider calls.
 Changed Python Ruff passes. A new head requires fresh Codex review and CI.
+
+### Active lifecycle closure (PM decision, 2026-09-17)
+
+At `a8a79660e`, the required pause preceded five hermetic diagnostic cases:
+authenticated same-Session creation produced an accepted delegated Task Turn;
+local, different-owner, and ownerless Workbench P1 inputs all steered under its
+scope; internal rebinding removed its owner; active OpenCode revival reissued a
+valid proof but fresh-controller HTTP reads denied. The latter two are host
+continuations, while different-owner steering is new authority.
+
+| Lifecycle | Existing seam | Required authority behavior |
+| --- | --- | --- |
+| Definition creation / CLI edit | owner-bound proof accessor | same-Session re-admission; no caller grants |
+| Host same-definition rebind | guarded store binding-only write | preserve owner/resource metadata and CAS/deletion/repoint guards |
+| Queued/new Turn | durable hydration and batch identity | existing admission; one authority per batch |
+| Active OpenCode revival | exact Session + live logical Turn/initial Delivery or accepted Message | shared context hydration + current admission before binding; no fallback to another Turn |
+| P1 / pending P1 / send-now / restored steering | shared pre-native `_dispatch_steer_batch` | compare effective human/delegated owner/resource identity; refuse to existing queue fallback on mismatch |
+
+Same-owner human continuation remains steerable. Comparison ignores resource
+credential-refresh timestamps, not role/membership/instance identity. Human-only
+steering remains outside this delegated boundary change. Ordinary CLI edits still
+re-admit; no public trust flag, credential registry, or cross-Session creation is
+introduced. Watch internal runtime writes already use separate guarded methods;
+there is no automatic update_watch rebind caller. Only OpenCode revives active
+native polls; Claude/Codex use fresh durable dispatch after restart.
+
+Active-lifecycle evidence: the new contract file has 18 cases. `034` revives actual
+Task/Watch polls with fresh controllers and HTTP reads, and denies missing,
+wrong-Session, terminal, and currently revoked identity before publishing a proof.
+While the revived poll remains active, incompatible P1 input queues without a
+native write. `035` creates and authentically updates a task to `create_once`,
+performs host binding recovery, reloads it, and dispatches an HTTP read under its
+retained owner; ordinary proofless edits still remove delegation. Existing full
+scheduled-task tests retain concurrent SQLite reclaim/CAS evidence. `036` covers
+direct P1, pending P1, and queued send-now: different/no owner waits then receives
+fresh scope/denial; the same local owner and refreshed remote owner still steer.
+An ineligible IM group remains denied Memory and keeps its prior steering policy.
+A previously established scope continues fencing input even if its binding is
+revoked temporarily; current read checks still enforce revocation.
+
+Validation layers: 1,026 combined focused cases passed before the final small
+steering eligibility adjustment; 431 affected lifecycle/internal/restore cases
+passed after the admission check, and final 223 delegated-lifecycle/durable-FSM
+cases passed after retaining the established-scope fence (18 new cases, 205
+existing FSM cases). Changed Python Ruff passes. These counts overlap and are
+not additive. No real Incus/backend acceptance is claimed.

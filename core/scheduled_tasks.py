@@ -1696,6 +1696,16 @@ class ScheduledTaskStore:
         return task
 
     @_serialize_task_mirror
+    def rebind_session(self, task_id: str, session_id: str) -> None:
+        """Host recovery changes only the binding, retaining authenticated metadata."""
+        task = self._tasks[task_id]
+        expect = self._read_state(task)
+        task.session_id = session_id
+        task.updated_at = _utc_now_iso()
+        if not self._write_task(task, expect):
+            raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
+
+    @_serialize_task_mirror
     def update_task(
         self,
         task_id: str,
@@ -10018,24 +10028,7 @@ class ScheduledTaskService:
         return True
 
     def _write_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
-        self.store.update_task(
-            task.id,
-            name=task.name,
-            session_key=task.session_key,
-            session_id=session_id,
-            prompt=task.prompt,
-            schedule_type=task.schedule_type,
-            agent_name=task.agent_name,
-            session_policy=task.session_policy,
-            post_to=task.post_to,
-            deliver_key=task.deliver_key,
-            cron=task.cron,
-            run_at=task.run_at,
-            timezone_name=task.timezone,
-            cwd=task.cwd,
-            update_cwd=False,
-            metadata=task.metadata,
-        )
+        self.store.rebind_session(task.id, session_id)
 
     def _pause_task(self, task: ScheduledTask) -> None:
         try:

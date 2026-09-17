@@ -2626,7 +2626,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or poll_info.base_session_id or ""
             )
             if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
-                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id)
+                memory_context = self.controller.session_turns.restore_memory_context(restored_session_id, logical_turn_id)
+                admitted = memory_context is not None and configure_memory_cli_access(self.controller, memory_context)
+                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id) if admitted else None
                 if proof:
                     restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
             if (

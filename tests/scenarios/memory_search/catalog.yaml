@@ -213,3 +213,21 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_memory_delegated_reads.py::test_no_trigger_harness_retains_scheduling_without_memory
+  - id: MEMORY-SEARCH-034
+    name: Active Task and Watch polls restore exact live authority through current admission
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_memory_delegated_lifecycle.py::test_active_poll_restores_proof_and_read_scope
+  - id: MEMORY-SEARCH-035
+    name: Host same-definition recovery preserves owner while ordinary edits re-admit
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_memory_delegated_lifecycle.py::test_internal_rebind_preserves_owner
+  - id: MEMORY-SEARCH-036
+    name: Direct pending promoted and restored steering cannot mix delegated authorities
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_lifecycle.py::test_steering_preserves_effective_memory_authority

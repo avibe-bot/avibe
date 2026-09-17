@@ -1255,12 +1255,13 @@ class SessionTurnManager:
             self._restore_scheduled_dispatch_context(context, deliveries[0])
         return await prepare(context, human=not scheduled)
 
-    @staticmethod
     def _restore_scheduled_dispatch_context(
+        self,
         context: "MessageContext",
         delivery: dict[str, Any],
     ) -> None:
-        payload = delivery_store.delivery_payload(delivery)
+        with self._sqlite_engine().connect() as conn:
+            payload = delivery_store.execution_delivery_payload(conn, delivery)
         provenance = delivery_store.scheduled_delivery_provenance(payload)
         preserved = (
             provenance.get("platform_specific")
@@ -2339,6 +2340,24 @@ class SessionTurnManager:
                 continue
             return None
 
+    def restore_memory_context(self, session_id: str, turn_id: str) -> Optional["MessageContext"]:
+        """Reconstruct only this still-live execution, never a later Session turn."""
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.get_turn(conn, turn_id)
+            if not turn or turn["session_id"] != session_id or turn["state"] not in delivery_store.TURN_OWNER_STATES:
+                return None
+            delivery = delivery_store.delivery_for_turn(conn, turn_id)
+        if delivery is None:
+            return None
+        context = self._delivery_context(session_id)
+        self._hydrate_delivery_context(context, delivery)
+        self._restore_scheduled_dispatch_context(context, delivery)
+        context.platform_specific["turn_token"] = turn_id
+        context.platform_specific["turn_source"] = (
+            SOURCE_SCHEDULED if context.platform_specific.get("delivery_source") == "harness" else SOURCE_HUMAN
+        )
+        return context
+
     def _hydrate_delivery_context(
         self,
         context: "MessageContext",
@@ -2346,7 +2365,8 @@ class SessionTurnManager:
     ) -> dict[str, Any]:
         """Restore dispatch inputs only from the durable Delivery snapshot."""
 
-        payload = delivery_store.delivery_payload(delivery)
+        with self._sqlite_engine().connect() as conn:
+            payload = delivery_store.execution_delivery_payload(conn, delivery)
         context.platform = str(payload.get("platform") or context.platform or "avibe")
         native_message_id = str(payload.get("native_message_id") or "").strip()
         context.message_id = (
@@ -2366,7 +2386,7 @@ class SessionTurnManager:
             snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else {}
         except (TypeError, ValueError):
             snapshot = {}
-        legacy_workbench = context.platform == "avibe" and (
+        legacy_workbench = not delivery.get("message_id") and context.platform == "avibe" and (
             not isinstance(snapshot, dict) or "message_kind" not in snapshot
         )
         author_id = payload.get("author_id")
@@ -2670,6 +2690,27 @@ class SessionTurnManager:
                 error_type=type(exc).__name__,
             )
 
+    def _compatible_steer_memory_authority(self, turn_id: str, deliveries: list[dict[str, Any]]) -> bool:
+        if not bool(getattr(getattr(self.controller.config, "memory", None), "enabled", False)):
+            return True
+        from avibe_memory.admission import InboundTurnFacts
+
+        with self._sqlite_engine().connect() as conn:
+            initial = delivery_store.delivery_for_turn(conn, turn_id)
+            active = delivery_store.execution_delivery_payload(conn, initial) if initial else {}
+            incoming = [delivery_store.execution_delivery_payload(conn, row) for row in deliveries]
+        payloads = [active, *incoming]
+        admission = self.controller._memory_admission()
+        delegated = [delivery_store.memory_owner_from_payload(payload)
+                     for payload in payloads if payload.get("source") == "harness"]
+        # Revoking a binding must not let foreign input enter a native Turn whose
+        # existing scope could become readable again when access is restored.
+        has_scope = active.get("session_id") in getattr(self.controller, "_memory_scopes_by_session", {})
+        if not any(owner and (has_scope or admission.admits(InboundTurnFacts(**owner))) for owner in delegated):
+            return True  # Human-only and Memory-ineligible group steering keep their policy.
+        authority = delivery_store.memory_authority_for_payload(active)
+        return all(delivery_store.memory_authority_for_payload(payload) == authority for payload in incoming)
+
     async def _dispatch_steer_batch(
         self,
         backend: str,
@@ -2681,6 +2722,10 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         delivery_id = str(deliveries[0]["id"])
+        if not self._compatible_steer_memory_authority(logical_turn_id, deliveries):
+            return await self._finish_steer(
+                delivery_id, steer_result(SteerOutcome.REFUSED, reason="memory_authority_changed"), context=context
+            )
         try:
             metadata = await self._steer_input_metadata(deliveries)
             request = SteerRequest(
