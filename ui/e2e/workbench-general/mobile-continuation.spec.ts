@@ -219,6 +219,22 @@ async function primeHome(page: Page) {
   await markInstance(page);
 }
 
+/**
+ * Leaves the home by the ordinary Inbox tab, and waits for the departure to
+ * have actually happened. React Router writes history synchronously but commits
+ * the new route inside a transition, so the URL reads `/inbox` while the home is
+ * still the mounted tree; turning round inside that window supersedes the
+ * pending transition and the home is never torn down at all. The control is
+ * about what a real teardown costs, so it waits for the destination to be on
+ * screen and the home's composer to be gone before going Back.
+ */
+async function leaveByInboxTab(page: Page) {
+  await inboxTab(page).click();
+  await expect(page).toHaveURL(/\/inbox$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Inbox' })).toBeVisible();
+  await expect(composer(page)).toHaveCount(0);
+}
+
 async function expectHomeIntact(page: Page, creates: unknown[]) {
   await expect(composer(page)).toHaveValue(DRAFT);
   await expect(agentTrigger(page)).toHaveText(/claude/);
@@ -293,8 +309,7 @@ test.describe('Workbench continuations on a phone', () => {
     // browser Back as the chat-apps case — only the departure differs. An
     // ordinary tab is not a continuation, so the home is torn down and what
     // comes back is a new one that resolves the most recent project again.
-    await inboxTab(page).click();
-    await expect(page).toHaveURL(/\/inbox$/);
+    await leaveByInboxTab(page);
     await page.goBack();
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
 
@@ -333,8 +348,7 @@ test.describe('Workbench continuations on a phone', () => {
     // The pick is component state of the same class as the draft: a home that is
     // torn down comes back on the most recent project, not the chosen one. That
     // is what a continuation has to preserve, and what a refetch cannot restore.
-    await inboxTab(page).click();
-    await expect(page).toHaveURL(/\/inbox$/);
+    await leaveByInboxTab(page);
     await page.goBack();
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
     await expect(composer(page)).toHaveValue('');

@@ -27,6 +27,7 @@ export default defineConfig({
   use: { baseURL: 'http://127.0.0.1:5213', trace: 'retain-on-failure' },
   webServer: {
     command: 'npm run build && npx vite preview --host 127.0.0.1 --port 5213 --strictPort',
+    env: { VIBE_UI_BACKEND: 'http://127.0.0.1:9' },
     url: 'http://127.0.0.1:5213/',
     timeout: 180_000,
   },
