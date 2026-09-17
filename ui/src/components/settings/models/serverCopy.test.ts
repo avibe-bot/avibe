@@ -53,6 +53,13 @@ describe('serverText', () => {
     expect(text).not.toContain('models.oauth.some.future');
   });
 
+  it.each(['en', 'zh'] as const)('rejects existing objects and arrays as server text in %s', (lng) => {
+    for (const key of ['common', 'memory.settings.disclosure']) {
+      expect(serverText(t(lng), key)).toBeNull();
+      expect(serverText(t(lng), key, 'settings.models.oauth.error.generic')).toBe(t(lng)('settings.models.oauth.error.generic'));
+    }
+  });
+
   it('renders nothing for optional copy whose key is unknown', () => {
     // A migration row's secondary line has no generic substitute — dropping the
     // line is honest, printing the key is not.

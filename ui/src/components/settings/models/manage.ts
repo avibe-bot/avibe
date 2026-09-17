@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import type { Source, SourcePatch } from './types';
 import { SOURCE_DISPLAY_NAME_MAX_LENGTH } from './types';
 import {
@@ -17,7 +18,7 @@ export const MANAGE_DESTINATION: Record<ManageKind, ManageDestination> = {
   delete_source: 'delete_source_guard',
 };
 
-export const MANAGE_LABEL_KEY: Record<ManageKind, string> = {
+export const MANAGE_LABEL_KEY: Record<ManageKind, TranslationKey> = {
   edit_source: 'settings.models.sourceDetail.manage.edit',
   delete_source: 'settings.models.sourceDetail.manage.remove',
 };
@@ -267,7 +268,7 @@ export type SourceEditInvalidReason =
   | 'displayNameCredential'
   | 'baseUrlCredential';
 
-export const SOURCE_EDIT_REASON_KEY: Record<SourceEditInvalidReason, string> = {
+export const SOURCE_EDIT_REASON_KEY: Record<SourceEditInvalidReason, TranslationKey> = {
   displayNameRequired: 'settings.models.sourceDetail.edit.validation.displayNameRequired',
   displayNameTooLong: 'settings.models.sourceDetail.edit.validation.displayNameTooLong',
   displayNameCredential: 'settings.models.sourceDetail.edit.validation.displayNameCredential',

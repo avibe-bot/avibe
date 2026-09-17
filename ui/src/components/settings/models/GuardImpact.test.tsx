@@ -76,14 +76,14 @@ describe('GuardImpact', () => {
   it('distinguishes a stated absence of gaps from nobody having stated one', () => {
     // Every claim this body can make about interruption, read off the keys
     // rather than copied, so a reworded claim is caught by the same assertion.
-    const claims = [
+    const claims = ([
       'settings.models.guard.hint.safe',
       'settings.models.guard.hint.interrupt',
       'settings.models.guard.result.hint.safe',
       'settings.models.guard.result.hint.interrupt',
       'settings.models.guard.gap.label',
       'settings.models.guard.result.gapLabel',
-    ].map((key) => i18n.t(key));
+    ] as const).map((key) => i18n.t(key));
 
     // `[]` is the guard saying so, and it is entitled to: it can see the supply.
     const stated = renderImpact({ hops: [hop()], gaps: [] });

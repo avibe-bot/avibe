@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, Sparkles } from 'lucide-react';
@@ -7,8 +8,8 @@ import { SettingsPageShell } from './SettingsPageShell';
 
 export const SettingsPlaceholderPage: React.FC<{
   tab: 'platforms' | 'backends' | 'messaging';
-  titleKey: string;
-  subtitleKey: string;
+  titleKey: TranslationKey;
+  subtitleKey: TranslationKey;
 }> = ({ tab, titleKey, subtitleKey }) => {
   const { t } = useTranslation();
 

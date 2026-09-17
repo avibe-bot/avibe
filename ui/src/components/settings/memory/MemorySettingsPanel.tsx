@@ -606,10 +606,10 @@ export const MemorySettingsPanel: React.FC<{
       <div className="rounded-xl border border-border bg-surface p-4">
         <h3 className="mb-2 text-[13px] font-semibold text-foreground">{t('memory.settings.disclosureTitle')}</h3>
         <ul className="flex flex-col gap-1.5">
-          {(t(
+          {t(
             customMode ? 'memory.settings.disclosure' : 'memory.settings.cloudDisclosure',
             { returnObjects: true },
-          ) as string[]).map((line, idx) => (
+          ).map((line, idx) => (
             <li key={idx} className="flex gap-2 text-[11.5px] leading-snug text-muted">
               <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
               {line}

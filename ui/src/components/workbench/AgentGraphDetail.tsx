@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
@@ -352,7 +353,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
 // Per-state end action, matching the old running list. Idle disconnect is
 // non-destructive (no confirm); active Stop and orphan Kill require a 2nd click.
 type EndState = 'active' | 'idle' | 'orphan';
-const END_META: Record<EndState, { labelKey: string; Icon: typeof Square; needsConfirm: boolean }> = {
+const END_META: Record<EndState, { labelKey: TranslationKey; Icon: typeof Square; needsConfirm: boolean }> = {
   active: { labelKey: 'agents.running.endActive', Icon: Square, needsConfirm: true },
   idle: { labelKey: 'agents.running.endIdle', Icon: Power, needsConfirm: false },
   orphan: { labelKey: 'agents.running.endOrphan', Icon: Trash2, needsConfirm: true },

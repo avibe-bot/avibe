@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useState } from 'react';
 import {
   Activity,
@@ -20,7 +21,7 @@ import { Button } from '../ui/button';
 interface DoctorPanelProps {
   isPage?: boolean;
   logsPath?: string;
-  titleKey?: string;
+  titleKey?: TranslationKey;
 }
 
 type CheckStatus = 'pass' | 'warn' | 'fail';

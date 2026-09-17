@@ -256,7 +256,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
         <div className="flex flex-wrap gap-2 text-sm">
           {availableMessageTypes.map((msgType) => {
             const checked = (value.show_message_types || []).includes(msgType);
-            const label = t(`channelList.messageType.${msgType}`);
+            const label = t(`channelList.messageType.${msgType}`, { defaultValue: `channelList.messageType.${msgType}` });
             return (
               <button
                 key={msgType}

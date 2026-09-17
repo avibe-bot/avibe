@@ -55,7 +55,7 @@ const SourceNotices: React.FC<{ sources: MemoryProcessingRecordSources }> = ({ s
       {unavailable.map(([name, source]) => (
         <div key={name} className="rounded-md border border-border bg-surface px-3 py-2 text-[11.5px] text-muted">
           {t('memory.processingRecord.records.sourceNotice', {
-            section: t(`memory.processingRecord.source.${name}`),
+            section: t(`memory.processingRecord.source.${name}`, { defaultValue: `memory.processingRecord.source.${name}` }),
             state: t(`memory.processingRecord.sourceState.${source.status}`),
             reason: reasonLabel(t, source.reason),
           })}

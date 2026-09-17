@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { PlatformIcon } from '../visual';
 import { useOnboardingMotion } from './motion';
 
-const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'];
+const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'] as const;
 
 export function AccessTiles() {
   const { t } = useTranslation();

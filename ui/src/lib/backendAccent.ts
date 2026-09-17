@@ -7,11 +7,11 @@
 export const BACKEND_ORDER = ['claude', 'opencode', 'codex'] as const;
 export type Backend = (typeof BACKEND_ORDER)[number];
 
-export const BACKEND_LABEL: Record<Backend, string> = {
+export const BACKEND_LABEL = {
   claude: 'Claude',
   opencode: 'OpenCode',
   codex: 'Codex',
-};
+} as const satisfies Record<Backend, string>;
 
 // Text / icon accent — e.g. <Icon className={BACKEND_TEXT[b]} />.
 export const BACKEND_TEXT: Record<Backend, string> = {

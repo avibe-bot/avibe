@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import {
   forwardRef,
   useCallback,
@@ -231,7 +232,7 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
   return session.finalization;
 };
 
-const voiceErrorTranslationKey = (error: unknown): string => {
+const voiceErrorTranslationKey = (error: unknown): TranslationKey => {
   if (!(error instanceof VoiceTranscriptionError)) return 'chat.compose.voiceFailed';
   if (error.code === 'too_large') return 'chat.compose.voiceTooLarge';
   if (error.code === 'timeout') return 'chat.compose.voiceTimedOut';

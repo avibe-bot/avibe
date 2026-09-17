@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { apiFetch } from './apiFetch';
 
 // Product safety limit, enforced again by core/workbench_media.py. This is an
@@ -93,7 +94,7 @@ export async function uploadWorkbenchAttachment(
   return payload;
 }
 
-export function workbenchUploadErrorTranslationKey(error: unknown): string {
+export function workbenchUploadErrorTranslationKey(error: unknown): TranslationKey {
   if (!(error instanceof WorkbenchUploadError)) return 'chat.compose.attachmentFailed';
   if (error.code === 'too_large') return 'chat.compose.attachmentTooLarge';
   if (error.code === 'empty_file') return 'chat.compose.attachmentEmpty';

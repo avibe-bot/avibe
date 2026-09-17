@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
@@ -298,7 +299,12 @@ export const RemoteAccess: React.FC = () => {
         : qualityGrade === 'critical' || qualityGrade === 'degraded'
           ? 'destructive'
           : 'secondary';
-  const qualityLabel = t(`remoteAccess.quality${qualityGrade.charAt(0).toUpperCase()}${qualityGrade.slice(1)}`);
+  const qualityKeys = {
+    good: 'remoteAccess.qualityGood', fair: 'remoteAccess.qualityFair', poor: 'remoteAccess.qualityPoor',
+    critical: 'remoteAccess.qualityCritical', unknown: 'remoteAccess.qualityUnknown',
+    degraded: 'remoteAccess.qualityDegraded', recovering: 'remoteAccess.qualityRecovering',
+  } as const satisfies Record<typeof qualityGrade, TranslationKey>;
+  const qualityLabel = t(qualityKeys[qualityGrade]);
   const requestPath = quality?.request_path;
   const requestPathDisplayState = getTunnelRequestPathDisplayState(requestPath);
   const requestPathUnavailable = requestPathDisplayState === 'unavailable';

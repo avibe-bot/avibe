@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
@@ -414,7 +415,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
 };
 
 const Legend: React.FC<{
-  t: (k: string) => string;
+  t: TFunction;
   showDisabled: boolean;
   onToggleDisabled: (next: boolean) => void;
 }> = ({ t, showDisabled, onToggleDisabled }) => (

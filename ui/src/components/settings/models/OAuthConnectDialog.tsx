@@ -813,12 +813,12 @@ export const OAuthConnectDialog: React.FC<{
                 const disabled = isNative && nativeSlotTaken;
                 const selected = channel === candidate;
                 const badgeKey = disabled
-                  ? 'added'
+                  ? 'settings.models.addSub.opt.added'
                   : candidate === recommended
-                    ? 'recommended'
+                    ? 'settings.models.addSub.badge.recommended'
                     : vendorCopy === 'claude'
-                      ? 'secondary'
-                      : 'supportedNotRecommended';
+                      ? 'settings.models.addSub.badge.secondary'
+                      : 'settings.models.addSub.badge.supportedNotRecommended';
                 const optionKey = isNative ? 'native' : 'hub';
                 return (
                   <button
@@ -866,7 +866,7 @@ export const OAuthConnectDialog: React.FC<{
                           {t(`settings.models.addSub.opt.${optionKey}.label`)}
                         </span>
                         <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
-                          {t(`settings.models.addSub.${disabled ? 'opt' : 'badge'}.${badgeKey}`)}
+                          {t(badgeKey)}
                         </span>
                       </span>
                       <span className="model-hub-add-sub-description block text-muted">

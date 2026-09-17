@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, Bot, HelpCircle, MessageSquare, Radio, Send, Sparkles, Type } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -27,7 +28,7 @@ import {
 } from '@/lib/chatDisplay';
 import { configChanges } from '@/lib/configMutations';
 
-function formatSavedAt(value: number | null, t: (key: string) => string) {
+function formatSavedAt(value: number | null, t: TFunction) {
   if (!value) return t('settings.messagingStatusIdle');
   const deltaSec = Math.max(0, Math.round((Date.now() - value) / 1000));
   return deltaSec <= 1

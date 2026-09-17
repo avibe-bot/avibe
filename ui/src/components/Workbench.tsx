@@ -50,13 +50,13 @@ export const Workbench: React.FC = () => {
   // Quick chips under the hero — three of the most common first moves.
   const suggestions = [
     ...(canCreateProject
-      ? [{ key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
+      ? [{ key: 'newProject' as const, icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
       : []),
     ...(capabilities.can_manage_agents
-      ? [{ key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') }]
+      ? [{ key: 'openAgents' as const, icon: Bot, onClick: () => navigate('/agents') }]
       : []),
     ...(capabilities.can_manage_instance
-      ? [{ key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') }]
+      ? [{ key: 'openHarness' as const, icon: Activity, onClick: () => navigate('/harness') }]
       : []),
   ];
 

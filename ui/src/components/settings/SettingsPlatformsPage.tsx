@@ -1,3 +1,4 @@
+import { platformText } from '@/lib/platforms';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -340,7 +341,7 @@ export const SettingsPlatformsPage: React.FC = () => {
                       active ? 'font-bold text-foreground' : 'font-medium text-muted'
                     )}
                   >
-                    {t(platform.title_key || `platform.${id}.title`)}
+                    {platformText(t, id, 'title', platform.title_key)}
                   </span>
                 </button>
               );
@@ -352,8 +353,8 @@ export const SettingsPlatformsPage: React.FC = () => {
             with no credentials only appear here after the user checks them. */}
         {cardPlatforms.map((id) => {
           const descriptor = platformCatalog.find((p) => p.id === id);
-          const label = t(descriptor?.title_key || `platform.${id}.title`);
-          const description = t(descriptor?.description_key || `platform.${id}.desc`);
+          const label = platformText(t, id, 'title', descriptor?.title_key);
+          const description = platformText(t, id, 'desc', descriptor?.description_key);
           const tile = tileStyle(id);
           const runnable = platformHasRunnableConfig(config, id);
           const enabled = enabledPlatforms.includes(id);
@@ -421,10 +422,7 @@ export const SettingsPlatformsPage: React.FC = () => {
             <DialogDescription>
               {t('platform.disableConfirmBody', {
                 name: confirmDisableId
-                  ? t(
-                      platformCatalog.find((p) => p.id === confirmDisableId)?.title_key ||
-                        `platform.${confirmDisableId}.title`
-                    )
+                  ? platformText(t, confirmDisableId, 'title', platformCatalog.find((p) => p.id === confirmDisableId)?.title_key)
                   : '',
               })}
             </DialogDescription>

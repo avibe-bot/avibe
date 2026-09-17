@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // Provenance click-through for a harness trigger message in Chat (contract
 // A9a/A9b). A pure mapper so the branching is unit-tested without the component.
 //
@@ -57,7 +58,7 @@ type TriggerFields = Pick<
   | 'source_session_agent_name'
 > & { metadata?: Record<string, unknown> };
 
-const VAULT_CALLBACK_STATUS_KEYS: Record<string, string> = {
+const VAULT_CALLBACK_STATUS_KEYS: Record<string, TranslationKey> = {
   'provision:fulfilled': 'chat.source.vaultProvided',
   'access:approved': 'chat.source.vaultAccessApproved',
   'sign:approved': 'chat.source.vaultSigned',
@@ -89,7 +90,7 @@ export function isVaultCallback(message: TriggerFields): boolean {
   return sourceActor.startsWith('vault:');
 }
 
-export function vaultCallbackStatusKey(message: TriggerFields): string | null {
+export function vaultCallbackStatusKey(message: TriggerFields): TranslationKey | null {
   const metadata = vaultCallbackMetadata(message);
   if (!metadata) return null;
   return VAULT_CALLBACK_STATUS_KEYS[`${metadata.requestType}:${metadata.status}`] ?? null;
@@ -132,7 +133,7 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
 //    never the mechanism-flavored "Automated" that read as system-triggered.
 //  - Task / Watch / Webhook keep their own self-contained labels.
 // Pure so the branch is unit-tested alongside chatTriggerLink.
-export function harnessChipLabelKey(message: TriggerFields): string {
+export function harnessChipLabelKey(message: TriggerFields): TranslationKey {
   if (message.source === 'harness' && message.source_session_id) return 'chat.source.from';
   if (isVaultCallback(message)) return 'chat.source.vault';
   const kind = message.author_name;

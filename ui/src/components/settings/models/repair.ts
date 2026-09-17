@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // The supply JOURNEYS' decisions — which remedy a stopped source actually has,
 // what the server's answer to a repair means, and whether 试跑 has anything real
 // to run. Same shape and same reason as `supply.ts` / `sufficiency.ts`: each of
@@ -126,7 +127,7 @@ export function repairAction(source: Source): RepairKind | null {
  * a Record the compiler refuses a new RepairKind that has no label, and
  * `repair.test.ts` proves each one is translated in both locales.
  */
-export const REPAIR_LABEL_KEY: Record<RepairKind, string> = {
+export const REPAIR_LABEL_KEY: Record<RepairKind, TranslationKey> = {
   reauth: 'settings.models.repair.reauth',
   replace_key: 'settings.models.repair.replaceKey',
   retest: 'settings.models.repair.retest',
@@ -179,13 +180,13 @@ export type ReauthCost = 'immediate' | 'on_failure';
 export const reauthCost = (source: Source): ReauthCost =>
   source.supply_channel === 'native_cli' ? 'immediate' : 'on_failure';
 
-const REAUTH_BODY_KEY: Record<ReauthCost, string> = {
+const REAUTH_BODY_KEY: Record<ReauthCost, TranslationKey> = {
   immediate: 'settings.models.repair.reauthBody.immediate',
   on_failure: 'settings.models.repair.reauthBody.onFailure',
 };
 
 /** The confirm body that is TRUE for this source. */
-export const reauthBodyKey = (source: Source): string => REAUTH_BODY_KEY[reauthCost(source)];
+export const reauthBodyKey = (source: Source): TranslationKey => REAUTH_BODY_KEY[reauthCost(source)];
 
 // ── What the server's repair answer MEANS ────────────────────────────────
 
@@ -255,7 +256,7 @@ export const repairSettles = (outcome: RepairOutcome): boolean =>
  */
 export type RepairLine = Exclude<RepairOutcome['kind'], 'gaps'>;
 
-export const REPAIR_LINE_KEY: Record<RepairLine, string> = {
+export const REPAIR_LINE_KEY: Record<RepairLine, TranslationKey> = {
   repaired: 'settings.models.repair.repaired',
   refreshed: 'settings.models.repair.refreshed',
   unresolved: 'settings.models.repair.unresolved',
@@ -275,7 +276,7 @@ export const REPAIR_LINE_KEY: Record<RepairLine, string> = {
  * that happens to render it, and a Record over the full union makes the next
  * verdict added answer for its own tone instead of inheriting green.
  */
-export const REPAIR_TOAST: Record<RepairOutcome['kind'], { key: string; tone: 'success' | 'warning' }> = {
+export const REPAIR_TOAST: Record<RepairOutcome['kind'], { key: TranslationKey; tone: 'success' | 'warning' }> = {
   repaired: { key: REPAIR_LINE_KEY.repaired, tone: 'success' },
   refreshed: { key: REPAIR_LINE_KEY.refreshed, tone: 'success' },
   // The call succeeded and the source is still stopped: this page's gold 需处理

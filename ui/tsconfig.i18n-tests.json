@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.app.json",
+  "include": ["src/i18n/i18next.d.ts", "src/i18n/translationContract.test.ts"],
+  "exclude": []
+}

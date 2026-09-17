@@ -1,3 +1,5 @@
+import type { TFunction } from 'i18next';
+import type { TranslationKey } from '@/i18n/types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -99,7 +101,7 @@ import { errorMessage } from '@/lib/errorMessage';
 // Detail-panel schedule, in words. The literal it was derived from is printed
 // beside it by the caller — humanizing must never be the only copy of a value
 // an operator may need to paste back into a CLI.
-function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string): string {
+function formatSchedule(task: HarnessTask, t: TFunction): string {
   if (task.cron) return humanizeCron(task.cron, t);
   // A one-shot's ``run_at`` is stored as the user typed it, which is usually a
   // wall-clock reading in ``task.timezone`` with no offset. The scheduler has
@@ -121,7 +123,7 @@ function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string)
 // marked as the default rather than left out.
 function formatTimeout(
   task: HarnessTask,
-  t: (k: string, opts?: Record<string, unknown>) => string,
+  t: TFunction,
 ): string {
   const { seconds, isDefault } = taskTimeout(task);
   if (seconds <= 0) return t('harness.detail.timeoutNone');
@@ -562,9 +564,10 @@ export const HarnessPage: React.FC = () => {
   const isRunsTab = tab === 'runs';
   // One filter row, three tabs. Runs swap in outcome statuses and add a type
   // selector; everything else (search, the shown/total hint) is shared.
-  const statusOptions: readonly string[] = isRunsTab ? RUN_STATUS_FILTERS : DEFINITION_STATUS_FILTERS;
+  const statusOptions = isRunsTab
+    ? RUN_STATUS_FILTERS.map((value) => ({ value, labelKey: `harness.runStatus.${value}` as const }))
+    : DEFINITION_STATUS_FILTERS.map((value) => ({ value, labelKey: `harness.statusFilter.${value}` as const }));
   const activeStatus: string = isRunsTab ? runStatusFilter : statusFilter;
-  const statusLabelPrefix = isRunsTab ? 'harness.runStatus' : 'harness.statusFilter';
   const queryDefinitionCounts = tab === 'tasks' ? queryTaskCounts : queryWatchCounts;
   const totalForTab = isRunsTab ? queryRunCounts.all : queryDefinitionCounts.total;
   // How many rows a chip stands for. A definition chip is a *set* of lifecycle
@@ -697,7 +700,7 @@ export const HarnessPage: React.FC = () => {
           />
         </div>
         <div className="flex rounded-md border border-border-strong bg-surface p-0.5">
-          {statusOptions.map((opt) => (
+          {statusOptions.map(({ value: opt, labelKey }) => (
             <button
               key={opt}
               type="button"
@@ -709,7 +712,7 @@ export const HarnessPage: React.FC = () => {
                   : 'text-muted hover:text-foreground',
               )}
             >
-              {t(`${statusLabelPrefix}.${opt}`)}
+              {t(labelKey)}
               <span
                 className={clsx(
                   'ml-1 tabular-nums',
@@ -1260,7 +1263,7 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
  * one whose Session row is gone (the same ``deleted`` state the Session field prints
  * two rows up) -- it drops that term instead of contradicting itself.
  */
-function commandCwdFallbackKey(task: HarnessTask): string {
+function commandCwdFallbackKey(task: HarnessTask): TranslationKey {
   const state = harnessSessionState(task, task.session_id);
   return state === 'none' || state === 'deleted'
     ? 'harness.detail.cwdRuntimeDefault'
@@ -2017,13 +2020,13 @@ const LifecyclePill: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) =
   );
 };
 
-function sessionPolicyLabel(policy: string | null | undefined, t: (k: string) => string): string {
+function sessionPolicyLabel(policy: string | null | undefined, t: TFunction): string {
   if (policy === 'create_per_run') return t('harness.sessionPolicy.createPerRun');
   if (policy === 'create_once') return t('harness.sessionPolicy.createOnce');
   return t('harness.sessionPolicy.existing');
 }
 
-function deliveryLabel(postTo: string | null | undefined, t: (k: string) => string): string {
+function deliveryLabel(postTo: string | null | undefined, t: TFunction): string {
   if (postTo === 'channel') return t('harness.delivery.channel');
   if (postTo === 'thread') return t('harness.delivery.thread');
   return t('harness.delivery.session');
@@ -2201,7 +2204,7 @@ const FailureDetails: React.FC<{
   );
 };
 
-const EmptyState: React.FC<{ i18nKey: string }> = ({ i18nKey }) => {
+const EmptyState: React.FC<{ i18nKey: TranslationKey }> = ({ i18nKey }) => {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-surface px-6 py-12 text-center">

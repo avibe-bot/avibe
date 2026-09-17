@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Check,
@@ -39,7 +40,7 @@ interface DirectoryBrowserProps {
 // and verifies each path exists). Well-known shortcuts get a localized label;
 // OS roots like /tmp, /data or a Windows drive are shown by their path. Both
 // label and icon are keyed off the backend's stable ``key``.
-const FAVORITE_I18N: Record<string, string> = {
+const FAVORITE_I18N: Record<string, TranslationKey> = {
   home: 'directoryBrowser.favoritesHome',
   desktop: 'directoryBrowser.favoritesDesktop',
   documents: 'directoryBrowser.favoritesDocuments',

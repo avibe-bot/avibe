@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // One model-catalog dialog for every backend.
 //
 // It replaces OpenCodeMenuDialog, which existed because OpenCode was the only
@@ -207,7 +208,7 @@ export const BackendModelCatalogDialog: React.FC<{
   const [draft, setDraft] = React.useState<BackendModel[]>([]);
   const draftRef = React.useRef<BackendModel[]>([]);
   const [query, setQuery] = React.useState('');
-  const [saveFailedKey, setSaveFailedKey] = React.useState<string | null>(null);
+  const [saveFailedKey, setSaveFailedKey] = React.useState<TranslationKey | null>(null);
   const [editing, setEditing] = React.useState<{ model: BackendModel | null; seedId?: string } | null>(null);
   const [picking, setPicking] = React.useState<{ seed: ReadonlySet<string> } | null>(null);
   const [removing, setRemoving] = React.useState<RemovalQuestion | null>(null);

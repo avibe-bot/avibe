@@ -849,7 +849,7 @@ export function ShowPageSharingSettings({
             ) : null}
           </section>
 
-          {['conflict', 'invalid', 'error'].includes(gate) ? (
+          {(gate === 'conflict' || gate === 'invalid' || gate === 'error') ? (
             <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
               <span className="text-[11px] leading-snug text-destructive-ink">
                 {t(`chat.showPage.sharingErrors.${gate}`)}

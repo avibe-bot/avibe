@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Loader2, Power, Square, Trash2 } from 'lucide-react';
@@ -21,7 +22,7 @@ import { formatElapsed } from '../../lib/agentGraph';
 type LiveState = 'active' | 'idle' | 'orphan';
 const STATE_META: Record<
   LiveState,
-  { dotClass: string; stateKey: string; endKey: string; Icon: typeof Square; needsConfirm: boolean }
+  { dotClass: string; stateKey: TranslationKey; endKey: TranslationKey; Icon: typeof Square; needsConfirm: boolean }
 > = {
   active: { dotClass: 'bg-mint', stateKey: 'agents.running.stateActive', endKey: 'agents.running.endActive', Icon: Square, needsConfirm: true },
   idle: { dotClass: 'bg-muted', stateKey: 'agents.running.stateIdle', endKey: 'agents.running.endIdle', Icon: Power, needsConfirm: false },

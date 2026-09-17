@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // 迁移对话框 · 接入模型中枢 (frame 03). Non-destructive: a per-backend checklist of
 // detected native configs. Actions follow migration-scan.schema (spec v1.1,
 // Option 1): API keys / base URLs → import; subscription OAuth → keep_native.
@@ -38,7 +39,7 @@ function migrationVisual(item: MigrationItem): { Icon: React.ComponentType<{ siz
 
 const ActionBadge: React.FC<{ action: MigrationAction }> = ({ action }) => {
   const { t } = useTranslation();
-  const map: Record<MigrationAction, { variant: 'success' | 'warning' | 'secondary'; key: string }> = {
+  const map: Record<MigrationAction, { variant: 'success' | 'warning' | 'secondary'; key: TranslationKey }> = {
     import: { variant: 'success', key: 'settings.models.migration.action.import' },
     controlled_import: { variant: 'warning', key: 'settings.models.migration.action.controlledImport' },
     keep_native: { variant: 'secondary', key: 'settings.models.migration.action.keepNative' },

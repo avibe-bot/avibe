@@ -1,3 +1,5 @@
+import { platformText } from '@/lib/platforms';
+import type { TFunction } from 'i18next';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -385,7 +387,7 @@ const ActiveCodeBox: React.FC<{
   code: BindCodeItem;
   onCopy: () => void;
   copied: boolean;
-  t: (k: string, opts?: any) => string;
+  t: TFunction;
 }> = ({ code, onCopy, copied, t }) => {
   const expiryLabel = code.type === 'expiring' && code.expires_at
     ? t('bindCode.expiresIn', { time: formatExpiry(code.expires_at) })
@@ -763,7 +765,7 @@ export const UserList: React.FC = () => {
                       </span>
                       <span
                         className="absolute -bottom-1 -right-1 flex size-[20px] items-center justify-center rounded-full border border-border bg-background shadow-[0_0_0_2px_var(--color-background)]"
-                        title={t(`platform.${u.platform}.title`)}
+                        title={platformText(t, u.platform, 'title')}
                       >
                         <PlatformIcon platform={u.platform} size={13} />
                       </span>

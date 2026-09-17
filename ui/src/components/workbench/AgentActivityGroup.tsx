@@ -1,3 +1,5 @@
+import type { TFunction } from 'i18next';
+import type { TranslationKey } from '@/i18n/types';
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -78,13 +80,13 @@ const TOOL_ICON: Record<ToolIconKind, LucideIcon> = {
 };
 
 // File operation → badge glyph + i18n key (the mint-soft "+ 新增" style chip in A).
-const FILE_OP_META: Record<FileOp, { glyph: string; i18nKey: string; className: string }> = {
+const FILE_OP_META: Record<FileOp, { glyph: string; i18nKey: TranslationKey; className: string }> = {
   create: { glyph: '+', i18nKey: 'chat.agentActivity.opCreate', className: 'border-mint/30 bg-mint/[0.08] text-mint-ink' },
   modify: { glyph: '~', i18nKey: 'chat.agentActivity.opModify', className: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink' },
   delete: { glyph: '−', i18nKey: 'chat.agentActivity.opDelete', className: 'border-gold/30 bg-gold/[0.08] text-gold-ink' },
 };
 
-const stepLabel = (t: (k: string, o?: Record<string, unknown>) => string, count: number): string =>
+const stepLabel = (t: TFunction, count: number): string =>
   t(count === 1 ? 'chat.agentActivity.step' : 'chat.agentActivity.steps', { count });
 
 // ----- B: tool-row visibility pill (eye / eye-off + "Tools"). Global, config-backed

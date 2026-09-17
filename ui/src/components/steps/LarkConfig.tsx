@@ -429,7 +429,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                     {t('larkConfig.step3ManualList')}
                   </summary>
                   <ul className="mt-2 space-y-1.5 pl-1">
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map((i) => (
+                    {([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] as const).map((i) => (
                       <li key={i} className="flex items-start gap-2">
                         <code className="shrink-0 rounded bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-foreground">
                           {i}

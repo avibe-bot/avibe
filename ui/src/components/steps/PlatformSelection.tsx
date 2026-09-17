@@ -1,3 +1,4 @@
+import { platformText } from '@/lib/platforms';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -161,7 +162,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
   };
 
   const activeDescriptor = platformCatalog.find((item) => item.id === activeCredentialPlatform) || platformCatalog[0];
-  const activePlatformLabel = t(activeDescriptor?.title_key || `platform.${activeCredentialPlatform}.title`);
+  const activePlatformLabel = platformText(t, activeCredentialPlatform, 'title', activeDescriptor?.title_key);
   const activeCredential = credentialDraft[activeCredentialPlatform] || {};
   const currentValidationState = validationState[activeCredentialPlatform] || 'idle';
 
@@ -340,7 +341,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                 const option = platform.id;
                 const active = selected.includes(option);
                 const focused = activeCredentialPlatform === option;
-                const label = t(platform.title_key || `platform.${option}.title`);
+                const label = platformText(t, option, 'title', platform.title_key);
                 return (
                   <button
                     key={option}
@@ -411,7 +412,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                           : 'border-border bg-surface-3 text-muted hover:border-border-strong'
                       )}
                     >
-                      {t(descriptor?.title_key || `platform.${platform}.title`)}
+                      {platformText(t, platform, 'title', descriptor?.title_key)}
                     </button>
                   );
                 })}
@@ -596,7 +597,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                         active ? 'font-bold text-foreground' : 'font-medium text-muted'
                       )}
                     >
-                      {t(platform.title_key || `platform.${option}.title`)}
+                      {platformText(t, option, 'title', platform.title_key)}
                     </span>
                     {/* Selection indicator on the phone row only; on sm+ the
                         mint border carries the selected state (design.pen). */}

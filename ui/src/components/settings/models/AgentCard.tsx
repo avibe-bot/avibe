@@ -145,6 +145,7 @@ const AgentSupplyIssues: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
           const reason = named.effective_model_id === null ? 'modelMissing'
             : named.route_reason === 'route_unconfigured' ? 'routeMissing'
               : named.supply_status;
+          if (reason === null || reason === 'ok') return null;
           return (
             <li key={named.name} className="min-w-0 text-[11px] leading-4" data-agent-supply-issue>
               <p className="min-w-0 font-semibold text-foreground [overflow-wrap:anywhere]">{named.name}</p>

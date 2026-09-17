@@ -1,3 +1,4 @@
+import { platformText } from '@/lib/platforms';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -1226,7 +1227,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   )}
                 >
                   <PlatformIcon platform={p} size={16} />
-                  <span>{t(`platform.${p}.title`)}</span>
+                  <span>{platformText(t, p, 'title')}</span>
                   <span
                     className={clsx(
                       'rounded-full px-1.5 py-0.5 font-mono text-[10px]',
@@ -1382,7 +1383,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               {pageTab === 'all'
                 ? t('channelList.headerSummary', { active: summary.active, discovered: summary.total })
                 : t('channelList.headerSummaryPlatform', {
-                    platform: t(`platform.${pageTab}.title`),
+                    platform: platformText(t, pageTab, 'title'),
                     active: summary.active,
                     discovered: summary.total,
                   })}
@@ -1709,7 +1710,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             </span>
             <span>{t('dashboard.metricGroupsHint', { count: channels.length })}</span>
             <span className="hidden h-1 w-1 rounded-full bg-border md:inline-block" />
-            <span className="font-mono text-xs uppercase tracking-[0.18em]">{t(`platform.${platform}.title`)}</span>
+            <span className="font-mono text-xs uppercase tracking-[0.18em]">{platformText(t, platform, 'title')}</span>
           </div>
         )}
       </div>
@@ -1728,7 +1729,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
               )}
             >
-              {t(`platform.${candidate}.title`)}
+              {platformText(t, candidate, 'title')}
             </button>
           ))}
         </div>

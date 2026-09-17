@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 // Client for the whole-machine File Browser backend (`/api/files/*`). Reuses the
 // shared `apiFetch`, which attaches the CSRF header to mutating verbs and routes
 // remote-auth-expiry redirects. Backend contract: `core/file_browser_service.py`.
@@ -56,14 +57,14 @@ export class FilesApiError extends Error {
   }
 }
 
-export function fileBrowserErrorMessage(error: unknown, t: (key: string) => string, fallback: string): string {
+export function fileBrowserErrorMessage(error: unknown, t: TFunction, fallback: string): string {
   if (error instanceof FilesApiError) {
     // Every error code (backend not_found/permission_denied/... and the client-side
     // file_not_utf8) maps 1:1 to apps.fileBrowser.errors.<code>; fall back to the raw
     // message when no localized string exists.
     const key = `apps.fileBrowser.errors.${error.code}`;
-    const translated = t(key);
-    return translated === key ? error.message : translated;
+    const translated = t(key, { defaultValue: key, returnObjects: true });
+    return typeof translated === 'string' && translated !== key ? translated : error.message;
   }
   return error instanceof Error ? error.message : fallback;
 }

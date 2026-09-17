@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import { formatElapsed } from '../../lib/agentGraph';
 
 // Pure mappers behind the Harness task/watch rows (plan §4.1–§4.3). Like
@@ -99,16 +100,16 @@ export function definitionSurvivesToggle(
 export function lifecycleLabel(
   state: string | null | undefined,
   detail: string | null | undefined,
-  t: (k: string) => string,
+  t: TFunction,
 ): string {
-  if (state === 'finished') return t(`harness.lifecycle.${detail && DETAILS.has(detail) ? detail : 'finished'}`);
-  if (state && STATES.has(state)) return t(`harness.lifecycle.${state}`);
+  if (state === 'finished') return t(`harness.lifecycle.${LIFECYCLE_DETAILS.find((value) => value === detail) ?? 'finished'}`);
+  const known = STATES.find((value) => value === state);
+  if (known) return t(`harness.lifecycle.${known}`);
   return t('harness.lifecycle.unknown');
 }
 
-const STATES = new Set<string>(['running', 'waiting', 'paused', 'finished']);
+const STATES = ['running', 'waiting', 'paused', 'finished'] as const;
 export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error', 'missed', 'canceled'] as const;
-const DETAILS = new Set<string>(LIFECYCLE_DETAILS);
 
 // ---------------------------------------------------------------------------
 // Time, never printed raw (§4.2)
@@ -131,7 +132,7 @@ function calendarDayDelta(target: Date, now: Date): number {
 // full timestamp.
 export function humanizeTime(
   iso: string | null | undefined,
-  t: (k: string, opts?: any) => string,
+  t: TFunction,
   now: number = Date.now(),
 ): string {
   if (!iso) return '—';
@@ -157,7 +158,7 @@ export function humanizeTime(
 export function humanizeGap(
   iso: string | null | undefined,
   now: number,
-  t: (key: string) => string,
+  t: TFunction,
 ): string | null {
   if (!iso) return null;
   const at = Date.parse(iso);
@@ -182,7 +183,7 @@ export function isWallClockTimestamp(iso: string | null | undefined): boolean {
 export function formatWallTime(
   iso: string | null | undefined,
   timezone: string | null | undefined,
-  t: (k: string, opts?: any) => string,
+  t: TFunction,
 ): string {
   if (!iso) return '—';
   const raw = iso.trim();
@@ -209,7 +210,7 @@ export function formatWallTime(
 // Pinned to APScheduler's own ``WEEKDAYS`` constant by a test in
 // ``tests/test_harness_definition_lifecycle.py`` — upgrade the library's
 // numbering and that test fails rather than the rows quietly shifting a day.
-const WEEKDAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const WEEKDAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
 const WEEKDAY_INDEX: Record<string, number> = WEEKDAY_NAMES.reduce(
   (map, name, index) => ({ ...map, [name]: index }),
   {},
@@ -267,7 +268,7 @@ function clockTime(hour: string, minute: string): string | null {
 // unchanged — a wrong plain-English schedule is worse than a raw one, and the
 // detail panel prints the expression either way. Deliberately not a dependency:
 // the whole grammar we need is four cases.
-export function humanizeCron(expr: string | null | undefined, t: (k: string, opts?: any) => string): string {
+export function humanizeCron(expr: string | null | undefined, t: TFunction): string {
   const raw = (expr ?? '').trim();
   if (!raw) return '';
   const fields = raw.split(/\s+/);
@@ -667,7 +668,7 @@ export function waiterExpectedAlive(row: HarnessDefinitionFacts): boolean {
 export function definitionChipLabel(
   row: HarnessDefinitionFacts,
   kind: HarnessDefinitionKind,
-  t: (k: string, opts?: any) => string,
+  t: TFunction,
 ): string {
   if (kind === 'watch') {
     return t(row.mode === 'forever' ? 'harness.row.modeForever' : 'harness.row.modeOnce');
@@ -693,7 +694,7 @@ export type HarnessDefinitionLine = {
 
 function livenessLabel(
   row: HarnessDefinitionFacts,
-  t: (k: string) => string,
+  t: TFunction,
 ): string | null {
   if (row.process_alive === true) return t('harness.row.processAlive');
   // Report an exit only where an exit is unexpected. A retired waiter did stop,
@@ -713,7 +714,7 @@ function livenessLabel(
 export function definitionRowLine(
   row: HarnessDefinitionFacts,
   kind: HarnessDefinitionKind,
-  t: (k: string, opts?: any) => string,
+  t: TFunction,
   now: number = Date.now(),
 ): HarnessDefinitionLine {
   const state = row.lifecycle_state;
