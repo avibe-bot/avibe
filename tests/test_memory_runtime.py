@@ -753,6 +753,15 @@ async def test_write_anomaly_is_visible_through_processing_record(tmp_path):
     projection = await record._read_durable_anomalies(None, asyncio.get_running_loop().time() + 5)
     assert projection.source.status == "partial"
     assert projection.items == observation.items
+
+    async def read_failures(**_kwargs):
+        return projection, None
+
+    runtime._processing_record.read_failures = read_failures
+    payload = await runtime.failure_log_payload()
+    assert payload["source"]["status"] == "partial"
+    assert payload["source"]["reason"] == "memory_failure_history_unavailable"
+    assert payload["items"][0]["generation"] is None
     await runtime.close()
 
 

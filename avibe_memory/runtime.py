@@ -1386,6 +1386,7 @@ class MemoryRuntime:
         payload: dict[str, Any] = {
             "status": "ok",
             "items": [asdict(entry) for entry in anomalies.items],
+            "source": asdict(anomalies.source),
         }
         return payload
 

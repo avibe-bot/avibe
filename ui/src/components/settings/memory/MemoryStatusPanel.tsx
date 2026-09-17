@@ -131,7 +131,9 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
         />
         <Field label={t('memory.processingRecord.field.attempts')} value={entry.attempts} />
         <Field label={t('memory.processingRecord.field.affectedCount')} value={entry.affected_count ?? 1} />
-        <Field label={t('memory.processingRecord.field.generation')} value={entry.generation} />
+        {entry.generation != null ? (
+          <Field label={t('memory.processingRecord.field.generation')} value={entry.generation} />
+        ) : null}
         <div className="sm:col-span-2">
           <Field label={t('memory.processingRecord.field.requestId')} value={entry.request_id ?? '-'} />
         </div>

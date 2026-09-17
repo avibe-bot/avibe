@@ -113,3 +113,12 @@ result contract, and log only internal observation classification. Opaque codes
 remain in bounded process-local observations only. Regression coverage includes
 all flush continuation outcomes and both rejection operations with a secret/newline
 canary; no new recovery state or sanitization framework is needed.
+
+Review of `7e65afc92` found three members of the settlement/projection class:
+definite failures were lost when a crash prevented a retry, the failures endpoint
+dropped the partial-source qualifier, and observations fabricated generation 0.
+The orchestrator chose to settle known add/flush failures before the crash fence
+blocks further attempts (including attachment fallback), reuse the existing source
+projection in the failures response, and mark unsupported generation metadata null.
+The UI omits unknown generation while retaining real values from older responses.
+No epoch queries, additional lifecycle state, or durable history is introduced.

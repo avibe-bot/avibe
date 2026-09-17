@@ -563,7 +563,7 @@ class BestEffortMemoryWriter:
                     await self._ambiguous_outcome(failure.error, attempts=attempt)
                     await self._cleanup_item(item)
                     return
-                if attempt < MAX_ATTEMPTS:
+                if attempt < MAX_ATTEMPTS and not self._unavailable:
                     continue
                 await self._terminal_failure(item, failure.error, attempts=attempt)
                 return
@@ -572,7 +572,7 @@ class BestEffortMemoryWriter:
                     await self._ambiguous_outcome(failure.error, attempts=attempt)
                     await self._cleanup_item(item)
                     return
-                if failure.retryable and attempt < MAX_ATTEMPTS:
+                if failure.retryable and attempt < MAX_ATTEMPTS and not self._unavailable:
                     continue
                 await self._terminal_failure(item, failure.error, attempts=attempt)
                 return
@@ -596,6 +596,7 @@ class BestEffortMemoryWriter:
                     and capture.text.strip()
                     and attachment_add_rejection_proves_no_write(capture, result)
                     and attempt < MAX_ATTEMPTS
+                    and not self._unavailable
                 ):
                     attachments = ()
                     capture = ProviderCapture(
@@ -722,7 +723,7 @@ class BestEffortMemoryWriter:
                         self._pending.pop(key, None)
                         await self._ambiguous_outcome(failure.error, operation="flush", attempts=attempt)
                         return
-                    if failure.retryable and attempt < MAX_ATTEMPTS:
+                    if failure.retryable and attempt < MAX_ATTEMPTS and not self._unavailable:
                         continue
                     self._record_failure(
                         "distillation_rejected", failure.error, state="failed",
@@ -737,7 +738,7 @@ class BestEffortMemoryWriter:
                     return
                 finally:
                     self._active_provider_calls = max(0, self._active_provider_calls - 1)
-                if isinstance(result, FlushRetryable) and attempt < MAX_ATTEMPTS:
+                if isinstance(result, FlushRetryable) and attempt < MAX_ATTEMPTS and not self._unavailable:
                     continue
                 break
             if isinstance(result, FlushUnknown):

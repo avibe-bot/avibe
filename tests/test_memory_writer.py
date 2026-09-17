@@ -1372,6 +1372,12 @@ async def test_flush_crash_fences_all_subsequent_calls(tmp_path, outcome):
         writer._pending[ref.serialize()] = _PendingSession(ref, "shared", deque(["digest"]), 0, 0)
     await writer._flush_barrier(_BarrierItem(raw_session_id="shared"))
     assert calls == [_ref(0)]
+    entries = writer.failure_observations()
+    if outcome == "success":
+        assert not entries
+    else:
+        assert len(entries) == 1
+        assert (entries[0].state, entries[0].attempts) == ("failed", 1)
     await writer.close()
 
 
@@ -1391,4 +1397,31 @@ async def test_flush_unknown_preserves_cause_without_retry(tmp_path, reason, err
     entry = writer.failure_observations()[0]
     assert (entry.error_code, entry.state, entry.attempts) == (error, "unknown", 1)
     assert not writer._pending
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system_failure", [False, True])
+async def test_crash_during_definite_add_failure_is_observed_once(tmp_path, system_failure):
+    from avibe_memory.everos import MemoryProviderSystemFailure
+    calls = 0
+
+    async def add(_capture):
+        nonlocal calls
+        calls += 1
+        writer.pause_intake(unavailable=True)
+        if system_failure:
+            raise MemoryProviderSystemFailure("memory_sidecar_unavailable")
+        raise MemoryProviderFailure("memory_sidecar_unavailable", retryable=True)
+
+    provider = FakeMemoryProvider()
+    provider.add = add
+    writer = _writer(tmp_path, provider)
+    _reserve_and_offer(writer, 0)
+    await writer.wait_idle_for_tests()
+    assert calls == 1
+    entries = writer.failure_observations()
+    assert len(entries) == 1
+    assert (entries[0].state, entries[0].attempts, entries[0].affected_count) == ("failed", 1, 1)
+    assert entries[0].generation is None
     await writer.close()

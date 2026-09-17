@@ -2023,12 +2023,13 @@ export type MemoryFailureLogEntry = {
   occurred_at: string;
   error_code: string | null;
   attempts: number;
-  generation: number;
+  generation: number | null;
   request_id: string | null;
 };
 
 export type MemoryFailureLog = {
   status: 'ok';
+  source?: MemoryProcessingSourceStatus;
   items: MemoryFailureLogEntry[];
 };
 

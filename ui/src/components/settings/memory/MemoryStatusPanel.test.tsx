@@ -58,7 +58,7 @@ describe('MemoryStatusPanel', () => {
       failures={[{
         id: 'drop', kind: 'delivery_abandoned', state: 'not_submitted', operation: 'add',
         occurred_at: '2026-09-17T00:00:00Z', error_code: null, attempts: 0,
-        generation: 0, request_id: null, affected_count: count,
+        generation: null, request_id: null, affected_count: count,
       }, {
         id: 'unknown', kind: 'result_unknown', state: 'unknown', operation: 'flush',
         occurred_at: '2026-09-17T00:00:00Z', error_code: null, attempts: 3,
@@ -68,7 +68,9 @@ describe('MemoryStatusPanel', () => {
     expect(dropped.getByText('memory.processingRecord.anomalyState.notSubmitted')).toBeTruthy();
     expect(dropped.getByText('memory.processingRecord.field.affectedCount').parentElement?.textContent)
       .toContain(String(count ?? 1));
+    expect(dropped.queryByText('memory.processingRecord.field.generation')).toBeNull();
     const unknown = within(screen.getByTestId('memory-anomaly-result_unknown'));
+    expect(unknown.getByText('memory.processingRecord.field.generation')).toBeTruthy();
     expect(unknown.getByText('memory.processingRecord.anomalyState.unknown')).toBeTruthy();
     expect(unknown.getByText('memory.processingRecord.field.attempts').parentElement?.textContent).toContain('3');
     expect(screen.getByText('memory.processingRecord.reason.memory_failure_history_unavailable')).toBeTruthy();
