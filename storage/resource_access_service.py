@@ -748,8 +748,12 @@ def _migrate_deferred_metadata_value(
     if not isinstance(snapshot, Mapping):
         return None
     if member_repair_cutoff is not None:
-        # Only untouched Member rows that provably existed at the old pass can
-        # inherit its pairing. Equal-second timestamps are ambiguous, so deny.
+        # Attribute an old Member authorization snapshot, not an immutable row.
+        # Authorization re-snapshot and timestamped lifecycle writes advance
+        # updated_at; diagnostics and stable-Agent rewrites can preserve it.
+        # Current lifecycle checks still apply, including soft deletion.
+        # Preserve their CURRENT metadata below. These clocks are not a complete
+        # mutation history. Equal-second timestamps are ambiguous, so deny.
         if snapshot.get("vibe_instance_role") != "member" or any(
             (instant := _deferred_provenance_time(value)) is None or instant >= member_repair_cutoff
             for value in (created_at, updated_at)
@@ -782,6 +786,12 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     pairing can retry later. A successfully observed unpaired state is sealed,
     while a known instance with an unknown kind remains pending until that same
     instance is authoritatively classified.
+
+    Repairing a completed pre-Member pass requires the original pairing/cutoff
+    and an authorization snapshot whose row clocks precede it. Released
+    diagnostic/reference writers preserve that snapshot without advancing the
+    lifecycle clock; their current values survive the binding-only repair.
+    No complete historical row immutability is inferred from those clocks.
     """
 
     # This migration decides from a marker, pairing config, durable binding and

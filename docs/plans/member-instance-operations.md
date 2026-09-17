@@ -223,10 +223,22 @@ with a valid absolute completion time, exact instance/kind and a matching ready
 binding. Only Member records created/submitted and last updated strictly before
 that original cutoff qualify. Completion retains the original timestamp and seals
 version 3; later rows cannot reopen the opportunity. Missing/corrupt/unknown or
-sealed provenance, equal-second/later/modified rows, another pairing, contradictory
+sealed provenance, equal-second/later row clocks, another pairing, contradictory
 claims and terminal work remain unchanged. Ambiguous historical work may therefore
 remain denied; this repair does not guess identity or authorize recovery by
 re-pairing. Other roles do not enter the completed-marker repair.
+
+The cutoff attributes the legacy row and its remote authorization snapshot; it
+is not evidence that every byte of the row stayed unchanged. Released user edits
+that replace `resource_user_context` advance `updated_at`; timestamped lifecycle
+writes and new creation/submission clocks also exclude post-cutoff work.
+Diagnostic stamps/clears and stable-Agent reference canonicalization
+can preserve both the authorization snapshot and the lifecycle clock. Such rows
+remain eligible: under the shared writer reservation, repair preserves their
+current metadata/columns and every original principal/claims field, adding only
+the missing instance ID/kind to the snapshot. No complete mutation history is
+claimed. Soft deletion can also preserve `updated_at`; repair does not revive it.
+Execution still applies existing lifecycle, Agent and pairing rules.
 
 First review round: one findings-bearing head (`02b96d475`), one root cause
 (released deferred Member compatibility). The repair and stale Member Project/Vault
@@ -246,7 +258,7 @@ repository gate. All state is test-owned; execution/provider IPC is stubbed.
 
 ## Review circuit-breaker diagnosis and resumption
 
-Two findings-bearing heads were independently inventoried by PM:
+Three findings-bearing heads were independently inventoried by PM:
 
 - `02b96d475`, review `5237360393`, thread `PRRT_kwDOPbFPYs6jaBH1`:
   Member was omitted from legacy deferred binding and previously completed
@@ -256,6 +268,10 @@ Two findings-bearing heads were independently inventoried by PM:
   This repeats the deferred migration compatibility/safety class, so the lane
   stopped before editing or pushing. Thread `PRRT_kwDOPbFPYs6jaoeR` on this head
   separately identified stale Owner-only EN/ZH Skill-usage parser help.
+- `e943feee7`, review `5238087139`, thread `PRRT_kwDOPbFPYs6jbZHm`:
+  released diagnostic writers change Run metadata without advancing `updated_at`.
+  This is the third head in the same provenance/safety class; the lane stopped
+  before editing/pushing and PM independently diagnosed the proof invariant.
 
 PM reproduced a lost concurrent Task metadata update with two real SQLite/WAL
 engines and independently audited the call paths. Importer's migration file lock
@@ -293,3 +309,50 @@ initial/unversioned/pre-Show schema cases, changed-file Ruff and the UI build. P
 independently inspected the shared boundary and ran 19 concurrency, legacy-schema,
 rollback and parser-help cases, all passing, then authorized this round's push.
 Subsequent exact-head review/CI remain required.
+
+The third-head diagnosis corrected the overbroad "untouched row" requirement,
+not runtime semantics. PM and lane independently used real SQLite producers:
+`record_run_skip_reason` preserves the authorization snapshot and hold clock;
+`_clear_transport_skip_evidence` removes its reason and reason-start timestamp.
+After skip then clear, decoded metadata equals pristine metadata, so a
+`last_skip_at` deny-list cannot establish historical immutability. Advancing that
+clock would change released hold/transition behavior. The invariant above instead
+protects authorization attribution while retaining legitimate current diagnostics.
+
+PM authorized comments, contract and producer-to-consumer evidence on 2026-09-17;
+no scheduler, schema, cutoff, binding, concurrency or role decision changed.
+The production-writer audit found:
+
+- Task/Watch user add/update re-snapshot authority and advance `updated_at`;
+  full-row upsert callers also advance it. Internal runtime writes preserve the
+  principal and advance lifecycle time where applicable.
+- Run producers construct a new `TaskExecutionRequest` ID with current creation
+  time, including definition fires, callbacks and atomic completion/escalation
+  outboxes. A duplicate callback returns its existing child. Requeue and metadata
+  merge callers advance time; they do not silently replace old remote authority.
+- UI Delivery submission builds verified metadata and sets current submission
+  and update clocks. Retry either inserts a new Delivery or records history on
+  retained input through timestamped CAS; it does not replace its snapshot.
+- Legacy Task/Watch file imports emit empty metadata; task-request import retains
+  only `ok`. Watch runtime import carries process-state entries whose actual
+  producer contains no remote authorization snapshot. These are insert paths,
+  not edits that replace old authority while retaining old clocks.
+- Diagnostic skip/clear, Agent reference pin/rename, soft deletion and Delivery
+  dedupe normalization do not change `resource_user_context`. Agent catalog
+  identity and existing archived-reference execution policy are preserved.
+
+Focused tests use real skip/clear, Task/Watch user updates, Run/Delivery lifecycle
+writes and stable-Agent pin/rename before repair. They assert exact retained
+principal/claims plus only two binding additions, current nonauthorization
+metadata/columns, Harness admission and queued-Delivery execution recheck,
+post-cutoff refusals and sealed idempotence. Existing concurrency, terminal/hash
+and conservative negative-provenance tests remain required. This evidence makes
+no claim to recover unrecorded mutation history or support forged database files.
+This round passes 10 new producer/consumer cases, 160 combined resource-permission
+and signed Member scenarios (including the existing concurrency/provenance matrix),
+and five retained runtime/Agent regressions. Changed-file Ruff and diff whitespace
+checks pass. PM independently inspected the complete three-file diff and PR ledger, ran all
+10 new producer/consumer cases successfully, and compared the production AST
+(excluding comments/docstrings) with `e943feee7`: executable logic is identical.
+On 2026-09-18 PM approved explanatory closure and this comments/contract/tests
+push. Another exact-head review and complete CI remain required.

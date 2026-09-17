@@ -2645,3 +2645,251 @@ def test_member_repair_keeps_existing_transaction_owned_by_caller(member_repair_
         assert not conn.execute(select(state_meta.c.key).where(state_meta.c.key == "caller-write")).first()
         snapshot = _legacy_definition_metadata(conn, "scheduled")[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
         assert "vibe_instance_id" not in snapshot
+
+
+@pytest.fixture
+def member_repair_provenance(monkeypatch, tmp_path, sqlite_schema_db_factory):
+    """Released rows with a completed marker, before a real runtime producer writes."""
+    from types import SimpleNamespace
+
+    from config import paths
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    db = paths.get_sqlite_state_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    sqlite_schema_db_factory(db)
+    store = SQLiteBackgroundTaskStore(db)
+    old = "2026-08-20T00:00:00Z"
+    cutoff = "2026-08-21T00:00:00Z"
+    later = "2026-08-22T00:00:00Z"
+    context = {
+        "sub": "member α", "vibe_instance_role": "member",
+        "vibe_instance_access_source": "email", "claims_issued_at": 1_700_000_000,
+        "vibe_membership_version": 7, "vibe_instance_authorization_revision": 9,
+        "authorization_expires_at": 1_700_003_600,
+    }
+    metadata = {"resource_user_context": context, "note": {"text": "preserve 当前", "value": [1, 2]}}
+    for kind in ("scheduled", "watch"):
+        values = dict(id=kind, name=kind, message="run", schedule_type="interval",
+                      created_at=old, updated_at=old, metadata=metadata)
+        writer = store.upsert_scheduled_task if kind == "scheduled" else store.upsert_watch
+        assert writer(values)
+    store.enqueue_run(dict(id="run", run_type="hook_send", status="queued", session_id="session",
+                           created_at=old, updated_at=old, metadata=metadata))
+    with store.engine.begin() as conn:
+        _seed_ready_binding(conn, instance_id="same-instance", instance_kind="personal")
+        conn.execute(state_meta.insert().values(
+            key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+            value_json=json.dumps({"schema_version": 2, "state": "completed", "instance_id": "same-instance",
+                                   "instance_kind": "personal", "completed_at": cutoff}), updated_at=cutoff,
+        ))
+        conn.execute(agent_sessions.insert().values(
+            id="session", agent_backend="codex", agent_variant="default", session_anchor="session",
+            native_session_id="native", status="active", metadata_json="{}", created_at=old, updated_at=old,
+        ))
+        delivery = enqueue_queued(conn, scope_id=None, session_id="session", text="你好", metadata=metadata, now=old)
+    try:
+        yield SimpleNamespace(store=store, db=db, old=old, cutoff=cutoff, later=later,
+                              context=context, metadata=metadata, delivery_id=delivery["id"])
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("diagnostic", ["pristine", "present", "cleared"])
+def test_member_repair_preserves_real_run_diagnostics_and_authorization(member_repair_provenance, diagnostic):
+    """PERMISSIONS-014: skip history is not authorization history or a hold-clock update."""
+    state = member_repair_provenance
+    store = state.store
+    if diagnostic != "pristine":
+        assert store.record_run_skip_reason("run", reason="transport_unavailable", at=state.later)
+        if diagnostic == "cleared":
+            assert store._clear_transport_skip_evidence({"run"}) == 1
+    before = store.get_run("run")
+    assert before["updated_at"] == state.old
+    assert before["metadata"]["resource_user_context"] == state.context
+    if diagnostic in {"pristine", "cleared"}:
+        assert before["metadata"] == state.metadata  # Clearing leaves no mutation history.
+    else:
+        assert before["metadata"]["last_skip_at"] == state.later
+    assert not resource_access_service.metadata_allows_harness_runtime(before["metadata"])
+    with store.engine.begin() as conn:
+        assert resource_access_service.migrate_legacy_deferred_resource_contexts(conn)["legacy_deferred_runs"] == 1
+    after = store.get_run("run")
+    assert after["metadata"] == {
+        **before["metadata"], "resource_user_context": {
+            **state.context, "vibe_instance_id": "same-instance", "vibe_instance_kind": "personal",
+        },
+    }
+    assert {k: v for k, v in after.items() if k not in {"metadata", "updated_at"}} == {
+        k: v for k, v in before.items() if k not in {"metadata", "updated_at"}
+    }
+    assert resource_access_service.metadata_allows_harness_runtime(after["metadata"])
+    from core.session_turns import SessionTurnManager
+    with store.engine.begin() as conn:
+        delivery = conn.execute(select(message_deliveries)).mappings().one()
+        assert SessionTurnManager._remote_delivery_execution_denial(conn, dict(delivery)) is None
+        marker = _stored_migration_marker(conn)
+        assert _migration_counts(resource_access_service.migrate_legacy_deferred_resource_contexts(conn)) == _EMPTY_MIGRATION_COUNTS
+        assert _stored_migration_marker(conn) == marker
+    assert store.get_run("run") == after
+
+
+@pytest.mark.parametrize("kind", ["scheduled", "watch"])
+def test_member_repair_refuses_real_post_cutoff_authorization_update(member_repair_provenance, monkeypatch, tmp_path, kind):
+    """PERMISSIONS-014: the user-edit producer replaces authority and advances its clock."""
+    from core import scheduled_tasks, watches
+
+    state = member_repair_provenance
+    module = scheduled_tasks if kind == "scheduled" else watches
+    monkeypatch.setattr(module, "_utc_now_iso", lambda: state.later)
+    context = _context("replacement β", organization_id=None, instance_role="member", access_source="email")
+    # An old no-kind caller can still save a legacy-shaped snapshot. Its new
+    # timestamp, not an assumption that every caller already supplies binding,
+    # must prevent the original marker from claiming that replacement authority.
+    if kind == "scheduled":
+        definitions = scheduled_tasks.ScheduledTaskStore(tmp_path / "unused-tasks.json")
+        definitions._sqlite = state.store
+        definitions.load()
+        definitions.update_task(kind, name=kind, session_key="", prompt="edited", schedule_type="interval",
+                                post_to=None, deliver_key=None, cron=None, run_at=None, timezone_name="UTC",
+                                user_context=context)
+    else:
+        definitions = watches.ManagedWatchStore(tmp_path / "unused-watches.json")
+        definitions._sqlite = state.store
+        definitions.load()
+        definitions.update_watch(kind, name=kind, session_key="", session_id=None, command=["true"],
+                                 shell_command=None, prefix=None, cwd=None, mode="once", timeout_seconds=0,
+                                 lifetime_timeout_seconds=0, retry_exit_codes=[75], retry_delay_seconds=30,
+                                 post_to=None, deliver_key=None, user_context=context)
+    with state.store.engine.begin() as conn:
+        before = dict(conn.execute(select(run_definitions).where(run_definitions.c.id == kind)).mappings().one())
+        metadata = json.loads(before["metadata_json"])
+        assert metadata["resource_user_context"]["sub"] == "replacement β"
+        assert metadata["resource_user_context"]["vibe_instance_id"] is None
+        assert before["updated_at"] == state.later
+        assert resource_access_service.migrate_legacy_deferred_resource_contexts(conn)["legacy_deferred_definitions"] == 1
+        after = dict(conn.execute(select(run_definitions).where(run_definitions.c.id == kind)).mappings().one())
+        assert after == before
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
+@pytest.mark.parametrize("kind", ["run", "delivery"])
+def test_member_repair_refuses_real_post_cutoff_lifecycle_update(member_repair_provenance, monkeypatch, kind):
+    from storage import message_deliveries as deliveries
+
+    state = member_repair_provenance
+    if kind == "run":
+        assert state.store.claim_pending_run("run", started_at=state.later) is not None
+        table, row_id = agent_runs, "run"
+    else:
+        monkeypatch.setattr(deliveries, "utc_now_iso", lambda: state.later)
+        with state.store.engine.begin() as conn:
+            row = deliveries.get_delivery(conn, state.delivery_id)
+            assert deliveries.cas_delivery(conn, row["id"], expected_version=row["version"],
+                                           expected_states=("queued",), values={},
+                                           history_event={"kind": "retry_claim"}) is not None
+        table, row_id = message_deliveries, state.delivery_id
+    with state.store.engine.begin() as conn:
+        before = dict(conn.execute(select(table).where(table.c.id == row_id)).mappings().one())
+        assert before["updated_at"] == state.later
+        counts = resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+        assert counts[f"legacy_deferred_{'runs' if kind == 'run' else 'deliveries'}"] == 0
+        assert dict(conn.execute(select(table).where(table.c.id == row_id)).mappings().one()) == before
+
+
+def test_member_repair_preserves_real_stable_agent_reference_rewrites(member_repair_provenance):
+    """PERMISSIONS-014: catalog canonicalization changes routing, not the initiating principal."""
+    from core.vibe_agents import VibeAgentStore, ensure_agent_selection_access
+    from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
+
+    state = member_repair_provenance
+    agents = VibeAgentStore(state.db)
+    try:
+        original = agents.create(name="repair-agent", backend="codex")
+        metadata = {**state.metadata, "session_settings_snapshot": {"agent_name": original.name, "model": "keep"}}
+        with state.store.engine.begin() as conn:
+            conn.execute(run_definitions.update().values(agent_name=original.name, metadata_json=json.dumps(metadata)))
+            conn.execute(agent_runs.update().values(agent_name=original.name, agent_id=None))
+        assert state.store.refresh_run_agent_reference("run") == {"agent_id": original.id, "agent_name": original.name}
+        renamed = agents.rename(original.name, "repair-agent-renamed")
+        assert renamed.id == original.id
+        with state.store.engine.begin() as conn:
+            before = list(conn.execute(select(run_definitions)).mappings())
+            run_before = dict(conn.execute(select(agent_runs)).mappings().one())
+            assert run_before["agent_id"] == original.id and run_before["agent_name"] == renamed.name
+            assert run_before["updated_at"] == state.old
+            for row in before:
+                current = json.loads(row["metadata_json"])
+                assert current["resource_user_context"] == state.context
+                assert current["session_settings_snapshot"] == {"agent_name": renamed.name, "model": "keep"}
+                assert current[DEFINITION_AGENT_BINDING_REVISION_KEY]
+                assert row["updated_at"] == state.old
+            assert resource_access_service.migrate_legacy_deferred_resource_contexts(conn)["legacy_deferred_definitions"] == 2
+            for row in before:
+                after = dict(conn.execute(select(run_definitions).where(run_definitions.c.id == row["id"])).mappings().one())
+                expected = json.loads(row["metadata_json"])
+                expected["resource_user_context"] = {**state.context, "vibe_instance_id": "same-instance", "vibe_instance_kind": "personal"}
+                assert json.loads(after.pop("metadata_json")) == expected
+                assert after == {k: v for k, v in row.items() if k != "metadata_json"}
+                assert resource_access_service.metadata_allows_harness_runtime(expected)
+                context = resource_access_service.resource_user_context_from_metadata(expected)
+                selected = ensure_agent_selection_access(conn, agent_name=renamed.name, agent_id=original.id,
+                                                         user_context=context, missing_is_error=True)
+                assert selected.id == original.id
+            run_after = dict(conn.execute(select(agent_runs)).mappings().one())
+            assert {k: v for k, v in run_after.items() if k not in {"metadata_json", "updated_at"}} == {
+                k: v for k, v in run_before.items() if k not in {"metadata_json", "updated_at"}
+            }
+            assert json.loads(run_after["metadata_json"])["resource_user_context"] == {
+                **state.context, "vibe_instance_id": "same-instance", "vibe_instance_kind": "personal",
+            }
+    finally:
+        agents.close()
+
+
+def test_member_repair_preserves_real_soft_deletion(member_repair_provenance):
+    state = member_repair_provenance
+    state.store.remove_task("scheduled")
+    assert state.store.get_scheduled_task("scheduled") is None
+    with state.store.engine.begin() as conn:
+        before = dict(conn.execute(select(run_definitions).where(run_definitions.c.id == "scheduled")).mappings().one())
+        assert before["deleted_at"] and before["updated_at"] == state.old
+        resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+        after = dict(conn.execute(select(run_definitions).where(run_definitions.c.id == "scheduled")).mappings().one())
+        assert {k: v for k, v in after.items() if k != "metadata_json"} == {
+            k: v for k, v in before.items() if k != "metadata_json"
+        }
+    assert state.store.get_scheduled_task("scheduled") is None
+
+
+def test_member_repair_preserves_real_delivery_dedupe_normalization(member_repair_provenance):
+    from core.session_turns import SessionTurnManager
+    from storage import message_deliveries as deliveries
+
+    state = member_repair_provenance
+    with state.store.engine.begin() as conn:
+        row = deliveries.insert_delivery(
+            conn, delivery_id="legacy-native", session_id="session", priority="p3", state="queued",
+            snapshot=deliveries.message_snapshot(scope_id="scope", session_id="session", platform="slack",
+                                                author="user", source="user", text="hello", metadata=state.metadata),
+            dispatch_text="hello", dedupe_key=deliveries.native_dedupe_key("slack", "native"), now=state.old,
+        )
+        normalized = deliveries.get_delivery_by_native_identity(
+            conn, platform="slack", native_message_id="native", scope_id="scope", session_id="session", normalize_legacy=True,
+        )
+        assert normalized["dedupe_key"] != row["dedupe_key"]
+        assert normalized["snapshot_json"] == row["snapshot_json"]
+        assert normalized["updated_at"] == state.old
+        resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+        repaired = deliveries.get_delivery(conn, "legacy-native")
+        assert repaired["dedupe_key"] == normalized["dedupe_key"]
+        snapshot = json.loads(repaired["snapshot_json"])
+        expected = json.loads(normalized["snapshot_json"])
+        metadata = json.loads(expected["metadata_json"])
+        metadata["resource_user_context"].update(vibe_instance_id="same-instance", vibe_instance_kind="personal")
+        assert json.loads(snapshot.pop("metadata_json")) == metadata
+        expected.pop("metadata_json")
+        assert snapshot == expected
+        assert repaired["snapshot_sha256"] == hashlib.sha256(repaired["snapshot_json"].encode()).hexdigest()
+        assert SessionTurnManager._remote_delivery_execution_denial(conn, repaired) is None
