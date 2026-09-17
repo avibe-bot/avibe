@@ -264,6 +264,11 @@ The current head's known run inventory is retained separately from notification
 progress, including through a PR-only report or a restart. Existing cursor files
 are accepted without reseeding; notification history already overwritten by an
 older waiter cannot be reconstructed.
+Explicit `--catch-up` and PR cursor replay reset the observed run inventory to
+the initial current response, just as `--seed-state` does. Catch-up reports
+current completed CI; explicit PR replay baselines unrelated CI silently.
+Subsequent polls retain newly observed runs normally. Do not use these reset
+modes when re-arming an existing Watch.
 
 ```bash
 STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"

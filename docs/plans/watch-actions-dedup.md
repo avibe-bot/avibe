@@ -44,6 +44,30 @@ state-file diagnostic and preserve the file rather than discarding notification
 history or silently disabling requested CI monitoring. An absent optional
 observed inventory remains compatible with version-1 cursors.
 
+### Explicit replay and initialization boundaries
+
+The notification baseline and observed inventory must share the caller's
+initialization policy. Ordinary monitoring retains saved current-head run IDs
+and attempt high-water marks. Explicit seed, catch-up, and PR cursor replay
+instead initialize the inventory from the first current observation; inheriting
+a missing run or higher attempt from the old inventory can otherwise prevent
+all future CI verdicts after a deliberate reset.
+
+Keep the existing mode-specific notification behavior: seed adopts current CI
+silently, catch-up reports current completed CI, and explicit PR replay silently
+baselines unrelated CI while replaying the selected PR stream. Reset inventory
+only at initialization, not during polling or settle. Observations made after
+that boundary still constrain every complete gate and survive acknowledgement
+and ordinary restart.
+
+The smallest complete repair is this initialization-policy alignment, not a
+change to the delivery owner or missing-run policy. Pending replay/acknowledgement
+and malformed-state validation still precede initialization; an explicit replay
+must neither discard an undelivered report nor bypass corrupt-state diagnostics.
+Validate saved optional inventory and legacy baseline fallback, missing rows and
+older attempts, immediate and later CI completion, PR-only replay, and an
+acknowledged restart that again enforces newly observed inventory.
+
 ## Boundaries
 
 - Production changes are limited to the bundled GitHub PR waiter and stable

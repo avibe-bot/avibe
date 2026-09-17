@@ -2230,7 +2230,9 @@ def main() -> int:
     actions_head_sha = observed_head_sha if explicit_replay or args.seed_state else tracked_head_sha
     actions_observed = (
         _observe_actions(
-            {} if args.seed_state else (
+            # Deliberate replay starts a new observation baseline too. Retaining
+            # an omitted old run/attempt would block every later CI verdict.
+            {} if args.seed_state or args.catch_up or explicit_replay else (
                 _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY)
                 if ACTIONS_OBSERVED_KEY in saved else _saved_actions_snapshot(saved)
             ),

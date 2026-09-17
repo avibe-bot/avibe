@@ -4306,7 +4306,7 @@ def _seed_ci_state(module, path, *runs, workflows=("CI",), head="head-1", owner=
     )
 
 
-def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0, sha=None):
+def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0, sha=None, extra_args=()):
     """Use real cursor IO in tmp_path, fake GitHub, and a bounded virtual clock."""
     clock = 0.0
     polls = iter(states)
@@ -4335,7 +4335,7 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
             delivery=delivery,
             extra_args=(
                 *ci_args, *sha_args, "--interval", "1", "--timeout", "100",
-                "--settle", str(settle),
+                "--settle", str(settle), *extra_args,
             ),
         )
 
@@ -4577,6 +4577,109 @@ def test_explicit_pr_replay_does_not_replay_unrelated_completed_ci(with_comment)
     assert rc == (0 if with_comment else 124)
     assert "GitHub Actions" not in stdout.getvalue()
     assert ("review_comment #501" in stdout.getvalue()) == with_comment
+
+
+@pytest.mark.parametrize("mode", ["catch-up", "pr-replay", "monitor"])
+@pytest.mark.parametrize("inventory_present", [False, True])
+@pytest.mark.parametrize("stale_kind", ["missing-run", "higher-attempt"])
+@pytest.mark.parametrize("initial_terminal", [False, True])
+def test_explicit_replay_resets_ci_inventory_but_ordinary_resume_retains_it(
+    tmp_path, mode, inventory_present, stale_kind, initial_terminal,
+):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    stale = (
+        [old, _ci_run(8, conclusion="failure")]
+        if stale_kind == "missing-run" else [_ci_run(attempt=9, conclusion="failure")]
+    )
+    _seed_ci_state(module, path, *([old] if inventory_present else stale))
+    if inventory_present:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        saved[module.ACTIONS_OBSERVED_KEY] = module.normalize_selected_runs({"CI": stale})
+        path.write_text(json.dumps(saved), encoding="utf-8")
+
+    current = old if initial_terminal else _ci_run(status="in_progress", conclusion=None)
+    state = _ci_state(current, comment=True)
+    flags = {
+        "catch-up": ("--catch-up",),
+        "pr-replay": ("--since-review-comment-id", "0"),
+        "monitor": (),
+    }[mode]
+    rc, first_output, payload = _ci_cycle(module, path, [state], extra_args=flags)
+    assert rc == 0
+    assert "review_comment #501" in first_output
+    assert ("GitHub Actions success" in first_output) == (mode == "catch-up" and initial_terminal)
+    expected_inventory = module._observe_actions(
+        module.normalize_selected_runs({"CI": stale}) if mode == "monitor" else {},
+        module.normalize_selected_runs({"CI": [current]}),
+        "head-1",
+    )
+    assert payload[module.STAGED_KEY]["cursors"][module.ACTIONS_OBSERVED_KEY] == expected_inventory
+
+    # Explicit reset flags must not supersede an undelivered transaction.
+    def unavailable(*args, **kwargs):
+        raise AssertionError("pending replay must not reach GitHub")
+
+    rc, replay, _ = _run_managed(
+        module, path, unavailable, delivery="1",
+        extra_args=("--branch", "feature", "--workflow", "CI", *flags),
+    )
+    assert rc == 0
+    assert replay == first_output
+
+    # A normal restart adopts the reset inventory and remains quiet on the
+    # initial state. A genuinely new CI result then reports exactly once.
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2")
+    assert rc == 124
+    assert output == ""
+    complete = _ci_state(old, _ci_run(9), comment=True)
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
+    assert rc == (124 if mode == "monitor" else 0)
+    assert ("GitHub Actions success" in output) == (mode != "monitor")
+    assert "review_comment #501" not in output
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="3")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--since-review-id", "0"),
+        ("--since-review-comment-id", "0"),
+        ("--since-issue-comment-id", "0"),
+        ("--since-reaction-id", "0"),
+        ("--since-pr-status", "open"),
+        ("--catch-up",),
+    ],
+)
+def test_explicit_replay_with_empty_ci_baselines_quietly_then_tracks_new_observations(tmp_path, flags):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(conclusion="failure"))
+    rc, output, payload = _ci_cycle(module, path, [_ci_state()], extra_args=flags)
+    assert rc == 124
+    assert output == ""
+    assert payload["actions"] == {"CI": []}
+    assert payload[module.ACTIONS_OBSERVED_KEY] == {"CI": []}
+
+    succeeded, pending = _ci_run(9), _ci_run(10, status="in_progress", conclusion=None)
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(succeeded, pending), _ci_state(succeeded)])
+    assert rc == 124
+    assert output == ""
+    # Reset is an initialization boundary, not permission to forget runs
+    # observed afterwards, including across a normal restart.
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(succeeded)])
+    assert rc == 124
+    assert output == ""
+    complete = _ci_state(succeeded, _ci_run(10))
+    rc, output, _ = _ci_cycle(module, path, [complete])
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
+    assert rc == 124
+    assert output == ""
 
 
 @pytest.mark.parametrize("head", ["head-1", "head-2"])
