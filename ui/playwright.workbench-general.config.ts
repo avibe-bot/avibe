@@ -5,6 +5,8 @@ import { defineConfig, devices } from '@playwright/test';
 // so nothing here reaches a running Avibe service or writes to user state.
 export default defineConfig({
   testDir: './e2e/workbench-general',
+  // Runs against the built app instead — see playwright.workbench-general-build.config.ts.
+  testIgnore: ['**/mobile-continuation.spec.ts'],
   // Playwright empties `outputDir` at the start of every run, including a filtered
   // one, so the captures must NOT live inside it: a `-g` re-run of two shots would
   // otherwise delete the other sixteen. Traces get their own subdirectory and the

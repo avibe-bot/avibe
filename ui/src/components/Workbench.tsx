@@ -269,9 +269,10 @@ export const Workbench: React.FC = () => {
 
         {/* Continuation row (design CRERw) — where this conversation can carry on
             when the user leaves the desk. Both destinations are OWNER_ONLY_ROUTES,
-            so a member who followed either would be bounced straight back here;
-            the whole row goes rather than the links alone, because the sentence
-            around them only exists to introduce a destination they cannot reach. */}
+            so anyone without `can_manage_instance` who followed either would be
+            bounced straight back here; the whole row goes rather than the links
+            alone, because the sentence around them only exists to introduce a
+            destination they cannot reach. */}
         {capabilities.can_manage_instance && (
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <Link

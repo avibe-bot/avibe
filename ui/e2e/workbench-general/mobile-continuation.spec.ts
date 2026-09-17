@@ -9,16 +9,23 @@ import { NARROW, open, serveProduct } from './support';
  * What is under test is a lifecycle, not a layout: the home holds an unsent
  * draft, an Agent pick and a workspace target that live nowhere but in the
  * component, so following either continuation used to throw them away. These
- * specs drive the real product through the whole round trip — type, pick,
- * follow, navigate inside Settings, come back the way the phone actually offers
- * — and then read that state back off the page.
+ * specs drive the real product through the whole round trip — type, pick, open a
+ * workspace through the directory browser, follow, navigate inside Settings,
+ * come back the way the phone actually offers — and then read that state back
+ * off the page.
  *
- * Every preservation claim is paired with a control that leaves the home by an
- * ordinary route and returns the same way, where the identical assertions must
- * FAIL. Without it, a reading could be re-derived rather than preserved.
+ * The preservation claims are paired with a control that leaves the home by an
+ * ordinary tab and returns with browser Back — the same return path the
+ * chat-apps case below uses — where the identical assertions must FAIL. Without
+ * it, a reading could be re-derived rather than preserved. The phone-continuation
+ * case returns through the in-app control instead, which is the other way the
+ * phone offers out of Settings.
  *
  * Hermetic like the rest of the suite: every request is answered or refused by
- * `serveProduct`, and each test asserts nothing was refused.
+ * `serveProduct`, and each test asserts nothing was refused. Unlike the rest of
+ * the suite this file runs against the built app — the directory browser the
+ * workspace pick goes through cannot be driven under the dev server's StrictMode
+ * double-mount; `playwright.workbench-general-build.config.ts` explains why.
  */
 
 const COMPOSER = 'Describe a task or ask a question...';
@@ -27,13 +34,15 @@ const DRAFT = '把「中文项目」的日志整理成周报，并附上待办�
 // Two workspaces, because one cannot tell a preserved selection from the
 // fallback: `useNewSession` resolves an explicit pick first and the most recent
 // project second, so only a SECOND project makes the two readings differ. The
-// draft above is about the older one, so picking it is what a user would do.
+// draft above is about the older one, so opening it is what a user would do.
 // Names and paths are non-ASCII for the same reason the shared fixture's are.
+const HOME_DIR = '/Users/max';
+const WORKSPACES_DIR = '/Users/max/工作区';
 const RECENT_WORKSPACE = {
   id: 'proj-2',
   scope_id: 'scope-1',
   display_name: '设计稿归档',
-  folder_path: '/Users/max/工作区/设计稿归档',
+  folder_path: `${WORKSPACES_DIR}/设计稿归档`,
   created_at: '2026-01-02T00:00:00Z',
   last_active_at: '2026-02-02T00:00:00Z',
   archived: false,
@@ -43,7 +52,7 @@ const PICKED_WORKSPACE = {
   id: 'proj-1',
   scope_id: 'scope-1',
   display_name: '中文项目',
-  folder_path: '/Users/max/工作区/中文项目',
+  folder_path: `${WORKSPACES_DIR}/中文项目`,
   created_at: '2026-01-01T00:00:00Z',
   last_active_at: '2026-01-10T00:00:00Z',
   archived: false,
@@ -51,14 +60,31 @@ const PICKED_WORKSPACE = {
 };
 const PROJECTS = { projects: [PICKED_WORKSPACE, RECENT_WORKSPACE], sessions: {} };
 
+/** The folders the browse endpoint answers with — test-owned, never the real disk. */
+const BROWSE: Record<string, { path: string; parent: string | null; dirs: { name: string; path: string }[] }> = {
+  '~': { path: HOME_DIR, parent: '/Users', dirs: [{ name: '工作区', path: WORKSPACES_DIR }] },
+  [HOME_DIR]: { path: HOME_DIR, parent: '/Users', dirs: [{ name: '工作区', path: WORKSPACES_DIR }] },
+  [WORKSPACES_DIR]: {
+    path: WORKSPACES_DIR,
+    parent: HOME_DIR,
+    dirs: [
+      { name: PICKED_WORKSPACE.display_name, path: PICKED_WORKSPACE.folder_path },
+      { name: RECENT_WORKSPACE.display_name, path: RECENT_WORKSPACE.folder_path },
+    ],
+  },
+  [PICKED_WORKSPACE.folder_path]: { path: PICKED_WORKSPACE.folder_path, parent: WORKSPACES_DIR, dirs: [] },
+};
+
 /**
  * Capabilities are the boundary the product reads; the role name is only how
- * the server spells one out. `vibe/authorization.py` projects `can_chat` from
- * editor upward and `can_manage_instance` from member upward, so an editor is
- * the real role that can work here and cannot reach either continuation
- * destination. It is also the one that gets the workspace PICKER: creating a
- * local project needs `can_manage_projects && can_use_files`, and without it
- * the same chip lists the projects that already exist instead.
+ * the server spells one out. `vibe/authorization.py` projects `can_chat` and
+ * `can_use_files` from editor upward and `can_manage_instance` and
+ * `can_manage_projects` from member upward, so an editor is the real role that
+ * can work here and cannot reach either continuation destination. It is also the
+ * one that gets the workspace PICKER: opening a local folder needs
+ * `can_manage_projects && can_use_files`, and without it the same chip lists the
+ * projects that already exist instead. The manager branch of that same chip —
+ * the directory browser — is what the continuation tests above exercise.
  */
 const EDITOR_SESSION = {
   remote: true,
@@ -86,11 +112,39 @@ const EDITOR_SESSION = {
   },
 };
 
-/** Routes registered after `serveProduct` win, so each of these replaces only what it names. */
-const withWorkspaces = async (page: Page) => {
-  await page.route('**/api/projects**', (route) => route.fulfill({ json: PROJECTS }));
+/**
+ * Routes registered after `serveProduct` win, so each of these replaces only
+ * what it names. Two writes are answered here rather than refused — the
+ * directory browse and the find-or-create the manager path actually makes.
+ * Both are fulfilled from the fixtures above, so no real folder is ever listed
+ * and no project is ever created; the returned array records every create
+ * payload, so a second creation cannot pass unnoticed.
+ */
+const withWorkspaceApi = async (page: Page) => {
+  const creates: unknown[] = [];
+  await page.route('**/api/projects**', (route) => {
+    const request = route.request();
+    if (request.method() !== 'POST') return route.fulfill({ json: PROJECTS });
+    // create_project is find-or-create by folder path, so opening a folder that
+    // is already a project answers with that project instead of a new row.
+    const payload = request.postDataJSON() as { folder_path?: string };
+    creates.push(payload);
+    const existing = PROJECTS.projects.find((project) => project.folder_path === payload.folder_path);
+    return existing
+      ? route.fulfill({ json: existing })
+      : route.fulfill({ status: 404, json: { error: `no project fixture for ${payload.folder_path}` } });
+  });
   await page.route('**/api/workbench/projects-bootstrap**', (route) => route.fulfill({ json: PROJECTS }));
+  await page.route('**/api/browse', (route) => {
+    const { path } = route.request().postDataJSON() as { path: string };
+    const answer = BROWSE[path];
+    return route.fulfill(
+      answer ? { json: { ok: true, ...answer } } : { json: { ok: false, error: `no folder fixture for ${path}` } },
+    );
+  });
+  return creates;
 };
+
 const asEditor = (page: Page) =>
   page.route('**/api/session', (route) => route.fulfill({ json: EDITOR_SESSION }));
 
@@ -126,19 +180,53 @@ async function pickClaude(page: Page) {
   await expect(agentTrigger(page)).toHaveText(/claude/);
 }
 
-/** Types the draft and picks the non-default Agent, then marks the instance. */
+/**
+ * Opens the non-default workspace the way someone who can manage projects
+ * actually does it: the chip opens the directory browser, the browser walks to
+ * a real folder, and the confirm card fires create_project — which is
+ * find-or-create by path, so opening a folder that is already a project selects
+ * that project. No product code is aware of this test; only the endpoints are.
+ */
+async function openPickedWorkspace(page: Page) {
+  await workspaceChip(page).click();
+  const browser = page.getByRole('dialog', { name: 'Select Project Folder' });
+  await browser.getByRole('button', { name: '工作区' }).click();
+  await browser.getByRole('button', { name: PICKED_WORKSPACE.display_name }).click();
+  await expect(browser.locator('code')).toHaveText(PICKED_WORKSPACE.folder_path);
+  await browser.getByRole('button', { name: 'Select' }).click();
+
+  const confirm = page.getByRole('dialog', { name: 'Open project' });
+  await expect(confirm).toContainText(PICKED_WORKSPACE.folder_path);
+  await confirm.getByRole('button', { name: 'Open project' }).click();
+
+  await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${PICKED_WORKSPACE.folder_path}`);
+  await expect(workspaceChip(page)).toContainText(PICKED_WORKSPACE.display_name);
+}
+
+/**
+ * Types the draft, opens the non-default workspace, picks the non-default Agent,
+ * then marks the instance. Workspace before Agent because switching projects
+ * deliberately drops a stale Agent pick so the new project's default applies —
+ * doing it the other way round would be testing that rule, not the round trip.
+ */
 async function primeHome(page: Page) {
   await composer(page).fill(DRAFT);
-  await pickClaude(page);
+  // The home resolves the most recent project on its own; the open below is
+  // what makes a preserved reading distinguishable from a re-derived one.
   await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
+  await openPickedWorkspace(page);
+  await pickClaude(page);
   await markInstance(page);
 }
 
-async function expectHomeIntact(page: Page) {
+async function expectHomeIntact(page: Page, creates: unknown[]) {
   await expect(composer(page)).toHaveValue(DRAFT);
   await expect(agentTrigger(page)).toHaveText(/claude/);
-  await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
+  await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${PICKED_WORKSPACE.folder_path}`);
   expect(await instanceSurvived(page)).toBe(true);
+  // Coming back must not re-run the open: the same home is still there, so the
+  // one create the user made is the only one the server ever sees.
+  expect(creates).toEqual([{ folder_path: PICKED_WORKSPACE.folder_path }]);
 }
 
 test.describe('Workbench continuations on a phone', () => {
@@ -146,7 +234,7 @@ test.describe('Workbench continuations on a phone', () => {
 
   test('carries the composer through Settings and back on the phone continuation', async ({ page }) => {
     const denied = await serveProduct(page);
-    await withWorkspaces(page);
+    const creates = await withWorkspaceApi(page);
     await open(page, '/');
     await primeHome(page);
 
@@ -172,13 +260,13 @@ test.describe('Workbench continuations on a phone', () => {
     await page.getByRole('link', { name: 'Back to Workbench' }).click();
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
 
-    await expectHomeIntact(page);
+    await expectHomeIntact(page, creates);
     expect(denied).toEqual([]);
   });
 
   test('carries the composer through the chat-apps continuation and browser Back', async ({ page }) => {
     const denied = await serveProduct(page);
-    await withWorkspaces(page);
+    const creates = await withWorkspaceApi(page);
     await open(page, '/');
     await primeHome(page);
 
@@ -191,19 +279,20 @@ test.describe('Workbench continuations on a phone', () => {
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
     await expect(settingsSurface(page)).toHaveCount(0);
 
-    await expectHomeIntact(page);
+    await expectHomeIntact(page, creates);
     expect(denied).toEqual([]);
   });
 
   test('starts a fresh home when the phone leaves by an ordinary route', async ({ page }) => {
     const denied = await serveProduct(page);
-    await withWorkspaces(page);
+    const creates = await withWorkspaceApi(page);
     await open(page, '/');
     await primeHome(page);
 
-    // The control for the two tests above: same phone, same fixture, same way
-    // back — only the departure differs. An ordinary tab is not a continuation,
-    // so the home is torn down and what comes back is a new one.
+    // The control for the two tests above: same phone, same fixture, same
+    // browser Back as the chat-apps case — only the departure differs. An
+    // ordinary tab is not a continuation, so the home is torn down and what
+    // comes back is a new one that resolves the most recent project again.
     await inboxTab(page).click();
     await expect(page).toHaveURL(/\/inbox$/);
     await page.goBack();
@@ -211,18 +300,20 @@ test.describe('Workbench continuations on a phone', () => {
 
     await expect(composer(page)).toHaveValue('');
     await expect(agentTrigger(page)).toHaveText(/codex/);
+    await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
     expect(await instanceSurvived(page)).toBe(false);
+    expect(creates).toEqual([{ folder_path: PICKED_WORKSPACE.folder_path }]);
     expect(denied).toEqual([]);
   });
 
   test('keeps a picked workspace exactly as long as the home that holds it', async ({ page }) => {
     const denied = await serveProduct(page);
-    await withWorkspaces(page);
+    const creates = await withWorkspaceApi(page);
     await asEditor(page);
     await open(page, '/');
 
-    // The chip lists projects for someone who cannot create one, so this is a
-    // real selection through the shipped UI rather than a seeded fixture value.
+    // The other branch of the same chip: someone who cannot open folders picks
+    // among the projects they already have, with no create call at all.
     await composer(page).fill(DRAFT);
     await pickClaude(page);
     await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
@@ -249,6 +340,7 @@ test.describe('Workbench continuations on a phone', () => {
     await expect(composer(page)).toHaveValue('');
     await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
 
+    expect(creates).toEqual([]);
     expect(denied).toEqual([]);
   });
 

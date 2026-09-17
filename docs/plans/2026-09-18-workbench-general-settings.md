@@ -150,12 +150,12 @@ found it:
    beside it, so naming the image too read the destination twice. The image is decorative (`alt=""`,
    `aria-hidden`). Only `WorkbenchSidebar`'s image is new in this PR; `AppShell`'s mobile header brand carries the
    same pattern and predates it, so it is reported rather than swept in.
-2. **A phone lost an unsent composition when it followed a Settings continuation.** The Workbench home is the one
-   surface a user can be mid-composition on — an unsent draft plus the Agent and workspace it is aimed at, none of
-   which is persisted anywhere — so its Settings ingress now records an origin on mobile as well as desktop. That
-   keeps the one Workbench instance mounted behind the full-screen mobile Settings surface, and Back returns to the
-   composer the user left. Every other mobile route keeps its ordinary unmount-on-navigate lifecycle, and a direct
-   Settings link still invents no origin. The change is at the existing ingress owner (`settingsOverlay`); the
+2. **A phone lost an unsent composition when it followed a Settings continuation.** The home's continuations lead
+   away from an unsent draft plus the Agent and workspace it is aimed at, none of which is persisted anywhere, so
+   its Settings ingress now records an origin on mobile as well as desktop. That keeps the one Workbench instance
+   mounted behind the full-screen mobile Settings surface, and Back returns to the composition the user left. This
+   retains that one route's local state and nothing else: every other mobile route keeps its ordinary
+   unmount-on-navigate lifecycle, and a direct Settings link still invents no origin. The change is at the existing ingress owner (`settingsOverlay`); the
    mobile chrome is unchanged, because `AppShell` keeps its own desktop guard — a retained origin changes what
    survives behind the surface, not what is drawn over it. The one presentation seam, the dialog primitive's left
    border at the viewport edge, is neutralized in the consumer so the surface looks identical either way.
@@ -176,18 +176,28 @@ What the audit established, and why the evidence is shaped the way it is:
 - Nothing in the product links to `/settings/appearance` any more, so the alias is reachable only as a stale
   bookmark: a document load, which invents no origin by design. The origin-carrying alias hop is therefore
   asserted at the boundary owner in unit scope, and the reachable flow is asserted in the browser.
-- The workspace picker and the continuation row cannot appear together. The server projects `can_manage_instance`
-  from member upward and `can_chat`/`can_use_files` from editor upward, so whoever can reach either continuation
-  destination also gets the directory-browser chip, and the role that gets the picker (editor) has no Settings
-  ingress on the home at all. The picked-workspace evidence accordingly runs under the editor projection, and the
-  continuation round trips assert the resolved workspace rather than a selected one.
+- A chosen workspace and the continuation row do appear together — through the chip's manager branch. Only the
+  `ProjectPicker` popover is mutually exclusive with the row: the server projects `can_manage_instance` from
+  member upward and `can_chat`/`can_use_files` from editor upward, so the editor who gets the picker has no
+  Settings ingress on the home at all. A member or owner gets the other branch of the same chip —
+  `NewProjectDialog` → `DirectoryBrowser` → `createProject` → `upsertSelectProject` — and `create_project` is
+  find-or-create by folder path, so opening a folder that is already a project selects that existing row. The
+  continuation round trips therefore choose their workspace through that shipped path, with no permission
+  widening, and assert the create call carried exactly that one folder and was not repeated on the way back.
+- That path cannot be driven under the dev server. `DirectoryBrowser` clears a mounted ref on unmount and never
+  restores it, so StrictMode's mount→cleanup→remount leaves every browse response discarded and the dialog stuck
+  loading — a pre-existing, development-only defect in a shared primitive this PR does not own and does not
+  touch. This file therefore runs against the production build, where StrictMode is inert, under its own config
+  and the same hermetic harness; the rest of the suite stays on the dev config, which now ignores this file.
 
-`mobile-continuation.spec.ts` (5, hermetic) covers this: both continuations preserving a non-ASCII draft, a
-non-default Agent and the same DOM instance across Settings-internal navigation — including General and its theme
-controls — and back; a control that leaves by an ordinary tab and returns the same way, where every one of those
-assertions fails because the home is a new one; a real non-default workspace pick through the shipped picker,
-which survives exactly as long as the home that holds it; and the retired alias landing on General with Account's
-destination unchanged. Unit scope adds the mobile origin policy and its onward hops, the PWA
+`mobile-continuation.spec.ts` (5, hermetic, built app) covers this: both continuations preserving a non-ASCII
+draft, a non-default Agent, a workspace opened through the directory browser and the same DOM instance across
+Settings-internal navigation — including General and its theme controls — and back; a control that leaves by an
+ordinary tab and returns with browser Back, the same return path the chat-apps case uses, where every one of
+those assertions fails because the home is a new one; the picker branch under the editor projection, which has no
+continuation to offer and issues no create call at all; and the retired alias landing on General with Account's
+destination unchanged. All folder and project endpoints are test-owned fixtures — no real directory is browsed
+and no project is created. Unit scope adds the mobile origin policy and its onward hops, the PWA
 write→read→resolve chain, and an `App.tsx` AST assertion that each retired alias points at the page that took its
 content over. Re-validated for this round: the five browser tests, the six affected unit files (70), `typecheck`,
 `lint` on the changed files, and `build`. The earlier full-suite and screenshot gates are not re-run here, because
