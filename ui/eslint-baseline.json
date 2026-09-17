@@ -84,9 +84,6 @@
     "src/components/steps/WeChatConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4
     },
-    "src/components/steps/Welcome.tsx": {
-      "@typescript-eslint/no-explicit-any": 1
-    },
     "src/components/ui/secret-request-card.tsx": {
       "react-hooks/set-state-in-effect": 1
     },

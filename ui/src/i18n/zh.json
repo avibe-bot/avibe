@@ -5195,5 +5195,72 @@
       "narrowTitle": "收紧项目访问权限？",
       "narrowBody": "策略应用后，部分用户可能立即失去访问权限。"
     }
+  },
+  "onboarding": {
+    "welcome": {
+      "getStarted": "开始使用",
+      "title": "各有所长，接力完成",
+      "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
+      "detecting": "检测中…",
+      "detectionFailed": "未能检测助手，请重试。"
+    },
+    "details": "查看详情",
+    "story": {
+      "label": "助手接力协作",
+      "description": "Claude Code 规划任务，Codex 编写代码，OpenCode 执行测试，最后由 Claude Code 汇总交付。",
+      "caption": "规划 · 开发 · 测试 · 交付",
+      "pause": "暂停动画",
+      "play": "播放动画",
+      "replay": "重新播放动画",
+      "claude": {
+        "name": "Claude Code",
+        "role": "PM",
+        "waiting": "规划任务",
+        "working": "编写需求文档",
+        "complete": "需求文档已就绪",
+        "summary": "汇总交付结果"
+      },
+      "codex": {
+        "name": "Codex",
+        "role": "开发",
+        "waiting": "等待需求文档",
+        "working": "编写功能代码",
+        "complete": "功能代码已就绪"
+      },
+      "opencode": {
+        "name": "OpenCode",
+        "role": "测试",
+        "waiting": "等待功能代码",
+        "working": "编写并执行用例",
+        "complete": "测试全部通过"
+      }
+    },
+    "access": {
+      "label": "随时随地安排工作",
+      "description": "手机 APP 和常用聊天应用，随时随地安排工作",
+      "avibe": "Avibe App",
+      "slack": "Slack",
+      "discord": "Discord",
+      "telegram": "Telegram",
+      "lark": "飞书",
+      "wechat": "微信"
+    },
+    "setup": {
+      "title": "连接AI，开始工作",
+      "subtitle": "安装助手，连接模型，即可开始工作",
+      "assistants": "AI 助手",
+      "claudeDescription": "Anthropic 的 AI 编程助手",
+      "codexDescription": "OpenAI 的 AI 编程助手",
+      "opencodeDescription": "开源 AI 编程助手，支持多种模型",
+      "install": "安装",
+      "installed": "已安装",
+      "notInstalled": "未安装",
+      "installFailed": "安装失败",
+      "enabled": "启用",
+      "subscription": "订阅",
+      "api_key": "API Key",
+      "subscriptionConnected": "订阅已连接",
+      "api_keyConnected": "API Key 已连接"
+    }
   }
 }

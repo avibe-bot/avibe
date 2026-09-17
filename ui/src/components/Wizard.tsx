@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { Welcome } from './steps/Welcome';
 import { PlatformSelection } from './steps/PlatformSelection';
@@ -22,11 +22,13 @@ import {
   collectWizardEnabledPlatformDelta,
   type WizardEnabledPlatformDelta,
 } from '../lib/wizardConfigMutations';
-import { WizardChrome } from './visual';
+import { BrandLogo, WizardChrome } from './visual';
+import { LanguageSwitcher } from './LanguageSwitcher';
 
 export const Wizard: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const reducedMotion = useReducedMotion();
   const [currentStep, setCurrentStep] = useState(0);
   const [data, setData] = useState<any>({
     show_duration: false,
@@ -179,7 +181,8 @@ export const Wizard: React.FC = () => {
     }
   };
 
-  const back = () => {
+  const back = (stepData?: { agents: Record<string, unknown> }) => {
+    if (stepData?.agents) setData((current: Record<string, unknown>) => ({ ...current, agents: stepData.agents }));
     if (currentStep > 0) {
       setCurrentStep(currentStep - 1);
     }
@@ -239,6 +242,20 @@ export const Wizard: React.FC = () => {
   const progressTotal = steps.length;
   const progressIndex = steps.findIndex((step) => step.id === stepId);
 
+  if (isWelcome || stepId === 'agents') {
+    return (
+      <div className="onboarding-shell">
+        <header>
+          <div className="flex items-center gap-2.5"><BrandLogo size={32} /><span className="text-sm font-semibold">Avibe</span></div>
+          <LanguageSwitcher />
+        </header>
+        <main className="onboarding-shell-content">
+          <CurrentComponent data={data} onNext={next} onBack={back} isFirst={currentStep === 0} isLast={currentStep === steps.length - 1} />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div
       className={clsx(
@@ -263,10 +280,10 @@ export const Wizard: React.FC = () => {
           <AnimatePresence mode="wait">
             <motion.div
               key={currentStep}
-              initial={{ opacity: 0, y: 12 }}
+              initial={reducedMotion ? false : { opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
+              exit={reducedMotion ? undefined : { opacity: 0, y: -8 }}
+              transition={{ duration: reducedMotion ? 0 : 0.18 }}
               className="w-full"
             >
               <CurrentComponent

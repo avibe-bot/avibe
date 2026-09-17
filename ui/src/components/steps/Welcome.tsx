@@ -1,85 +1,61 @@
-import React from 'react';
-import { ArrowRight, HardDrive, PlugZap, Radio, Sparkles } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { ArrowRight, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { WizardCard } from '../visual';
+import { useApi } from '../../context/ApiContext';
 import { Button } from '../ui/button';
+import { CollaborationStory } from '../onboarding/CollaborationStory';
+import { AccessTiles } from '../onboarding/AccessTiles';
+import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
+import { DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import '../onboarding/onboarding.css';
 
 interface WelcomeProps {
-  onNext: (data: any) => void;
+  data?: { agents?: Record<string, { cli_path?: string }> };
+  onNext: (data: unknown) => void | Promise<void>;
 }
 
-// Mirrors design.pen welCard (EYBEx): 920px card, 80×80 mint logo with strong glow,
-// 42px title, 16px subtitle (max 680), three accented feature tiles, large mint
-// "Get started" button. Card colors: #11111c with 1px white/8 stroke and a soft
-// mint shadow (#5BFFA014, blur 64, y32, spread -12).
-export const Welcome: React.FC<WelcomeProps> = ({ onNext }) => {
+export function Welcome({ data, onNext }: WelcomeProps) {
   const { t } = useTranslation();
-
-  const features = [
-    {
-      Icon: HardDrive,
-      iconClass: 'text-mint-ink',
-      title: t('welcome.card1Title'),
-      body: t('welcome.feature1'),
-    },
-    {
-      Icon: PlugZap,
-      iconClass: 'text-cyan-ink',
-      title: t('welcome.card2Title'),
-      body: t('welcome.feature2'),
-    },
-    {
-      Icon: Sparkles,
-      iconClass: 'text-violet-ink',
-      title: t('welcome.card3Title'),
-      body: t('welcome.feature3'),
-    },
-  ];
-
+  const api = useApi();
+  const [paused, setPaused] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const busy = useRef(false);
+  const start = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    setPending(true);
+    setError(null);
+    try {
+      const results = await Promise.all(ASSISTANT_ORDER.map(async (name) => {
+        const agent = { ...DEFAULT_AGENT_STATE[name], ...data?.agents?.[name] };
+        const result = await api.detectCli(agent.cli_path || name);
+        return [name, { ...agent, cli_path: result.path || agent.cli_path, status: result.found ? 'ok' : 'missing' }];
+      }));
+      await onNext({ agents: Object.fromEntries(results), __onboardingDetected: true });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      busy.current = false;
+      setPending(false);
+    }
+  };
   return (
-    <div className="flex w-full justify-center">
-      <WizardCard
-        size="hero"
-        className="items-center text-center gap-8"
-      >
-        {/* welBigLogo (A3aTA) */}
-        <div
-          className="mx-auto flex size-20 items-center justify-center rounded-[20px] border-2 border-mint/40 bg-mint/[0.16] shadow-glow-xl-mint"
-          aria-hidden
-        >
-          <Radio className="size-10 text-mint-ink" strokeWidth={1.75} />
-        </div>
-
-        {/* welHead (OpTFX) gap 14 */}
-        <div className="flex flex-col items-center gap-3.5">
-          <h1 className="text-[28px] font-bold leading-[1.1] tracking-[-0.4px] text-foreground sm:text-[42px] sm:leading-[1.05] sm:tracking-[-0.8px]">
-            {t('welcome.title')}
-          </h1>
-          <p className="max-w-[680px] text-[16px] leading-[1.55] text-muted">
-            {t('welcome.subtitle')}
-          </p>
-        </div>
-
-        {/* welHilights (QdiUZ) — three feature tiles, gap 16 */}
-        <div className="grid w-full gap-4 text-left md:grid-cols-3">
-          {features.map(({ Icon, iconClass, title, body }) => (
-            <div
-              key={title}
-              className="flex flex-col gap-2 rounded-xl border border-foreground/[0.08] bg-background px-4 py-[18px]"
-            >
-              <Icon className={`size-5 ${iconClass}`} strokeWidth={1.75} />
-              <div className="text-[14px] font-semibold leading-tight text-foreground">{title}</div>
-              <p className="text-[12px] leading-[1.5] text-muted">{body}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* welStart (a95QY) — large mint pill */}
-        <Button type="button" variant="brand" size="hero" onClick={() => onNext({})} className="group">
-          {t('welcome.getStarted')}
-          <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" strokeWidth={2.25} />
-        </Button>
-      </WizardCard>
+    <div className="onboarding-welcome">
+      <header className="onboarding-heading">
+        <h1>{t('onboarding.welcome.title')}</h1>
+        <p>{t('onboarding.welcome.subtitle')}</p>
+      </header>
+      <CollaborationStory paused={paused} onPausedChange={setPaused} />
+      <AccessTiles paused={paused} />
+      <Button type="button" variant="brand" className="group h-11 min-w-36" onClick={() => void start()} disabled={pending}>
+        {t(pending ? 'onboarding.welcome.detecting' : error ? 'common.retry' : 'onboarding.welcome.getStarted')}
+        {pending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />}
+      </Button>
+      {error && <div role="alert" className="text-center text-sm text-destructive-ink">
+        <p>{t('onboarding.welcome.detectionFailed')}</p>
+        <details className="mt-2 max-w-xl break-words"><summary>{t('onboarding.details')}</summary>{error}</details>
+      </div>}
     </div>
   );
-};
+}
