@@ -14,7 +14,14 @@ not a new backend retry protocol or an automatic retry policy.
   Its visible restart explanation is unchanged. The notice does not settle
   another Turn or replay the original request; clicking continues through the
   existing admission path. Harness-owned interruptions retain their existing
-  notice owner, and a restorable live backend does not acquire a retry action.
+  notice owner: its owed-notice drain carries the authoritative notice `turn_id`
+  when delivering to the Run's own explicit Session. Generic Run failures
+  without a Turn binding and fallback delivery to another Session remain
+  informational; a Turn is never guessed from a failure ID or notification text.
+  The existing admission checks still reject stale, busy, stopped, or
+  acceptance-unknown work. Clicking continues that Session, not the original
+  Task/Watch command or definition. A restorable live backend does not acquire
+  a retry action.
   Recovery sets `metadata.replayed=true`: the notice describes an already-ended
   Turn, even on immediate delivery. This is not detached completion and does not
   disable Retry. The Web classifier refreshes durable Activity without settling
@@ -23,6 +30,8 @@ not a new backend retry protocol or an automatic retry policy.
   filter apply the same nonterminal provenance, so history readback cannot
   reinterpret the notice as newer work ending. Ordinary live failures keep
   their terminal UI role.
+  The Harness replay emitter applies the same historical provenance to every
+  owed notice without adding a live Turn token to its delivery context.
 - The action targets the notice's exact Session and failed Turn. The server
   rechecks access, archive/read-only status, current Turn, and pending input.
   A newer task, another live owner, or an unresolved native start blocks it.
@@ -98,6 +107,7 @@ implementations; IM-specific notification button rendering is not added here.
 
 Scenario contracts: `MESSAGE-DELIVERY-026` through `MESSAGE-DELIVERY-028`.
 Restart notification binding and continuation: `MESSAGE-DELIVERY-030`.
+Harness-owned notification binding and continuation: `MESSAGE-DELIVERY-320`.
 
 ## Known by design
 
