@@ -21,6 +21,7 @@ from sqlalchemy import text as sqlalchemy_text
 from sqlalchemy.engine import Connection
 
 from storage.db import get_cached_sqlite_engine
+from storage.agent_session_rows import reserve_write_lock
 from storage.models import (
     agent_runs,
     message_deliveries,
@@ -30,6 +31,7 @@ from storage.models import (
     state_meta,
 )
 from vibe.authorization import (
+    INSTANCE_ROLES,
     AuthorizationContext,
     context_from_session_payload,
     instance_owner_context,
@@ -596,7 +598,7 @@ def _legacy_deferred_context_binding(
     """Return a safe current binding for one pre-instance metadata snapshot."""
 
     context = current_resource_context(snapshot, is_remote=True)
-    if context.instance_role not in {"owner", "editor", "viewer"}:
+    if context.instance_role not in INSTANCE_ROLES:
         return None
 
     raw_instance_id = snapshot.get("vibe_instance_id")
@@ -719,17 +721,44 @@ def _has_unbound_deferred_snapshots(connection: Connection) -> bool:
     return False
 
 
+def _deferred_provenance_time(value: Any) -> datetime | None:
+    """Read a persisted timestamp only when it identifies an absolute instant."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def _migrate_deferred_metadata_value(
     metadata: Any,
     *,
     paired_instance_id: str,
     paired_kind: str,
+    member_repair_cutoff: datetime | None = None,
+    created_at: Any = None,
+    updated_at: Any = None,
 ) -> dict[str, Any] | None:
     if not isinstance(metadata, dict):
         return None
     snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
         return None
+    if member_repair_cutoff is not None:
+        # Attribute an old Member authorization snapshot, not an immutable row.
+        # Authorization re-snapshot and timestamped lifecycle writes advance
+        # updated_at; diagnostics and stable-Agent rewrites can preserve it.
+        # Current lifecycle checks still apply, including soft deletion.
+        # Preserve their CURRENT metadata below. These clocks are not a complete
+        # mutation history. Equal-second timestamps are ambiguous, so deny.
+        if snapshot.get("vibe_instance_role") != "member" or any(
+            (instant := _deferred_provenance_time(value)) is None or instant >= member_repair_cutoff
+            for value in (created_at, updated_at)
+        ):
+            return None
     binding = _legacy_deferred_context_binding(
         snapshot,
         paired_instance_id=paired_instance_id,
@@ -757,7 +786,20 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     pairing can retry later. A successfully observed unpaired state is sealed,
     while a known instance with an unknown kind remains pending until that same
     instance is authoritatively classified.
+
+    Repairing a completed pre-Member pass requires the original pairing/cutoff
+    and an authorization snapshot whose row clocks precede it. Released
+    diagnostic/reference writers preserve that snapshot without advancing the
+    lifecycle clock; their current values survive the binding-only repair.
+    No complete historical row immutability is inferred from those clocks.
     """
+
+    # This migration decides from a marker, pairing config, durable binding and
+    # several deferred row families before updating any of them. Reserve the
+    # SQLite writer slot before the first read so that decision and seal share
+    # one serialized state. This also covers callers that already hold a
+    # transaction; reserve_write_lock is explicitly nested-transaction safe.
+    reserve_write_lock(connection)
 
     def _counts(
         *,
@@ -792,6 +834,8 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             return _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
         marker = parsed_marker
         marker_state = marker.get("state")
+        if marker_state is not None and marker_state not in {"pending", "completed", "sealed_unattributed"}:
+            return empty_unavailable
         if marker_state not in {"pending", "completed", "sealed_unattributed"}:
             marker_state = "completed" if marker.get("completed_at") else "pending"
         # Markers written by e64/d667 used ``completed`` with no instance ID
@@ -823,7 +867,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     ) -> None:
         now = _utc_now_iso()
         payload: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3 if state == "completed" else 2,
             "state": state,
             "instance_id": instance_id,
             "updated_at": now,
@@ -831,7 +875,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         if instance_kind in {"personal", "organization"}:
             payload["instance_kind"] = instance_kind
         if state == "completed":
-            payload["completed_at"] = now
+            payload["completed_at"] = marker["completed_at"] if retry_member else now
         values = {
             "value_json": json.dumps(payload, sort_keys=True, separators=(",", ":")),
             "updated_at": now,
@@ -850,7 +894,23 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
                 .values(**values)
             )
 
-    if marker is not None and marker.get("state") in {"completed", "sealed_unattributed"}:
+    # Released migrations omitted Member. Revisit only those snapshots when a
+    # completed marker proves the SAME pairing identity and kind. Never reopen
+    # an unattributed seal, infer missing provenance, or retry other roles.
+    completed_at = _deferred_provenance_time(marker.get("completed_at")) if marker else None
+    retry_member = bool(
+        marker is not None
+        and marker.get("state") == "completed"
+        and type(marker.get("schema_version")) is int
+        and marker.get("schema_version") in {1, 2}
+        and completed_at is not None
+        and configured.status == RESOURCE_BINDING_STATE_READY
+        and current_instance_id is not None
+        and marker.get("instance_id") == current_instance_id
+        and current_kind in {"personal", "organization"}
+        and marker.get("instance_kind") == current_kind
+    )
+    if marker is not None and marker.get("state") in {"completed", "sealed_unattributed"} and not retry_member:
         return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
 
     raw_marker_instance_id = marker.get("instance_id") if marker else None
@@ -912,19 +972,23 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         row_id = binding_row.get("instance_id")
         row_kind = binding_row.get("instance_kind")
         row_state = binding_row.get("state")
+        if retry_member and row_state != RESOURCE_BINDING_STATE_READY:
+            return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
         identity_matches = row_id == current_instance_id and (
             row_kind == current_kind
             or (row_state == _BINDING_RECONCILING and row_kind in {None, current_kind})
         )
         if not identity_matches:
-            write_marker(state="pending", instance_id=current_instance_id)
+            if not retry_member:
+                write_marker(state="pending", instance_id=current_instance_id)
             return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
     else:
         # Known-kind config with no durable binding row is an upgrade
         # artifact, not a validated pairing. Leave the opportunity pending
         # so a later heartbeat/bootstrap can attribute snapshots after the
         # server-owned kind is confirmed.
-        write_marker(state="pending", instance_id=current_instance_id)
+        if not retry_member:
+            write_marker(state="pending", instance_id=current_instance_id)
         return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
     paired_instance_id = current_instance_id
     paired_kind = current_kind
@@ -937,7 +1001,8 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     }
     definition_rows = (
         connection.execute(
-            select(run_definitions.c.id, run_definitions.c.metadata_json).where(
+            select(run_definitions.c.id, run_definitions.c.metadata_json,
+                   run_definitions.c.created_at, run_definitions.c.updated_at).where(
                 run_definitions.c.definition_type.in_(("scheduled", "watch"))
             )
         ).mappings()
@@ -953,6 +1018,9 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             metadata,
             paired_instance_id=paired_instance_id,
             paired_kind=paired_kind,
+            member_repair_cutoff=completed_at if retry_member else None,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
         if migrated is None:
             continue
@@ -972,7 +1040,8 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
 
     run_rows = (
         connection.execute(
-            select(agent_runs.c.id, agent_runs.c.metadata_json)
+            select(agent_runs.c.id, agent_runs.c.metadata_json,
+                   agent_runs.c.created_at, agent_runs.c.updated_at)
             .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
         ).mappings()
         if _connection_has_table(connection, "agent_runs")
@@ -987,6 +1056,9 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             metadata,
             paired_instance_id=paired_instance_id,
             paired_kind=paired_kind,
+            member_repair_cutoff=completed_at if retry_member else None,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
         if migrated is None:
             continue
@@ -1017,6 +1089,8 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             select(
                 message_deliveries.c.id,
                 message_deliveries.c.snapshot_json,
+                message_deliveries.c.submitted_at.label("created_at"),
+                message_deliveries.c.updated_at,
             ).where(
                 message_deliveries.c.snapshot_json.is_not(None),
                 message_deliveries.c.state.in_(executable_delivery_states),
@@ -1035,6 +1109,9 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             metadata,
             paired_instance_id=paired_instance_id,
             paired_kind=paired_kind,
+            member_repair_cutoff=completed_at if retry_member else None,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
         if migrated_metadata is None:
             continue
@@ -1323,7 +1400,9 @@ def _policy_allows(
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
 ) -> bool:
-    if context.is_instance_owner:
+    # Current-instance operators use every supported resource without rewriting
+    # its stored ownership or ACL. Protected Vault proofs are enforced by use.
+    if context.can_manage_instance:
         return True
     if resource_kind == "agent" and context.is_personal_instance:
         return context.can_use_resource(resource_kind)

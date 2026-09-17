@@ -113,7 +113,7 @@ def test_project_positions_survive_activity_metadata_and_restoration(engine, tmp
         assert [p["id"] for p in projects_service.list_projects(conn, navigation_order=True)] == [*saved, new["id"]]
 
 
-def test_project_reorder_preserves_hidden_and_archived_slots(engine, tmp_path):
+def test_member_project_reorder_includes_restricted_and_preserves_archived_slots(engine, tmp_path):
     with engine.begin() as conn:
         rows = _ordered_projects(conn, tmp_path)
         ids = [row["id"] for row in rows]
@@ -121,11 +121,11 @@ def test_project_reorder_preserves_hidden_and_archived_slots(engine, tmp_path):
         projects_service.archive_project(conn, ids[2])
         context = _acl_context("member", email="outsider@example.com")
         result = projects_service.reorder_projects(
-            conn, [ids[3], ids[0]], expected_order=[ids[0], ids[3]], authorization_context=context
+            conn, [ids[3], ids[0], ids[1]], expected_order=[ids[0], ids[1], ids[3]], authorization_context=context
         )
-        assert [p["id"] for p in result] == [ids[3], ids[0]]
+        assert [p["id"] for p in result] == [ids[3], ids[0], ids[1]]
         assert [p["id"] for p in projects_service.list_projects(conn, include_archived=True, navigation_order=True)] == [
-            ids[3], ids[1], ids[2], ids[0]
+            ids[3], ids[0], ids[2], ids[1]
         ]
 
 
@@ -259,9 +259,8 @@ def test_remote_project_order_invalidation_reaches_the_real_event_stream(role):
     if isinstance(frame, bytes):
         frame = frame.decode("utf-8")
     assert "event: projects.changed\n" in frame
-    assert "hidden-project" not in frame
     data = next(line.removeprefix("data: ") for line in frame.splitlines() if line.startswith("data: "))
-    assert json.loads(data)["data"] == {}
+    assert json.loads(data)["data"] == ({"project_ids": ["hidden-project"]} if role == "member" else {})
 
 
 def _remote_context(role: str) -> AuthorizationContext:
@@ -373,93 +372,37 @@ def _restrict_project_to(conn, project_id: str, email: str, *, access_role: str 
     assert result.outcome == "applied"
 
 
-def test_project_mutations_follow_the_acl_that_hides_them(engine, tmp_path):
-    """Whether a member administers Projects and *which* are separate questions.
-
-    ``can_manage_projects`` answers the first; the Project ACL answers the second.
-    Checking only the first is what let a member who knew a Project id PATCH or
-    archive a restricted Project that ``list_projects`` and ``get_project``
-    correctly hide from them -- the read half was ACL-checked and the write half
-    was not, which is the wrong way round for an asymmetry to fall.
-
-    The floor is the ACL's *visibility* floor rather than a second predicate: a
-    member holding an explicit editor binding has an effective Project role of
-    editor, so demanding a "member" Project role would refuse exactly the
-    Projects the list shows them.
-    """
-
+@pytest.mark.parametrize("role", ["member", "owner", "editor", "viewer"])
+def test_project_mutations_follow_instance_operations_and_lower_role_acl(engine, tmp_path, role):
+    """Instance managers operate restricted Projects; lower roles retain ACLs."""
     folder = tmp_path / "restricted"
     folder.mkdir()
+    excluded = _acl_context(role, email="outsider@example.com")
+    included = _acl_context(role, email="insider@example.com")
     with engine.begin() as conn:
-        project = projects_service.create_project(
-            conn,
-            str(folder),
-            display_name="Restricted",
-            authorization_context=_remote_context("owner"),
-        )
+        project = projects_service.create_project(conn, str(folder), display_name="Restricted")
         _restrict_project_to(conn, project["id"], "insider@example.com")
-
-    excluded = _acl_context("member", email="outsider@example.com")
-    included = _acl_context("member", email="insider@example.com")
-
-    with engine.connect() as conn:
-        visible_to_excluded = {
-            listed["id"] for listed in projects_service.list_projects(conn, authorization_context=excluded)
+        policy = project_access_service.get_project_policy(conn, project["id"])
+        listed = {p["id"] for p in projects_service.list_projects(conn, authorization_context=excluded)}
+        assert (project["id"] in listed) == (role in {"member", "owner"})
+        assert project["id"] in {
+            p["id"] for p in projects_service.list_projects(conn, authorization_context=included)
         }
-        visible_to_included = {
-            listed["id"] for listed in projects_service.list_projects(conn, authorization_context=included)
-        }
-    assert project["id"] not in visible_to_excluded
-    assert project["id"] in visible_to_included
-
-    # Hidden by the list, hidden by every mutation: LookupError, the same signal
-    # ``get_project`` already raises, so a 404 does not enumerate the Projects a
-    # caller is excluded from.
-    with engine.begin() as conn:
-        with pytest.raises(LookupError):
-            projects_service.get_project(conn, project["id"], authorization_context=excluded)
-        with pytest.raises(LookupError):
-            projects_service.update_project(
-                conn,
-                project["id"],
-                display_name="Stolen",
-                authorization_context=excluded,
-            )
-        with pytest.raises(LookupError):
-            projects_service.archive_project(
-                conn,
-                project["id"],
-                authorization_context=excluded,
-            )
-
-    with engine.connect() as conn:
-        assert projects_service.get_project(conn, project["id"])["display_name"] == "Restricted"
-
-    # A bound member and the Instance Owner are both unaffected.
-    with engine.begin() as conn:
-        assert (
-            projects_service.update_project(
-                conn,
-                project["id"],
-                display_name="Insider Renamed",
-                authorization_context=included,
-            )["display_name"]
-            == "Insider Renamed"
-        )
-        assert (
-            projects_service.update_project(
-                conn,
-                project["id"],
-                display_name="Owner Renamed",
-                authorization_context=_remote_context("owner"),
-            )["display_name"]
-            == "Owner Renamed"
-        )
-        projects_service.archive_project(
-            conn,
-            project["id"],
-            authorization_context=included,
-        )
+        if role in {"member", "owner"}:
+            assert projects_service.get_project(conn, project["id"], authorization_context=excluded)
+            assert projects_service.update_project(
+                conn, project["id"], display_name="Renamed", authorization_context=excluded,
+            )["display_name"] == "Renamed"
+            projects_service.archive_project(conn, project["id"], authorization_context=excluded)
+        else:
+            with pytest.raises(LookupError):
+                projects_service.get_project(conn, project["id"], authorization_context=excluded)
+            for context in (excluded, included):
+                with pytest.raises(InstanceAuthorizationError):
+                    projects_service.update_project(conn, project["id"], display_name="Denied", authorization_context=context)
+                with pytest.raises(InstanceAuthorizationError):
+                    projects_service.archive_project(conn, project["id"], authorization_context=context)
+        assert project_access_service.get_project_policy(conn, project["id"]) == policy
 
 
 def test_every_project_entry_point_resolves_through_the_visibility_check():
@@ -529,94 +472,30 @@ def test_every_project_entry_point_resolves_through_the_visibility_check():
     assert ungated == [], f"Project entry points that never reach a visibility check: {ungated}"
 
 
-def test_folder_path_is_not_a_side_door_onto_a_hidden_project(engine, tmp_path):
-    """Create-or-reuse is a Project lookup, so it carries the visibility rule too.
-
-    A folder path is a lookup key exactly as much as a Project id is. Reuse
-    resolved the match without the ACL, so a member who submitted the folder of
-    a restricted Project they are excluded from got its payload back -- and,
-    when the Project was archived, revived it on the way, since reuse is also
-    the unarchive path.
-
-    Applying the *same* check the list applies carries one declared consequence:
-    ``get_effective_project_role`` returns nothing for an inactive Project below
-    the Instance Owner, so restoring an archived Project by re-opening its
-    folder is Owner-only. That is not a new rule, it is the existing one finally
-    reaching this path -- ``list_projects(include_archived=True)``,
-    ``get_project``, ``update_project``, and ``archive_project`` already answer
-    a non-owner with nothing for an archived Project.
-    """
-
-    folder = tmp_path / "hidden"
+@pytest.mark.parametrize("role", ["member", "owner", "editor", "viewer"])
+def test_project_folder_reuse_and_restore_follow_instance_operations(engine, tmp_path, role):
+    """Managers reuse/restore restricted folders without changing their ACL."""
+    folder = tmp_path / "restricted"
     folder.mkdir()
-    owner = _remote_context("owner")
+    context = _acl_context(role, email="outsider@example.com")
     with engine.begin() as conn:
-        project = projects_service.create_project(
-            conn,
-            str(folder),
-            display_name="Hidden",
-            authorization_context=owner,
-        )
+        project = projects_service.create_project(conn, str(folder), display_name="Restricted")
         _restrict_project_to(conn, project["id"], "insider@example.com")
-
-    excluded = _acl_context("member", email="outsider@example.com")
-    included = _acl_context("member", email="insider@example.com")
-
-    with engine.begin() as conn:
-        with pytest.raises(LookupError):
-            projects_service.create_project(
-                conn,
-                str(folder),
-                display_name="Stolen",
-                authorization_context=excluded,
-            )
-
-    # The bound member reaches the same folder normally, so the refusal above is
-    # the ACL talking and not create-or-reuse breaking for everyone.
-    with engine.begin() as conn:
-        reused = projects_service.create_project(
-            conn,
-            str(folder),
-            display_name="Ignored On Reuse",
-            authorization_context=included,
-        )
-    assert reused["id"] == project["id"]
-    assert reused["display_name"] == "Hidden"
-
-    # Archived: invisible to every non-owner, so reuse cannot revive it either.
-    with engine.begin() as conn:
-        projects_service.archive_project(conn, project["id"], authorization_context=owner)
-        for context in (excluded, included):
-            with pytest.raises(LookupError):
-                projects_service.create_project(
-                    conn,
-                    str(folder),
-                    display_name="Revived",
-                    authorization_context=context,
-                )
-
-    # Refused without side effects: still archived, still named as its owner
-    # left it, and no duplicate scope minted over the same folder.
-    with engine.connect() as conn:
-        owned = projects_service.list_projects(
-            conn,
-            include_archived=True,
-            authorization_context=owner,
-        )
-    assert len(owned) == 1
-    assert owned[0]["id"] == project["id"]
-    assert owned[0]["display_name"] == "Hidden"
-    assert owned[0]["archived"] is True
-
-    # The Owner still restores it the documented way, by re-opening the folder.
-    with engine.begin() as conn:
-        restored = projects_service.create_project(
-            conn,
-            str(folder),
-            authorization_context=owner,
-        )
-    assert restored["id"] == project["id"]
-    assert restored["archived"] is False
+        policy = project_access_service.get_project_policy(conn, project["id"])
+        for archived in (False, True):
+            if archived:
+                projects_service.archive_project(conn, project["id"])
+            if role in {"member", "owner"}:
+                reused = projects_service.create_project(conn, str(folder), display_name="Ignored", authorization_context=context)
+                assert reused["id"] == project["id"]
+                assert reused["display_name"] == "Restricted"
+                assert reused["archived"] is False
+            else:
+                with pytest.raises(InstanceAuthorizationError):
+                    projects_service.create_project(conn, str(folder), authorization_context=context)
+                assert projects_service.get_project(conn, project["id"])["archived"] == archived
+            assert project_access_service.get_project_policy(conn, project["id"]) == policy
+        assert len(projects_service.list_projects(conn, include_archived=True)) == 1
 
 
 def test_personal_instance_member_mutates_without_a_project_acl(engine, tmp_path):

@@ -430,6 +430,15 @@ def test_agent_run_provenance_hides_inaccessible_source_session(isolated_state):
     assert "source_session_title" not in remote_message
     assert "source_session_agent_name" not in remote_message
 
+    with engine.connect() as conn:
+        member_result = messages_service.list_session_messages(
+            conn, session_id="ses_target",
+            authorization_context=AuthorizationContext(instance_role="member", is_remote=True),
+        )
+    member_message = next(row for row in member_result["messages"] if row["id"] == "msg_hidden")
+    assert member_message["source_session_id"] == "ses_hidden_source"
+    assert member_message["source_session_title"] == "Hidden Source"
+
     local_message = next(row for row in local_result["messages"] if row["id"] == "msg_hidden")
     assert local_message["source_session_id"] == "ses_hidden_source"
     assert local_message["source_session_title"] == "Hidden Source"

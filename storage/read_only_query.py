@@ -42,7 +42,7 @@ def run_read_only_query(
 ) -> QueryResult:
     from storage.resource_access_service import resolve_resource_access_context
 
-    allow_skill_statistics = resolve_resource_access_context(user_context).is_instance_owner
+    allow_skill_statistics = resolve_resource_access_context(user_context).can_manage_instance
     statement = _validate_single_statement(sql)
     resolved_db_path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -61,7 +61,7 @@ def run_read_only_query(
         conn.execute("PRAGMA query_only = ON")
         def authorize(action, arg1, arg2, db_name, source):
             # SQL has no resource-row filter. Raw Skill observations share
-            # agent_events, so non-owners cannot query that table wholesale.
+            # agent_events, so roles below Member cannot query that table wholesale.
             if (not allow_skill_statistics and action == sqlite3.SQLITE_READ
                     and arg1 in {"skill_usage_daily", "agent_events"}):
                 return sqlite3.SQLITE_DENY

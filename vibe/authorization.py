@@ -82,6 +82,7 @@ _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
         DEFINITIONS_UPDATED_EVENT,
         RUNS_UPDATED_EVENT,
         VAULTS_UPDATED_EVENT,
+        "remote_access.quality.changed",
     }
 )
 
@@ -163,9 +164,10 @@ class AuthorizationContext:
     def can_use_resource(self, resource_kind: str) -> bool:
         """Return whether the Instance role may use this resource kind.
 
-        Effective Resource ACL is a separate, mandatory check performed by the
-        resource service. Unknown kinds fail closed so adding a resource type
-        never makes it editor-visible by accident.
+        Effective resource access is checked by the resource service: managers
+        operate instance-wide, while lower roles retain their resource ACLs.
+        Unknown kinds fail closed so adding a resource type never makes it
+        editor-visible by accident.
         """
 
         minimum_role = _RESOURCE_USE_MINIMUM_ROLES.get(resource_kind)

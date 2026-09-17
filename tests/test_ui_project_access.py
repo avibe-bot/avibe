@@ -295,113 +295,41 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     assert hidden_action.status_code != 403 or hidden_action.get_json().get("code") != "remote_execution_disabled"
 
 
-def test_member_project_mutations_are_bounded_by_the_acl_that_hides_them(monkeypatch, tmp_path) -> None:
-    """Instance role admits the route; the Project ACL still picks the Project.
-
-    ``can_manage_projects`` is instance-wide Project administration, but every
-    one of these routes names a single Project, and the instance role says
-    nothing about which. The middleware used to skip member-tier routes
-    entirely, so a member who knew an id could PATCH or archive a Project that
-    ``GET /api/projects`` and ``GET /api/projects/<id>`` already hid from them.
-
-    404 on every hidden Project, matching the read path: a 403/404 split would
-    let a caller enumerate the restricted Projects they are excluded from.
-    """
-
+def test_member_operates_restricted_projects_by_id_and_folder(monkeypatch, tmp_path) -> None:
+    """Member list/detail/reuse/mutation share current-instance scope."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
-
-    def _patch(client, project_id, headers, name):
-        return client.patch(
-            f"/api/projects/{project_id}",
-            base_url=REMOTE_ORIGIN,
-            environ_base=REMOTE_PEER,
-            headers=headers,
-            json={"display_name": name},
+    client = _remote_client(config, role="member", email="carol@example.com")
+    headers = csrf_headers(client, REMOTE_ORIGIN)
+    assert {row["id"] for row in _get(client, "/api/projects").get_json()["projects"]} == {
+        ids["project_a"], ids["project_b"]
+    }
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        before = [project_access_service.get_project_policy(conn, ids[key]) for key in ("project_a", "project_b")]
+    for key, folder in (("project_a", "project-a"), ("project_b", "project-b")):
+        project_id = ids[key]
+        assert _get(client, f"/api/projects/{project_id}").status_code == 200
+        reused = client.post(
+            "/api/projects", base_url=REMOTE_ORIGIN, environ_base=REMOTE_PEER,
+            headers=headers, json={"folder_path": str(tmp_path / folder)},
         )
-
-    def _archive(client, project_id, headers):
-        return client.delete(
-            f"/api/projects/{project_id}",
-            base_url=REMOTE_ORIGIN,
-            environ_base=REMOTE_PEER,
-            headers=headers,
+        assert reused.status_code == 201
+        assert reused.get_json()["id"] == project_id
+        changed = client.patch(
+            f"/api/projects/{project_id}", base_url=REMOTE_ORIGIN, environ_base=REMOTE_PEER,
+            headers=headers, json={"display_name": "成员管理"},
         )
-
-    # Bound to neither Project: the list is empty, and so is what they can touch.
-    excluded = _remote_client(config, role="member", email="carol@example.com")
-    excluded_headers = csrf_headers(excluded, REMOTE_ORIGIN)
-    assert _get(excluded, "/api/projects").get_json()["projects"] == []
-    for project_id in (ids["project_a"], ids["project_b"]):
-        assert _get(excluded, f"/api/projects/{project_id}").status_code == 404
-        assert _patch(excluded, project_id, excluded_headers, "Stolen").status_code == 404
-        assert _archive(excluded, project_id, excluded_headers).status_code == 404
-
-    # An explicit editor binding is below "member", and that is the point: the
-    # floor for these routes is the ACL's visibility floor, so the Projects the
-    # list shows are exactly the Projects that can be mutated.
-    included = _remote_client(config, role="member", email="alice@example.com")
-    included_headers = csrf_headers(included, REMOTE_ORIGIN)
-    assert {row["id"] for row in _get(included, "/api/projects").get_json()["projects"]} == {
-        ids["project_a"]
-    }
-    renamed = _patch(included, ids["project_a"], included_headers, "Alice Renamed")
-    assert renamed.status_code == 200
-    assert renamed.get_json()["display_name"] == "Alice Renamed"
-    assert _patch(included, ids["project_b"], included_headers, "Stolen").status_code == 404
-    assert _archive(included, ids["project_b"], included_headers).status_code == 404
-    assert _archive(included, ids["project_a"], included_headers).status_code == 200
-
-
-def test_member_cannot_reach_a_hidden_project_through_its_folder(monkeypatch, tmp_path) -> None:
-    """``POST /api/projects`` is create-or-reuse, so it is also a Project lookup.
-
-    The middleware only sees routes that name a Project id, and this one names a
-    folder, so the whole visibility rule for it lives in the service. A member
-    excluded from the Project gets the same 404 the id-keyed routes answer with
-    -- not its payload, and not a revived copy of it.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config, ids = _setup_state(tmp_path)
-    project_b_dir = str((tmp_path / "project-b").resolve())
-
-    # ``alice`` is bound to project_a only; project_b is restricted to a group
-    # she is not in, so it is hidden from her exactly as the list shows.
-    alice = _remote_client(config, role="member", email="alice@example.com")
-    headers = csrf_headers(alice, REMOTE_ORIGIN)
-    assert {row["id"] for row in _get(alice, "/api/projects").get_json()["projects"]} == {
-        ids["project_a"]
-    }
-
-    hidden = alice.post(
-        "/api/projects",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=headers,
-        json={"folder_path": project_b_dir, "display_name": "Stolen"},
-    )
-    assert hidden.status_code == 404
-    assert "project_b" not in json.dumps(hidden.get_json())
-
-    owner = _remote_client(config, role="owner", email="owner@example.com")
-    owner_view = {
-        row["id"]: row for row in _get(owner, "/api/projects").get_json()["projects"]
-    }
-    assert owner_view[ids["project_b"]]["display_name"] == "B"
-
-    # Reuse still works for a folder the caller can see, so the refusal above is
-    # the ACL and not create-or-reuse breaking.
-    project_a_dir = str((tmp_path / "project-a").resolve())
-    visible = alice.post(
-        "/api/projects",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=headers,
-        json={"folder_path": project_a_dir, "display_name": "Ignored On Reuse"},
-    )
-    assert visible.status_code == 201
-    assert visible.get_json()["id"] == ids["project_a"]
+        assert changed.status_code == 200
+        assert changed.get_json()["display_name"] == "成员管理"
+    with engine.connect() as conn:
+        assert [project_access_service.get_project_policy(conn, ids[key]) for key in ("project_a", "project_b")] == before
+    for key in ("project_a", "project_b"):
+        assert client.delete(
+            f"/api/projects/{ids[key]}", base_url=REMOTE_ORIGIN, environ_base=REMOTE_PEER,
+            headers=headers,
+        ).status_code == 200
+    engine.dispose()
 
 
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
@@ -1263,7 +1191,7 @@ def test_show_page_payload_redacts_path_when_session_is_missing(monkeypatch) -> 
     assert "path" not in payload
 
 
-@pytest.mark.parametrize("role", ["viewer", "editor", "member"])
+@pytest.mark.parametrize("role", ["viewer", "editor"])
 def test_retry_notice_update_stream_keeps_remote_session_acl(monkeypatch, tmp_path, role) -> None:
     import asyncio
 

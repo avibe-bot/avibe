@@ -25,6 +25,7 @@ import {
   useApi,
 } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -57,6 +58,8 @@ const formatEdgeLocation = (location: CloudflareEdgeLocation) => (
 export const RemoteAccess: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
+  const canPair = capabilities.is_instance_owner;
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [pairing, setPairing] = useState(false);
@@ -128,6 +131,7 @@ export const RemoteAccess: React.FC = () => {
   }, [settingsDirty, status?.settings]);
 
   const pair = async () => {
+    if (!canPair) return;
     setPairing(true);
     setActionMessage(null);
     try {
@@ -274,7 +278,7 @@ export const RemoteAccess: React.FC = () => {
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
-  const showPairingForm = !paired || reconfiguring;
+  const showPairingForm = !paired || (canPair && reconfiguring);
   const connectorState = status?.pid_state === 'unknown'
     ? t('remoteAccess.stateNeedsAttention')
     : running
@@ -737,6 +741,7 @@ export const RemoteAccess: React.FC = () => {
               value={pairingKey}
               onChange={(event) => setPairingKey(event.target.value)}
               placeholder="vrp_xxxxxxxxxxxxxxxxx"
+              disabled={!canPair}
             />
             <div className="flex shrink-0 flex-wrap gap-2">
               <Button
@@ -744,7 +749,7 @@ export const RemoteAccess: React.FC = () => {
                 variant="default"
                 size="xs"
                 className="font-semibold"
-                disabled={pairing || !pairingKey.trim()}
+                disabled={!canPair || pairing || !pairingKey.trim()}
                 onClick={pair}
               >
                 <Link2 className="size-3.5" />
@@ -765,7 +770,7 @@ export const RemoteAccess: React.FC = () => {
               )}
             </div>
           </div>
-          <span className="block text-[10px] text-muted">{t('remoteAccess.pairingKeyHelp')}</span>
+          <span className="block text-[10px] text-muted">{canPair ? t('remoteAccess.pairingKeyHelp') : t('remoteAccess.ownerPairingRequired')}</span>
         </div>
       ) : (
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
@@ -805,6 +810,8 @@ export const RemoteAccess: React.FC = () => {
               type="button"
               variant="secondary"
               size="xs"
+              disabled={!canPair}
+              title={!canPair ? t('remoteAccess.ownerPairingRequired') : undefined}
               onClick={() => setReconfiguring(true)}
             >
               {t('remoteAccess.repair')}

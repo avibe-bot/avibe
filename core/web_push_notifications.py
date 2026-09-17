@@ -959,7 +959,7 @@ def _badge_count_for_user_key(
         # Legacy remote messages predate persisted authorization claims. Keep
         # delivering eligible content, but never attach a machine-global count.
         return 0
-    if context.is_instance_owner:
+    if context.can_manage_instance:
         return messages_service.total_unread(conn, platform="avibe")
 
     from storage import project_access_service
