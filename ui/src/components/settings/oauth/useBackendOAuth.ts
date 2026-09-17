@@ -9,10 +9,14 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_DEADLINE_MS = 16 * 60 * 1000;
 
 /** One owner for Settings and onboarding: invalidation precedes cancellation. */
-export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onActiveChange, onPendingChange }: {
+export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange, onPendingChange }: {
   backend: OAuthBackend;
   opencodeProviderId?: string;
   onSuccess?: () => void | Promise<void>;
+  /** Observe persisted credentials when a terminal server failure follows commit. */
+  onFailure?: (error: string) => void | Promise<void>;
+  /** Invalidate an in-flight confirmation before explicit cancellation. */
+  onCancel?: () => void;
   onActiveChange?: (active: boolean) => void;
   onPendingChange?: (pending: boolean) => void;
 }) {
@@ -29,8 +33,8 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onActi
   const [error, setError] = useState<string | null>(null);
   const owner = useRef({ generation: 0, mounted: true, flowId: '', busy: false, submitting: false, deadline: 0 });
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const callbacks = useRef({ onSuccess, onActiveChange, onPendingChange });
-  callbacks.current = { onSuccess, onActiveChange, onPendingChange };
+  const callbacks = useRef({ onSuccess, onFailure, onCancel, onActiveChange, onPendingChange });
+  callbacks.current = { onSuccess, onFailure, onCancel, onActiveChange, onPendingChange };
   const pending = useRef(new Set<number>());
   const settled = useCallback((generation: number) => {
     if (pending.current.delete(generation)) {
@@ -100,6 +104,8 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onActi
       return;
     }
     if (data.state === 'failed' || data.state === 'cancelled') {
+      if (data.state === 'failed') await callbacks.current.onFailure?.(data.error || data.state);
+      if (!current(generation)) return;
       throw new Error(data.error || data.state);
     }
     setState(data.state || 'starting');
@@ -150,6 +156,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onActi
     finally { if (current(generation)) setStarting(false); }
   };
   const cancelFlow = async () => {
+    callbacks.current.onCancel?.();
     const id = owner.current.flowId;
     const generation = owner.current.generation;
     resetToIdle();

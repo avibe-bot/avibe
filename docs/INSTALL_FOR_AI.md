@@ -111,9 +111,9 @@ OpenCode retains its explicit **Allow tool calls** action.
 Select **Enter workspace** explicitly. A stopped service starts at this point;
 the wizard confirms application and an available Agent before completing setup.
 Pending application, uncertain keychain auth, or a failed start stays recoverable
-on this screen. For OpenCode, if the Agent's model names an unconnected provider,
-choose a compatible model in the inline recovery and apply it explicitly. The
-wizard never chooses a model or changes an existing usable default silently.
+on this screen. For OpenCode, if the Agent's provider is unconnected or its exact
+model is absent from that provider's merged native/custom catalog, choose a
+compatible model in the inline recovery and apply it explicitly. The wizard never chooses a model or changes an existing usable default silently.
 
 IM is optional for a fresh installation. Configure Slack, Discord, Telegram,
 WeChat, or Lark / Feishu later in Settings. Existing enabled but incomplete IM
@@ -141,7 +141,8 @@ This guides the user through avibe.bot sign-in, pairing, and a secure tunnel. Us
 
 ## Step 6: Smoke Test
 
-After setup, ask the user to send a short message in the enabled chat:
+After setup, open the Web workspace, select an available Agent, and ask the user
+to send a short message in a new conversation:
 
 ```text
 Say hello and tell me which project directory you are running in.
@@ -153,13 +154,17 @@ Then verify:
 vibe status
 ```
 
-If messages do not arrive, run:
+If the Web response does not arrive, inspect the selected Agent, backend
+connection and application status in Settings, then run:
 
 ```bash
 vibe doctor
 ```
 
-Check platform-specific docs for missing permissions, disabled bot privacy settings, or unselected channels.
+Only if an IM platform was explicitly configured, repeat the message in an enabled
+IM chat. For IM delivery failures, check the platform-specific docs for missing
+permissions, bot privacy settings, or unselected channels. A Web-only installation
+does not need an IM chat to complete this smoke test.
 
 ## Common Fixes
 

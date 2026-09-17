@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useBackendOAuth } from './oauth/useBackendOAuth';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle2, LogIn, Trash2, X } from 'lucide-react';
@@ -6,8 +6,9 @@ import { AlertTriangle, CheckCircle2, LogIn, Trash2, X } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Label } from '../ui/label';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from './oauth/OAuthFlowParts';
-import { useApi } from '@/context/ApiContext';
+import { useApi, type OAuthWebMutationResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { surfaceBackendNotices } from './shared/surfaceBackendNotices';
 import { errorMessage } from '@/lib/errorMessage';
 
 type Backend = 'claude' | 'codex' | 'opencode';
@@ -41,7 +42,9 @@ export type BackendOAuthPanelProps = {
    *  The parent typically re-reads ``getClaudeAuth`` / ``getCodexAuth`` here so
    *  the on-screen "signed in" indicators move. */
   onSuccess?: () => void | Promise<void>;
-  onRemoved?: () => void | Promise<void>;
+  onRemoved?: (result: OAuthWebMutationResult) => boolean | void | Promise<boolean | void>;
+  onFailure?: (error: string) => void | Promise<void>;
+  onCancel?: () => void;
   /** Fires whenever the panel's internal flow is mid-handshake
    *  (``state`` ∈ {starting, awaiting_code, verifying}). The parent
    *  uses this to disable auth-mode switching: on iOS Safari the
@@ -76,6 +79,8 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   hideRemove,
   onSuccess,
   onRemoved,
+  onFailure,
+  onCancel,
   onActiveChange,
 }) => {
   const { t } = useTranslation();
@@ -84,8 +89,13 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
 
   const { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
     startFlow, cancelFlow, submitCallback, resetToIdle, copyUrl, copyDeviceCode, isActive } =
-    useBackendOAuth({ backend, opencodeProviderId, onSuccess, onActiveChange });
+    useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange });
   const [removing, setRemoving] = useState(false);
+  const removalOwner = useRef({ mounted: true, busy: false });
+  useEffect(() => {
+    const owner = removalOwner.current; owner.mounted = true;
+    return () => { owner.mounted = false; };
+  }, []);
 
   const removeAuth = async () => {
     if (backend === 'opencode') {
@@ -94,13 +104,17 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       // the OAuth panel just shouldn't render this button there.
       return;
     }
+    if (removalOwner.current.busy) return;
+    removalOwner.current.busy = true;
     setRemoving(true);
+    onActiveChange?.(true);
     setError(null);
     try {
       const result =
         backend === 'claude' && canRemoveAuth && !signedIn
           ? await api.removeClaudeOAuthCredentials()
           : await api.removeBackendAuth(backend);
+      if (!removalOwner.current.mounted) return;
       if (!result.ok) {
         showToast(
           t('settings.backends.oauthRemoveFailed', {
@@ -108,32 +122,36 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           }),
           'error',
         );
+        await onRemoved?.(result);
         return;
       }
       resetToIdle();
+      onActiveChange?.(true);
+      if (result.notices) surfaceBackendNotices(result.notices, showToast, t);
+      // Report partial persistence before readback can change the effective mode
+      // and unmount this panel. The parent owns subsequent application errors.
       if (result.partial) {
-        // V2Config got cleared, but the CLI logout subprocess failed —
-        // credentials may still live on disk. Surface a warning toast
-        // with the detail so the user knows to investigate (e.g.
-        // ``codex logout`` returning "Not logged in" is harmless;
-        // a real failure means the user has to run logout manually).
-        showToast(
-          t('settings.backends.oauthRemovePartial', {
-            detail: result.detail || result.warning || 'logout_failed',
-          }),
-          'warning',
-        );
-      } else {
+        showToast(t('settings.backends.oauthRemovePartial', {
+          detail: result.detail || result.warning || 'logout_failed',
+        }), 'warning');
+      }
+      const observed = onRemoved ? await onRemoved(result) : await onSuccess?.();
+      if (!removalOwner.current.mounted) return;
+      if (result.restart?.ok === false) {
+        setError(result.restart.message || t('onboarding.connection.applyFailed'));
+      } else if (!result.partial && observed !== false) {
         showToast(t('settings.backends.oauthRemoved'), 'success');
       }
-      await (onRemoved || onSuccess)?.();
     } catch (err) {
+      if (!removalOwner.current.mounted) return;
       showToast(
         t('settings.backends.oauthRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
         'error',
       );
+      await onRemoved?.({ ok: false, error: errorMessage(err) || 'unknown' });
     } finally {
-      setRemoving(false);
+      removalOwner.current.busy = false;
+      if (removalOwner.current.mounted) { setRemoving(false); onActiveChange?.(false); }
     }
   };
 
@@ -162,7 +180,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         if (backend === 'codex') return t('settings.backends.codexSignInButton');
         return t('settings.backends.opencodeProviderSignIn');
       })();
-  const showRemoveAuth = (canRemoveAuth ?? signedIn) || state === 'success';
+  const showRemoveAuth = canRemoveAuth ?? (signedIn || state === 'success');
   const removeLabel =
     backend === 'claude' && canRemoveAuth && !signedIn
       ? t('settings.backends.oauthCleanStoredCredentials')
@@ -193,7 +211,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         </div>
       )}
 
-      {state === 'success' && (
+      {state === 'success' && signedIn && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
           <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint-ink" />
           <p className="text-[12px] text-mint-ink">{t('settings.backends.oauthSuccess')}</p>

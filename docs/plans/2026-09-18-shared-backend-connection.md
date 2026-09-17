@@ -352,7 +352,7 @@ another push. No architecture/schema rewrite or owner escalation is required.
   Settings uses the existing Save/Saving labels and a muted, wrapping status for
   saved credentials on a currently disabled backend. The existing runtime hook
   increments `connectionRevision` after a config mutation settles (including
-  failure); Claude/Codex parents pass it to the shared form. This only triggers
+  failure); All three backend parents pass it to the shared form (OpenCode was completed in the round 3 closure below). This only triggers
   fresh native/application reads, never readiness from an optimistic toggle.
   Status refresh preserves key, URL and method drafts without remounting. There
   is no duplicate enable control, event bus or polling; pending application
@@ -364,3 +364,92 @@ another push. No architecture/schema rewrite or owner escalation is required.
 - Only successful permission reads may add an OpenCode permission gate. The
   documented malformed-file fail-open exception does not grant permission or
   prove credentials/application, and the original file remains untouched.
+
+### Round 3: authoritative observation closure (2026-09-18 06:09)
+
+PM audited all 11 threads across three findings-bearing heads and diagnosed the
+repeated persistence/application/UI-observation class before resuming this work.
+The public connection contract, persistence owners and navigation event remain
+unchanged. A settled write must refresh persisted auth/config independently of
+application success; failures remain visible and never confer readiness. Reads
+are observers, not another mutation/restart. New intent and component lifetime
+invalidate older observations without replacing unrelated drafts.
+
+Caller inventory and bounded closure:
+
+- `BackendConnectionForm` owns key Save/Remove, compact OAuth confirmation and
+  native/application refresh for the dialog plus Claude/Codex/OpenCode Settings.
+  Its observer publishes native success even when IPC fails, preserves explicit
+  apply receipts/notices, distinguishes unreadable auth from absent auth, and
+  lets Refresh follow the effective mode after removal without writing again.
+- `BackendOAuthPanel` is used only by that form. Sign out and Claude stale-token
+  cleanup refresh the parent after committed/partial removal and preserve apply
+  failure instead of announcing unconditional success. `useBackendOAuth` already
+  awaits its success consumer and invalidates explicit cancellation separately
+  from panel inactivity/unmount; its deadline/backend lifecycle remains unchanged.
+  Removal warnings are published before readback may switch effective mode and
+  unmount the panel. Codex uses its native `has_chatgpt_tokens` field for removal,
+  while Claude uses `has_oauth_credentials`. Model Hub uses its own `OAuthConnectDialog` and
+  is outside this change.
+- All three Settings parents consume `useBackendRuntime.connectionRevision`,
+  including expanded OpenCode providers. The existing hook notifies observers
+  after config and runtime lifecycle settlement; applied failure cannot undo a
+  committed enabled/path write. Serialized toggles and current-intent guards
+  prevent an older rejection from rolling back a newer action. Lifecycle chip
+  `onChanged` updates the installed path; its existing `onOperationChange(false)`
+  notifies observers on every settlement, including failed restart/upgrade.
+  Direct install settlement also refreshes observers, even when apply fails.
+  Delayed detection/lifecycle results preserve newer CLI drafts. The only typed
+  runtime fixture is `e2e/badge-triggers/fixture.tsx`; its required revision is 0.
+- Wizard `AgentDetection` keeps its existing mutation queue. Per-backend intent
+  and read guards ensure fresh connection `enabled` repairs a failed optimistic
+  toggle, including explicit Retry; cached config/modal results cannot overwrite
+  a later intent. Unreadable state remains unresolved and blocks that candidate.
+- OpenCode Direct Agent eligibility requires effective provider auth and exact
+  model membership in the existing merged native/user-config catalog. The first
+  prefix chooses the provider; the rest is the model ID. Bare IDs require the
+  explicitly configured default provider. Empty/missing lists leave the route
+  unverified without changing backend readiness. Registered custom models and
+  existing usable defaults survive; Hub supply and other backends are unchanged.
+- Installation smoke testing starts in the Web workspace, with IM verification
+  conditional on explicitly configured platforms. Tests never perform that live
+  model/message operation.
+
+The accepted two-file CI fixture repair remains byte-for-byte unchanged in this
+combined round. Focused consumers cover failed-before transitions, all backend
+parents, queued intent races, partial removal and model catalog ownership. No
+new store, schema, restart mechanism, generic events, polling or automatic model
+selection is introduced. Frozen captures apply only to unchanged presentation.
+
+Validation for the uncommitted round 3 repair:
+
+- Hermetic old-head comparison runs the current selected consumer tests against
+  the committed `f6a556b` product sources in a temporary copy: 21 failures and
+  one passing empty-model guard. The corresponding repaired subset passes.
+- The actual Agent/default → provider catalog → route → completion scenario
+  retains AUTH-SETUP-121 and now covers native and registered custom models for
+  Anthropic and Poe, including slash IDs. AUTH-SETUP-120 and the real Wizard
+  continue to cover canonical no-IM and saved-platform recovery. No IDs added.
+- Focused validation: 133 UI consumers across onboarding and the lifecycle chip;
+  109 Python tests covering the complete config-merge file and AUTH-SETUP-120/121;
+  22 repaired before/after cases; 8 Chromium badge cases, 4 WebKit badge cases and
+  2 EN/ZH390 Settings browser cases, plus desktop/narrow model recovery cases. UI build/lint/test-type/consumer-type/theme/
+  catalog checks and changed Python Ruff pass. Global scenario inventory finds
+  736 unique IDs across 15 catalogs, with all 46 auth/setup targets present.
+- All auth/model/config writes in these checks use test-owned state; daemon,
+  CLI, network and service boundaries are fake. No live smoke/model/auth test
+  was run. Python OAuth/native implementation is unchanged in this round.
+- The frozen original16/corrected9/round2 captures remain intact. The round3
+  browser check generated a separate pair of EN/ZH390 Settings regression
+  images under `/tmp/issue2011/r3-browser-settings`; these are test evidence,
+  not a claim of additional independent design approval. The model recovery
+  browser fixture now includes the actual provider models list; separate
+  desktop/narrow captures are under `/tmp/issue2011/r3-browser-model`. Presentation tokens,
+  layout, locale strings and the existing disabled-provider visibility policy
+  are unchanged.
+- Current remote head remains `f6a556b452fa9b5c6e41588a7df30766444e2e8c`,
+  with three genuine findings-bearing heads, 11 threads (five unresolved), and
+  failed lint35278050365. The two known CI fixture corrections are retained
+  exactly (binary diff SHA256 `ca392f40273ad265ea135e676dbbc688057f5b9ece4afbfd99436ce877a385c9`).
+  New local results do not change those remote gates. PM must inspect the quiet
+  complete diff and consumer evidence before authorizing commit/push.

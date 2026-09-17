@@ -18,14 +18,15 @@ export async function readOpencodeSetupRoutes(api: ApiContextType) {
   }
   const result = await api.getOpencodeProviders();
   if (!result.ok) throw new Error(result.message);
-  const connected = new Set(result.providers?.filter((provider) => provider.active_auth_type === 'api' || provider.active_auth_type === 'oauth').map((provider) => provider.id));
+  const connected = new Map(result.providers?.filter((provider) => provider.active_auth_type === 'api' || provider.active_auth_type === 'oauth').map((provider) => [provider.id, new Set(provider.models || [])]));
   return {
     mode: 'direct' as const,
     accepts: (model: string | null) => {
       if (!model) return false;
       const slash = model.indexOf('/');
       const provider = slash >= 0 ? model.slice(0, slash) : result.default_provider;
-      return Boolean(provider && connected.has(provider) && (slash < 0 || model.slice(slash + 1)));
+      const modelId = slash < 0 ? model : model.slice(slash + 1);
+      return Boolean(provider && modelId && connected.get(provider)?.has(modelId));
     },
   };
 }

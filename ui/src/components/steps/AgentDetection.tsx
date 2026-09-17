@@ -96,6 +96,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [entryError, setEntryError] = useState('');
   const connectionTokens = useRef<Partial<Record<RuntimeBackendId, number>>>({});
   const enableQueue = useRef(Promise.resolve());
+  const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
   // One provider modal/reconciliation at a time; Configure and navigation stay
   // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
@@ -105,18 +107,21 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
 
-  const refreshConnection = useCallback(async (name: RuntimeBackendId) => {
+  const refreshConnection = useCallback(async (name: RuntimeBackendId, receiptError = '') => {
+    if (pendingEnable.current[name] !== undefined) return;
+    const intent = enableIntent.current[name];
     const token = (connectionTokens.current[name] || 0) + 1;
     connectionTokens.current[name] = token;
     setConnectionPending((current) => ({ ...current, [name]: true }));
-    setConnectionErrors((current) => ({ ...current, [name]: '' }));
+    setConnectionErrors((current) => ({ ...current, [name]: receiptError }));
     try {
       const result = await api.getBackendConnection(name);
-      if (connectionTokens.current[name] !== token) return;
+      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
+      setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
     } catch (error) {
-      if (connectionTokens.current[name] !== token) return;
+      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
       setConnections((current) => ({ ...current, [name]: undefined }));
       setConnectionErrors((current) => ({ ...current, [name]: String(error) }));
     } finally {
@@ -125,7 +130,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }, [api, t]);
   useEffect(() => {
     if (!isPage) for (const name of ASSISTANT_ORDER) void refreshConnection(name);
-    return () => { for (const name of ASSISTANT_ORDER) connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1; };
+    return () => { for (const name of ASSISTANT_ORDER) {
+      connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1;
+      enableIntent.current[name] = (enableIntent.current[name] || 0) + 1;
+    } };
   }, [refreshConnection, isPage]);
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
@@ -217,17 +225,27 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setAgents((prev) => ({ ...prev, [name]: { ...prev[name], enabled } }));
     if (isPage) return;
     const backend = name as RuntimeBackendId;
+    const intent = (enableIntent.current[backend] || 0) + 1;
+    enableIntent.current[backend] = intent;
+    pendingEnable.current[backend] = intent;
+    connectionTokens.current[backend] = (connectionTokens.current[backend] || 0) + 1;
     setConnectionPending((current) => ({ ...current, [backend]: true }));
-    // Each explicit toggle owns one narrow mutation. Serializing its receipts
-    // prevents a quick off/on from reconciling a stale browser snapshot.
+    setConnections((current) => ({ ...current, [backend]: undefined }));
+    // Persist each queued intent, but only the latest intent may publish state.
     enableQueue.current = enableQueue.current.then(async () => {
+      let receiptError = '';
       try {
-        await api.mutateConfig([setConfigField(['agents', backend, 'enabled'], enabled)]);
-        await refreshConnection(backend);
-      } catch (error) {
-        setConnectionErrors((current) => ({ ...current, [backend]: String(error) }));
-        setConnectionPending((current) => ({ ...current, [backend]: false }));
-      }
+        const saved = await api.mutateConfig([setConfigField(['agents', backend, 'enabled'], enabled)]);
+        const applied = saved?.agent_backend_runtime;
+        if (applied && !applied.hot_reconciled && !applied.restart_scheduled && !applied.apply_on_next_start) {
+          receiptError = applied.restart_error || applied.error || t('onboarding.connection.applyFailed');
+        }
+      } catch (error) { receiptError = String(error); }
+      if (enableIntent.current[backend] !== intent) return;
+      delete pendingEnable.current[backend];
+      // This uncached projection reads persisted enabled even after a rejected
+      // write. Apply failure cannot roll back config that was already committed.
+      await refreshConnection(backend, receiptError);
     });
   };
 
@@ -263,6 +281,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       pendingInstalls.current.delete(name);
       setInstallingAgents((prev) => ({ ...prev, [name]: false }));
+      if (!isPage) void refreshConnection(name as RuntimeBackendId);
     }
   };
 
@@ -273,7 +292,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const opencodeAgent = agents['opencode'];
   const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
-    && !pendingWrites[name] && connections[name]?.entry_eligible);
+    && !pendingWrites[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
   const handlePrimaryAction = async () => {
     if (entering) return;
@@ -505,7 +524,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => setProviderModal({ backend: name, method: 'oauth' })}
             onAddKey={() => setProviderModal({ backend: name, method: 'api_key' })}
-            connection={connections[name]?.ready ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key') : undefined}
+            connection={!connectionErrors[name] && connections[name]?.ready ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key') : undefined}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name)}

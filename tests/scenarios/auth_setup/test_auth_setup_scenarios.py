@@ -3609,18 +3609,23 @@ def test_setup_completion_preserves_canonical_and_legacy_platform_configuration(
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "poe"])
-def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypatch, tmp_path, provider):
+@pytest.mark.parametrize("model_id", ["explicit-model", "family/custom-model"])
+def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypatch, tmp_path, provider, model_id):
     """AUTH-SETUP-121: compatible model -> real Agent/default -> route -> completion."""
     from core.vibe_agents import VibeAgentStore
     from modules.agents.opencode.agent import resolve_opencode_model_dict
     from vibe import api
-    from vibe.opencode_config import upsert_opencode_provider_api_key
+    from vibe.opencode_config import upsert_opencode_provider_api_key, upsert_opencode_provider_model
 
     config = V2Config.default()
     config.agents.opencode.enabled = True
     config.agents.opencode.default_provider = provider
     config.save()
     upsert_opencode_provider_api_key(provider, "fixture-only-key")
+    if model_id == "family/custom-model":
+        # A user-managed model absent from the vendor catalog is a real route
+        # only when registered in the existing native provider config owner.
+        upsert_opencode_provider_model(provider, model_id)
     api.setup_opencode_permission()
     server = SimpleNamespace(
         get_providers=AsyncMock(return_value={"all": [
@@ -3661,17 +3666,18 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
         assert invalid.status_code == 400
         assert store.require(agent["name"]).model == before.model
         selected = next(row for row in catalog["providers"] if row["id"] == provider)
-        assert "explicit-model" in selected["models"]
-        result = client.patch(f'/api/agents/{agent["name"]}', json={"model": f"{provider}/explicit-model"}, headers=headers)
+        assert model_id in selected["models"]
+        result = client.patch(f'/api/agents/{agent["name"]}', json={"model": f"{provider}/{model_id}"}, headers=headers)
         assert result.status_code == 200, result.get_json()
         persisted = store.require(agent["name"])
-        assert persisted.model == f"{provider}/explicit-model"
+        assert persisted.model == f"{provider}/{model_id}"
         assert persisted.reasoning_effort == before.reasoning_effort
         assert persisted.system_prompt == before.system_prompt
         assert persisted.metadata == before.metadata
         assert store.get_default_agent().name == before.name
         route = resolve_opencode_model_dict(persisted.model, provider)
-        assert route == {"providerID": provider, "modelID": "explicit-model"}
+        assert route == {"providerID": provider, "modelID": model_id}
+        assert route["modelID"] in selected["models"]
         assert route["providerID"] in connected
         assert asyncio.run(api.get_backend_connection('opencode'))["ready"]
         completed = client.post('/api/config', json={"setup_completed": True}, headers=headers)

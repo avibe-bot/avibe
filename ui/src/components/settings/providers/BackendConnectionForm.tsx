@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, ExternalLink, Eye, EyeOff, KeyRound, LoaderCircle, Pencil } from 'lucide-react';
-import { useApi, type ClaudeAuthState, type CodexAuthState, type OpencodeProvider } from '@/context/ApiContext';
+import { useApi, type ClaudeAuthState, type CodexAuthState, type OpencodeProvider, type OAuthWebMutationResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
 import { Button } from '@/components/ui/button';
@@ -51,12 +51,16 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [savedDisabled, setSavedDisabled] = useState(false);
   const [active, setActive] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
+  const [authReadable, setAuthReadable] = useState(false);
+  const observation = useRef(0);
+  const draftTouched = useRef(false);
+  const pendingConfirmation = useRef<Method | null>(null);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
   const lifetime = useRef({ mounted: true, busy: false });
   const onConnectedRef = useRef(onConnected); onConnectedRef.current = onConnected;
   useEffect(() => {
     const owner = lifetime.current; owner.mounted = true;
-    return () => { owner.mounted = false; };
+    return () => { owner.mounted = false; observation.current += 1; };
   }, []);
   const read = useCallback(async () => {
     if (backend === 'opencode') {
@@ -70,86 +74,111 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     if (!fresh.ok) throw new Error(fresh.message || t('onboarding.connection.readFailed'));
     return { native: fresh, provider: undefined };
   }, [api, backend, provider?.id, t]);
-  const load = useCallback(async (preserveDraft = false, isCurrent: () => boolean = () => true) => {
-    if (!preserveDraft) setLoading(true);
-    setError('');
-    try {
-      const [fresh, connection] = await Promise.all([read(), api.getBackendConnection(backend)]);
-      if (!lifetime.current.mounted || !isCurrent()) return;
-      const pending = !connection.ok || ['draining', 'failed', 'unknown'].includes(connection.application);
-      setApplyPending(pending);
-      const hasEffectiveAuth = fresh.provider ? ['api', 'oauth'].includes(fresh.provider.active_auth_type || '') : ['api_key', 'oauth'].includes(fresh.native?.active_auth_mode || '');
-      setConnected(connection.ready && hasEffectiveAuth);
-      const authUncertain = fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain;
-      setSavedDisabled(connection.enabled === false && hasEffectiveAuth && !authUncertain && !pending);
-      if (pending) setError(connection.message || t('onboarding.connection.applyPending'));
-      setNative(fresh.native); setCurrentProvider(fresh.provider);
-      if (!preserveDraft) {
-        setBaseUrl(fresh.native?.base_url || fresh.provider?.base_url || '');
-        if (fresh.native && 'credential_type' in fresh.native) setCredential(fresh.native.credential_type || 'api_key');
+  // Native persistence and controller application are independent observations.
+  // A failed IPC read must not discard a successful post-commit credential read.
+  const observe = useCallback(async ({ expectedMethod, receiptError = '' }: {
+    expectedMethod?: Method; receiptError?: string;
+  } = {}) => {
+    const token = ++observation.current;
+    const current = () => lifetime.current.mounted && token === observation.current;
+    setConnected(false); setSavedDisabled(false); setError(receiptError);
+    const nativeRead = read().then((fresh) => {
+      if (current()) {
+        setNative(fresh.native); setCurrentProvider(fresh.provider); setAuthReadable(true);
+        if (!draftTouched.current) {
+          setBaseUrl(fresh.native?.base_url || fresh.provider?.base_url || '');
+          if (fresh.native && 'credential_type' in fresh.native) setCredential(fresh.native.credential_type || 'api_key');
+        }
+        if (!compact && !draftTouched.current) {
+          const effective = fresh.native?.active_auth_mode;
+          setMethod(effective && effective !== 'none' ? effective : fresh.provider?.active_auth_type === 'api' ? 'api_key' : backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
+        }
       }
-      if (!compact && !preserveDraft) {
-        const effective = fresh.native?.active_auth_mode;
-        setMethod(effective && effective !== 'none' ? effective : fresh.provider?.active_auth_type === 'api' ? 'api_key' : backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
-      }
-    } catch (err) {
-      if (lifetime.current.mounted && isCurrent()) {
-        setConnected(false); setSavedDisabled(false); setApplyPending(true);
-        setError(errorMessage(err) || t('onboarding.connection.readFailed'));
-      }
-    } finally { if (lifetime.current.mounted && isCurrent() && !preserveDraft) setLoading(false); }
-  }, [read, api, compact, initialMethod, backend, provider?.oauth_available, t]);
+      return fresh;
+    }, (cause: unknown) => {
+      if (current()) setAuthReadable(false);
+      throw cause;
+    });
+    const [auth, application] = await Promise.allSettled([nativeRead, api.getBackendConnection(backend)]);
+    if (!current()) return false;
+    setLoading(false);
+    const messages = receiptError ? [receiptError] : [];
+    const connection = application.status === 'fulfilled' ? application.value : null;
+    const applied = connection?.ok && ['applied', 'stopped'].includes(connection.application);
+    if (!applied) messages.push(application.status === 'rejected' ? errorMessage(application.reason) || t('onboarding.connection.readFailed') : connection?.message || t('onboarding.connection.applyPending'));
+    let hasAuth = false;
+    let keylessSettings = false;
+    if (auth.status === 'rejected') messages.push(errorMessage(auth.reason) || t('onboarding.connection.readFailed'));
+    else {
+      const fresh = auth.value;
+      const effective = fresh.native?.active_auth_mode || (fresh.provider?.active_auth_type === 'oauth' ? 'oauth' : fresh.provider?.active_auth_type === 'api' ? 'api_key' : 'none');
+      const uncertain = fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain;
+      hasAuth = ['oauth', 'api_key'].includes(effective) && !uncertain;
+      keylessSettings = !compact && Boolean(fresh.provider?.custom && fresh.provider.configured && effective === 'none');
+      if (expectedMethod && ((!keylessSettings && effective !== expectedMethod) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
+    }
+    setError([...new Set(messages)].join(' '));
+    setApplyPending(messages.length > 0);
+    const confirmed = messages.length === 0;
+    setConnected(confirmed && hasAuth && Boolean(connection?.ready));
+    setSavedDisabled(confirmed && hasAuth && connection?.enabled === false && !keylessSettings);
+    return confirmed;
+  }, [read, api, backend, compact, provider?.oauth_available, initialMethod, t]);
   useEffect(() => {
-    let current = true;
-    void load(false, () => current);
-    return () => { current = false; };
-  }, [load]);
+    void observe();
+    return () => { observation.current += 1; };
+  }, [observe]);
   const observedRevision = useRef(connectionRevision);
   useEffect(() => {
     if (observedRevision.current === connectionRevision) return;
     observedRevision.current = connectionRevision;
-    let current = true;
-    void load(true, () => current);
-    return () => { current = false; };
-  }, [connectionRevision, load]);
+    void observe();
+    return () => { observation.current += 1; };
+  }, [connectionRevision, observe]);
 
-  const confirm = async () => {
-    const fresh = await read();
-    if (!lifetime.current.mounted) return;
-    const effective = fresh.native?.active_auth_mode || (fresh.provider?.active_auth_type === 'oauth' ? 'oauth' : fresh.provider?.active_auth_type === 'api' ? 'api_key' : 'none');
-    const keylessSettings = !compact && fresh.provider?.custom && fresh.provider.configured && effective === 'none';
-    if ((!keylessSettings && effective !== method) || (fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain)) {
-      throw new Error(t('onboarding.connection.unconfirmed'));
-    }
-    const connection = await api.getBackendConnection(backend);
-    if (!lifetime.current.mounted) return;
-    if (!connection.ok || !['applied', 'stopped'].includes(connection.application)) {
-      setApplyPending(true);
-      throw new Error(connection.message || t('onboarding.connection.applyPending'));
-    }
-    setApplyPending(false);
-    setNative(fresh.native); setCurrentProvider(fresh.provider); setKey(''); setEditing(false);
-    setConnected(!keylessSettings && connection.ready);
-    setSavedDisabled(connection.enabled === false && !keylessSettings);
+  const confirm = async (expectedMethod: Method = method, receiptError = '') => {
+    pendingConfirmation.current = expectedMethod;
+    if (!await observe({ expectedMethod, receiptError })) return false;
+    pendingConfirmation.current = null;
+    setKey(''); setEditing(false); draftTouched.current = false;
     await onConnectedRef.current?.();
+    return true;
   };
-  const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirm, onActiveChange: setActive, onPendingChange: onWriteState });
+  const confirmOAuth = async () => {
+    if (!await confirm('oauth')) throw new Error(t('onboarding.connection.applyPending'));
+  };
+  const observeOAuthFailure = async (receiptError: string) => {
+    pendingConfirmation.current = 'oauth';
+    await observe({ receiptError });
+  };
+  const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirmOAuth,
+    onFailure: observeOAuthFailure, onCancel: () => { pendingConfirmation.current = null; observation.current += 1; }, onActiveChange: setActive, onPendingChange: onWriteState });
+  const refresh = async () => {
+    const expected = pendingConfirmation.current;
+    if (expected) await confirm(expected);
+    else await observe();
+  };
+  const removed = async (result: OAuthWebMutationResult) => {
+    pendingConfirmation.current = null;
+    return observe({ receiptError: !result.ok ? result.error || result.detail || t('onboarding.connection.saveFailed')
+      : result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '' });
+  };
   const busy = saving || active;
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   useEffect(() => { onHeading?.({ method, active, credential }); }, [method, active, credential, onHeading]);
-  const hasKey = backend === 'opencode' ? Boolean(currentProvider?.api_key_masked) : Boolean(native?.has_api_key);
+  const hasKey = authReadable && (backend === 'opencode' ? Boolean(currentProvider?.api_key_masked) : Boolean(native?.has_api_key));
   const mask = native?.api_key_masked || currentProvider?.api_key_masked || '••••••••';
   const uncertain = native && 'auth_mode_uncertain' in native && native.auth_mode_uncertain;
-  const signedIn = native?.active_auth_mode === 'oauth' || currentProvider?.active_auth_type === 'oauth';
+  const signedIn = authReadable && (native?.active_auth_mode === 'oauth' || currentProvider?.active_auth_type === 'oauth');
   const urlValid = (() => {
     if (!baseUrl.trim()) return !provider?.custom;
     try { const url = new URL(baseUrl.trim()); return ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname); }
     catch { return false; }
   })();
-  const canSave = !loading && !busy && urlValid && Boolean(key.trim() || (hasKey && !editing) || (!compact && currentProvider?.custom && currentProvider.configured && !editing));
+  const canSave = !loading && authReadable && !busy && urlValid && Boolean(key.trim() || (hasKey && !editing) || (!compact && currentProvider?.custom && currentProvider.configured && !editing));
   const save = async () => {
     if (!canSave || lifetime.current.busy) return;
-    lifetime.current.busy = true; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
+    lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
     try {
       const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
       const result = backend === 'claude' ? await api.saveClaudeAuth({ ...payload, credential_type: credential })
@@ -159,20 +188,31 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.saveFailed'));
       if ('notices' in result) surfaceBackendNotices(result.notices, showToast, t);
       if ('partial' in result && result.partial) showToast(result.detail || result.warning || t('onboarding.connection.partial'), 'warning');
-      if (result.restart?.ok === false) { setApplyPending(true); throw new Error(result.restart.message || t('onboarding.connection.applyFailed')); }
-      await confirm();
-    } catch (err) { if (lifetime.current.mounted) setError(errorMessage(err) || t('onboarding.connection.saveFailed')); }
+      await confirm('api_key', result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '');
+    } catch (err) {
+      if (lifetime.current.mounted) {
+        pendingConfirmation.current = 'api_key';
+        await observe({ receiptError: errorMessage(err) || t('onboarding.connection.saveFailed') });
+      }
+    }
     finally { lifetime.current.busy = false; writeState.current?.(false); if (lifetime.current.mounted) setSaving(false); }
   };
   const remove = async (onlyKey: boolean) => {
     if (lifetime.current.busy || !window.confirm(t('onboarding.connection.removeConfirm'))) return;
-    lifetime.current.busy = true; setSaving(true); setError('');
+    lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
     try {
       const result = backend === 'opencode' ? await api.deleteOpencodeProviderAuth(provider!.id)
         : onlyKey ? await api.removeBackendApiKey(backend) : await api.removeBackendAuth(backend);
-      if (!result.ok || result.restart?.ok === false) throw new Error(('message' in result ? result.message : 'detail' in result ? result.detail : undefined) || t('onboarding.connection.saveFailed'));
-      await load();
-    } catch (err) { if (lifetime.current.mounted) setError(errorMessage(err) || t('onboarding.connection.readFailed')); }
+      if (!lifetime.current.mounted) return;
+      if (!result.ok) throw new Error(('message' in result ? result.message : 'detail' in result ? result.detail : undefined) || t('onboarding.connection.saveFailed'));
+      if ('notices' in result) surfaceBackendNotices(result.notices, showToast, t);
+      await removed(result);
+    } catch (err) {
+      if (lifetime.current.mounted) {
+        pendingConfirmation.current = null;
+        await observe({ receiptError: errorMessage(err) || t('onboarding.connection.readFailed') });
+      }
+    }
     finally { lifetime.current.busy = false; writeState.current?.(false); if (lifetime.current.mounted) setSaving(false); }
   };
   const prefix = backend === 'claude' ? 'claude' : backend === 'codex' ? 'codex' : 'opencode';
@@ -187,20 +227,20 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   if (loading) return <div className="connection-loading" role="status"><LoaderCircle className="animate-spin" size={16} />{t('common.loading')}</div>;
   return <div className="backend-connection-form">
     {!(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <SegmentedRadio
-      value={method} onChange={(value) => { if (!busy) { setMethod(value); setError(''); setConnected(false); } }} disabled={busy}
+      value={method} onChange={(value) => { if (!busy) { pendingConfirmation.current = null; draftTouched.current = true; setMethod(value); setError(''); setConnected(false); } }} disabled={busy}
       ariaLabel={t('onboarding.connection.method')}
       options={[{ id: 'oauth', label: backend === 'claude' ? t('onboarding.connection.claudeLogin') : backend === 'codex' ? t('onboarding.connection.codexSignIn') : t('onboarding.connection.subscription') },
         { id: 'api_key', label: backend === 'claude' ? t('onboarding.connection.claudeCredentials') : backend === 'codex' ? t('onboarding.connection.openaiKey') : apiKeyLabel }]} />}
     {uncertain && <p className="connection-notice">{t('onboarding.connection.uncertain')}</p>}
     {native && 'file_store_active' in native && method === 'api_key' && !native.file_store_active && !uncertain && <p className="connection-notice">{t('settings.backends.codexCredentialsStoreKeyringWarn', { store: native.credentials_store })}</p>}
     {native && 'settings_conflict' in native && native.settings_conflict && <p className="connection-notice">{t('settings.backends.claudeSettingsConflictTitle')}: {t('settings.backends.claudeSettingsConflictBody', { var: native.settings_env_key_var || 'ANTHROPIC_API_KEY', path: native.settings_path })}</p>}
-    {applyPending && <Button variant="secondary" disabled={busy} onClick={() => { setError(''); void confirm().catch((cause) => setError(errorMessage(cause) || t('onboarding.connection.applyPending'))); }}>{t('onboarding.connection.refresh')}</Button>}
+    {applyPending && <Button variant="secondary" disabled={busy} onClick={() => void refresh()}>{t('onboarding.connection.refresh')}</Button>}
     {connected && <p className="connection-confirmed" role="status"><CheckCircle2 size={16} />{t('onboarding.connection.connected')}</p>}
     {savedDisabled && <p className="text-xs text-muted break-words" role="status">{t('onboarding.connection.savedDisabled')}</p>}
-    {error && <div role="alert" className="connection-error">{error}{!native && !currentProvider && <Button variant="secondary" onClick={() => void load()}>{t('common.retry')}</Button>}</div>}
+    {error && <div role="alert" className="connection-error">{error}{!native && !currentProvider && <Button variant="secondary" onClick={() => void observe()}>{t('common.retry')}</Button>}</div>}
     {method === 'oauth' && (!compact ? <BackendOAuthPanel backend={backend} opencodeProviderId={provider?.id} signedIn={signedIn}
-      title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirm} onRemoved={load} onActiveChange={setActive}
-      canRemoveAuth={native && 'has_oauth_credentials' in native ? native.has_oauth_credentials : undefined}
+      title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={setActive}
+      canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.has_oauth_credentials : native.has_chatgpt_tokens))}
       signedInDetail={native && 'chatgpt_account' in native && native.chatgpt_account ? [native.chatgpt_account.email, native.chatgpt_account.plan_type, (native.chatgpt_account.organizations?.find((org) => org.is_default) || native.chatgpt_account.organizations?.[0])?.title].filter(Boolean).join(' · ') : undefined} /> : <>
       {oauth.error && <p className="connection-error" role="alert">{oauth.error}</p>}
       {!oauth.isActive ? <div className="connection-account"><h3>{title}</h3><p>{hint}</p>
@@ -217,17 +257,17 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       </div>}
     </>)}
     {method === 'api_key' && <>
-      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><SegmentedRadio value={credential} onChange={setCredential} disabled={busy} ariaLabel={credentialLabel}
+      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><SegmentedRadio value={credential} onChange={(value) => { draftTouched.current = true; setCredential(value); }} disabled={busy} ariaLabel={credentialLabel}
         options={[{ id: 'api_key', label: apiKeyLabel }, { id: 'auth_token', label: tokenLabel }]} /></div>}
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-key`}>{secretLabel}</Label>
-        {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => { setEditing(true); setKey(''); }}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
-          : <div className="connection-secret"><KeyRound size={15} /><Input id={`${prefix}-connection-key`} type={reveal ? 'text' : 'password'} value={key} onChange={(event) => setKey(event.target.value)} disabled={busy} autoComplete="off" spellCheck={false} placeholder={credential === 'auth_token' ? t('settings.backends.claudeAuthTokenPlaceholder') : backend === 'claude' ? 'sk-ant-…' : 'sk-…'} />
+        {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => { draftTouched.current = true; setEditing(true); setKey(''); }}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
+          : <div className="connection-secret"><KeyRound size={15} /><Input id={`${prefix}-connection-key`} type={reveal ? 'text' : 'password'} value={key} onChange={(event) => { draftTouched.current = true; setKey(event.target.value); }} disabled={busy} autoComplete="off" spellCheck={false} placeholder={credential === 'auth_token' ? t('settings.backends.claudeAuthTokenPlaceholder') : backend === 'claude' ? 'sk-ant-…' : 'sk-…'} />
             <Button variant="ghost" size="icon" aria-label={t(reveal ? 'onboarding.connection.hideKey' : 'onboarding.connection.showKey')} onClick={() => setReveal(!reveal)}>{reveal ? <EyeOff size={15} /> : <Eye size={15} />}</Button></div>}
         <p>{backend === 'opencode' ? t('onboarding.connection.providerCredentialHint', { name: provider?.name }) : t(backend === 'claude' && credential === 'auth_token' ? 'onboarding.connection.tokenHint' : 'onboarding.connection.keyHint')}</p>
         {editing && hasKey && <Button variant="link" size="xs" onClick={() => { setEditing(false); setKey(''); }}>{t('common.cancel')}</Button>}
       </div>
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-url`}>{t('onboarding.connection.baseUrl')}</Label>
-        <Input id={`${prefix}-connection-url`} type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} disabled={busy} autoComplete="off" placeholder={backend === 'claude' ? 'https://api.anthropic.com' : backend === 'codex' ? 'https://api.openai.com/v1' : t('onboarding.connection.providerDefault')} />
+        <Input id={`${prefix}-connection-url`} type="url" value={baseUrl} onChange={(event) => { draftTouched.current = true; setBaseUrl(event.target.value); }} disabled={busy} autoComplete="off" placeholder={backend === 'claude' ? 'https://api.anthropic.com' : backend === 'codex' ? 'https://api.openai.com/v1' : t('onboarding.connection.providerDefault')} />
         <p>{t(backend === 'claude' ? 'onboarding.connection.claudeUrlHint' : 'onboarding.connection.urlHint')}</p>
         {!urlValid && <p className="connection-error">{t('onboarding.connection.invalidUrl')}</p>}
       </div>

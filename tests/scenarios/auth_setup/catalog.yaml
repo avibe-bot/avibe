@@ -332,7 +332,7 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_preserves_canonical_and_legacy_platform_configuration
   - id: AUTH-SETUP-121
-    name: Explicit compatible OpenCode model selection preserves Agent ownership and completes setup
+    name: Native and registered custom OpenCode models preserve Agent ownership and complete setup
     status: covered
     kind: historical_regression
     layer: scenario

@@ -97,7 +97,7 @@ function directConnection(provider: string) {
   mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({ ok: true, backend, enabled: true, installed: true, auth: 'api_key', application: 'applied', ready: backend === 'opencode', entry_eligible: backend === 'opencode' }));
   mock.api.listVibeAgents.mockImplementation(async () => ({ ok: true, default_agent_name: 'opencode', agents: [agent] }));
   mock.api.getVibeAgent.mockImplementation(async () => ({ ok: true, agent }));
-  mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, default_provider: 'openai', providers: [{ id: 'openai', configured: true, active_auth_type: null }, { id: provider, configured: true, active_auth_type: 'oauth' }] });
+  mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, default_provider: 'openai', providers: [{ id: 'openai', configured: true, active_auth_type: null, models: ['gpt-5.6-sol'] }, { id: provider, configured: true, active_auth_type: 'oauth', models: ['selected-model', 'my-model'] }] });
   mock.api.readOpencodeOptionsForModelPicker.mockResolvedValue({ ok: true, data: { models: { providers: [{ id: provider, models: { 'selected-model': {} } }, { id: 'openai', models: { 'gpt-5.6-sol': {} } }] }, reasoning_options: { [`${provider}/selected-model`]: [] } } });
   mock.api.updateVibeAgent.mockImplementation(async (_name, patch) => { agent = { ...agent, ...patch }; return { ok: true, agent }; });
 }
@@ -139,6 +139,45 @@ describe('OpenCode model recovery', () => {
     mock.api.listVibeAgents.mockResolvedValue({ ok: true, default_agent_name: 'custom', agents: [{ ...opencodeAgent, name: 'custom', source: 'user', model: 'anthropic/my-model' }] });
     fireEvent.click(await setup()); await screen.findByTestId('destination');
     expect(mock.api.readOpencodeOptionsForModelPicker).not.toHaveBeenCalled(); expect(mock.api.updateVibeAgent).not.toHaveBeenCalled(); expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
+  });
+  it.each(['anthropic/removed', 'anthropic/typo', 'anthropic/'] as const)('rejects unregistered Direct model %s without editing Agent or auth', async (model) => {
+    directConnection('anthropic');
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, default_agent_name: 'custom', agents: [{ ...opencodeAgent, name: 'custom', source: 'user', model }] });
+    fireEvent.click(await setup()); await screen.findByRole('region', { name: en.onboarding.connection.modelTitle });
+    expect(mock.api.updateVibeAgent).not.toHaveBeenCalled(); expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it.each([[], undefined])('keeps an Agent route unverified with absent model list (%s)', async (models) => {
+    directConnection('anthropic');
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [{ id: 'anthropic', active_auth_type: 'api', models }] });
+    fireEvent.click(await setup()); await screen.findByRole('region', { name: en.onboarding.connection.modelTitle });
+    expect(screen.queryByTestId('destination')).toBeNull(); expect(mock.api.updateVibeAgent).not.toHaveBeenCalled();
+  });
+  it.each(['anthropic/family/custom-model', 'family-model'] as const)('preserves registered slash or explicit-default Direct model %s', async (model) => {
+    directConnection('anthropic');
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, default_provider: 'anthropic', providers: [{ id: 'anthropic', active_auth_type: 'api', models: ['family/custom-model', 'family-model'] }] });
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, default_agent_name: 'custom', agents: [{ ...opencodeAgent, name: 'custom', source: 'user', model }] });
+    fireEvent.click(await setup()); await screen.findByTestId('destination');
+    expect(mock.api.updateVibeAgent).not.toHaveBeenCalled(); expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
+  });
+  it('does not infer a default provider for a bare model and retries unreadable catalog without auth mutation', async () => {
+    directConnection('anthropic');
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, default_agent_name: 'custom', agents: [{ ...opencodeAgent, name: 'custom', source: 'user', model: 'my-model' }] });
+    mock.api.getOpencodeProviders.mockRejectedValue(new Error('provider catalog unreadable'));
+    fireEvent.click(await setup());
+    expect((await screen.findByRole('alert')).textContent).toContain('provider catalog unreadable');
+    expect(screen.queryByTestId('destination')).toBeNull();
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [{ id: 'anthropic', active_auth_type: 'api', models: ['my-model'] }] });
+    fireEvent.click(screen.getByRole('button', { name: en.common.retry }));
+    await screen.findByRole('region', { name: en.onboarding.connection.modelTitle });
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled(); expect(mock.api.updateVibeAgent).not.toHaveBeenCalled();
+  });
+  it('an unreadable OpenCode catalog cannot block an existing usable Claude default', async () => {
+    directConnection('anthropic');
+    mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({ ok: true, backend, enabled: true, installed: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true }));
+    mock.api.getOpencodeProviders.mockRejectedValue(new Error('provider catalog unreadable'));
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, default_agent_name: 'mine', agents: [opencodeAgent, { name: 'mine', backend: 'claude', enabled: true }] });
+    fireEvent.click(await setup()); await screen.findByTestId('destination');
+    expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled(); expect(mock.api.updateVibeAgent).not.toHaveBeenCalled();
   });
   it('allows another ready backend despite OpenCode mismatch', async () => {
     directConnection('anthropic');

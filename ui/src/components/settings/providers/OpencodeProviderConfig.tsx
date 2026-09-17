@@ -1289,7 +1289,7 @@ export const OpencodeProviderConfig: React.FC<{
 
                             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                               <div className="flex flex-col gap-3">
-                                <BackendConnectionForm backend="opencode" provider={provider}
+                                <BackendConnectionForm backend="opencode" provider={provider} connectionRevision={runtime.connectionRevision}
                                   onConnected={async () => { notifyOpenCodeModelOptionsChanged(); await loadProviders(); }} />
 
                                 {/* Per-provider connectivity probe.

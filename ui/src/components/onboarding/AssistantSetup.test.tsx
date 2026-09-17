@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentDetection } from '../steps/AgentDetection';
 import { AssistantRow } from './AssistantRow';
 import en from '../../i18n/en.json';
+import type { BackendConnectionState } from '../../context/ApiContext';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(),
@@ -55,6 +56,17 @@ describe('assistant installation presentation', () => {
     await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
     expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/bin/claude');
     expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+  });
+  it('a failed install settlement refreshes connection state without admitting stale readiness', async () => {
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: false, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false }));
+    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    mock.api.installAgent.mockResolvedValue({ ok: false, path: '/fixture/new-cli', message: 'fixture apply failed' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'failed', ready: false, entry_eligible: false }));
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(4));
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
+    expect(mock.api.installAgent).toHaveBeenCalledOnce(); expect(mock.api.mutateConfig).not.toHaveBeenCalled();
   });
   it('keeps existing configure entry and does not claim connection from installation', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
@@ -178,5 +190,69 @@ describe('assistant installation presentation', () => {
     rerender(connectedRow(false));
     fireEvent.click(screen.getByRole('button', { name: 'Subscription connected' }));
     expect(configure).toHaveBeenCalledOnce();
+  });
+});
+
+const pending = <T,>() => { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+const stateFor = (backend: string, enabled = true, application: BackendConnectionState['application'] = 'applied') => ({ ok: true, backend, enabled, installed: true, auth: 'api_key', application, ready: backend === 'claude' && enabled && application === 'applied', entry_eligible: backend === 'claude' && enabled && application === 'applied' });
+describe('settled wizard enablement follows persistence and latest intent', () => {
+  function mountReady() {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    return row('Claude Code').getByRole('checkbox') as HTMLInputElement;
+  }
+  it.each(['rejected', 'committed-failed', 'unreadable'] as const)('reconciles a single toggle (%s) and Retry repairs enabled without another write', async (outcome) => {
+    const checkbox = mountReady();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false));
+    if (outcome === 'committed-failed') {
+      mock.api.mutateConfig.mockResolvedValue({ agents: { claude: { enabled: false } }, agent_backend_runtime: { hot_reconciled: false, restart_error: 'fixture apply failure' } });
+      mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name, false, 'failed'));
+    } else {
+      mock.api.mutateConfig.mockRejectedValue(new Error('fixture persist failure'));
+      if (outcome === 'unreadable') mock.api.getBackendConnection.mockRejectedValue(new Error('fixture read failure'));
+    }
+    fireEvent.click(checkbox);
+    await row('Claude Code').findByRole('alert');
+    expect(checkbox.checked).toBe(outcome === 'rejected');
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(checkbox.checked).toBe(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false));
+    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+  });
+  it('an older rejected off cannot replace queued on intent or accept a read started before the toggle', async () => {
+    const checkbox = mountReady(); await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    const oldRead = pending<ReturnType<typeof stateFor>>();
+    mock.api.getBackendConnection.mockImplementation((name) => name === 'claude' ? oldRead.promise : Promise.resolve(stateFor(name)));
+    fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
+    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledWith('claude'));
+    const off = pending<unknown>(); const on = pending<unknown>();
+    mock.api.mutateConfig.mockReturnValueOnce(off.promise).mockReturnValueOnce(on.promise);
+    fireEvent.click(checkbox); fireEvent.click(checkbox);
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
+    await act(async () => oldRead.resolve(stateFor('claude', false)));
+    expect(checkbox.checked).toBe(true);
+    await act(async () => off.reject(new Error('old off rejected')));
+    expect(checkbox.checked).toBe(true);
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    await act(async () => on.resolve({ agents: { claude: { enabled: true } } }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false));
+    expect(checkbox.checked).toBe(true); expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2);
+  });
+  it('delayed modal config cannot undo a newer authoritative enablement result', async () => {
+    const checkbox = mountReady(); await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    const config = pending<unknown>(); mock.api.getConfig.mockReturnValue(config.promise);
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'API Key connected' }));
+    fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' });
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name, false));
+    mock.api.mutateConfig.mockResolvedValue({ agents: { claude: { enabled: false } } });
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
+    await act(async () => config.resolve(data()));
+    expect(checkbox.checked).toBe(false);
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
   });
 });
