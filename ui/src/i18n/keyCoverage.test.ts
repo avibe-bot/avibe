@@ -168,26 +168,48 @@
 // value that renders as nothing is empty of copy whichever character made it so.
 // Nothing else is copy; nobody renders a subtree.
 //
-// What differs is the CONTAINER it has to arrive in, and that is decided by who
-// is asking — which is the distinction three review rounds were spent finding:
+// What differs is the CONTAINER it has to arrive in, and that is a property of
+// the NAME — not of the property doing the asking, which is the reading that had
+// to be corrected and is what #1969 was opened for. There are three:
 //
-//   A CALL SITE consumes an exact shape. A plain call renders the value, so the
-//   value must be copy. A `returnObjects` call renders each entry, so the value
-//   must be a nonempty list of copy. An object passes neither: i18next hands a
-//   plain call its diagnostic instead of a string, and `MemorySettingsPanel`
-//   hands React an object child. `consumable` is total over the shapes i18next
-//   can return, under both call shapes, and the fixture states that table.
+//   COPY, the DEFAULT. Something renders this name's value directly: a plain
+//   `t()`, a `labelKey` a component hands to `t()` later, an `i18nKey` on a
+//   `<Trans>`. An object passes none of them — i18next hands a plain call its
+//   diagnostic instead of a string — and neither does a list.
 //
-//   A BARE LITERAL has no call site to read, and it may be a key PREFIX rather
-//   than a key: `harness.runStatus` resolves to an object node that
-//   `HarnessPage` completes at runtime. So PARITY and RESIDUE ask the subtree
-//   question — `isRenderable`, is there copy under this name, nothing empty
-//   under it — because dropping that whole subtree from one locale is a real
-//   gap, and calling the prefix a non-key would hide it.
+//   LIST, where a call site reads `returnObjects` and maps what comes back;
+//   `MemorySettingsPanel` does, over the two keys in `src/` that answer this
+//   way. A nonempty list of copy, because a locale that keeps the array and
+//   empties an entry renders a blank row rather than a raw key.
 //
-// One leaf, two containers, each owned by the property that can know it. Reusing
-// the subtree reading at a call site is what let an object value pass as copy;
-// using the call reading on a prefix would drop two real keys into RESIDUE.
+//   SUBTREE, where the name is not a key at all but a PREFIX its component
+//   completes at runtime: `HarnessPage` writes `harness.runStatus` and asks for
+//   `harness.runStatus.queued`. Nobody renders the node itself, so the question
+//   is whether copy lives UNDER it — and dropping that whole subtree from one
+//   locale is a real gap, so the name is still watched rather than excused.
+//
+// The first two are READ off the app: `returnObjects` at a call site says LIST,
+// and every other way a name is written says COPY. The third cannot be read,
+// because a prefix is precisely a name no call site names — that is why it reads
+// like a leaf — so it is ENUMERATED in `KEY_PREFIXES` below, inverted exactly
+// like the residue pin: two names today, measured on this head rather than
+// carried over as a count, and a third has to be classified before it passes.
+//
+// Leaf BY DEFAULT is the whole of the correction. Asking the subtree question by
+// default is what let two escapes through a green suite: a name whose only call
+// carries a `defaultValue` (`harness.createDialog.kindTask`) and a name no call
+// site names at all (`telegramConfig.proxyUrl` via `labelKey`) both fell back to
+// it, so turning either into an object in BOTH locales passed while the surface
+// rendered i18next's diagnostic. A name with copy UNDER it is not thereby a name
+// that IS copy; the two escapes were that one sentence read backwards.
+//
+// So the subtree reading is the exception and owns exactly the enumerated names.
+// A `defaultValue` still narrows what EXISTENCE asks — that call cannot show a
+// raw key — and it narrows nothing about the value that IS there: absence and a
+// broken present value are different facts, and conflating them was the first
+// escape. The permission runs one way for the same reason: a pinned prefix
+// cannot excuse a copy-demanding call on that same name, because EXISTENCE
+// reads the call and never consults the pin.
 //
 // That whole claim is about copy being THERE. Whether the copy is RIGHT —
 // accurate, idiomatic, actually translated rather than English pasted into
@@ -657,19 +679,61 @@ const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
 const rendersAsCopy = (value: unknown, key: string): boolean =>
   typeof value === 'string' && value.trim() !== '' && value !== key;
 
-const isRenderable = (value: unknown, key: string): boolean => {
+/**
+ * Whether copy lives UNDER a name — the SUBTREE question, and the only one that
+ * says yes to a node nothing renders.
+ *
+ * This is what a key PREFIX needs and what nothing else may have. It was the
+ * file's default reading once, and defaulting to it is the bug in #1969: it
+ * answers "is there copy beneath this name", which is true of every prefix and
+ * also true of a leaf someone replaced with an object, and the second case is a
+ * surface rendering i18next's diagnostic. So it is reached only through the
+ * `subtree` container below, which only an enumerated name is given.
+ */
+const hasCopyUnder = (value: unknown, key: string): boolean => {
   if (typeof value === 'string') return rendersAsCopy(value, key);
-  if (Array.isArray(value)) return value.length > 0 && value.every((entry) => isRenderable(entry, key));
+  if (Array.isArray(value)) return value.length > 0 && value.every((entry) => hasCopyUnder(entry, key));
   if (typeof value === 'object' && value !== null) {
     const entries = Object.values(value);
-    return entries.length > 0 && entries.every((entry) => isRenderable(entry, key));
+    return entries.length > 0 && entries.every((entry) => hasCopyUnder(entry, key));
   }
   return false;
 };
 
 /**
- * Whether a locale resolves a literal — meaning it renders copy for it, bare or
- * against any plural category the locale selects.
+ * The container a name's value has to arrive in, and the whole table of them.
+ *
+ * One table, so the three properties cannot disagree about what a shape means:
+ * EXISTENCE asks it about the container a CALL consumes, PARITY and RESIDUE ask
+ * it about the container a NAME is written for, and a shape closed in one is
+ * closed in all three. That is the invariant the two escapes broke — they were
+ * asked a weaker question than the call sites beside them.
+ *
+ * A LIST has to be nonempty and copy in every slot for the reason a `returnObjects`
+ * consumer maps it: a blank row is missing copy, not a row that happens to be short.
+ */
+type Container = 'copy' | 'list' | 'subtree';
+
+const ARRIVES: Record<Container, (value: unknown, key: string) => boolean> = {
+  copy: rendersAsCopy,
+  list: (value, key) =>
+    Array.isArray(value) && value.length > 0 && value.every((entry) => rendersAsCopy(entry, key)),
+  subtree: hasCopyUnder,
+};
+
+/** Whether a value arrives in ANY container the asker can render it out of. */
+const arrivesIn = (value: unknown, key: string, containers: readonly Container[]): boolean =>
+  containers.some((container) => ARRIVES[container](value, key));
+
+/**
+ * Whether a locale resolves a literal INTO a container the asker renders it out
+ * of — meaning it renders copy for it, bare or against any plural category the
+ * locale selects.
+ *
+ * The container is handed in rather than assumed, because "resolves" was the
+ * word doing the conflating: it used to mean the subtree reading everywhere it
+ * was called, which is the right question for a prefix and too weak for every
+ * other name.
  *
  * Renders, not merely exists. `instance.exists()` was the earlier answer and it
  * is presence only, which cost two review rounds of the same root cause: an
@@ -685,11 +749,49 @@ const isRenderable = (value: unknown, key: string): boolean => {
  * would drop every family out of PARITY and miss the locale that kept the family
  * while the other lost it.
  */
-const resolvesIn = (instance: I18n, lng: string, key: string): boolean =>
-  isRenderable(instance.t(key, { returnObjects: true }), key) ||
+const resolvesIn = (
+  instance: I18n,
+  lng: string,
+  key: string,
+  containers: readonly Container[],
+): boolean =>
+  arrivesIn(instance.t(key, { returnObjects: true }), key, containers) ||
   representativeCounts(lng).some((count) =>
-    isRenderable(instance.t(key, { count, returnObjects: true }), key),
+    arrivesIn(instance.t(key, { count, returnObjects: true }), key, containers),
   );
+
+/**
+ * The names that are key PREFIXES rather than keys, pinned by hand.
+ *
+ * A prefix is a name whose component completes it at runtime, so it resolves to
+ * an object node and nothing renders it directly. That cannot be READ off the
+ * app — the completion is `` t(`${prefix}.${status}`) ``, a template over a value
+ * no type narrows — which is why this is a list and every other container is a
+ * measurement.
+ *
+ * Inverted like the residue pin below, and for the identical reason: an
+ * unclassified prefix must not sit here quietly. A name that turns into an
+ * object without being classified resolves in no container, so it falls to
+ * RESIDUE and the pin above fails; adding a line here is a deliberate claim that
+ * the name is a namespace and not copy someone broke.
+ *
+ * The permission is one-way. It relaxes what PARITY and RESIDUE ask of a NAME;
+ * it never reaches EXISTENCE, which reads the call site and asks the exact
+ * container that call consumes. So pinning a name here cannot excuse a plain
+ * `t()` on it — the test below states that, and no name in `src/` is both.
+ *
+ * Measured on this head: 3454 candidate names, 2 of them object nodes. The
+ * earlier census counted three, and `workbench.modules.agents` is no longer one
+ * — `CapabilityTabs` names `workbench.modules.agents.title`, a leaf, and the
+ * bare prefix survives only in a doc comment, which the collector does not read.
+ */
+const KEY_PREFIXES = [
+  // `HarnessPage` picks one of these into `statusLabelPrefix` and completes it
+  // with a chip's option, which is typed `readonly string[]` — so the template
+  // expands to nothing and only `${prefix}.${status}` is ever rendered.
+  'harness.runStatus',
+  'harness.statusFilter',
+];
 
 /**
  * Every dotted literal in `src/` that resolves in NEITHER locale, pinned exactly.
@@ -829,14 +931,38 @@ const appCandidateKeys = (referenced: Reference[]): string[] =>
   [...new Set([...appDottedLiterals(), ...referenced.map((reference) => reference.key)])]
     .sort((a, b) => a.localeCompare(b));
 
+/**
+ * The container a NAME has to arrive in — the contract PARITY and RESIDUE hold
+ * it to, as opposed to the one EXISTENCE reads off a single call.
+ *
+ * Leaf by default, which is the correction. A name is copy unless the app can be
+ * SEEN to consume it another way (`returnObjects` at some call site) or it is a
+ * pinned prefix. So a key named only through a carrier prop, and a key named
+ * only by a call carrying its own `defaultValue`, are both held to the shape
+ * their consumer renders — which is what neither was before.
+ *
+ * `listed` is read off the same collector every other fact here comes from, so
+ * this enumerates no positions and no prop names: a second `returnObjects`
+ * consumer is covered the day it is written.
+ */
+export type Containers = (key: string) => readonly Container[];
+
+const AS_COPY: Containers = () => ['copy'];
+
+const containersFor = (referenced: Reference[]): Containers => {
+  const listed = new Set(referenced.filter((reference) => reference.listed).map((reference) => reference.key));
+  return (key) => (KEY_PREFIXES.includes(key) ? ['subtree'] : listed.has(key) ? ['list'] : ['copy']);
+};
+
 /** The literals no locale resolves, sorted for comparison against the pin. */
 export const residueOf = (
   literals: string[],
   bundles: { lng: string; bundle: unknown }[],
+  containers: Containers = AS_COPY,
 ): string[] => {
   const locales = bundles.map(({ lng, bundle }) => ({ lng, instance: localeInstance(lng, bundle) }));
   return literals
-    .filter((key) => !locales.some(({ lng, instance }) => resolvesIn(instance, lng, key)))
+    .filter((key) => !locales.some(({ lng, instance }) => resolvesIn(instance, lng, key, containers(key))))
     .sort((a, b) => a.localeCompare(b));
 };
 
@@ -853,10 +979,13 @@ type ParityGap = { key: string; present: string[]; absent: string[] };
 export const parityGaps = (
   literals: string[],
   bundles: { lng: string; bundle: unknown }[],
+  containers: Containers = AS_COPY,
 ): ParityGap[] => {
   const locales = bundles.map(({ lng, bundle }) => ({ lng, instance: localeInstance(lng, bundle) }));
   return literals.flatMap((key) => {
-    const present = locales.filter(({ lng, instance }) => resolvesIn(instance, lng, key)).map(({ lng }) => lng);
+    const present = locales
+      .filter(({ lng, instance }) => resolvesIn(instance, lng, key, containers(key)))
+      .map(({ lng }) => lng);
     if (present.length === 0 || present.length === locales.length) return [];
     return [{ key, present, absent: locales.map(({ lng }) => lng).filter((lng) => !present.includes(lng)) }];
   });
@@ -876,29 +1005,27 @@ export const parityGaps = (
  * That shape is read off the call, exactly as `count` is, so a second site
  * asking for a list is covered without naming its keys here.
  *
- * The subtree reading (`isRenderable`) is deliberately NOT used here. It answers
- * a different question — does this NAME have copy under it — which is the right
- * question for a bare literal that may be a key prefix, and the wrong one for a
- * call site, because no consumer renders a subtree.
+ * The subtree reading (`hasCopyUnder`) is deliberately NOT reachable here. It
+ * answers a different question — does this NAME have copy under it — which is
+ * the right question for a pinned prefix and the wrong one anywhere a value is
+ * rendered, because no consumer renders a subtree.
  */
 const consumable = (value: unknown, reference: Reference): boolean =>
-  reference.listed
-    ? Array.isArray(value)
-      && value.length > 0
-      && value.every((entry) => rendersAsCopy(entry, reference.key))
-    : rendersAsCopy(value, reference.key);
+  arrivesIn(value, reference.key, [reference.listed ? 'list' : 'copy']);
 
 /**
  * What a locale owes a call site, which is exactly what the call demands.
  *
  * An `exact` call names its own shape, so every option set it can reach has to
  * come back consumable. An `any` call names none of it: the options could hide
- * a `count`, a `returnObjects`, or a `defaultValue`, and picking one shape
- * would be inventing a fact. So it is asked the same question a bare literal is
- * asked — does this name have copy under it — the weakest demand that still
- * fails when copy is deleted, and one this file already has a predicate for
- * rather than a third notion. A `none` call renders its own fallback and is
- * filtered out before this, since there is no copy it can fail to find.
+ * a `count`, a `returnObjects`, or a `defaultValue`, and picking one shape would
+ * be inventing a fact. So it is asked for EITHER container a call can consume —
+ * the weakest honest demand, and still not the subtree one, because whichever
+ * options that call passes, i18next hands it a string it renders or a list it
+ * maps and never a node anything renders. Reading the subtree question here was
+ * the same conflation #1969 names, one call shape over. A `none` call renders
+ * its own fallback and is filtered out before this, since there is no copy it
+ * can fail to find.
  *
  * The residual is stated rather than hidden: an opaque options object that
  * hides a `defaultValue` would be asked for copy the call does not need. That
@@ -907,13 +1034,14 @@ const consumable = (value: unknown, reference: Reference): boolean =>
  */
 const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean =>
   (reference.demand === 'any'
-    ? !resolvesIn(instance, lng, reference.key)
+    ? !resolvesIn(instance, lng, reference.key, ['copy', 'list'])
     : probes(lng, reference).some(
       (options) => !consumable(instance.t(reference.key, { ...options, returnObjects: true }), reference),
     ));
 
 describe('app i18n key coverage', () => {
   const referenced = referencedCallSites();
+  const appContainers = containersFor(referenced);
 
   it('collects the literal keys and how they are called, and only those, from a source file', () => {
     // The forward guard on the collector itself: a coverage test whose collector
@@ -1120,22 +1248,189 @@ describe('app i18n key coverage', () => {
   });
 
   it('reports a NAME as having copy under it when any leaf under it renders', () => {
-    // The subtree question, which is what PARITY and RESIDUE ask. A dotted literal
-    // is not always a leaf: `harness.runStatus` is a PREFIX that `HarnessPage`
-    // completes at runtime, and it resolves to an object node. Dropping that whole
-    // subtree from one locale is a real gap, so the object branch is load-bearing
-    // here — and wrong at a call site, which is the next test.
-    expect(isRenderable('Disclosure', 'k')).toBe(true);
-    expect(isRenderable('', 'k')).toBe(false);
-    expect(isRenderable('   ', 'k')).toBe(false);
-    expect(isRenderable('k', 'k')).toBe(false); // i18next echoes the key when it has none
-    expect(isRenderable(['one', 'two'], 'k')).toBe(true);
-    expect(isRenderable([], 'k')).toBe(false); // the disclosure list, emptied
-    expect(isRenderable(['one', ''], 'k')).toBe(false); // a blank row is missing copy too
-    expect(isRenderable({ a: 'one' }, 'k')).toBe(true); // a prefix: copy lives under it
-    expect(isRenderable({}, 'k')).toBe(false);
-    expect(isRenderable(undefined, 'k')).toBe(false);
-    expect(isRenderable(42, 'k')).toBe(false);
+    // The subtree question, which now belongs to a PINNED PREFIX and to nothing
+    // else. `harness.runStatus` is one: `HarnessPage` completes it at runtime, so
+    // it resolves to an object node, and dropping that whole subtree from one
+    // locale is a real gap — which is why the object branch is load-bearing here.
+    // Defaulting to it is the #1969 escape, and the two tests after this one hold
+    // the default and the call site to the container each actually renders.
+    expect(hasCopyUnder('Disclosure', 'k')).toBe(true);
+    expect(hasCopyUnder('', 'k')).toBe(false);
+    expect(hasCopyUnder('   ', 'k')).toBe(false);
+    expect(hasCopyUnder('k', 'k')).toBe(false); // i18next echoes the key when it has none
+    expect(hasCopyUnder(['one', 'two'], 'k')).toBe(true);
+    expect(hasCopyUnder([], 'k')).toBe(false); // the disclosure list, emptied
+    expect(hasCopyUnder(['one', ''], 'k')).toBe(false); // a blank row is missing copy too
+    expect(hasCopyUnder({ a: 'one' }, 'k')).toBe(true); // a prefix: copy lives under it
+    expect(hasCopyUnder({}, 'k')).toBe(false);
+    expect(hasCopyUnder(undefined, 'k')).toBe(false);
+    expect(hasCopyUnder(42, 'k')).toBe(false);
+  });
+
+  it('decides a NAME by the container its consumers render, leaf unless told otherwise', () => {
+    // The other half of the same table, asked of a NAME rather than of a call —
+    // and the half #1969 was opened for. Stated as the total table again: every
+    // shape i18next returns, judged in each container a name can be written for.
+    //
+    // The `copy` column is the default and the correction. An object under it is
+    // the escape: both reported keys turned into one and the suite stayed green,
+    // because the default used to be the `subtree` column instead.
+    const table: Array<{ value: unknown; copy: boolean; list: boolean; subtree: boolean; why: string }> = [
+      { value: 'Copy', copy: true, list: false, subtree: true, why: 'a leaf is copy and is copy under itself' },
+      { value: '', copy: false, list: false, subtree: false, why: 'blank' },
+      { value: '   ', copy: false, list: false, subtree: false, why: 'renders as nothing' },
+      { value: 'k', copy: false, list: false, subtree: false, why: 'i18next echoing the key' },
+      { value: ['one', 'two'], copy: false, list: true, subtree: true, why: 'a list is mapped, never rendered bare' },
+      { value: [], copy: false, list: false, subtree: false, why: 'the disclosure list, emptied' },
+      { value: ['one', ''], copy: false, list: false, subtree: false, why: 'a blank row is missing copy' },
+      { value: [{ text: 'one' }], copy: false, list: false, subtree: true, why: 'rows of objects render nothing' },
+      { value: { label: 'Copy' }, copy: false, list: false, subtree: true, why: 'a prefix, and NOT copy by default' },
+      { value: {}, copy: false, list: false, subtree: false, why: 'empty' },
+      { value: undefined, copy: false, list: false, subtree: false, why: 'no value at all' },
+      { value: null, copy: false, list: false, subtree: false, why: 'no value at all' },
+      { value: 42, copy: false, list: false, subtree: false, why: 'not copy' },
+      { value: true, copy: false, list: false, subtree: false, why: 'not copy' },
+    ];
+
+    for (const row of table) {
+      expect(arrivesIn(row.value, 'k', ['copy']), `copy: ${row.why}`).toBe(row.copy);
+      expect(arrivesIn(row.value, 'k', ['list']), `list: ${row.why}`).toBe(row.list);
+      expect(arrivesIn(row.value, 'k', ['subtree']), `subtree: ${row.why}`).toBe(row.subtree);
+      // An opaque call site names one of the first two and cannot say which, so
+      // it is asked for either — and never for the third.
+      expect(arrivesIn(row.value, 'k', ['copy', 'list']), `either: ${row.why}`).toBe(row.copy || row.list);
+    }
+  });
+
+  it('holds a defaulted-only key and a carrier-only key to the shape their consumer renders', () => {
+    // #1969, both escapes, through the real properties rather than a helper: a
+    // key named ONLY by a call carrying its own `defaultValue`, and a key named
+    // by no call site at all, each turned into a nonempty object in BOTH locales.
+    //
+    // Neither reaches EXISTENCE — one demands no copy, the other has no call to
+    // read — so the name-side contract is the only thing that can see them, and
+    // under the old default it saw an object with copy under it and said yes.
+    const defaulted = collectReferences(`
+      const title = t('harness.createDialog.kindTask', { defaultValue: 'Background work' });
+    `);
+    expect(defaulted.map((reference) => reference.demand)).toEqual(['none']);
+    const carrierOnly = collectDottedLiterals(`
+      const Field = () => <ProxyUrlField labelKey="telegramConfig.proxyUrl" />;
+    `);
+    expect(collectReferences('const Field = () => <ProxyUrlField labelKey="telegramConfig.proxyUrl" />;')).toEqual([]);
+
+    const names = [...defaulted.map((reference) => reference.key), ...carrierOnly];
+    const asObjects = (kindTask: unknown, proxyUrl: unknown) => ({
+      harness: { createDialog: { kindTask } },
+      telegramConfig: { proxyUrl },
+    });
+
+    // As shipped: leaves, so both resolve and neither property has anything to say.
+    const copy = [
+      { lng: 'en', bundle: asObjects('Scheduled task', 'Proxy URL (optional)') },
+      { lng: 'zh', bundle: asObjects('后台任务', '代理地址（可选）') },
+    ];
+    expect(parityGaps(names, copy)).toEqual([]);
+    expect(residueOf(names, copy)).toEqual([]);
+
+    // M21 and M22: an object in every locale. Nothing renders a node, so no
+    // locale resolves either name and both fall to the pin — the same landing as
+    // blanking them, because it is the same loss of copy.
+    const node = { title: 'Scheduled task' };
+    const mutated = [
+      { lng: 'en', bundle: asObjects(node, { label: 'Proxy URL (optional)' }) },
+      { lng: 'zh', bundle: asObjects({ title: '后台任务' }, { label: '代理地址（可选）' }) },
+    ];
+    expect(parityGaps(names, mutated)).toEqual([]);
+    expect(residueOf(names, mutated)).toEqual(['harness.createDialog.kindTask', 'telegramConfig.proxyUrl']);
+    expect(NON_KEY_LITERALS).not.toContain('harness.createDialog.kindTask');
+    expect(NON_KEY_LITERALS).not.toContain('telegramConfig.proxyUrl');
+
+    // A list is refused on the same ground and for the same reason: `t()` at a
+    // carrier hands React an array, not the label the surface asked for.
+    const listed = [
+      { lng: 'en', bundle: asObjects('Scheduled task', ['Proxy URL (optional)']) },
+      { lng: 'zh', bundle: asObjects('后台任务', ['代理地址（可选）']) },
+    ];
+    expect(residueOf(names, listed)).toEqual(['telegramConfig.proxyUrl']);
+
+    // Broken in ONE locale only, which is the commoner accident: a parity gap
+    // rather than residue, so the name is reported instead of silently pinned.
+    const half = [
+      { lng: 'en', bundle: asObjects('Scheduled task', 'Proxy URL (optional)') },
+      { lng: 'zh', bundle: asObjects(node, { label: '代理地址（可选）' }) },
+    ];
+    expect(parityGaps(names, half)).toEqual([
+      { key: 'harness.createDialog.kindTask', present: ['en'], absent: ['zh'] },
+      { key: 'telegramConfig.proxyUrl', present: ['en'], absent: ['zh'] },
+    ]);
+
+    // And absence is still its own fact, distinct from a broken present value: a
+    // `defaultValue` call renders its fallback when the key is gone from every
+    // locale, so that name lands in the pin rather than in EXISTENCE. Which
+    // container it would have been held to never enters the question.
+    const gone = [
+      { lng: 'en', bundle: { telegramConfig: { proxyUrl: 'Proxy URL (optional)' } } },
+      { lng: 'zh', bundle: { telegramConfig: { proxyUrl: '代理地址（可选）' } } },
+    ];
+    expect(residueOf(names, gone)).toEqual(['harness.createDialog.kindTask']);
+  });
+
+  it('lets a pinned prefix resolve to a node, and lets it excuse nothing else', () => {
+    // The exception, and its boundary. `containersFor` is the app's own resolver,
+    // so what this pins is the rule the properties above actually run under.
+    const prefixed = [
+      { lng: 'en', bundle: { harness: { runStatus: { queued: 'Queued' }, other: { queued: 'Queued' } } } },
+      { lng: 'zh', bundle: { harness: { runStatus: { queued: '排队中' }, other: { queued: '排队中' } } } },
+    ];
+    const names = ['harness.runStatus', 'harness.other'];
+
+    // Leaf by default: the identical node resolves at neither name.
+    expect(residueOf(names, prefixed)).toEqual(['harness.other', 'harness.runStatus']);
+    // Pinned: the prefix resolves, and the name beside it — same shape, same
+    // subtree, not enumerated — still does not.
+    expect(residueOf(names, prefixed, containersFor([]))).toEqual(['harness.other']);
+
+    // A `returnObjects` consumer is READ rather than pinned, and it buys a list
+    // and only a list: the object that a prefix may be is still residue here.
+    const listConsumer = collectReferences("const rows = t('memory.settings.disclosure', { returnObjects: true });");
+    const withList = containersFor(listConsumer);
+    expect(withList('memory.settings.disclosure')).toEqual(['list']);
+    const rows = (value: unknown) => ({ memory: { settings: { disclosure: value } } });
+    const asList = [{ lng: 'en', bundle: rows(['One']) }, { lng: 'zh', bundle: rows(['一']) }];
+    const asNode = [{ lng: 'en', bundle: rows({ a: 'One' }) }, { lng: 'zh', bundle: rows({ a: '一' }) }];
+    expect(residueOf(['memory.settings.disclosure'], asList, withList)).toEqual([]);
+    expect(residueOf(['memory.settings.disclosure'], asNode, withList)).toEqual(['memory.settings.disclosure']);
+
+    // Losing the whole subtree in one locale is still a gap: the pin relaxes the
+    // container, never the requirement that both locales carry copy.
+    expect(
+      parityGaps(['harness.runStatus'], [prefixed[0], { lng: 'zh', bundle: { harness: {} } }], containersFor([])),
+    ).toEqual([{ key: 'harness.runStatus', present: ['en'], absent: ['zh'] }]);
+
+    // And the permission does not reach EXISTENCE, which reads the call: a plain
+    // `t()` on a pinned prefix is still missing the copy it renders.
+    const plain: Reference = { key: 'harness.runStatus', counted: false, listed: false, demand: 'exact' };
+    expect(missingCopy(localeInstance('en', prefixed[0].bundle), 'en', plain)).toBe(true);
+  });
+
+  it('pins the prefixes against the bundles, and keeps them out of copy-demanding calls', () => {
+    // Both directions, on the real bundles. A pinned name that is no longer a
+    // node has a stale exemption; a pinned name something renders directly would
+    // be an exemption cancelling a real demand, which is the one-way rule.
+    for (const { lng, bundle } of BUNDLES) {
+      const instance = localeInstance(lng, bundle);
+      for (const prefix of KEY_PREFIXES) {
+        const value = instance.t(prefix, { returnObjects: true });
+        expect(Array.isArray(value) || typeof value !== 'object', `${prefix} in ${lng} is no longer a node`).toBe(false);
+        expect(resolvesIn(instance, lng, prefix, ['subtree']), `${prefix} in ${lng} has no copy under it`).toBe(true);
+      }
+    }
+    expect(
+      referenced
+        .filter((reference) => reference.demand !== 'none' && KEY_PREFIXES.includes(reference.key))
+        .map(label),
+    ).toEqual([]);
   });
 
   it('decides a CALL by the exact shape it consumes, over every shape i18next returns', () => {
@@ -1395,12 +1690,12 @@ describe('app i18n key coverage', () => {
   it('pins the names that are not keys, so no key can leave both locales unseen', () => {
     // Exact set equality, not a count: a count lets one literal leave as another
     // enters. Sorted on both sides so the list above can stay grouped by class.
-    expect(residueOf(appCandidateKeys(referenced), BUNDLES)).toEqual(
+    expect(residueOf(appCandidateKeys(referenced), BUNDLES, appContainers)).toEqual(
       [...NON_KEY_LITERALS].sort((a, b) => a.localeCompare(b)),
     );
   });
 
   it('keeps every name the app can ask for resolving in both locales or neither', () => {
-    expect(parityGaps(appCandidateKeys(referenced), BUNDLES)).toEqual([]);
+    expect(parityGaps(appCandidateKeys(referenced), BUNDLES, appContainers)).toEqual([]);
   });
 });
