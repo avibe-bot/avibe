@@ -28,6 +28,22 @@ that omits a previously known run cannot turn an earlier failure into success.
 Lower rerun attempts cannot supersede a delivered newer attempt. A settle
 candidate that returns to the acknowledged baseline must not be reported.
 
+### Report/snapshot atomicity
+
+A settled report owns both its PR observation and its optional Actions verdict.
+If a quiet re-poll omits previously detected PR activity, retain the PR
+observation with that fallback output; derive its fingerprints, head, and
+normalized snapshot from the same observation. Revalidate Actions separately
+against the latest successful poll. Both still use the existing pending
+transaction and delivery acknowledgement, not a second cursor or delivery owner.
+The startup and loop paths must consume the same report/baseline contract.
+
+Validate persisted Actions records before normalization or run-ID indexing.
+Malformed records are not an empty inventory: fail closed with the existing
+state-file diagnostic and preserve the file rather than discarding notification
+history or silently disabling requested CI monitoring. An absent optional
+observed inventory remains compatible with version-1 cursors.
+
 ## Boundaries
 
 - Production changes are limited to the bundled GitHub PR waiter and stable
@@ -55,6 +71,11 @@ multi-workflow gates, and undelivered replay. Run the complete PR/Actions waiter
 tests, related Watch supervisor tests, skill guidance tests, and changed-file lint.
 Obtain independent read-only review and exact-head GitHub review/CI before
 delivery close-out. Existing live Watches retain their IDs, cursors, and filters.
+
+Settle tests must continue through unacknowledged replay and acknowledged
+restart, including restoration of the unchanged PR item and a subsequent real
+edit/deletion. Cover PR-only and combined reports, startup and loop detection,
+and malformed committed/observed Actions records without overwriting evidence.
 
 Explicit PR replay baselines unrelated CI at the currently fetched head without
 altering the requested PR history. SHA comparisons use the same case-insensitive

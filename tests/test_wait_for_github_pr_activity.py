@@ -4322,6 +4322,7 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
         return latest, 2
 
     workflow_args = tuple(arg for workflow in workflows for arg in ("--workflow", workflow))
+    ci_args = ("--branch", "feature", *workflow_args) if workflows else ()
     sha_args = ("--sha", sha) if sha is not None else ()
     with (
         patch.object(module.time, "monotonic", side_effect=lambda: clock),
@@ -4333,7 +4334,7 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
             fetch,
             delivery=delivery,
             extra_args=(
-                "--branch", "feature", *workflow_args, *sha_args, "--interval", "1", "--timeout", "100",
+                *ci_args, *sha_args, "--interval", "1", "--timeout", "100",
                 "--settle", str(settle),
             ),
         )
@@ -4647,6 +4648,200 @@ def test_settle_preserves_detected_pr_activity_when_later_polls_omit_it(tmp_path
     assert payload[module.STAGED_KEY]["output"] == output.strip()
     if with_ci:
         assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs({"CI": [old]})
+
+
+@pytest.mark.parametrize("during_loop", [False, True])
+@pytest.mark.parametrize("ci_mode", ["off", "stable", "complete", "withdraw"])
+def test_settled_pr_report_keeps_its_snapshot_through_ack_and_restart(tmp_path, during_loop, ci_mode):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    first_run = {
+        "off": old,
+        "stable": old,
+        "complete": _ci_run(attempt=2, status="in_progress", conclusion=None),
+        "withdraw": _ci_run(attempt=2),
+    }[ci_mode]
+    final_run = _ci_run(attempt=2) if ci_mode == "complete" else old
+    first = _ci_state(first_run, comment=True)
+    quiet = _ci_state(final_run)
+    workflows = () if ci_mode == "off" else ("CI",)
+    states = [_ci_state(old), first, quiet] if during_loop else [first, quiet]
+
+    rc, output, payload = _ci_cycle(module, path, states, workflows=workflows, settle=1)
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert ("GitHub Actions" in output) == (ci_mode == "complete")
+    staged = payload[module.STAGED_KEY]["cursors"]
+    assert staged["snapshot"]["review_comments"] == module._normalized_pr_snapshot(first)["review_comments"]
+    assert staged["review_comment_fingerprints"] == module._fingerprint_map(first["review_comments"])
+
+    def unavailable(*args, **kwargs):
+        raise AssertionError("unacknowledged output must replay without polling")
+
+    ci_args = ("--branch", "feature", "--workflow", "CI") if workflows else ()
+    rc, replay, _ = _run_managed(module, path, unavailable, delivery="1", extra_args=ci_args)
+    assert rc == 0
+    assert replay == output
+
+    restored = _ci_state(final_run, comment=True)
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", workflows=workflows)
+    assert rc == 124
+    assert output == ""
+
+    if ci_mode == "withdraw":
+        restored["actions"] = [_ci_run(attempt=2)]
+        rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", workflows=workflows)
+        assert rc == 0
+        assert "GitHub Actions success" in output
+        assert "GitHub PR activity" not in output
+        rc, output, _ = _ci_cycle(module, path, [restored], delivery="ci-ack", workflows=workflows)
+        assert rc == 124
+        assert output == ""
+
+    restored["review_comments"][0]["body"] = "A genuine edit after acknowledgement"
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", workflows=workflows)
+    assert rc == 0
+    assert "review_comment #501" in output
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", workflows=workflows)
+    assert rc == 124
+    assert output == ""
+
+    restored["review_comments"] = []
+    restored["review_threads"] = [{"id": "thread-1", "isResolved": False}]
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", workflows=workflows)
+    assert rc == 0
+    assert "review_thread thread-1" in output
+    assert "501" not in json.loads(path.read_text())[module.STAGED_KEY]["cursors"]["snapshot"]["review_comments"]
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="4", workflows=workflows)
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("during_loop", [False, True])
+def test_settled_pr_fallback_does_not_attribute_current_ci_to_a_transient_head(tmp_path, during_loop):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    transient = _ci_state(_ci_run(9, head="head-2"), head="head-2", comment=True)
+    quiet = _ci_state(old)
+    states = [_ci_state(old), transient, quiet] if during_loop else [transient, quiet]
+    rc, output, payload = _ci_cycle(module, path, states, settle=1)
+    assert rc == 0
+    assert "head-2" in output
+    assert "GitHub Actions" not in output
+    staged = payload[module.STAGED_KEY]["cursors"]
+    assert payload["head_sha"] == "head-1"
+    assert staged["head_sha"] == staged["snapshot"]["pull_request"]["head_sha"] == "head-2"
+    assert staged["actions"] == {"CI": []}
+    assert staged["actions_observed"]["CI"][0]["head_sha"] == "head-1"
+    rc, output, _ = _ci_cycle(module, path, [quiet], delivery="2")
+    assert rc == 0
+    assert "head-2 -> head-1" in output
+    assert "GitHub Actions success" in output
+    rc, output, _ = _ci_cycle(module, path, [quiet], delivery="3")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("during_loop", [False, True])
+def test_settled_pr_snapshot_survives_a_failed_repoll_and_ack(tmp_path, during_loop):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    run = _ci_run()
+    _seed_ci_state(module, path, run)
+    first = _ci_state(run, comment=True)
+    failure = urllib.error.URLError("synthetic settle failure")
+    states = [_ci_state(run), first, failure] if during_loop else [first, failure]
+    clock = 0.0
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def fetch(*args, **kwargs):
+        item = states.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item, 2
+
+    with (
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+        patch.object(module.time, "sleep", side_effect=sleep),
+    ):
+        rc, output, payload = _run_managed(
+            module, path, fetch, delivery="1",
+            extra_args=("--workflow", "CI", "--branch", "feature", "--settle", "1", "--timeout", "100"),
+        )
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert "501" in payload[module.STAGED_KEY]["cursors"]["snapshot"]["review_comments"]
+    rc, output, _ = _ci_cycle(module, path, [first], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("location", ["committed", "pending"])
+@pytest.mark.parametrize("key", ["actions", "actions_observed"])
+@pytest.mark.parametrize("bad_value", [
+    {"CI": [None]}, {"CI": ["invalid"]}, {"CI": [{"id": []}]},
+    {"CI": "not-a-list"}, None, [], {"CI": [{"id": 7, "run_attempt": []}]},
+])
+def test_malformed_saved_actions_fail_closed_without_overwriting_history(tmp_path, key, bad_value, location):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    _seed_ci_state(module, path, _ci_run())
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    if location == "pending":
+        saved[module.STAGED_KEY] = {
+            "delivered_after": "0",
+            "output": "an earlier report",
+            "cursors": {key: bad_value},
+        }
+    else:
+        saved[key] = bad_value
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    original = path.read_bytes()
+    stderr = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: "1"}),
+        patch.object(module, "_fetch_state", return_value=(_ci_state(_ci_run()), 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch("sys.argv", [
+            "wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI",
+            "--branch", "feature", "--state-file", str(path), "--timeout", "0.001",
+        ]),
+        patch("sys.stderr", stderr),
+    ):
+        assert module.run_cli() == 1
+    assert key in stderr.getvalue()
+    assert "malformed" in stderr.getvalue()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("attempt", ["missing", None])
+def test_valid_legacy_actions_and_partial_pending_remain_compatible(tmp_path, attempt):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    run = _ci_run(attempt=attempt)
+    if attempt == "missing":
+        run.pop("run_attempt")
+    _seed_ci_state(module, path, run)
+    saved = json.loads(path.read_text())
+    if attempt == "missing":
+        saved["actions"]["CI"][0].pop("run_attempt")
+    saved[module.STAGED_KEY] = {
+        "delivered_after": "0",
+        "output": "legacy partial transaction",
+        "cursors": {"review_comment_cursor": 500},
+    }
+    path.write_text(json.dumps(saved))
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(run)], delivery="1")
+    assert rc == 124
+    assert output == ""
 
 
 def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_path) -> None:

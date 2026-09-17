@@ -15,7 +15,7 @@ import urllib.parse
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 try:  # POSIX only, which is every platform `vibe` runs the waiter on.
     import fcntl
@@ -96,6 +96,17 @@ REVIEW_THREAD_STATES_KEY = "review_thread_states"
 PR_SNAPSHOT_KEY = "snapshot"
 ACTIONS_SNAPSHOT_KEY = "actions"
 ACTIONS_OBSERVED_KEY = "actions_observed"
+
+
+class PRReport(NamedTuple):
+    """One delivery and the observations its pending transaction will commit."""
+
+    output: str | None
+    cursors: tuple[int, int, int, int, str]
+    pr_state: dict[str, Any]
+    actions: dict[str, Any] | None = None
+
+
 PR_FINGERPRINT_KEYS = (
     REVIEW_FINGERPRINTS_KEY,
     REVIEW_COMMENT_FINGERPRINTS_KEY,
@@ -1125,6 +1136,12 @@ def _load_state_file(
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} {conflict}")
+    _validate_saved_actions(payload)
+    pending = payload.get(STAGED_KEY)
+    if isinstance(pending, dict) and isinstance(pending.get("cursors"), dict):
+        # Legacy pending transactions may contain only some cursor fields.
+        # Validate their effective state before acknowledgement can write it.
+        _validate_saved_actions({**payload, **pending["cursors"]})
     return payload
 
 
@@ -1547,8 +1564,43 @@ def _saved_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
 
 
 def _saved_actions_snapshot(saved: dict[str, Any], key: str = ACTIONS_SNAPSHOT_KEY) -> dict[str, Any]:
-    value = saved.get(key)
-    return value if isinstance(value, dict) else {}
+    return saved.get(key, {})
+
+
+def _validate_saved_actions(saved: dict[str, Any]) -> None:
+    """Reject corrupt history, never filter it into an apparently empty gate."""
+
+    for key in (ACTIONS_SNAPSHOT_KEY, ACTIONS_OBSERVED_KEY):
+        if key not in saved:
+            continue
+        value = saved[key]
+        if not isinstance(value, dict):
+            raise StateFileUnusableError(f"Saved {key} is malformed: expected a workflow mapping")
+        for workflow, runs in value.items():
+            if not isinstance(workflow, str) or not isinstance(runs, list):
+                raise StateFileUnusableError(f"Saved {key} is malformed: expected workflow run lists")
+            for run in runs:
+                if not isinstance(run, dict):
+                    raise StateFileUnusableError(f"Saved {key} is malformed: expected run objects")
+                run_id = run.get("id")
+                attempt = run.get("run_attempt")
+                if (
+                    not isinstance(run_id, (int, str))
+                    or isinstance(run_id, bool)
+                    or (isinstance(run_id, str) and not run_id)
+                    or any(
+                        run.get(field) is not None and not isinstance(run[field], str)
+                        for field in ("status", "conclusion", "head_sha", "head_branch")
+                    )
+                    or (
+                        attempt is not None
+                        and (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1)
+                    )
+                ):
+                    raise StateFileUnusableError(f"Saved {key} is malformed: invalid run comparison fields")
+    if ACTIONS_SNAPSHOT_KEY in saved and ACTIONS_OBSERVED_KEY in saved:
+        if set(saved[ACTIONS_SNAPSHOT_KEY]) != set(saved[ACTIONS_OBSERVED_KEY]):
+            raise StateFileUnusableError("Saved actions_observed is malformed: workflow inventory differs from actions")
 
 
 def _actions_snapshot_regressed(current: dict[str, Any], previous: dict[str, Any]) -> bool:
@@ -1707,6 +1759,7 @@ def _resolve_staged_state(
     resolved = {key: value for key, value in saved.items() if key != STAGED_KEY}
     if delivered:
         resolved.update(cursors)
+    _validate_saved_actions(resolved)
     print(
         (
             "An earlier report was delivered; advancing past it."
@@ -2178,7 +2231,8 @@ def main() -> int:
     actions_observed = (
         _observe_actions(
             {} if args.seed_state else (
-                _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY) or _saved_actions_snapshot(saved)
+                _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY)
+                if ACTIONS_OBSERVED_KEY in saved else _saved_actions_snapshot(saved)
             ),
             normalize_selected_runs(selected_actions),
             args.sha or observed_head_sha,
@@ -2254,8 +2308,8 @@ def main() -> int:
             file=sys.stderr,
         )
 
-        def _render(cursors: tuple[int, int, int, int, str]) -> tuple[str | None, int, int, int, int, str]:
-            return _render_activity(
+        def _render(cursors: tuple[int, int, int, int, str]) -> PRReport:
+            activity = _render_activity(
                 repo=args.repo,
                 pr_number=args.pr,
                 state=state,
@@ -2278,25 +2332,32 @@ def main() -> int:
                 ignored_authors=ignored_authors,
                 ignore_patterns=ignore_patterns,
             )
+            return PRReport(activity[0], activity[1:], state)
 
         def _render_combined(
             cursors: tuple[int, int, int, int, str],
             *,
-            fallback_pr: tuple[str | None, int, int, int, int, str] | None = None,
-        ) -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
+            fallback_pr: PRReport | None = None,
+        ) -> PRReport:
             pr_result = _render(cursors)
-            if pr_result[0] is None and fallback_pr is not None:
+            if pr_result.output is None and fallback_pr is not None and fallback_pr.output is not None:
                 pr_result = fallback_pr
             if not ci_enabled:
-                return (*pr_result, None)
+                return pr_result
+
+            # A transient PR head can itself be retained as evidence. Never
+            # attach another head's CI verdict to that observation's baseline.
+            if _current_pr_head_sha(pr_result.pr_state.get("pull_request")).casefold() != (
+                _current_pr_head_sha(state.get("pull_request")).casefold()
+            ):
+                return pr_result
 
             actions_output = _render_new_actions()
             if actions_output is None:
-                return (*pr_result, None)
+                return pr_result
             reported_actions = normalize_selected_runs(selected_actions)
-            if pr_result[0] is None:
-                return (actions_output, *pr_result[1:], reported_actions)
-            return (f"{pr_result[0]}\n{actions_output}", *pr_result[1:], reported_actions)
+            output = actions_output if pr_result.output is None else f"{pr_result.output}\n{actions_output}"
+            return pr_result._replace(output=output, actions=reported_actions)
 
         def _render_new_actions() -> str | None:
             current_actions = normalize_selected_runs(selected_actions)
@@ -2315,18 +2376,19 @@ def main() -> int:
             )
             return output
 
-        def _advance_actions_baseline(reported_actions: dict[str, Any] | None) -> None:
+        def _advance_actions_baseline(report: PRReport) -> None:
             nonlocal actions_snapshot, actions_head_sha
             if not ci_enabled:
                 return
             # Only a reported terminal result advances the notification baseline.
             # Quiet polls and PR-only reports must not erase an acknowledged CI
             # result. The existing pending transaction covers this state too.
-            if reported_actions is not None:
-                actions_snapshot = reported_actions
-            elif not _same_actions_head():
+            report_head = args.sha or _current_pr_head_sha(report.pr_state.get("pull_request"))
+            if report.actions is not None:
+                actions_snapshot = report.actions
+            elif actions_head_sha is None or actions_head_sha.casefold() != report_head.casefold():
                 actions_snapshot = {workflow: [] for workflow in args.workflow}
-            actions_head_sha = _active_ci_head_sha()
+            actions_head_sha = report_head
 
         def _refresh_actions() -> None:
             nonlocal selected_actions, actions_observed
@@ -2359,10 +2421,35 @@ def main() -> int:
             )
             return actions_output is None
 
-        def _advance_since() -> None:
+        def _adopt_report(report: PRReport) -> None:
+            nonlocal review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
+            nonlocal observed_head_sha, snapshot
+            nonlocal review_fingerprints, review_comment_fingerprints, issue_comment_fingerprints, review_thread_states
             nonlocal review_comment_since, issue_comment_since
-            review_comment_since = later_since(review_comment_since, state["review_comments"])
-            issue_comment_since = later_since(issue_comment_since, state["issue_comments"])
+            review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status = report.cursors
+            pr_state = report.pr_state
+            observed_head_sha = _current_pr_head_sha(pr_state.get("pull_request"))
+            review_comment_since = later_since(review_comment_since, pr_state["review_comments"])
+            issue_comment_since = later_since(issue_comment_since, pr_state["issue_comments"])
+            review_fingerprints = _fingerprint_map(pr_state["reviews"])
+            review_comment_fingerprints = _fingerprint_map(pr_state["review_comments"])
+            issue_comment_fingerprints = _fingerprint_map(pr_state["issue_comments"])
+            if token is not None:
+                raw_threads = pr_state.get("review_threads")
+                review_thread_states = _review_thread_state_map(
+                    raw_threads if isinstance(raw_threads, list) else []
+                )
+            snapshot = _normalized_pr_snapshot(
+                pr_state,
+                viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+                actionable_only=args.actionable_only,
+                ignored_authors=ignored_authors,
+                ignore_patterns=ignore_patterns,
+                committed_snapshot=snapshot,
+                review_threads_available=token is not None,
+            )
+            _advance_actions_baseline(report)
 
         def _pr_state_fields() -> dict[str, Any]:
             fields = {
@@ -2432,9 +2519,9 @@ def main() -> int:
             _persist_pr_state()
 
         def _settle(
-            first: tuple[str | None, int, int, int, int, str, dict[str, Any] | None],
+            first: PRReport,
             pending: tuple[int, int, int, int, str],
-        ) -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
+        ) -> PRReport:
             """Re-poll while a batch is still landing so it costs one Agent turn."""
 
             nonlocal state
@@ -2444,7 +2531,7 @@ def main() -> int:
             best = first
             best_pr = _render(pending)
 
-            def _fallback() -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
+            def _fallback() -> PRReport:
                 # Revalidate against the latest successful poll, not a transient
                 # earlier candidate that may now equal the delivered baseline.
                 # PR evidence remains at-least-once even if a later collection
@@ -2500,16 +2587,16 @@ def main() -> int:
                 state, _count = settle_request.value
                 _refresh_actions()
                 pr_candidate = _render(pending)
-                if pr_candidate[0] is not None:
+                if pr_candidate.output is not None:
                     best_pr = pr_candidate
                 if _actions_waiting_for_terminal_result():
                     continue
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
                 candidate = _fallback()
-                if candidate[0] is None:
+                if candidate.output is None:
                     return candidate
-                if candidate[1:6] == best[1:6]:
+                if candidate.cursors == best.cursors:
                     return candidate
                 best = candidate
             return _fallback()
@@ -2521,44 +2608,19 @@ def main() -> int:
             reaction_cursor,
             pr_status,
         )
+        # Until a report is adopted, the committed PR head must stay paired
+        # with the saved snapshot, even if the first fetch already saw a push.
+        observed_head_sha = tracked_head_sha or observed_head_sha
         pre_event_fields = _pr_state_fields()
         initial_result = (
-            (None, *pending_cursors, None)
+            PRReport(None, pending_cursors, state)
             if args.seed_state
             else _render_combined(pending_cursors)
         )
-        if initial_result[0] is not None and not args.catch_up:
+        if initial_result.output is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
-        (
-            initial_output,
-            review_cursor,
-            review_comment_cursor,
-            issue_comment_cursor,
-            reaction_cursor,
-            pr_status,
-            reported_actions,
-        ) = initial_result
-        _advance_actions_baseline(reported_actions)
-        observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
-        _advance_since()
-        review_fingerprints = _fingerprint_map(state["reviews"])
-        review_comment_fingerprints = _fingerprint_map(state["review_comments"])
-        issue_comment_fingerprints = _fingerprint_map(state["issue_comments"])
-        if token is not None:
-            raw_threads = state.get("review_threads")
-            review_thread_states = _review_thread_state_map(
-                raw_threads if isinstance(raw_threads, list) else []
-            )
-        snapshot = _normalized_pr_snapshot(
-            state,
-            viewer_login=viewer_login,
-            ignore_self_comments=not args.include_self_comments,
-            actionable_only=args.actionable_only,
-            ignored_authors=ignored_authors,
-            ignore_patterns=ignore_patterns,
-            committed_snapshot=snapshot,
-            review_threads_available=token is not None,
-        )
+        initial_output = initial_result.output
+        _adopt_report(initial_result)
         if initial_output is None:
             # Persisted even with nothing to report: the baseline this cycle
             # established is exactly what the next cycle must resume from.
@@ -2711,7 +2773,6 @@ def main() -> int:
 
         if args.pr is not None:
             _refresh_actions()
-            observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
             pending_cursors = (
                 review_cursor,
                 review_comment_cursor,
@@ -2721,38 +2782,10 @@ def main() -> int:
             )
             pre_event_fields = _pr_state_fields()
             result = _render_combined(pending_cursors)
-            if result[0] is not None:
+            if result.output is not None:
                 result = _settle(result, pending_cursors)
-            (
-                output,
-                review_cursor,
-                review_comment_cursor,
-                issue_comment_cursor,
-                reaction_cursor,
-                pr_status,
-                reported_actions,
-            ) = result
-            observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
-            _advance_since()
-            review_fingerprints = _fingerprint_map(state["reviews"])
-            review_comment_fingerprints = _fingerprint_map(state["review_comments"])
-            issue_comment_fingerprints = _fingerprint_map(state["issue_comments"])
-            if token is not None:
-                raw_threads = state.get("review_threads")
-                review_thread_states = _review_thread_state_map(
-                    raw_threads if isinstance(raw_threads, list) else []
-                )
-            snapshot = _normalized_pr_snapshot(
-                state,
-                viewer_login=viewer_login,
-                ignore_self_comments=not args.include_self_comments,
-                actionable_only=args.actionable_only,
-                ignored_authors=ignored_authors,
-                ignore_patterns=ignore_patterns,
-                committed_snapshot=snapshot,
-                review_threads_available=token is not None,
-            )
-            _advance_actions_baseline(reported_actions)
+            output = result.output
+            _adopt_report(result)
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.
