@@ -4976,6 +4976,56 @@ def test_malformed_saved_actions_fail_closed_without_overwriting_history(tmp_pat
     assert path.read_bytes() == original
 
 
+@pytest.mark.parametrize("mode", ["resume", "catch-up", "pr-replay", "seed", "fresh-manual", "pr-only"])
+@pytest.mark.parametrize("key", ["actions", "actions_observed"])
+@pytest.mark.parametrize("location", ["committed", "pending-delivered", "pending-undelivered"])
+def test_corrupt_actions_cannot_be_bypassed_by_initialization_or_pending_replay(tmp_path, mode, key, location):
+    """Resetting valid history never authorizes overwriting unreadable evidence."""
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    _seed_ci_state(module, path, _ci_run(), owner=None)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    if mode in {"seed", "fresh-manual"}:
+        saved.pop("review_cursor")
+    malformed = {"CI": [None]}
+    if location == "committed":
+        saved[key] = malformed
+    else:
+        saved[module.STAGED_KEY] = {
+            "delivered_after": "1" if location == "pending-undelivered" else "0",
+            "output": "an earlier combined report",
+            "cursors": {key: malformed},
+        }
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    original = path.read_bytes()
+    flags = [] if mode == "pr-only" else ["--workflow", "CI", "--branch", "feature"]
+    flags += {
+        "resume": [],
+        "catch-up": ["--catch-up"],
+        "pr-replay": ["--since-review-comment-id", "0"],
+        "seed": ["--seed-state"],
+        "fresh-manual": [],
+        "pr-only": [],
+    }[mode]
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: "1"}),
+        patch.object(module, "get_token", side_effect=AssertionError("must reject before authentication")),
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+        patch("sys.argv", [
+            "wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153",
+            "--state-file", str(path), *flags,
+        ]),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        assert module.run_cli() == 1
+    assert "malformed" in stderr.getvalue()
+    assert key in stderr.getvalue()
+    assert stdout.getvalue() == ""
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize("attempt", ["missing", None])
 def test_valid_legacy_actions_and_partial_pending_remain_compatible(tmp_path, attempt):
     module = _load_module()

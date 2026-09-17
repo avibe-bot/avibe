@@ -44,6 +44,23 @@ state-file diagnostic and preserve the file rather than discarding notification
 history or silently disabling requested CI monitoring. An absent optional
 observed inventory remains compatible with version-1 cursors.
 
+Actions monitoring is optional to request, but its persisted notification history
+is not disposable optional-feature configuration. Once `--workflow` is requested,
+silently disabling CI would change the Watch's contract. This integrity failure
+stops only the affected waiter and is surfaced by the supervisor's existing
+terminal-failure notification; it does not prevent Avibe service startup.
+
+The same protection precedes explicit replay, catch-up, seed, fresh manual
+initialization, and pending replay/acknowledgement. Those modes may reset valid
+history, not bypass corruption. Cursor writes replace the whole file: skipping
+validation would overwrite unreadable Actions history with a fresh baseline, or
+remove it in PR-only mode. Deferring validation until acknowledgement would also
+allow an unacknowledged corrupt pending report to replay first. Safe degradation
+would need an explicit evidence-preservation and recovery contract, which this
+repair does not add. Missing legacy baselines and present-but-malformed sections
+remain different cases; a valid released-state fixture rejected by these checks
+would warrant a compatibility fix rather than general sanitization.
+
 ### Explicit replay and initialization boundaries
 
 The notification baseline and observed inventory must share the caller's
@@ -115,6 +132,10 @@ ordinary Watch re-arming, which must never reseed.
 
 - Missing or regressed Actions observations do not establish a fresh terminal
   gate. A deleted known run can require investigation; absence is not success.
+- Corrupt notification history intentionally stops the affected waiter with the
+  original file intact. This is stricter than the base's incomplete nested-row
+  validation, not a claim of unchanged behavior. Schema compatibility covers
+  valid released files; it does not authorize erasing unreadable history.
 - Existing PR settle limitation, not fixed here: a later nonempty PR snapshot
   containing event B but omitting previously detected event A can replace the
   earlier candidate and report only B. The unchanged base has the same behavior;
