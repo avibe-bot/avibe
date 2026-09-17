@@ -2041,7 +2041,7 @@ def test_manual_opencode_pending_callback_has_one_cancellable_owner(service, mon
         commit = AsyncMock()
         monkeypatch.setattr(service, "_commit_web_login", commit)
         flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
-        assert flow.waiter_task is None
+        assert flow.waiter_task is not None
         assert (await service.submit_web_code(flow.flow_id, "test-code"))["ok"]
         await pending.wait()
         if terminal == "cancel":
@@ -2052,5 +2052,131 @@ def test_manual_opencode_pending_callback_has_one_cancellable_owner(service, mon
             await flow.waiter_task
             assert flow.state == "failed"
         commit.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_manual_opencode_expires_without_browser_and_releases_provider_slot(service, monkeypatch):
+    """An abandoned manual-code tab must not retain the native-login admission."""
+    from vibe.opencode_config import get_opencode_auth_path
+
+    async def run():
+        service.setup_timeout_seconds = 0.02
+        auth_path = get_opencode_auth_path()
+        auth_path.parent.mkdir(parents=True, exist_ok=True)
+        previous = '{"fixture":{"type":"api","key":"old-test-key"}}'
+        auth_path.write_text(previous)
+        provider = SimpleNamespace(
+            get_provider_auth=AsyncMock(return_value={"fixture": [{"type": "oauth"}]}),
+            start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
+            wait_provider_oauth=AsyncMock(),
+        )
+        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        commit = AsyncMock()
+        monkeypatch.setattr(service, "_commit_web_login", commit)
+        flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
+        waiter = flow.waiter_task
+        # No status poll, submit or cancellation drives the timeout.
+        await asyncio.wait_for(asyncio.shield(waiter), 1)
+        assert flow.state == "failed" and flow.error == "timed_out"
+        assert not flow.awaiting_code
+        provider.wait_provider_oauth.assert_not_awaited()
+        commit.assert_not_awaited()
+        assert auth_path.read_text() == previous
+        assert not (await service.submit_web_code(flow.flow_id, "late-code"))["ok"]
+        reopened = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
+        assert reopened.flow_id != flow.flow_id and reopened.state == "awaiting_code"
+        await service.cancel_web_flow(flow.flow_id)
+        assert flow.state == "failed" and flow.error == "timed_out"
+        assert reopened.state == "awaiting_code"
+        await service.cancel_web_flow(reopened.flow_id)
+        assert reopened.state == "cancelled"
+        provider.wait_provider_oauth.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_manual_opencode_cancel_after_callback_completion_preserves_success(service, monkeypatch):
+    async def run():
+        provider = SimpleNamespace(
+            get_provider_auth=AsyncMock(return_value={"fixture": [{"type": "oauth"}]}),
+            start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
+            wait_provider_oauth=AsyncMock(),
+        )
+        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        commit = AsyncMock()
+        monkeypatch.setattr(service, "_commit_web_login", commit)
+        flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
+        assert (await service.submit_web_code(flow.flow_id, "fixture-code"))["ok"]
+        await flow.waiter_task
+        assert flow.state == "success"
+        await service.cancel_web_flow(flow.flow_id)
+        assert flow.state == "success"
+        commit.assert_awaited_once()
+        provider.wait_provider_oauth.assert_awaited_once()
+        assert flow.flow_id not in service._web_flows
+
+    asyncio.run(run())
+
+
+def test_manual_opencode_submission_does_not_extend_callback_deadline(service, monkeypatch):
+    async def run():
+        service.setup_timeout_seconds = 0.06
+        callback_started = asyncio.Event()
+
+        async def callback(*_args, **kwargs):
+            assert 0 < kwargs["timeout"] < service.setup_timeout_seconds
+            callback_started.set()
+            await asyncio.Event().wait()
+
+        provider = SimpleNamespace(
+            get_provider_auth=AsyncMock(return_value={"fixture": [{"type": "oauth"}]}),
+            start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
+            wait_provider_oauth=callback,
+        )
+        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        commit = AsyncMock()
+        monkeypatch.setattr(service, "_commit_web_login", commit)
+        flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
+        waiter, deadline = flow.waiter_task, flow.expires_at_iso
+        await asyncio.sleep(0.01)
+        assert (await service.submit_web_code(flow.flow_id, "fixture-code"))["ok"]
+        await asyncio.wait_for(callback_started.wait(), 1)
+        await asyncio.wait_for(asyncio.shield(waiter), 1)
+        assert flow.waiter_task is waiter and flow.expires_at_iso == deadline
+        assert flow.state == "failed" and flow.error == "timed_out"
+        commit.assert_not_awaited()
+        assert not (await service.submit_web_code(flow.flow_id, "late-code"))["ok"]
+        reopened = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
+        assert reopened.state == "awaiting_code"
+        await service.cancel_web_flow(reopened.flow_id)
+
+    asyncio.run(run())
+
+
+def test_manual_opencode_submit_keeps_start_waiter_and_cancel_before_dispatch_wins(service, monkeypatch):
+    async def run():
+        provider = SimpleNamespace(
+            get_provider_auth=AsyncMock(return_value={"fixture": [{"type": "oauth"}]}),
+            start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
+            wait_provider_oauth=AsyncMock(),
+        )
+        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        commit = AsyncMock()
+        monkeypatch.setattr(service, "_commit_web_login", commit)
+        flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
+        waiter, deadline = flow.waiter_task, flow.expires_at_iso
+        assert not (await service.submit_web_code(flow.flow_id, "  "))["ok"]
+        assert (await service.submit_web_code(flow.flow_id, "fixture-code"))["ok"]
+        assert not (await service.submit_web_code(flow.flow_id, "duplicate"))["ok"]
+        assert flow.waiter_task is waiter and flow.expires_at_iso == deadline
+        # No yield between admission and cancellation: the queued waiter must
+        # not dispatch the callback afterward or mutate a reopened flow.
+        await service.cancel_web_flow(flow.flow_id)
+        assert flow.state == "cancelled"
+        assert waiter.done()
+        provider.wait_provider_oauth.assert_not_awaited()
+        commit.assert_not_awaited()
+        assert not (await service.submit_web_code(flow.flow_id, "stale"))["ok"]
 
     asyncio.run(run())

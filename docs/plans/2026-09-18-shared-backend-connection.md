@@ -188,19 +188,41 @@ false. The existing enabled-IM validator remains the final save boundary.
 
 `WebAuthFlow`, its start/status serializers and `OAuthWebStartResult` /
 `OAuthWebStatus` add optional `callback_kind: 'code' | 'device' | 'redirect'`.
-The producer maps OpenCode authorize `method: code` to `code`; it retains the
-selected method index and prompt inputs on that same flow. `auto` (and missing
+The producer maps OpenCode authorize `method: code` to `code`; its start-time
+waiter retains the selected method index and prompt inputs. `auto` (and missing
 method for compatibility) uses `device` when a device code exists, otherwise
 `redirect`. Unknown explicit methods fail start. Claude/Codex can omit this
 field; their existing callback/device contract is unchanged.
 
-Manual-code flows make no callback request until explicit submit, share the
-existing waiter and cancellation lifetime, and send the code only to the existing
+Manual-code flows arm the existing waiter at start. `_arm_flow_waiter` remains
+the only deadline publisher; the waiter first awaits a flow-owned in-memory
+`submitted_code: Future[str] | None`, then uses the remaining deadline for the
+callback. An abandoned browser expires and releases provider admission without
+polling. Explicit nonempty submit resolves the future once and never replaces
+the waiter or deadline; cancellation owns that same task. These flows make no
+callback request before submission, and send the code only to the existing
 OpenCode callback endpoint. `OpenCodeServerManager.wait_provider_oauth` adds an
 optional code argument; reserved method/code fields cannot be replaced by prompt
 answers. The scope extension includes this one transport method and direct
 transport tests, with the auth_setup runtime-provider scenario consuming it.
 No backend readiness fields or parallel-lane interfaces change.
+
+Installation jobs reconcile every refresh-capable backend, including Claude,
+through the existing rolling-refresh owner after persisting the detected CLI
+path. The job reports a failed application receipt as failure; a draining
+receipt remains non-ready until the coordinator confirms application. A stopped
+controller keeps apply-on-next-start semantics. Neither the frontend nor entry
+adds another restart. Tests consume actual job/config/coordinator/readiness
+owners with isolated non-ASCII paths and cover applied/draining/failed/stopped
+states for all three backends.
+
+The additive connection GET has an explicit Member management rule alongside
+backend runtime/auth/install operations. Owner and Member can read it; Editor,
+Viewer and unauthenticated remote callers cannot reach its readiness consumer.
+Unknown routes retain the Owner default, supported backend validation remains
+inside native dispatch, and the existing lower-tier read-role baseline is
+unchanged. This corrects a CI-discovered omitted route classification without
+changing credential write permissions.
 
 The internal application projection also returns `controller_pid` from the
 serving process. Failed UI apply receipts retain the already-existing runtime

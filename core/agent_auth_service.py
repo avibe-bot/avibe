@@ -397,8 +397,7 @@ class WebAuthFlow:
     device_code: str | None = None
     awaiting_code: bool = False
     callback_kind: str | None = None
-    provider_method: int = 0
-    provider_prompt_answers: dict[str, Any] = field(default_factory=dict)
+    submitted_code: asyncio.Future[str] | None = None
     error: str | None = None
     last_status_text: str | None = None
     # Per-provider context for OpenCode flows; ``None`` for Claude / Codex
@@ -2280,7 +2279,10 @@ class AgentAuthService:
             return {"ok": False, "error": "flow_not_found"}
         if flow.backend == "opencode":
             if flow.callback_kind == "code":
-                if flow.state != "awaiting_code" or not flow.awaiting_code:
+                if (
+                    flow.state != "awaiting_code" or not flow.awaiting_code
+                    or flow.submitted_code is None or flow.submitted_code.done()
+                ):
                     return {"ok": False, "error": "not_awaiting_code"}
                 raw = (code or "").strip()
                 if not raw:
@@ -2288,13 +2290,11 @@ class AgentAuthService:
                 if self._remaining_flow_timeout(flow) <= 0:
                     await self._terminate_web_flow(flow, final_state="failed", error="timed_out")
                     return {"ok": False, "error": "timed_out"}
-                # Admission changes before any await: duplicate submissions cannot
-                # arm a second callback, and cancellation owns this same waiter.
+                # The start-time waiter keeps the same deadline and ownership.
+                # Resolving once before any await excludes duplicate submissions.
                 flow.awaiting_code = False
                 flow.state = "verifying"
-                self._arm_flow_waiter(flow, self._wait_for_opencode_oauth_web(
-                    flow, flow.provider, flow.provider_method, flow.provider_prompt_answers, code=raw,
-                ))
+                flow.submitted_code.set_result(raw)
                 return {"ok": True}
             if flow.state not in {"awaiting_code", "verifying"}:
                 return {"ok": False, "error": "not_awaiting_code"}
@@ -3253,17 +3253,14 @@ class AgentAuthService:
         mode = authorize.get("method")
         if mode not in {None, "auto", "code"}:
             raise RuntimeError("opencode_authorize_unsupported_method")
-        flow.provider_method = method_index
-        flow.provider_prompt_answers = dict(prompt_answers)
         flow.callback_kind = "code" if mode == "code" else "device" if flow.device_code else "redirect"
         flow.state = "awaiting_code"
         flow.awaiting_code = mode == "code"
         if flow.awaiting_code:
-            flow.expires_at_iso = (datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)).isoformat()
-        if not flow.awaiting_code:
-            self._arm_flow_waiter(
-                flow, self._wait_for_opencode_oauth_web(flow, provider_id, method_index, prompt_answers),
-            )
+            flow.submitted_code = asyncio.get_running_loop().create_future()
+        self._arm_flow_waiter(
+            flow, self._wait_for_opencode_oauth_web(flow, provider_id, method_index, prompt_answers),
+        )
 
     async def _submit_opencode_callback_url(self, flow: WebAuthFlow, code: str) -> dict[str, Any]:
         """Forward a manually-pasted 127.0.0.1 callback URL to OpenCode.
@@ -3317,19 +3314,27 @@ class AgentAuthService:
         provider_id: str,
         method_index: int,
         prompt_answers: dict[str, Any],
-        *, code: str | None = None,
     ) -> None:
         try:
-            server = await self._opencode_server()
-            if server is None:
-                raise RuntimeError("opencode_server_unavailable")
-            await server.wait_provider_oauth(
-                provider_id,
-                method=method_index,
-                prompt_answers=prompt_answers,
-                timeout=self._remaining_flow_timeout(flow),
-                **({"code": code} if code is not None else {}),
-            )
+            # Keep one start-time budget across user input, server lookup and
+            # callback; submit must not restart the advertised deadline.
+            async with asyncio.timeout(self._remaining_flow_timeout(flow)):
+                code = None
+                if flow.submitted_code is not None:
+                    # Expire even if the browser disappears, without contacting
+                    # the provider until an explicit code reaches this waiter.
+                    code = await flow.submitted_code
+                    flow.submitted_code = None
+                server = await self._opencode_server()
+                if server is None:
+                    raise RuntimeError("opencode_server_unavailable")
+                await server.wait_provider_oauth(
+                    provider_id,
+                    method=method_index,
+                    prompt_answers=prompt_answers,
+                    timeout=self._remaining_flow_timeout(flow),
+                    **({"code": code} if code is not None else {}),
+                )
             flow.state = "verifying"
             # OpenCode persists into auth.json itself. Clear any Vibe-managed
             # provider option key so the new OAuth entry becomes the effective
@@ -3339,6 +3344,7 @@ class AgentAuthService:
             await self._commit_web_login(flow)
             flow.state = "success"
         except asyncio.TimeoutError:
+            flow.awaiting_code = False
             flow.state = "failed"
             flow.error = "timed_out"
         except asyncio.CancelledError:
@@ -4081,6 +4087,13 @@ class AgentAuthService:
         if flow.claude_client is not None:
             await self._disconnect_claude_client(flow.claude_client)
             flow.claude_client = None
-        flow.state = final_state
-        if error:
-            flow.error = error
+        if flow.submitted_code is not None:
+            flow.submitted_code.cancel()
+            flow.submitted_code = None
+        flow.awaiting_code = False
+        # Cleanup can race with a completed waiter. Preserve its terminal
+        # outcome instead of relabelling success/failure as a later cancel.
+        if flow.state not in self._WEB_FLOW_TERMINAL_STATES:
+            flow.state = final_state
+            if error:
+                flow.error = error

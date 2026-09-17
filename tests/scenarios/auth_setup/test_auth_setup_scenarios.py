@@ -3506,7 +3506,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
         async def start(h):
             h.web_flow = await auth.start_web_setup("opencode", provider_id="test-provider", force_reset=False)
             assert h.web_flow.callback_kind == "code"
-            assert h.web_flow.waiter_task is None
+            assert h.web_flow.waiter_task is not None
             assert not callbacks
 
         async def submit(h):

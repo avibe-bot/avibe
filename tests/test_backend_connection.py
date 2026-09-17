@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -99,3 +99,100 @@ def test_only_confirmed_new_controller_clears_old_failed_delivery(connection, mo
     assert not asyncio.run(api.get_backend_connection("claude"))["ready"]
     connection.probe.return_value["body"]["controller_pid"] = 101
     assert asyncio.run(api.get_backend_connection("claude"))["ready"]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("application", ["applied", "draining", "failed", "stopped"])
+def test_install_job_applies_persisted_path_before_admitting_connection(monkeypatch, tmp_path, backend, application):
+    """The real install-job result and readiness consume the same rolling apply."""
+    from core.backend_restart import BackendRestartCoordinator
+    from vibe import opencode_config
+
+    config = V2Config.default()
+    for name in ("claude", "codex", "opencode"):
+        getattr(config.agents, name).enabled = True
+    getattr(config.agents, backend).cli_path = "/old/missing-cli"
+    config.save()
+    installed_path = str(tmp_path / "安装 后端/bin" / backend)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _: installed_path)
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(
+        communicate=lambda **_: ("fixture installed", ""), returncode=0,
+    ))
+    monkeypatch.setattr(api, "install_agent", lambda name: api._run_install_command(name, ["fixture-installer"], lambda value: value))
+    monkeypatch.setattr(api, "get_claude_auth", lambda: {"ok": True, "active_auth_mode": "api_key"})
+    monkeypatch.setattr(api, "get_codex_auth", lambda: {"ok": True, "active_auth_mode": "api_key"})
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value={"fixture"}))
+    monkeypatch.setattr(opencode_config, "read_opencode_provider_auth_entries", lambda **_: {})
+    monkeypatch.setattr(api, "opencode_permission_status", lambda: {"ok": True, "permission_allowed": True})
+    monkeypatch.setattr(runtime, "service_process_running", lambda: application != "stopped")
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_: 123 if application != "stopped" else None)
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+    monkeypatch.setattr(api, "_AGENT_INSTALL_JOBS", {})
+    monkeypatch.setattr(api, "_AGENT_INSTALL_LATEST_BY_BACKEND", {})
+
+    async def run():
+        service = SimpleNamespace(
+            agents={name: object() for name in ("claude", "codex", "opencode")},
+            active=application == "draining",
+            begin_backend_drain=Mock(), end_backend_drain=Mock(),
+            prepare_backend_restart=AsyncMock(),
+        )
+        service.runtime_turn_tokens_for_backend = lambda name: {"fixture": "turn"} if service.active and name == backend else {}
+        controller = SimpleNamespace(config=config, agent_service=service, session_turns=SimpleNamespace(
+            begin_backend_drain=Mock(), end_backend_drain=AsyncMock(),
+        ))
+        applied = []
+
+        async def refresh(name, _forced):
+            applied.append(name)
+            if application == "failed":
+                raise RuntimeError("fixture apply failed")
+            controller.config = V2Config.load()
+
+        coordinator = BackendRestartCoordinator(controller, refresh, poll_interval=0.001)
+        loop = asyncio.get_running_loop()
+
+        def marker(name, **_kwargs):
+            assert getattr(V2Config.load().agents, name).cli_path == installed_path
+            try:
+                asyncio.run_coroutine_threadsafe(coordinator.request_restart(name), loop).result(2)
+                return True, None
+            except Exception as exc:
+                return True, str(exc)
+
+        async def projection(name):
+            if application == "stopped":
+                raise internal_client.InternalServerUnavailable("fixture stopped")
+            return {"status_code": 200, "body": {"ok": True, "controller_pid": 123, **coordinator.snapshot(name)}}
+
+        monkeypatch.setattr(api, "_request_controller_restart", marker)
+        monkeypatch.setattr(internal_client, "backend_application", projection)
+        started = api.start_agent_install_job(backend)
+        async with asyncio.timeout(3):
+            while (job := api.get_agent_install_job(started["job_id"]))["status"] == "running":
+                await asyncio.sleep(0.001)
+        assert job["path"] == installed_path
+        assert getattr(V2Config.load().agents, backend).cli_path == installed_path
+        state = await api.get_backend_connection(backend)
+        assert state["application"] == application, (job, state)
+        assert state["ready"] is (application == "applied")
+        assert state["entry_eligible"] is (application in {"applied", "stopped"})
+        assert job["ok"] is (application != "failed")
+        if application == "stopped":
+            assert job["restart"]["apply_on_next_start"] and not applied
+        elif application == "draining":
+            assert getattr(controller.config.agents, backend).cli_path == "/old/missing-cli"
+            service.active = False
+            await coordinator.wait(backend)
+            assert (await api.get_backend_connection(backend))["ready"]
+            assert getattr(controller.config.agents, backend).cli_path == installed_path
+            assert applied == [backend]
+        elif application == "applied":
+            assert getattr(controller.config.agents, backend).cli_path == installed_path
+            assert applied == [backend]
+        else:
+            assert getattr(controller.config.agents, backend).cli_path == "/old/missing-cli"
+            other = "codex" if backend != "codex" else "claude"
+            assert (await api.get_backend_connection(other))["ready"]
+
+    asyncio.run(run())

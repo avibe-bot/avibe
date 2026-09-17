@@ -512,6 +512,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/agent/[^/]+/install$"),
         ("GET", r"^/api/agent/[^/]+/install/[^/]+$"),
         ("GET", r"^/api/backend/[^/]+/runtime$"),
+        ("GET", r"^/api/backend/[^/]+/connection$"),
         ("POST", r"^/api/backend/[^/]+/restart$"),
         ("GET", r"^/api/dependencies$"),
         ("POST", r"^/api/dependencies/[^/]+/install$"),
