@@ -63,3 +63,10 @@ The consumer-bundle test also checks module identities and spies on the
 sanitizer called by Monaco, so the evidence does not depend on version text
 alone. Existing build warnings about large chunks and third-party pure
 annotations remain unchanged. GitHub review and CI are separate delivery gates.
+
+The lockfile is regenerated with CI's npm 10.9.2 to retain the root optional
+peer entries required by `@napi-rs/wasm-runtime`. A clean npm 10.9.2 install and
+consistency checks with npm 10.9.2 and 11.4.2 pass on local Node 22.18.0.
+The complete UI suite, audit and production build also pass after that clean
+install. This is not a claim that local tests covered Node 24 or Linux; the
+exact-head CI remains required for its own environment.
