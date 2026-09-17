@@ -217,8 +217,10 @@ class BestEffortMemoryWriter:
         self._provider = provider
         self._unavailable = False
 
-    def pause_intake(self) -> None:
+    def pause_intake(self, *, unavailable: bool = False) -> None:
         self._intake_paused = True
+        if unavailable:
+            self._unavailable = True
 
     def resume_intake(self) -> None:
         # ``_closed`` independently fences a settling cleanup. Clearing the
@@ -717,7 +719,13 @@ class BestEffortMemoryWriter:
                         return
                     if failure.retryable and attempt < MAX_ATTEMPTS:
                         continue
-                    result = FlushRejected(None, failure.error, True)
+                    self._record_failure(
+                        "distillation_rejected", failure.error, state="failed",
+                        operation="flush", attempts=attempt,
+                    )
+                    self._pending.pop(key, None)
+                    result = None  # Already recorded; continue with the next pending session.
+                    break
                 except Exception:
                     self._pending.pop(key, None)
                     await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush", attempts=attempt)

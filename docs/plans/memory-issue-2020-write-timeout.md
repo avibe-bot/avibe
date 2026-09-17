@@ -77,3 +77,14 @@ quality. Unified Incus/IM acceptance remains an integration check before release
 - [x] Timeout and observation changes without a persistent workflow.
 - [x] Isolated released-artifact contract trial.
 - [ ] Focused validation, PR review and CI.
+
+## Review boundary audit
+
+Review of `abce9c5` identified three diagnostic projection gaps (count, source
+scope and attempt count). Review of `9da60f3` identified two classification gaps
+(supervisor-crash disposal and non-ambiguous flush exceptions). Before further
+edits the orchestrator audited the whole boundary: ambiguous transport failures
+and supervisor crashes both fence queued provider calls; intentional authority
+changes retain their prior semantics. Non-ambiguous exceptions retain their
+original error and failed classification rather than becoming synthetic HTTP
+server failures. These changes use existing writer state only.

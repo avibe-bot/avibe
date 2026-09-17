@@ -279,10 +279,10 @@ class MemoryModule:
 
         return self._writer.failure_observations()
 
-    def pause_claims(self) -> None:
-        """Synchronously fence new volatile writer admissions."""
+    def pause_claims(self, *, unavailable: bool = False) -> None:
+        """Fence admissions and, after a child failure, queued provider calls."""
 
-        self._writer.pause_intake()
+        self._writer.pause_intake(unavailable=unavailable)
 
     async def quiesce_claims(self, *, timeout_seconds: float | None = None) -> bool:
         """Fence claims and join in-flight add and flush work under one deadline."""

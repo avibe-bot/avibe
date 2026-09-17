@@ -1258,5 +1258,32 @@ async def test_submitted_anomalies_report_actual_provider_attempts(tmp_path, ope
         writer._pending[ref.serialize()] = _PendingSession(ref, "raw-session-0", deque(["digest"]), 0, 0)
         await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
     assert calls == attempts
-    assert writer.failure_observations()[0].attempts == calls
+    entry = writer.failure_observations()[0]
+    assert entry.attempts == calls
+    assert entry.state == ("unknown" if unknown else "failed")
+    assert entry.error_code == "memory_provider_timeout"
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_flush_failure_does_not_skip_other_sessions_in_barrier(tmp_path):
+    refs = [_ref(0), _ref(1)]
+    calls = []
+
+    async def flush(ref):
+        calls.append(ref)
+        if ref == refs[0]:
+            raise MemoryProviderFailure("memory_capability_unavailable", retryable=False)
+        return FlushSucceeded("synthetic", "no_extraction")
+
+    provider = FakeMemoryProvider()
+    provider.flush = flush
+    writer = _writer(tmp_path, provider)
+    for ref in refs:
+        writer._pending[ref.serialize()] = _PendingSession(ref, "shared-raw-session", deque(["digest"]), 0, 0)
+    await writer._flush_barrier(_BarrierItem(raw_session_id="shared-raw-session"))
+    assert calls == refs
+    assert not writer._pending
+    assert len(writer.failure_observations()) == 1
+    assert writer.failure_observations()[0].state == "failed"
     await writer.close()

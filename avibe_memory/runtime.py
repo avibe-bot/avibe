@@ -2375,7 +2375,7 @@ class MemoryRuntime:
 
         if self._closing or self.needs_repair:
             return
-        self.module.pause_claims()
+        self.module.pause_claims(unavailable=True)
         self._runtime_error = "memory_sidecar_unavailable"
 
     async def _recover_current_sidecar(self) -> bool:
