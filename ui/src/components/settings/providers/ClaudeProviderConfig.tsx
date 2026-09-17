@@ -17,7 +17,7 @@ export function ClaudeProviderConfig({ hideEnableToggle }: { hideEnableToggle?: 
     <BackendRuntimeCard backend="claude" label="Claude Code" description={t('settings.backends.claudeDescription')}
       Icon={Sparkles} iconTileClassName="bg-cyan-soft" iconClassName="text-cyan-ink" runtime={runtime} hideEnableToggle={hideEnableToggle} />
     {modelHubEnabled === true && <BackendSupplyModeCard backend="claude" />}
-    <Card><CardContent className="p-6"><BackendConnectionForm backend="claude" /></CardContent></Card>
+    <Card><CardContent className="p-6"><BackendConnectionForm backend="claude" connectionRevision={runtime.connectionRevision} /></CardContent></Card>
     <BackendTestPanel backend="claude" />
   </div>;
 }

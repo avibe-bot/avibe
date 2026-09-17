@@ -5293,6 +5293,7 @@
       "hideKey": "隐藏凭据",
       "connected": "已连接",
       "savedSubscription": "已检测到订阅凭据",
+      "savedDisabled": "凭据已保存。此助手当前未启用。",
       "readFailed": "无法读取连接状态，请重试",
       "saveFailed": "无法保存连接，请重试",
       "applyFailed": "凭据已保存，但运行时应用失败，请重试保存",

@@ -20,6 +20,7 @@ import {
 } from '@/lib/platforms';
 import { PlatformIcon } from '@/components/visual';
 import { PlatformConfigEmbed } from './PlatformConfigEmbed';
+import { savePlatformSettings } from './shared/savePlatformSettings';
 import { SettingsPageShell } from './SettingsPageShell';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -91,21 +92,6 @@ export const SettingsPlatformsPage: React.FC = () => {
     const savedConfig = await api.mutateConfig(mutations);
     setConfig(savedConfig);
     return savedConfig;
-  };
-
-  const savePlatformSettings = async (platform: string, nextData: any) => {
-    const discordGuildAllowlist = nextData?.discordGuildAllowlist;
-    if (
-      canManageAccessMembers && platform === 'discord' &&
-      Array.isArray(discordGuildAllowlist) &&
-      (discordGuildAllowlist.length > 0 || nextData?.discordGuildAllowlistTouched === true)
-    ) {
-      await api.saveSettings({
-        guilds: Object.fromEntries(
-          discordGuildAllowlist.map((guildId: string) => [guildId, { enabled: true }])
-        ),
-      }, 'discord');
-    }
   };
 
   // Persist the enabled set. ``primary`` is intentionally omitted:
@@ -220,7 +206,7 @@ export const SettingsPlatformsPage: React.FC = () => {
         showToast(t('common.saveFailed'), 'error');
         return;
       }
-      await savePlatformSettings(platform, nextData);
+      await savePlatformSettings(api, platform, nextData, canManageAccessMembers);
       const runnable = platformHasRunnableConfig(savedConfig, platform);
       if (!wasEnabled && !runnable) {
         // Saved credentials but they are incomplete — keep the card open so the

@@ -10692,6 +10692,8 @@ async def get_backend_connection(name: str) -> dict:
         body = application.get("body") or {}
         if application.get("status_code") == 200 and body.get("ok"):
             result["application"] = body.get("state") if body.get("state") in {"applied", "draining", "failed"} else "unknown"
+            if enabled and body.get("disabled") is True and result["application"] == "applied":
+                result["application"] = "unknown"
             if body.get("error"):
                 result["message"] = body["error"]
     except internal_client.InternalServerUnavailable:
@@ -10727,7 +10729,7 @@ async def get_backend_connection(name: str) -> dict:
             effective = next((mode for mode in modes.values() if mode in {"api", "oauth"}), None)
             result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
             permission = await asyncio.to_thread(opencode_permission_status)
-            result["permission_required"] = not permission.get("permission_allowed", False)
+            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
         else:
             auth = await asyncio.to_thread(get_claude_auth if name == "claude" else get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):

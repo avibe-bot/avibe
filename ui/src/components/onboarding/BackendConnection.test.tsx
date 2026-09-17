@@ -3,11 +3,15 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ClaudeProviderConfig } from '../settings/providers/ClaudeProviderConfig';
+import { CodexProviderConfig } from '../settings/providers/CodexProviderConfig';
 import { BackendConnectionForm } from '../settings/providers/BackendConnectionForm';
 import { BackendConnectionDialog } from './BackendConnectionDialog';
 import en from '../../i18n/en.json';
+import type { BackendConnectionState } from '../../context/ApiContext';
 
 const mock = vi.hoisted(() => ({ toast: vi.fn(), api: {
+  getConfig: vi.fn(), detectCli: vi.fn(), mutateConfig: vi.fn(), getBackendRuntime: vi.fn(), claudeModels: vi.fn(), codexModels: vi.fn(),
   getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(),
   setOpencodeProviderAuth: vi.fn(), getBackendConnection: vi.fn(), saveClaudeAuth: vi.fn(), saveCodexAuth: vi.fn(),
   startOAuthWeb: vi.fn(), startOAuthWebForOpencodeProvider: vi.fn(),
@@ -19,19 +23,99 @@ vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: moc
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 const wrap = (node: React.ReactNode) => <I18nextProvider i18n={i18n}>{node}</I18nextProvider>;
+const connection = (patch: Partial<BackendConnectionState> = {}): BackendConnectionState => ({ ok: true, backend: 'claude', installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true, ...patch });
 const native = () => ({ ok: true, active_auth_mode: 'api_key', has_api_key: true, api_key_masked: 'sk-•••old', base_url: 'https://old.example', credential_type: 'api_key', has_oauth_credentials: true });
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
 beforeEach(() => {
   vi.resetAllMocks();
   mock.api.getClaudeAuth.mockResolvedValue(native());
   mock.api.getCodexAuth.mockResolvedValue(native());
-  mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'applied', ready: true });
+  mock.api.getBackendConnection.mockImplementation(async (backend) => connection({ backend }));
   mock.api.saveClaudeAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
   mock.api.cancelOAuthWeb.mockResolvedValue({ ok: true });
+  mock.api.getConfig.mockResolvedValue({ agents: { claude: { enabled: false, cli_path: 'claude' }, codex: { enabled: false, cli_path: 'codex' } } });
+  mock.api.detectCli.mockImplementation(async (binary) => ({ found: true, path: binary }));
+  mock.api.getBackendRuntime.mockImplementation(async (backend) => ({ ok: true, name: backend, enabled: true, installed: true, process_status: 'running' }));
+  mock.api.claudeModels.mockResolvedValue({ ok: true, models: [] });
+  mock.api.codexModels.mockResolvedValue({ ok: true, models: [] });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('shared Settings and onboarding connection owner', () => {
+  it.each(['claude', 'codex', 'opencode'] as const)('saves disabled %s credentials and keeps saved-not-connected after reopen', async (backend) => {
+    const provider = { id: 'fixture', name: 'Fixture', description: '', configured: true, oauth_available: false, local: false, models: [], active_auth_type: 'api', api_key_masked: 'sk-•••old' };
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [provider] });
+    mock.api.saveCodexAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
+    mock.api.setOpencodeProviderAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend, enabled: false, ready: false, entry_eligible: false }));
+    const refreshed = vi.fn();
+    const props = { backend, provider: backend === 'opencode' ? provider : undefined, initialMethod: 'api_key' as const, onConnected: refreshed };
+    const first = render(wrap(<BackendConnectionForm {...props} />));
+    await screen.findByText(en.onboarding.connection.savedDisabled);
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(refreshed).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    first.unmount(); render(wrap(<BackendConnectionForm {...props} />));
+    await screen.findByText(en.onboarding.connection.savedDisabled);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    expect(refreshed).toHaveBeenCalledOnce();
+  });
+  it.each(['unknown', 'failed', 'draining'] as const)('disabled backend does not mask %s application', async (application) => {
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', enabled: false, ready: false, entry_eligible: false, application }));
+    mock.api.saveCodexAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
+    const refreshed = vi.fn();
+    render(wrap(<BackendConnectionForm backend="codex" initialMethod="api_key" onConnected={refreshed} />));
+    fireEvent.click(await screen.findByRole('button', { name: en.common.save }));
+    await screen.findByRole('alert');
+    expect(screen.queryByText(en.onboarding.connection.savedDisabled)).toBeNull();
+    expect(refreshed).not.toHaveBeenCalled();
+  });
+  it('disabled backend preserves explicit failed receipt and uncertain auth', async () => {
+    mock.api.getCodexAuth.mockResolvedValue({ ...native(), auth_mode_uncertain: true });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', enabled: false, auth: 'unknown', ready: false, entry_eligible: false }));
+    mock.api.saveCodexAuth.mockResolvedValue({ ok: true, restart: { ok: false, message: 'apply failed' } });
+    const refreshed = vi.fn();
+    render(wrap(<BackendConnectionForm backend="codex" initialMethod="api_key" onConnected={refreshed} />));
+    fireEvent.click(await screen.findByRole('button', { name: en.common.save }));
+    await screen.findByText('apply failed');
+    expect(screen.queryByText(en.onboarding.connection.savedDisabled)).toBeNull();
+    expect(refreshed).not.toHaveBeenCalled();
+  });
+  for (const backend of ['claude', 'codex'] as const) {
+    it.each(['applied', 'draining', 'failed', 'unreadable'] as const)(`${backend} Settings refreshes after toggle settlement (%s), preserving unsaved drafts`, async (outcome) => {
+      const mutation = deferred<{ agent_backend_runtime: { hot_reconciled: boolean; restart_error?: string } }>();
+      mock.api.mutateConfig.mockReturnValue(mutation.promise);
+      mock.api.saveCodexAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
+      mock.api.getBackendConnection.mockResolvedValue(connection({ backend, enabled: false, ready: false, entry_eligible: false }));
+      render(wrap(backend === 'claude' ? <ClaudeProviderConfig /> : <CodexProviderConfig />));
+      await screen.findByText(en.onboarding.connection.savedDisabled);
+      fireEvent.click(screen.getByRole('button', { name: en.common.save, exact: true }));
+      await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(2));
+      await screen.findByText(en.onboarding.connection.savedDisabled);
+      expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+      const keyInput = document.getElementById(`${backend}-connection-key`) as HTMLInputElement;
+      fireEvent.change(keyInput, { target: { value: 'unsaved-fixture-key' } });
+      fireEvent.change(screen.getByLabelText(en.onboarding.connection.baseUrl), { target: { value: 'https://unsaved.invalid' } });
+      const toggle = screen.getByRole('switch');
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      fireEvent.click(toggle);
+      expect(mock.api.mutateConfig).toHaveBeenCalledWith([{ kind: 'set', path: ['agents', backend, 'enabled'], value: true }]);
+      expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(2); // optimistic enabled is not settlement
+      if (outcome === 'unreadable') mock.api.getBackendConnection.mockRejectedValue(new Error('fixture IPC unavailable'));
+      else mock.api.getBackendConnection.mockResolvedValue(connection({ backend, application: outcome, ready: outcome === 'applied', entry_eligible: outcome === 'applied', message: outcome === 'failed' ? 'fixture apply failed' : undefined }));
+      await act(async () => mutation.resolve({ agent_backend_runtime: { hot_reconciled: outcome !== 'failed', restart_error: outcome === 'failed' ? 'fixture apply failed' : undefined } }));
+      await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(screen.queryByText(en.onboarding.connection.savedDisabled)).toBeNull());
+      if (outcome === 'applied') await screen.findByText(en.onboarding.connection.connected);
+      else { await screen.findByRole('alert'); expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull(); }
+      expect(keyInput.value).toBe('unsaved-fixture-key');
+      expect((screen.getByLabelText(en.onboarding.connection.baseUrl) as HTMLInputElement).value).toBe('https://unsaved.invalid');
+      expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
+    });
+  }
   it.each([true, false])('preserves masked credentials, saves once, confirms effective application (compact=%s)', async (compact) => {
     const saved = deferred<{ ok: boolean; restart: { ok: boolean } }>();
     mock.api.saveClaudeAuth.mockReturnValue(saved.promise);
@@ -39,7 +123,7 @@ describe('shared Settings and onboarding connection owner', () => {
     render(wrap(<BackendConnectionForm backend="claude" compact={compact} initialMethod="api_key" onConnected={connected} />));
     await screen.findByText('sk-•••old');
     fireEvent.change(screen.getByLabelText(en.onboarding.connection.baseUrl), { target: { value: 'https://新的.example/v1' } });
-    const button = screen.getByRole('button', { name: en.onboarding.connection.saveConnect });
+    const button = screen.getByRole('button', { name: compact ? en.onboarding.connection.saveConnect : en.common.save });
     fireEvent.click(button); fireEvent.click(button);
     expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
     expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'api_key', api_key: undefined, base_url: 'https://新的.example/v1' });
@@ -60,13 +144,13 @@ describe('shared Settings and onboarding connection owner', () => {
     expect(close).not.toHaveBeenCalled();
   });
   it('does not claim connection for accepted draining; readback can finish without another save', async () => {
-    mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'draining', ready: false });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ ok: true, application: 'draining', ready: false, entry_eligible: false }));
     const connected = vi.fn();
     render(wrap(<BackendConnectionForm backend="claude" compact initialMethod="api_key" onConnected={connected} />));
     fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.saveConnect }));
     await screen.findByText(en.onboarding.connection.applyPending);
     expect(connected).not.toHaveBeenCalled();
-    mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'applied', ready: true });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ ok: true, application: 'applied', ready: true }));
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.refresh }));
     await waitFor(() => expect(connected).toHaveBeenCalledOnce());
     expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
@@ -126,9 +210,9 @@ describe('shared Settings and onboarding connection owner', () => {
     const provider = { id: 'local-test', name: 'Local', description: '', configured: true, custom: true, oauth_available: false, local: true, models: [], base_url: 'http://localhost:4567/v1' };
     mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [provider] });
     mock.api.setOpencodeProviderAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
-    mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'applied', ready: false, auth: 'none' });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', ok: true, application: 'applied', ready: false, entry_eligible: false, auth: 'none' }));
     render(wrap(<BackendConnectionForm backend="opencode" provider={provider} />));
-    const button = await screen.findByRole('button', { name: en.onboarding.connection.saveConnect });
+    const button = await screen.findByRole('button', { name: en.common.save });
     expect(button.hasAttribute('disabled')).toBe(false); fireEvent.click(button);
     await waitFor(() => expect(mock.api.setOpencodeProviderAuth).toHaveBeenCalledWith('local-test', undefined, 'http://localhost:4567/v1'));
     expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
@@ -138,7 +222,7 @@ describe('shared Settings and onboarding connection owner', () => {
   it('does not label an unconnected provider ready because another OpenCode provider is connected', async () => {
     const provider = { id: 'new-provider', name: 'New provider', description: '', configured: false, oauth_available: false, local: false, models: [] };
     mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [provider] });
-    mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'applied', ready: true, auth: 'api_key' });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', ok: true, application: 'applied', ready: true, auth: 'api_key' }));
     render(wrap(<BackendConnectionForm backend="opencode" compact provider={provider} />));
     await screen.findByLabelText('API Key');
     expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
@@ -154,7 +238,7 @@ describe('shared Settings and onboarding connection owner', () => {
   });
   it('Codex saves through its native owner and refuses uncertain keychain readback', async () => {
     mock.api.getCodexAuth.mockResolvedValue({ ...native(), auth_mode_uncertain: true });
-    mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'applied', ready: false, auth: 'unknown' });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', ok: true, application: 'applied', ready: false, entry_eligible: false, auth: 'unknown' }));
     mock.api.saveCodexAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
     const connected = vi.fn();
     render(wrap(<BackendConnectionForm backend="codex" compact initialMethod="api_key" onConnected={connected} />));
@@ -166,7 +250,7 @@ describe('shared Settings and onboarding connection owner', () => {
   it('OpenCode runtime-declared manual code uses the existing submit owner and blocks duplicate submit', async () => {
     const provider = { id: 'poe', name: 'Poe', description: '', configured: false, oauth_available: true, local: false, models: [] };
     mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [provider] });
-    mock.api.getBackendConnection.mockResolvedValue({ ok: true, application: 'applied', ready: false });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', ok: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false }));
     mock.api.startOAuthWebForOpencodeProvider.mockResolvedValue({ ok: true, flow_id: 'manual-flow', state: 'awaiting_code', callback_kind: 'code', url: 'https://fixture.invalid' });
     const pending = deferred<{ ok: boolean }>(); mock.api.submitOAuthWebCode.mockReturnValue(pending.promise);
     render(wrap(<BackendConnectionForm backend="opencode" compact provider={provider} />));

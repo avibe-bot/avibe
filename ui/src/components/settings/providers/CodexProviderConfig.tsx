@@ -17,7 +17,7 @@ export function CodexProviderConfig({ hideEnableToggle }: { hideEnableToggle?: b
     <BackendRuntimeCard backend="codex" label="Codex" description={t('settings.backends.codexDescription')}
       Icon={Bot} iconTileClassName="bg-gold" iconClassName="text-gold-foreground" runtime={runtime} hideEnableToggle={hideEnableToggle} />
     {modelHubEnabled === true && <BackendSupplyModeCard backend="codex" />}
-    <Card><CardContent className="p-6"><BackendConnectionForm backend="codex" /></CardContent></Card>
+    <Card><CardContent className="p-6"><BackendConnectionForm backend="codex" connectionRevision={runtime.connectionRevision} /></CardContent></Card>
     <BackendTestPanel backend="codex" />
   </div>;
 }

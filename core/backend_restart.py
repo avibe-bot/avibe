@@ -94,7 +94,7 @@ class BackendRestartCoordinator:
                 self._outcomes[backend] = {"state": "failed", "error": str(exc) or type(exc).__name__}
             logger.exception("Backend restart failed for %s", backend)
 
-    def snapshot(self, backend: str) -> dict[str, str]:
+    def snapshot(self, backend: str) -> dict[str, str | bool]:
         """Read application without starting another cutover or credential probe."""
         lock = self._request_locks.get(backend)
         if lock is not None and lock.locked():
@@ -111,9 +111,21 @@ class BackendRestartCoordinator:
         outcome = self._outcomes.get(backend)
         if task is None and outcome and outcome["state"] == "failed":
             return dict(outcome)
-        # An existing registered backend is valid without a recent restart:
-        # startup itself installed it. A missing registration is never idle=OK.
-        if backend not in self.controller.agent_service.agents:
+        from config.v2_compat import AppCompatConfig
+
+        config = getattr(self.controller, "config", None)
+        registered = backend in self.controller.agent_service.agents
+        # Optional compat sections are None only for disabled backends. Claude
+        # stays registered with an explicit flag. Use loaded state, never disk
+        # or a stale successful outcome to excuse unexpected missing agents.
+        if isinstance(config, AppCompatConfig):
+            disabled = (backend in {"codex", "opencode"} and getattr(config, backend) is None and not registered) or (
+                backend == "claude" and registered and config.claude.enabled is False
+            )
+            if disabled:
+                return {"state": "applied", "disabled": True}
+        # Startup-installed agents need no recent restart receipt.
+        if not registered:
             return {"state": "unavailable"}
         return {"state": "applied"}
 

@@ -7,13 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Wizard } from '../Wizard';
 import en from '../../i18n/en.json';
 
-const mock = vi.hoisted(() => ({ supply: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), api: {
-  slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
+const mock = vi.hoisted(() => ({ supply: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, api: {
+  saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
   getOpencodeProviders: vi.fn(), readOpencodeOptionsForModelPicker: vi.fn(), readModelHubAgentCatalogForModelPicker: vi.fn(), updateVibeAgent: vi.fn(), getVibeAgent: vi.fn(), listVibeAgents: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
 } }));
 vi.mock('../../context/ApiContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../../context/ApiContext')>(), useApi: () => mock.api }));
 vi.mock('../settings/models/modelsApi', () => ({ modelsApi: { getAgentSources: mock.supply } }));
-vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_agents: true } }) }));
+vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_agents: true, can_manage_access_members: mock.manageAccess } }) }));
 vi.mock('../../context/StatusContext', () => ({ useStatus: () => ({ control: mock.control }) }));
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mock.toast }) }));
 vi.mock('../settings/models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
@@ -24,7 +24,8 @@ function Destination() { const location = useLocation(); return <div data-testid
 function mount() { return render(<MemoryRouter initialEntries={['/setup']}><I18nextProvider i18n={i18n}><Routes><Route path="/setup" element={<Wizard />} /><Route path="/" element={<Destination />} /></Routes></I18nextProvider></MemoryRouter>); }
 let running: boolean;
 beforeEach(() => {
-  vi.resetAllMocks(); running = true;
+  vi.resetAllMocks(); running = true; mock.manageAccess = true;
+  mock.api.saveSettings.mockResolvedValue({ guild_allowlist: [] });
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   Element.prototype.scrollIntoView = vi.fn();
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
@@ -209,5 +210,63 @@ describe('saved messaging recovery', () => {
     mock.api.getConfig.mockResolvedValue({ ...config, platforms: { enabled: ['slack', 'wechat'] }, slack: { has_bot_token: true, has_app_token: true }, wechat: {}, platform_catalog: [...config.platform_catalog, { id: 'wechat', credential_fields: ['bot_token'] }] });
     fireEvent.click(await setup()); await screen.findByTestId('destination');
     expect(mock.api.slackManifest).not.toHaveBeenCalled(); expect(mock.api.slackAuthTest).not.toHaveBeenCalled();
+  });
+});
+
+
+// AUTH-SETUP-120: Discord's existing form emits credential and auxiliary settings.
+describe('saved Discord recovery', () => {
+  async function repairDiscord() {
+    const config = { setup_completed: false, agents: { claude: { enabled: true } }, platforms: { enabled: ['discord'] }, platform_catalog: [{ id: 'discord', config_key: 'discord', credential_fields: ['bot_token'] }], discord: { bot_token: '', has_bot_token: false } };
+    mock.api.getConfig.mockResolvedValue(config);
+    mock.api.discordAuthTest.mockResolvedValue({ ok: true });
+    mock.api.discordGuilds.mockResolvedValue({ ok: true, guilds: [{ id: 'g-one', name: 'Guild One' }, { id: 'g-two', name: 'Guild Two' }] });
+    mock.api.mutateConfig.mockImplementation(async (changes) => {
+      if (changes[0].path[0] === 'discord') mock.api.getConfig.mockResolvedValue({ ...config, discord: { bot_token: '', has_bot_token: true } });
+      return {};
+    });
+    fireEvent.click(await setup());
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.platformRepair }));
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.discordConfig.step4Title) }));
+    const input = await screen.findByPlaceholderText(en.discordConfig.botTokenPlaceholder);
+    fireEvent.change(input, { target: { value: 'fixture-discord-token' } });
+    fireEvent.click(screen.getByRole('button', { name: en.discordConfig.validateToken }));
+    await screen.findByRole('checkbox', { name: 'Guild One' });
+    return input;
+  }
+  it.each(['selected', 'cleared', 'unchanged', 'excluded'] as const)('persists only the intended guild selection (%s)', async (mode) => {
+    mock.manageAccess = mode !== 'excluded';
+    await repairDiscord();
+    if (mode === 'selected' || mode === 'cleared') fireEvent.click(screen.getByRole('checkbox', { name: 'Guild One' }));
+    if (mode === 'cleared') fireEvent.click(screen.getByRole('button', { name: en.discordConfig.clearGuilds }));
+    if (mode === 'excluded') expect(screen.getByRole('checkbox', { name: 'Guild One' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
+    await screen.findByTestId('destination');
+    if (mode === 'selected' || mode === 'cleared') {
+      expect(mock.api.saveSettings).toHaveBeenCalledExactlyOnceWith({ guilds: mode === 'selected' ? { 'g-one': { enabled: true } } : {} }, 'discord');
+      expect(mock.api.saveSettings.mock.invocationCallOrder[0]).toBeLessThan(mock.api.mutateConfig.mock.invocationCallOrder[1]);
+    } else expect(mock.api.saveSettings).not.toHaveBeenCalled();
+    expect(mock.api.mutateConfig.mock.calls[0][0]).toEqual([{ kind: 'set', path: ['discord', 'bot_token'], value: 'fixture-discord-token' }]);
+  });
+  it('retains selected guild and credential draft after partial save failure, then retries before completion', async () => {
+    const input = await repairDiscord();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Guild Two' }));
+    mock.api.saveSettings.mockRejectedValueOnce(new Error('Guild settings failed'));
+    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
+    await screen.findByText('Guild settings failed');
+    expect(screen.queryByTestId('destination')).toBeNull();
+    expect((screen.getByRole('checkbox', { name: 'Guild Two' }) as HTMLInputElement).checked).toBe(true);
+    expect((input as HTMLInputElement).value).toBe('fixture-discord-token');
+    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
+    await screen.findByTestId('destination');
+    expect(mock.api.saveSettings).toHaveBeenCalledTimes(2);
+    expect(mock.api.saveSettings).toHaveBeenLastCalledWith({ guilds: { 'g-two': { enabled: true } } }, 'discord');
+  });
+  it('cancelled selection writes neither credentials nor settings', async () => {
+    await repairDiscord(); fireEvent.click(screen.getByRole('checkbox', { name: 'Guild One' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(mock.api.saveSettings).not.toHaveBeenCalled(); expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('destination')).toBeNull();
   });
 });

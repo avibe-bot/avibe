@@ -3539,6 +3539,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
 
 def test_setup_completion_preserves_canonical_and_legacy_platform_configuration(monkeypatch, tmp_path):
     """AUTH-SETUP-120: no mandatory IM; saved invalid IM remains actionable."""
+    from config.v2_config import DiscordConfig
     from tests.ui_server_test_helpers import csrf_headers
     from vibe import internal_client
     monkeypatch.setattr(internal_client, "reconcile_platforms", AsyncMock(return_value={
@@ -3581,6 +3582,30 @@ def test_setup_completion_preserves_canonical_and_legacy_platform_configuration(
     restored = V2Config.load()
     assert restored.platforms.enabled == ["slack"]
     assert restored.slack.bot_token == "xoxb-test-bot-token"
+
+    # Discord's same embedded form has an auxiliary guild-settings write. The
+    # credential patch cannot persist that selection by itself. Exercise the
+    # real settings owner before completion (Wizard consumer covers failure and
+    # retry of that second write with the mounted selected checkboxes).
+    config = V2Config.load()
+    config.setup_completed = False
+    config.platforms.enabled = ["discord"]
+    config.discord = DiscordConfig(bot_token="")
+    config.save()
+    settings = client.post('/api/settings', json={"platform": "discord", "guilds": {"old": {"enabled": True}}}, headers=csrf_headers(client))
+    assert settings.status_code == 200
+    repair = client.post('/api/config', json={"discord": {"bot_token": "fixture-discord-token"}}, headers=csrf_headers(client))
+    assert repair.status_code == 200, repair.get_json()
+    assert not V2Config.load().setup_completed
+    assert client.get('/api/settings?platform=discord').get_json()["guild_allowlist"] == ["old"]
+    for selected in ({"selected": {"enabled": True}}, {}):
+        saved = client.post('/api/settings', json={"platform": "discord", "guilds": selected}, headers=csrf_headers(client))
+        assert saved.status_code == 200, saved.get_json()
+        assert client.get('/api/settings?platform=discord').get_json()["guild_allowlist"] == list(selected)
+        assert V2Config.load().platforms.enabled == ["discord"]
+        assert V2Config.load().slack.bot_token == "xoxb-test-bot-token"
+    result = client.post('/api/config', json={"setup_completed": True}, headers=csrf_headers(client))
+    assert result.status_code == 200, result.get_json()
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "poe"])

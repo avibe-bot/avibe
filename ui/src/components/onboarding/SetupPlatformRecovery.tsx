@@ -1,10 +1,12 @@
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 import { platformText, type PlatformDescriptor } from '@/lib/platforms';
 import { PlatformConfigEmbed } from '../settings/PlatformConfigEmbed';
+import { savePlatformSettings } from '../settings/shared/savePlatformSettings';
 import { Button } from '../ui/button';
 
 export type SavedPlatformRecovery = { config: Record<string, unknown>; descriptor: PlatformDescriptor };
@@ -13,6 +15,7 @@ export function SetupPlatformRecovery({ saved, onRepaired, onCancel }: {
   saved: SavedPlatformRecovery; onRepaired: () => Promise<void>; onCancel: () => void;
 }) {
   const api = useApi(); const { t } = useTranslation();
+  const { capabilities } = useInstanceAuthorization();
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState('');
   const busy = useRef(false);
@@ -25,6 +28,7 @@ export function SetupPlatformRecovery({ saved, onRepaired, onCancel }: {
       const result = await api.mutateConfig(configChanges(config[key], next[key], [key]));
       const runtime = result?.platform_runtime;
       if (runtime?.hot_reconciled === false && !runtime.restart_scheduled) throw new Error(runtime.restart_error || runtime.error || t('platform.restartFailed'));
+      await savePlatformSettings(api, descriptor.id, next, capabilities.can_manage_access_members);
       await onRepaired();
     } catch (cause) { setError(errorMessage(cause) || t('common.saveFailed')); }
     finally { busy.current = false; }

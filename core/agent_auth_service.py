@@ -3315,26 +3315,28 @@ class AgentAuthService:
         method_index: int,
         prompt_answers: dict[str, Any],
     ) -> None:
+        async def exchange() -> None:
+            code = None
+            if flow.submitted_code is not None:
+                # Expire even if the browser disappears, without contacting
+                # the provider until an explicit code reaches this waiter.
+                code = await flow.submitted_code
+                flow.submitted_code = None
+            server = await self._opencode_server()
+            if server is None:
+                raise RuntimeError("opencode_server_unavailable")
+            await server.wait_provider_oauth(
+                provider_id,
+                method=method_index,
+                prompt_answers=prompt_answers,
+                timeout=self._remaining_flow_timeout(flow),
+                **({"code": code} if code is not None else {}),
+            )
+
         try:
-            # Keep one start-time budget across user input, server lookup and
-            # callback; submit must not restart the advertised deadline.
-            async with asyncio.timeout(self._remaining_flow_timeout(flow)):
-                code = None
-                if flow.submitted_code is not None:
-                    # Expire even if the browser disappears, without contacting
-                    # the provider until an explicit code reaches this waiter.
-                    code = await flow.submitted_code
-                    flow.submitted_code = None
-                server = await self._opencode_server()
-                if server is None:
-                    raise RuntimeError("opencode_server_unavailable")
-                await server.wait_provider_oauth(
-                    provider_id,
-                    method=method_index,
-                    prompt_answers=prompt_answers,
-                    timeout=self._remaining_flow_timeout(flow),
-                    **({"code": code} if code is not None else {}),
-                )
+            # One start-time budget, including user input and server lookup.
+            # wait_for also supports the project's minimum Python 3.10 runtime.
+            await asyncio.wait_for(exchange(), self._remaining_flow_timeout(flow))
             flow.state = "verifying"
             # OpenCode persists into auth.json itself. Clear any Vibe-managed
             # provider option key so the new OAuth entry becomes the effective

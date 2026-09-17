@@ -20,11 +20,13 @@ export type ConnectionHeading = { method: Method; active: boolean; credential: '
 
 /** Settings and onboarding share persistence, validation, effective readback and cancellation. */
 export function BackendConnectionForm({ backend, provider, initialMethod = 'oauth', compact = false,
-  onConnected, onCancel, onHeading, onBusyChange, onWriteState }: {
+  onConnected, onCancel, onHeading, onBusyChange, onWriteState, connectionRevision = 0 }: {
   backend: OAuthBackend;
   provider?: OpencodeProvider;
   initialMethod?: Method;
   compact?: boolean;
+  /** Runtime mutation settlement: refresh observations without replacing input drafts. */
+  connectionRevision?: number;
   onConnected?: () => void | Promise<void>;
   onCancel?: () => void;
   onHeading?: (heading: ConnectionHeading) => void;
@@ -46,6 +48,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
+  const [savedDisabled, setSavedDisabled] = useState(false);
   const [active, setActive] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
@@ -67,27 +70,48 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     if (!fresh.ok) throw new Error(fresh.message || t('onboarding.connection.readFailed'));
     return { native: fresh, provider: undefined };
   }, [api, backend, provider?.id, t]);
-  const load = useCallback(async () => {
-    setLoading(true); setError('');
+  const load = useCallback(async (preserveDraft = false, isCurrent: () => boolean = () => true) => {
+    if (!preserveDraft) setLoading(true);
+    setError('');
     try {
       const [fresh, connection] = await Promise.all([read(), api.getBackendConnection(backend)]);
-      if (!lifetime.current.mounted) return;
+      if (!lifetime.current.mounted || !isCurrent()) return;
       const pending = !connection.ok || ['draining', 'failed', 'unknown'].includes(connection.application);
       setApplyPending(pending);
       const hasEffectiveAuth = fresh.provider ? ['api', 'oauth'].includes(fresh.provider.active_auth_type || '') : ['api_key', 'oauth'].includes(fresh.native?.active_auth_mode || '');
       setConnected(connection.ready && hasEffectiveAuth);
+      const authUncertain = fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain;
+      setSavedDisabled(connection.enabled === false && hasEffectiveAuth && !authUncertain && !pending);
       if (pending) setError(connection.message || t('onboarding.connection.applyPending'));
       setNative(fresh.native); setCurrentProvider(fresh.provider);
-      setBaseUrl(fresh.native?.base_url || fresh.provider?.base_url || '');
-      if (fresh.native && 'credential_type' in fresh.native) setCredential(fresh.native.credential_type || 'api_key');
-      if (!compact) {
+      if (!preserveDraft) {
+        setBaseUrl(fresh.native?.base_url || fresh.provider?.base_url || '');
+        if (fresh.native && 'credential_type' in fresh.native) setCredential(fresh.native.credential_type || 'api_key');
+      }
+      if (!compact && !preserveDraft) {
         const effective = fresh.native?.active_auth_mode;
         setMethod(effective && effective !== 'none' ? effective : fresh.provider?.active_auth_type === 'api' ? 'api_key' : backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
       }
-    } catch (err) { if (lifetime.current.mounted) setError(errorMessage(err) || t('onboarding.connection.readFailed')); }
-    finally { if (lifetime.current.mounted) setLoading(false); }
+    } catch (err) {
+      if (lifetime.current.mounted && isCurrent()) {
+        setConnected(false); setSavedDisabled(false); setApplyPending(true);
+        setError(errorMessage(err) || t('onboarding.connection.readFailed'));
+      }
+    } finally { if (lifetime.current.mounted && isCurrent() && !preserveDraft) setLoading(false); }
   }, [read, api, compact, initialMethod, backend, provider?.oauth_available, t]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    let current = true;
+    void load(false, () => current);
+    return () => { current = false; };
+  }, [load]);
+  const observedRevision = useRef(connectionRevision);
+  useEffect(() => {
+    if (observedRevision.current === connectionRevision) return;
+    observedRevision.current = connectionRevision;
+    let current = true;
+    void load(true, () => current);
+    return () => { current = false; };
+  }, [connectionRevision, load]);
 
   const confirm = async () => {
     const fresh = await read();
@@ -106,6 +130,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     setApplyPending(false);
     setNative(fresh.native); setCurrentProvider(fresh.provider); setKey(''); setEditing(false);
     setConnected(!keylessSettings && connection.ready);
+    setSavedDisabled(connection.enabled === false && !keylessSettings);
     await onConnectedRef.current?.();
   };
   const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirm, onActiveChange: setActive, onPendingChange: onWriteState });
@@ -124,7 +149,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const canSave = !loading && !busy && urlValid && Boolean(key.trim() || (hasKey && !editing) || (!compact && currentProvider?.custom && currentProvider.configured && !editing));
   const save = async () => {
     if (!canSave || lifetime.current.busy) return;
-    lifetime.current.busy = true; writeState.current?.(true); setSaving(true); setError(''); setConnected(false);
+    lifetime.current.busy = true; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
     try {
       const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
       const result = backend === 'claude' ? await api.saveClaudeAuth({ ...payload, credential_type: credential })
@@ -171,6 +196,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     {native && 'settings_conflict' in native && native.settings_conflict && <p className="connection-notice">{t('settings.backends.claudeSettingsConflictTitle')}: {t('settings.backends.claudeSettingsConflictBody', { var: native.settings_env_key_var || 'ANTHROPIC_API_KEY', path: native.settings_path })}</p>}
     {applyPending && <Button variant="secondary" disabled={busy} onClick={() => { setError(''); void confirm().catch((cause) => setError(errorMessage(cause) || t('onboarding.connection.applyPending'))); }}>{t('onboarding.connection.refresh')}</Button>}
     {connected && <p className="connection-confirmed" role="status"><CheckCircle2 size={16} />{t('onboarding.connection.connected')}</p>}
+    {savedDisabled && <p className="text-xs text-muted break-words" role="status">{t('onboarding.connection.savedDisabled')}</p>}
     {error && <div role="alert" className="connection-error">{error}{!native && !currentProvider && <Button variant="secondary" onClick={() => void load()}>{t('common.retry')}</Button>}</div>}
     {method === 'oauth' && (!compact ? <BackendOAuthPanel backend={backend} opencodeProviderId={provider?.id} signedIn={signedIn}
       title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirm} onRemoved={load} onActiveChange={setActive}
@@ -209,7 +235,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     {(compact || method === 'api_key') && <div className="connection-actions">
       {compact && <Button variant="secondary" onClick={onCancel}>{t('common.cancel')}</Button>}
       {!compact && hasKey && method === 'api_key' && <Button variant="ghost" disabled={busy} onClick={() => void remove(true)}>{t('settings.backends.claudeApiKeyRemove')}</Button>}
-      {method === 'api_key' && <Button variant="brand" disabled={!canSave} onClick={() => void save()}>{saving ? t('onboarding.connection.connecting') : t('onboarding.connection.saveConnect')}</Button>}
+      {method === 'api_key' && <Button variant="brand" disabled={!canSave} onClick={() => void save()}>{saving ? t(compact ? 'onboarding.connection.connecting' : 'common.saving') : t(compact ? 'onboarding.connection.saveConnect' : 'common.save')}</Button>}
       {compact && needsCode && <Button variant="brand" disabled={!oauth.code.trim() || oauth.submitting} onClick={() => void oauth.submitCallback()}>{oauth.submitting ? t('onboarding.connection.connecting') : t('onboarding.connection.finishConnect')}</Button>}
     </div>}
   </div>;

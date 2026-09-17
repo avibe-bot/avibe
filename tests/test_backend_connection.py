@@ -168,9 +168,11 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
         monkeypatch.setattr(api, "_request_controller_restart", marker)
         monkeypatch.setattr(internal_client, "backend_application", projection)
         started = api.start_agent_install_job(backend)
-        async with asyncio.timeout(3):
+        async def finished_job():
             while (job := api.get_agent_install_job(started["job_id"]))["status"] == "running":
                 await asyncio.sleep(0.001)
+            return job
+        job = await asyncio.wait_for(finished_job(), 3)
         assert job["path"] == installed_path
         assert getattr(V2Config.load().agents, backend).cli_path == installed_path
         state = await api.get_backend_connection(backend)
@@ -196,3 +198,129 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
             assert (await api.get_backend_connection(other))["ready"]
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatch, backend):
+    from config.v2_compat import to_app_config
+    from core.agent_auth_service import AgentAuthService
+    from core.backend_restart import BackendRestartCoordinator
+    from modules.agents.claude_agent import ClaudeAgent
+
+    config = V2Config.default()
+    for name in ("claude", "codex", "opencode"):
+        getattr(config.agents, name).enabled = name == backend
+    config.save()
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _: "/fixture/bin/assistant")
+    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: SimpleNamespace())
+    monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda *_: {"ok": True})
+    monkeypatch.setattr(api, "_refresh_opencode_provider_catalog_async", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+    monkeypatch.setattr(runtime, "service_process_running", lambda: True)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_: 123)
+
+    async def run():
+        service = SimpleNamespace(
+            agents={}, active=False, begin_backend_drain=Mock(), end_backend_drain=Mock(),
+            prepare_backend_restart=AsyncMock(), runtime_turn_tokens_for_backend=lambda _: {},
+        )
+        controller = SimpleNamespace(config=to_app_config(config), agent_service=service,
+            session_turns=SimpleNamespace(begin_backend_drain=Mock(), end_backend_drain=AsyncMock()))
+        # Claude's loaded compat object remains registered even when disabled.
+        claude = SimpleNamespace(config=controller.config, controller=controller, refresh_auth_state=AsyncMock())
+        claude.refresh_runtime_config = lambda value: ClaudeAgent.refresh_runtime_config(claude, value)
+        service.agents["claude"] = claude
+        if backend != "claude":
+            service.agents[backend] = SimpleNamespace(shutdown_runtime=AsyncMock())
+        async def refresh(name, value):
+            if name == "claude":
+                await claude.refresh_runtime_config(value)
+                return True
+            return False
+        service.refresh_runtime_config = refresh
+        owner = AgentAuthService(controller)
+        coordinator = BackendRestartCoordinator(controller, owner._apply_backend_runtime_refresh)
+        async def projection(name):
+            return {"status_code": 200, "body": {"ok": True, **coordinator.snapshot(name)}}
+        monkeypatch.setattr(internal_client, "backend_application", projection)
+        # Persisted disable alone must not reinterpret an unexpectedly missing
+        # enabled registration as applied (a stale successful outcome cannot help).
+        if backend != "claude":
+            agent = service.agents.pop(backend)
+            assert coordinator.snapshot(backend)["state"] == "unavailable"
+            service.agents[backend] = agent
+        getattr(config.agents, backend).enabled = False
+        config.save()
+        await coordinator.request_restart(backend)
+        loop = asyncio.get_running_loop()
+        marker_calls = []
+        def marker(name, **_kwargs):
+            marker_calls.append(name)
+            asyncio.run_coroutine_threadsafe(coordinator.request_restart(name), loop).result(2)
+            return True, None
+        monkeypatch.setattr(api, "_request_controller_restart", marker)
+        payload = {"auth_mode": "api_key", "api_key": "fixture-saved-key"}
+        if backend == "opencode":
+            result = await asyncio.to_thread(lambda: asyncio.run(api.save_opencode_provider_auth_async("fixture", payload)))
+            assert await api._read_opencode_config_api_key("fixture") == "fixture-saved-key"
+        else:
+            save = api.save_claude_auth if backend == "claude" else api.save_codex_auth
+            result = await asyncio.to_thread(save, payload)
+            assert result["active_auth_mode"] == "api_key"
+        assert result["ok"] and result["restart"]["ok"]
+        assert marker_calls == [backend]
+        assert getattr(V2Config.load().agents, backend).enabled is False
+        for _ in range(2):
+            state = await api.get_backend_connection(backend)
+            assert state["application"] == "applied"
+            assert not state["enabled"] and not state["ready"] and not state["entry_eligible"]
+        # Startup from the same loaded disabled shape is also authoritative.
+        startup = BackendRestartCoordinator(controller, owner._apply_backend_runtime_refresh)
+        assert startup.snapshot(backend) == {"state": "applied", "disabled": True}
+        # A concurrent disk enable cannot borrow the disabled controller's
+        # applied state before that enablement is reconciled.
+        getattr(config.agents, backend).enabled = True
+        config.save()
+        stale = await api.get_backend_connection(backend)
+        assert stale["application"] == "unknown" and not stale["ready"] and not stale["entry_eligible"]
+        getattr(config.agents, backend).enabled = False
+        config.save()
+        # A failed subsequent prepare retains the failure even when disabled.
+        service.prepare_backend_restart.side_effect = RuntimeError("fixture failure")
+        with pytest.raises(RuntimeError, match="fixture failure"):
+            await coordinator.request_restart(backend)
+        assert (await api.get_backend_connection(backend))["application"] == "failed"
+        monkeypatch.setattr(internal_client, "backend_application", AsyncMock(side_effect=internal_client.InternalServerUnavailable()))
+        unknown = await api.get_backend_connection(backend)
+        assert unknown["application"] == "unknown" and not unknown["ready"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("contents,required", [
+    ('{ malformed', False), ('{}', True), ('{"permission":"ask"}', True),
+    ('{"permission":"deny"}', True), ('{"permission":"allow"}', False),
+    ('{"permission":{"*":"allow"}}', False),
+])
+def test_permission_read_policy_consumes_real_file_without_overwriting(connection, monkeypatch, contents, required):
+    from vibe.opencode_config import get_opencode_config_paths, get_opencode_auth_path
+
+    config_path = get_opencode_config_paths(api.Path.home())[0]
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(contents)
+    auth_path = get_opencode_auth_path()
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text('{"fixture":{"type":"api","key":"fixture-only-key"}}')
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value=set()))
+    result = asyncio.run(api.get_backend_connection("opencode"))
+    assert result["permission_required"] is required
+    assert result["ready"] is (not required)
+    assert result["auth"] == "api_key"
+    if contents == '{ malformed':
+        assert api.setup_opencode_permission()["ok"] is False
+    assert config_path.read_text() == contents
+    connection.probe.return_value["body"]["state"] = "failed"
+    assert not asyncio.run(api.get_backend_connection("opencode"))["ready"]
+    connection.probe.return_value["body"]["state"] = "applied"
+    assert asyncio.run(api.get_backend_connection("claude"))["ready"]

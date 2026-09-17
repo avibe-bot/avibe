@@ -45,6 +45,8 @@ export interface BackendRuntimeState {
   savingRuntime: boolean;
   /** True once the user has typed a path different from the saved one. */
   runtimeDirty: boolean;
+  /** Changes after a runtime mutation settles; consumers must read fresh state. */
+  connectionRevision: number;
 
   setCliPath: (next: string) => void;
   setInstallOutputOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
@@ -114,6 +116,7 @@ export function useBackendRuntime({
   const [installResult, setInstallResult] = useState<InstallResult | null>(null);
   const [installOutputOpen, setInstallOutputOpen] = useState(false);
   const [savingRuntime, setSavingRuntime] = useState(false);
+  const [connectionRevision, setConnectionRevision] = useState(0);
 
   const detect = useCallback(
     async (binary?: string) => {
@@ -217,6 +220,7 @@ export function useBackendRuntime({
       showToast(errorMessage(e) || t('common.saveFailed'), 'error');
     } finally {
       setSavingRuntime(false);
+      setConnectionRevision((revision) => revision + 1);
     }
   }, [api, backend, cliPath, defaultCli, enabled, showToast, t]);
 
@@ -239,6 +243,8 @@ export function useBackendRuntime({
       } catch (e) {
         showToast(errorMessage(e) || t('common.saveFailed'), 'error');
         if (!saved) setEnabled(!next);
+      } finally {
+        setConnectionRevision((revision) => revision + 1);
       }
     })();
   }, [api, backend, enabled, showToast, t]);
@@ -266,6 +272,7 @@ export function useBackendRuntime({
     installOutputOpen,
     savingRuntime,
     runtimeDirty,
+    connectionRevision,
     setCliPath,
     setInstallOutputOpen,
     detect,

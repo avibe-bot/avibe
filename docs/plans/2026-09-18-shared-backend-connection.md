@@ -322,3 +322,45 @@ cover explicit mounting, narrow payloads, failure/cancel and canonical bypass.
   files were hot-applied. Upstream automatic OAuth already sent to a provider
   may commit externally; cancellation settles Avibe-owned work and prevents
   stale UI effects, rather than claiming remote transaction rollback.
+
+### Review circuit breaker and complete boundary repair (2026-09-18 04:50)
+
+Two genuine findings-bearing heads (`b664dd95d5`, `31766481c8`) exposed the same
+OAuth lifetime class: the first omitted deadline enforcement, and its repair
+used an API unavailable on supported Python 3.10. PM paused editing, inspected
+all six threads and existing owners, and authorized these bounded repairs before
+another push. No architecture/schema rewrite or owner escalation is required.
+
+- The one start-time OAuth waiter uses Python-3.10-compatible `wait_for` for
+  the input/server/callback exchange. Credential commit remains outside that
+  timeout under the existing settlement shield. Actual isolated Python 3.10
+  tests cover the same lifetime properties as the current-runtime suite.
+- The coordinator recognizes intentionally absent Codex/OpenCode registration
+  only when its loaded `AppCompatConfig` has that backend set to `None`, as
+  `to_app_config` and successful unregister already specify. Missing config or
+  unexpectedly missing enabled registration stays unavailable; pending/failed
+  outcomes win. Claude remains registered and carries its enabled flag in its
+  loaded compat config. Applied configuration does not imply enabled/readiness.
+  The internal projection adds optional `disabled: true` only with confirmed
+  applied disabled config. The public reader preserves unknown if disk now says
+  enabled while the controller still reports disabled; this prevents mixing two
+  observations into false readiness before enablement has actually applied.
+  The public shape is unchanged. Settings confirms native credential readback
+  plus applied/stopped state and reports saved-but-disabled without enabling it
+  or presenting connected. Unknown IPC and failed receipts never count as saved
+  application. The form's completion callback refreshes parent data only.
+  Settings uses the existing Save/Saving labels and a muted, wrapping status for
+  saved credentials on a currently disabled backend. The existing runtime hook
+  increments `connectionRevision` after a config mutation settles (including
+  failure); Claude/Codex parents pass it to the shared form. This only triggers
+  fresh native/application reads, never readiness from an optimistic toggle.
+  Status refresh preserves key, URL and method drafts without remounting. There
+  is no duplicate enable control, event bus or polling; pending application
+  retains the existing explicit refresh action.
+- Discord's auxiliary guild selections use one small shared helper around the
+  existing settings API, after narrow credential mutation. It preserves access
+  management capability, explicit Discord platform and touched-empty semantics;
+  partial failure retains the mounted selection and cannot complete setup.
+- Only successful permission reads may add an OpenCode permission gate. The
+  documented malformed-file fail-open exception does not grant permission or
+  prove credentials/application, and the original file remains untouched.

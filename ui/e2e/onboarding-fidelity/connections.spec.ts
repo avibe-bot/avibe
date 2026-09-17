@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { expect, test, type Page } from '@playwright/test';
 import { openOnboarding, openSetup, serveProduct, settleEffects } from './support';
 
@@ -179,3 +180,86 @@ test('saved Slack recovery narrow uses the existing form only after explicit rep
   await recovery.getByRole('button', { name: 'Cancel' }).click();
   expect(denied).toEqual([]);
 });
+
+for (const lang of ['en', 'zh']) {
+  test(`disabled Settings credentials stay saved without connection ${lang}`, async ({ page }, info) => {
+    const denied = await serveProduct(page);
+    let saves = 0;
+    let enabled = false;
+    await page.route('**/api/codex/models', (route) => route.fulfill({ json: { ok: true, models: [] } }));
+    await page.route('**/api/config', (route) => {
+      if (route.request().method() === 'POST') {
+        expect(route.request().postDataJSON()).toEqual({ agents: { codex: { enabled: true } } });
+        enabled = true;
+      }
+      return route.fulfill({ json: { agents: { codex: { enabled, cli_path: '/fixture/bin/codex' } }, platforms: { enabled: [] }, agent_backend_runtime: { hot_reconciled: true } } });
+    });
+    await page.route('**/api/csrf-token', (route) => route.fulfill({ json: { csrf_token: 'fixture-token' } }));
+    await page.route('**/api/backend/codex/auth', (route) => {
+      if (route.request().method() === 'POST') {
+        saves++;
+        return route.fulfill({ json: { ok: true, restart: { ok: true } } });
+      }
+      return route.fulfill({ json: { ok: true, active_auth_mode: 'api_key', auth_mode: 'api_key', has_api_key: true, api_key_masked: 'sk-••••test', base_url: 'https://fixture.invalid/v1', file_store_active: true } });
+    });
+    await page.route('**/api/backend/codex/connection', (route) => route.fulfill({ json: { ok: true, backend: 'codex', installed: true, enabled, auth: 'api_key', application: 'applied', ready: enabled, entry_eligible: enabled } }));
+    await page.setViewportSize({ width: 390, height: 640 });
+    await page.goto(`/e2e/onboarding-fidelity/fixture.html?surface=disabled-settings&lang=${lang}&theme=light`);
+    const saved = lang === 'zh' ? '凭据已保存。此助手当前未启用。' : 'Credentials saved. This assistant is currently disabled.';
+    await expect(page.getByText(saved)).toBeVisible();
+    await page.locator('.backend-connection-form').getByRole('button', { name: lang === 'zh' ? '保存' : 'Save', exact: true }).click();
+    await expect.poll(() => saves).toBe(1);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByText(lang === 'zh' ? '已连接' : 'Connected', { exact: true })).toHaveCount(0);
+    await page.reload(); await expect(page.getByText(saved)).toBeVisible();
+    const bounds = await page.getByText(saved).evaluate((node) => {
+      const range = document.createRange(); range.selectNodeContents(node);
+      const text = range.getBoundingClientRect(); const rect = node.getBoundingClientRect();
+      return text.left >= rect.left && text.right <= rect.right && text.bottom <= rect.bottom;
+    });
+    expect(bounds).toBe(true);
+    expect(await page.getByText(saved).evaluate((node) => node.classList.contains('text-muted'))).toBe(true);
+    await expect(page.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    const save = page.locator('.backend-connection-form').getByRole('button', { name: lang === 'zh' ? '保存' : 'Save', exact: true });
+    const inspectActions = () => save.evaluate((button) => {
+      const ancestors = [];
+      for (let node: Element | null = button; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        ancestors.push({ tag: node.tagName, class: node.className, rect: node.getBoundingClientRect().toJSON(), scrollTop: node.scrollTop, clientHeight: node.clientHeight, scrollHeight: node.scrollHeight, overflowY: style.overflowY, visibility: style.visibility, display: style.display, opacity: style.opacity });
+      }
+      const rect = button.getBoundingClientRect();
+      return { ancestors, hit: button.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)) };
+    });
+    const before = await inspectActions();
+    await info.attach('pre-click-action-geometry', { body: JSON.stringify(before, null, 2), contentType: 'application/json' });
+    await save.click(); // real actionability and hit-target checks after reload
+    await expect.poll(() => saves).toBe(2);
+    await expect(page.getByText(saved)).toBeVisible();
+    await expect(save).toBeEnabled();
+    await page.getByLabel(lang === 'zh' ? 'Base URL（可选）' : 'Base URL (optional)').focus();
+    await page.keyboard.press('Tab'); // existing Remove key
+    await page.keyboard.press('Tab'); // Save
+    await expect(save).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => saves).toBe(3);
+    await expect(page.getByText(saved)).toBeVisible();
+    await save.scrollIntoViewIfNeeded();
+    await expect(save).toBeInViewport();
+    await expect(page.getByText(saved)).toBeInViewport();
+    const after = await inspectActions();
+    expect(after.hit).toBe(true);
+    const geometryPath = info.outputPath(`post-reload-action-geometry-${lang}.json`);
+    await writeFile(geometryPath, JSON.stringify({ before, after }, null, 2));
+    await info.attach('post-reload-action-geometry', { path: geometryPath, contentType: 'application/json' });
+    await page.screenshot({ path: info.outputPath(`post-reload-disabled-settings-${lang}-light-narrow.png`) });
+    const baseUrl = page.getByLabel(lang === 'zh' ? 'Base URL（可选）' : 'Base URL (optional)');
+    await baseUrl.fill('https://unsaved.invalid');
+    await page.getByRole('switch').click();
+    await expect(page.getByText(saved)).toHaveCount(0);
+    await expect(page.getByText(lang === 'zh' ? '已连接' : 'Connected', { exact: true })).toBeVisible();
+    await expect(baseUrl).toHaveValue('https://unsaved.invalid');
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    expect(saves).toBe(3);
+    expect(denied).toEqual([]);
+  });
+}

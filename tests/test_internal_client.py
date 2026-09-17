@@ -1230,6 +1230,15 @@ def test_backend_application_uses_verified_socket_and_real_projection(socket_pat
             assert result["body"]["controller_pid"] == os.getpid()
             missing = await internal_client.backend_application("codex", socket_path=socket_path)
             assert missing["body"]["state"] == "unavailable"
+            from config.v2_config import V2Config
+            from config.v2_compat import to_app_config
+
+            config = V2Config.default()
+            config.agents.codex.enabled = False
+            controller.config = to_app_config(config)
+            disabled = await internal_client.backend_application("codex", socket_path=socket_path)
+            assert disabled["body"]["state"] == "applied"
+            assert disabled["body"]["disabled"] is True
             with pytest.raises(ValueError, match="unsupported_backend"):
                 await internal_client.backend_application("other", socket_path=socket_path)
 

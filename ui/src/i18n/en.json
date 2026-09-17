@@ -5293,6 +5293,7 @@
       "hideKey": "Hide credential",
       "connected": "Connected",
       "savedSubscription": "Subscription credentials detected",
+      "savedDisabled": "Credentials saved. This assistant is currently disabled.",
       "readFailed": "Unable to read connection state. Try again.",
       "saveFailed": "Unable to save the connection. Try again.",
       "applyFailed": "Credentials saved, but runtime application failed. Retry the save.",
