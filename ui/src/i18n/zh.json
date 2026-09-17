@@ -5215,28 +5215,23 @@
       "label": "助手接力协作",
       "description": "Claude Code 规划任务，Codex 编写代码，OpenCode 执行测试，最后由 Claude Code 汇总交付。",
       "caption": "规划 · 开发 · 测试 · 交付",
-      "pause": "暂停动画",
-      "play": "播放动画",
-      "replay": "重新播放动画",
+      "returnCaption": "测试通过，回传 PM",
       "claude": {
         "name": "Claude Code",
         "role": "PM",
-        "waiting": "规划任务",
         "working": "编写需求文档",
         "complete": "需求文档已就绪",
-        "summary": "汇总交付结果"
+        "summary": "汇总结果，完成交付"
       },
       "codex": {
         "name": "Codex",
         "role": "开发",
-        "waiting": "等待需求文档",
         "working": "编写功能代码",
         "complete": "功能代码已就绪"
       },
       "opencode": {
         "name": "OpenCode",
         "role": "测试",
-        "waiting": "等待功能代码",
         "working": "编写并执行用例",
         "complete": "测试全部通过"
       }

@@ -15,8 +15,44 @@ vi.mock('../../context/ApiContext', () => ({ useApi: () => mocks.api }));
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
 const wrap = (element: React.ReactNode) => <I18nextProvider i18n={i18n}>{element}</I18nextProvider>;
+
+/** The tab going to the background, which jsdom exposes no other way. */
+const setHidden = (hidden: boolean) => act(() => {
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') });
+  document.dispatchEvent(new Event('visibilitychange'));
+});
+
+/**
+ * The composition scrolling out of sight, which jsdom exposes no other way either: it
+ * ships no IntersectionObserver at all. The stub keeps the real contract — observe an
+ * element, report whether it intersects — and hands back a switch the test can flip.
+ */
+function stubIntersectionObserver() {
+  const report: ((onScreen: boolean) => void)[] = [];
+  class Stub {
+    constructor(callback: IntersectionObserverCallback) {
+      report.push((onScreen) => callback(
+        [{ isIntersecting: onScreen } as IntersectionObserverEntry],
+        this as unknown as IntersectionObserver,
+      ));
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  vi.stubGlobal('IntersectionObserver', Stub);
+  return (onScreen: boolean) => act(() => { for (const notify of report) notify(onScreen); });
+}
+
 beforeEach(() => { mocks.reduced = false; vi.clearAllMocks(); void i18n.changeLanguage('en'); });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  delete (document as Partial<Document>).hidden;
+  delete (document as Partial<Document>).visibilityState;
+});
 
 describe('Welcome', () => {
   it('checks saved paths before advancing without persisting configuration', async () => {
@@ -47,40 +83,86 @@ describe('Welcome', () => {
   });
 });
 
-describe('collaboration playback and access interaction', () => {
-  it('advances the pulse and freezes the entire state on pause', () => {
+describe('collaboration lifecycle and access interaction', () => {
+  it('starts on its own and offers no playback control', () => {
     vi.useFakeTimers();
-    const { container, rerender } = render(wrap(<CollaborationStory paused={false} onPausedChange={vi.fn()} />));
+    const { container } = render(wrap(<CollaborationStory />));
     act(() => vi.advanceTimersByTime(1800));
     expect(screen.getByTestId('handoff-pulse')).toBeTruthy();
     expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(1);
-    rerender(wrap(<CollaborationStory paused onPausedChange={vi.fn()} />));
-    const before = container.innerHTML;
-    act(() => vi.advanceTimersByTime(3000));
-    expect(container.innerHTML).toBe(before);
+    // The approved design has no playback toolbar, so the story ships no control at all —
+    // not a renamed one, not a hidden one, not a keyboard-only one.
+    expect(container.querySelectorAll('button, [role="button"], input')).toHaveLength(0);
   });
-  it('replays every card and pulse from the same beginning', () => {
+  it('holds the story still while the tab is hidden and resumes in the same phase', () => {
     vi.useFakeTimers();
-    const resume = vi.fn();
-    const { container } = render(wrap(<CollaborationStory paused={false} onPausedChange={resume} />));
+    const { container } = render(wrap(<CollaborationStory />));
+    const diagram = () => container.querySelector('.onboarding-collaboration') as HTMLElement;
     act(() => vi.advanceTimersByTime(5000));
     expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: 'Replay animation' }));
-    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(0);
-    expect(screen.queryByTestId('handoff-pulse')).toBeNull();
-    expect(resume).toHaveBeenCalledWith(false);
+    expect(diagram().dataset.motion).toBe('running');
+
+    setHidden(true);
+    // `data-motion` is what holds the rendered CSS animations; the cleared timer is what
+    // holds the React frame. Both have to stop, or the diagram plays on against a clock
+    // nobody is watching and jumps when the tab comes back.
+    expect(diagram().dataset.motion).toBe('paused');
+    expect(vi.getTimerCount()).toBe(0);
+    const frozen = container.innerHTML;
+    act(() => vi.advanceTimersByTime(3000));
+    expect(container.innerHTML).toBe(frozen);
+
+    setHidden(false);
+    expect(diagram().dataset.motion).toBe('running');
+    expect(vi.getTimerCount()).toBe(1);
+    // Continuity, not restart: the 3000ms spent hidden would have carried the third card
+    // past its completion, and a restart would have emptied all three.
+    act(() => vi.advanceTimersByTime(100));
+    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(2);
+    act(() => vi.advanceTimersByTime(400));
+    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(3);
+  });
+  it('holds the story still while it is scrolled out of sight, with the tab still visible', () => {
+    vi.useFakeTimers();
+    const scroll = stubIntersectionObserver();
+    const { container } = render(wrap(<CollaborationStory />));
+    const diagram = () => container.querySelector('.onboarding-collaboration') as HTMLElement;
+    act(() => vi.advanceTimersByTime(5000));
+    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(2);
+    expect(diagram().dataset.motion).toBe('running');
+
+    // A hidden tab is only half the lifecycle. Here the document is perfectly visible
+    // and it is the diagram that has left the screen — on a short window it can sit
+    // entirely above the viewport while the user reads the button below it.
+    scroll(false);
+    expect(document.hidden).toBeFalsy();
+    expect(diagram().dataset.motion).toBe('paused');
+    expect(vi.getTimerCount()).toBe(0);
+    const frozen = container.innerHTML;
+    act(() => vi.advanceTimersByTime(3000));
+    expect(container.innerHTML).toBe(frozen);
+
+    scroll(true);
+    expect(diagram().dataset.motion).toBe('running');
+    expect(vi.getTimerCount()).toBe(1);
+    // Continuity, not restart, exactly as for the hidden tab above.
+    act(() => vi.advanceTimersByTime(100));
+    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(2);
+    act(() => vi.advanceTimersByTime(400));
+    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(3);
   });
   it('shows completed work and stops all timers for reduced motion', () => {
     vi.useFakeTimers(); mocks.reduced = true;
     const { container } = render(wrap(<Welcome onNext={vi.fn()} />));
     expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(3);
     expect(screen.queryByTestId('handoff-pulse')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Pause animation' })).toBeNull();
+    // Get started is the only button on the screen.
+    expect(screen.getAllByRole('button').map((node) => node.textContent?.trim())).toEqual(['Get started']);
     expect(vi.getTimerCount()).toBe(0);
   });
   it('pauses idle emphasis throughout pointer and keyboard interaction', () => {
     vi.useFakeTimers();
-    const { container } = render(wrap(<AccessTiles paused={false} />));
+    const { container } = render(wrap(<AccessTiles />));
     act(() => vi.advanceTimersByTime(2000));
     expect(container.querySelectorAll('[data-emphasis="true"]')).toHaveLength(1);
     fireEvent.pointerEnter(screen.getByRole('list'));
@@ -91,5 +173,29 @@ describe('collaboration playback and access interaction', () => {
     expect(vi.getTimerCount()).toBe(0);
     fireEvent.blur(screen.getAllByRole('listitem')[0], { relatedTarget: null });
     expect(vi.getTimerCount()).toBe(1);
+  });
+  it('stops the access rotation with the tab and keeps it stopped for reduced motion', () => {
+    vi.useFakeTimers();
+    const { container } = render(wrap(<AccessTiles />));
+    act(() => vi.advanceTimersByTime(2000));
+    expect(container.querySelectorAll('[data-emphasis="true"]')).toHaveLength(1);
+    setHidden(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(container.querySelectorAll('[data-emphasis="true"]')).toHaveLength(0);
+    setHidden(false);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+  it('stops the access rotation when the tiles themselves scroll out of sight', () => {
+    vi.useFakeTimers();
+    const scroll = stubIntersectionObserver();
+    const { container } = render(wrap(<AccessTiles />));
+    act(() => vi.advanceTimersByTime(2000));
+    expect(vi.getTimerCount()).toBe(1);
+    scroll(false);
+    expect(vi.getTimerCount()).toBe(0);
+    scroll(true);
+    expect(vi.getTimerCount()).toBe(1);
+    // The rotation is what suspends; the six tiles it rotates through are always there.
+    expect(container.querySelectorAll('.onboarding-access-tile')).toHaveLength(6);
   });
 });

@@ -5215,13 +5215,10 @@
       "label": "Assistants working together",
       "description": "Claude Code plans the work, Codex builds it, OpenCode tests it, and Claude Code summarizes the result.",
       "caption": "Plan · Build · Test · Deliver",
-      "pause": "Pause animation",
-      "play": "Play animation",
-      "replay": "Replay animation",
+      "returnCaption": "Tests passed · back to the PM",
       "claude": {
         "name": "Claude Code",
         "role": "PM",
-        "waiting": "Planning the work",
         "working": "Writing the project brief",
         "complete": "Project brief ready",
         "summary": "Summarizing the delivery"
@@ -5229,14 +5226,12 @@
       "codex": {
         "name": "Codex",
         "role": "Developer",
-        "waiting": "Waiting for the brief",
         "working": "Writing code",
         "complete": "Implementation ready"
       },
       "opencode": {
         "name": "OpenCode",
         "role": "Tester",
-        "waiting": "Waiting for the code",
         "working": "Writing and running tests",
         "complete": "All tests passed"
       }

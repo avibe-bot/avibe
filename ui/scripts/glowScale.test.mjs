@@ -68,7 +68,26 @@ const OFF_RULE = {
   },
   cta: {
     why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, not from design.pen',
-    holds: /^0 0 var\(--brand-glow-blur\) -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
+    holds: /^0 0 \d+px -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
+  },
+  // The approved onboarding reference draws its active card with no spread at all
+  // and at #5BFFA060, so the two fields the general rule fixes -- spread = -blur/4
+  // and alpha 0.44 -- are the two this role is excused from, and `holds` pins both
+  // at the reference's own numbers. Its blur is not excused: it is asserted from
+  // ROLE_BLUR like every other role's, because a role is still a name for a size.
+  //
+  // Two patterns, because the two frames drew this card separately: Light's own
+  // (waUhu) is 16/-4 at #10B98170, so the fields excused here are the ones that
+  // differ. An exception that named one theme would have left the other
+  // unasserted, which is this file's recurring failure shape -- so a themed
+  // exception states BOTH themes, and a theme it says nothing about fails rather
+  // than passing by default.
+  onboarding: {
+    why: 'the owner-approved active-card halo: spreadless #5BFFA060 in dark, and the light frame\'s own 16/-4 #10B98170',
+    holds: {
+      dark: /^0 0 \d+px 0px color-mix\(in srgb, var\(--[a-z]+\) 37\.6%, transparent\)$/,
+      light: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
+    },
   },
 };
 
@@ -77,8 +96,77 @@ const OFF_RULE = {
 // about which is 24 and which is 32, so swapping two rungs' blurs left every
 // assertion here green and every converted call site one rung off its frame.
 // A role is a name for a size; the mapping is the thing being asserted.
+// A role whose size is themed names one size per theme instead of one size. That is
+// not a softening: a single number still means "this blur in every theme", and a
+// themed role must state every theme or `blurOf` returns undefined and the assertion
+// fails. What it is NOT is an escape -- `onboarding` is pinned to 28 and 16, not
+// excused from having a blur, and `cta` is pinned to 16 and 20 where it used to be
+// excused entirely: "themed" was being read as "unasserted", so the owner's two
+// numbers were the only blurs in this file that nothing checked.
 const ROLE_BLUR = {
   dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48,
+  cta: { dark: 16, light: 20 },
+  onboarding: { dark: 28, light: 16 },
+};
+
+const blurOf = (role, theme) => {
+  const blur = ROLE_BLUR[role];
+  return typeof blur === 'number' ? blur : blur?.[theme];
+};
+
+// Every rung is read under both palettes, not under the block it is written in.
+// That block is always `@theme`: the token layer is `@theme inline`, so Tailwind
+// substitutes each value into its utilities at build time and `validate:theme`
+// fails a later re-declaration of the same name as dead. Asking which theme a
+// DECLARATION belongs to therefore has one answer for every glow in the tree, and
+// the question worth asking is what the declaration draws once each palette has
+// supplied its own numbers.
+const THEMES = ['dark', 'light'];
+
+// Which is how a glow is themed at all, since a value cannot be. A hue follows the
+// palette on its own -- `color-mix(in srgb, var(--mint) …)` is whichever mint the
+// theme declares -- but a blur is a number, and a number that has to change per
+// theme has to be named and re-anchored where the palette is. `--brand-glow-blur`
+// is that shape and `--onboarding-glow-*` follows it.
+//
+// So a rung is resolved through the numbers its theme declares before anything is
+// asserted about it. Only the numbers: a colour name is left as written, because
+// "this token's colour is that accent" is an assertion below and resolving it away
+// would delete it. The whole-selector matching is the one `DARK_ACCENTS` explains
+// -- a substring test reads `:root:not([data-theme="dark"])`, the light block whose
+// entire job is to say it is not the dark one, as a dark declaration.
+const NUMBER = /^-?[\d.]+(px|%)?$/;
+
+const THEME_NUMBERS = (() => {
+  const numbers = { dark: new Map(), light: new Map() };
+  postcss.parse(CSS).walkRules((rule) => {
+    let light = rule.selectors.some((one) => one.trim() === '[data-theme="light"]');
+    for (let at = rule.parent; at && !light; at = at.parent) {
+      light = at.type === 'atrule' && at.name === 'media' && /prefers-color-scheme:\s*light/.test(at.params);
+    }
+    const dark = !light && rule.selectors.some((one) => [':root', '[data-theme="dark"]'].includes(one.trim()));
+    if (!light && !dark) return;
+
+    for (const node of rule.nodes ?? []) {
+      if (node.type !== 'decl' || !node.prop.startsWith('--') || !NUMBER.test(node.value.trim())) continue;
+      numbers[light ? 'light' : 'dark'].set(node.prop, node.value.trim());
+    }
+  });
+
+  // Light declares only what it changes, so it reads through dark for the rest --
+  // the cascade, which is what the browser does with these two blocks.
+  return { dark: numbers.dark, light: new Map([...numbers.dark, ...numbers.light]) };
+})();
+
+const resolveNumbers = (value, theme) => {
+  let resolved = value.replace(/\s+/g, ' ').trim();
+  for (let hop = 0; hop < 4; hop += 1) {
+    const next = resolved.replace(/var\((--[\w-]+)\)/g, (written, name) =>
+      THEME_NUMBERS[theme].get(name) ?? written);
+    if (next === resolved) break;
+    resolved = next;
+  }
+  return resolved;
 };
 
 const SPREAD_CAP = 12;
@@ -102,7 +190,15 @@ const rungs = SHEETS.flatMap(([, sheet]) => {
   const found = [];
   sheet.walkDecls((decl) => {
     const match = RUNG_NAME.exec(decl.prop);
-    if (match) found.push({ ...match.groups, token: decl.prop, value: decl.value });
+    // Every DECLARATION under every theme, not every name: reading one per name
+    // would leave whichever came second unchecked -- the same "collected, marked
+    // managed and discarded unread" hole the validator's own token layer had -- and
+    // reading one theme per declaration leaves the other palette's numbers
+    // unasserted, which is the same hole one level along.
+    if (!match) return;
+    for (const theme of THEMES) {
+      found.push({ ...match.groups, theme, token: decl.prop, value: resolveNumbers(decl.value, theme) });
+    }
   });
   return found;
 });
@@ -184,12 +280,9 @@ describe('the accent glow scale', () => {
     expect(MANAGED.filter((token) => !rungs.some((rung) => rung.token === token))).toEqual([]);
   });
 
-  // And the role a name parses into has to be one the scale defines. `role in
-  // ROLE_BLUR` already decides which blur is asserted, but its else-branch --
-  // "then it must carry a themed blur" -- describes `cta`, so an invented role
-  // spelled with `var(--…)` would satisfy it. A role is a name for a size; a
-  // name for no size is not a role.
-  it.each(rungs)('$token names a role the scale defines', ({ role }) => {
+  // And the role a name parses into has to be one the scale defines. A role is a
+  // name for a size; a name for no size is not a role.
+  it.each(rungs)('$token in $theme names a role the scale defines', ({ role }) => {
     expect(role in ROLE_BLUR || role in OFF_RULE, `${role} is on neither the blur scale nor the off-rule list`).toBe(true);
   });
 
@@ -212,7 +305,7 @@ describe('the accent glow scale', () => {
   // status dot was unasserted in every theme. A token named for an accent that
   // draws a different one is the same defect as a blur off its frame, and it is
   // the harder one to see by eye.
-  it.each(rungs)('$token is its accent, as the dark theme declares it', ({ accent, value }) => {
+  it.each(rungs)('$token in $theme is its accent, as the dark theme declares it', ({ accent, value }) => {
     const declared = DARK_ACCENTS.get(`--${accent}`);
     expect(declared, `--${accent} is declared in no [data-theme="dark"] block`).toBeDefined();
     expect([...declared], `--${accent} is declared more than once in dark`).toHaveLength(1);
@@ -233,12 +326,16 @@ describe('the accent glow scale', () => {
 
   // A role is a name for a size, so the size is the assertion. Membership in a
   // set of blurs cannot see two roles trading values.
-  it.each(rungs)('$token has its role\'s blur', ({ role, value }) => {
-    if (!(role in ROLE_BLUR)) {
-      expect(value, `${role} has no fixed blur, so it must carry a themed one`).toMatch(/^0 0 var\(--[a-z-]+\) /);
-      return;
-    }
-    expect(Number(value.match(/^0 0 (\d+)px/)?.[1])).toBe(ROLE_BLUR[role]);
+  //
+  // Every role, with no branch for a themed one. That branch read "then it must
+  // carry a themed blur", which described `cta` exactly -- and so accepted any
+  // number at all behind the variable, including a role invented that morning.
+  // Resolving a rung through its theme's own numbers is what removes the need for
+  // it: a themed blur is a number by the time it gets here.
+  it.each(rungs)('$token has its role\'s blur in $theme', ({ role, theme, value }) => {
+    const blur = blurOf(role, theme);
+    expect(blur, `${role} names no blur for the ${theme} theme it is declared in`).toBeDefined();
+    expect(Number(value.match(/^0 0 (\d+)px/)?.[1])).toBe(blur);
   });
 
   it.each(Object.entries(OFF_RULE))('states why %s is off the rule', (role, { why }) => {
@@ -248,8 +345,11 @@ describe('the accent glow scale', () => {
 
   // Every accent's token of an off-rule role, so a role is covered across the
   // palette rather than at whichever accent happens to be first.
-  it.each(rungs.filter((rung) => rung.role in OFF_RULE))('$token holds its documented exception', ({ role, value }) => {
-    expect(value.trim(), OFF_RULE[role].why).toMatch(OFF_RULE[role].holds);
+  it.each(rungs.filter((rung) => rung.role in OFF_RULE))('$token holds its documented exception in $theme', ({ role, theme, value }) => {
+    const { holds, why } = OFF_RULE[role];
+    const pattern = holds instanceof RegExp ? holds : holds[theme];
+    expect(pattern, `${role} states no exception for the ${theme} theme it is declared in`).toBeDefined();
+    expect(value.trim(), why).toMatch(pattern);
   });
 
   // Which comments count as design glow annotations, and what each one measures.
@@ -316,7 +416,8 @@ describe('the accent glow scale', () => {
     // scale the test pins and not whatever index.css currently happens to say.
     // Taking it from the file made the two agree by construction: a rung nudged
     // to 40px became "spellable" in the same edit that broke its frame.
-    const spellable = new Set(Object.values(ROLE_BLUR));
+    const spellable = new Set(Object.values(ROLE_BLUR)
+      .flatMap((blur) => (typeof blur === 'number' ? [blur] : Object.values(blur))));
 
     expect([...annotated].filter((blur) => !spellable.has(blur)).sort((a, b) => a - b)).toEqual([]);
   }, WHOLE_TREE_SCAN);

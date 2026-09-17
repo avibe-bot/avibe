@@ -1,118 +1,641 @@
+/* Onboarding surface — Welcome and assistant setup.
+ *
+ * Geometry, fills and motion follow `avibe-docs/design_desktop.pen` and the authored
+ * animation in Show session `ses36vg559de2`. The values below are component-scoped on
+ * purpose: they encode exact approved design numbers without moving any global token.
+ *
+ * Widths are capped fluid, never fixed: the card grid uses percentage tracks and the
+ * diagram is sized from its own width, so card width, handoff gaps, diagram height and
+ * the stretched wire viewBox stay proportional at every container width. The owner
+ * accepted 1104 as the desktop cap; only the narrow bands choose a height directly.
+ */
 .onboarding-shell {
+  --ob-card: linear-gradient(150deg, #151521, #101019);
+  --ob-card-border: #ffffff1c;
+  --ob-active-border: #5bffa059;
+  /* The reference's own exterior glow — a 28px, spread-less mint at #5BFFA060 — now
+     carried by one managed token instead of approximated by stacking two rungs of the
+     sized scale. The inset line is only the top highlight, not the glow. */
+  --ob-active-shadow: var(--shadow-glow-onboarding-mint), inset 0 1px 0 #5bffa012;
+  --ob-idle-dot: #4c5060;
+  --ob-skeleton: #ffffff12;
+  --ob-skeleton-strong: #ffffff28;
+  --ob-shimmer-soft: #ffffff08;
+  --ob-shimmer: #ffffff16;
+  --ob-line-number: #585c71;
+  --ob-code-violet: #a496e15c;
+  --ob-code-cyan: #67c2b75c;
+  --ob-check-bg: #ffffff05;
+  --ob-check-border: #5bffa044;
+  --ob-check-done: #5bffa012;
+  --ob-identity-line: #ffffff0e;
+  --ob-wire: #5bffa031;
+  --ob-port: #15281f;
+  --ob-port-border: #5bffa066;
+  --ob-pulse: #b5ffd4;
+  --ob-pulse-glow: #5bffa0;
+  --ob-caption: #697087;
+  --ob-tile-bg: #ffffff03;
+  --ob-tile-hover: #ffffff0a;
+  --ob-well: #ffffff04;
+  --ob-tile-label: #d3d7e2;
+
+  /* One content width for the header, the story and the assistant rows. 1104 is the
+     setup frame's own container (i3vw9 lays it out at x=48 of a 1200 frame); the owner
+     accepted it for the welcome too, whose blocks are authored at 880. Every dependent
+     number is therefore expressed as its ratio to 880 rather than re-typed: the cap
+     alone moves the whole composition and nothing can drift out of proportion.
+     At 1104 that yields 301.1 cards, a 1104x341.2 diagram and an 802.9 access span. */
+  --ob-content-w: 1104px;
+  /* 20px shell padding plus this bar is the setup's authored 64.5 top offset (IWQi6),
+     which it holds at every window height. The welcome is centred instead and reaches
+     the same 65 only at the design's own 756 content box. */
+  --ob-header-h: 45px;
+  /* The design's own side padding, so the cap is reached at exactly its 1200 frame. */
+  --ob-gutter: 48px;
+
   background: var(--background);
   color: var(--foreground);
   height: var(--app-shell-h);
   overflow-y: auto;
-  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px var(--ob-gutter);
 }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .onboarding-shell { --ob-theme: light; }
+}
+[data-theme="light"] .onboarding-shell { --ob-theme: light; }
+/* Both light blocks must stay value-identical, like the global theme's own pair. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .onboarding-shell {
+    --ob-card: #ffffff;
+    --ob-card-border: #08081212;
+    /* The light frame's own active card (waUhu): a #10B98160 edge over a 16/-4
+       #10B98170 halo, and no inset highlight — that top line is the dark card's
+       lit rim, and on white it reads as a seam. The halo is the same managed
+       token as dark; the token itself is what carries light's geometry. */
+    --ob-active-border: #10b98160;
+    --ob-active-shadow: var(--shadow-glow-onboarding-mint);
+    --ob-idle-dot: #5c6079;
+    --ob-skeleton: #08081214;
+    --ob-skeleton-strong: #08081224;
+    --ob-shimmer-soft: #08081204;
+    --ob-shimmer: #08081208;
+    --ob-line-number: #5c6079;
+    --ob-code-violet: #7c3aed24;
+    --ob-code-cyan: #0891b224;
+    --ob-check-bg: #eef1f7;
+    --ob-check-border: #aae6d2;
+    --ob-check-done: #10b98114;
+    --ob-identity-line: #08081214;
+    --ob-wire: #10b98124;
+    --ob-port: #10b98124;
+    --ob-port-border: #aae6d2;
+    /* Light keeps a light mint pulse; a darker green read as a smear on white. */
+    --ob-pulse: #6ee7b7;
+    --ob-pulse-glow: #5bffa080;
+    --ob-caption: #5c6079;
+    --ob-tile-bg: #ffffff;
+    --ob-tile-hover: #0808120a;
+    --ob-well: #eef1f780;
+    --ob-tile-label: #0a0a14;
+  }
+}
+[data-theme="light"] .onboarding-shell {
+  --ob-card: #ffffff;
+  --ob-card-border: #08081212;
+  /* waUhu's edge and halo — see the prefers-color-scheme block above. */
+  --ob-active-border: #10b98160;
+  --ob-active-shadow: var(--shadow-glow-onboarding-mint);
+  --ob-idle-dot: #5c6079;
+  --ob-skeleton: #08081214;
+  --ob-skeleton-strong: #08081224;
+  --ob-shimmer-soft: #08081204;
+  --ob-shimmer: #08081208;
+  --ob-line-number: #5c6079;
+  --ob-code-violet: #7c3aed24;
+  --ob-code-cyan: #0891b224;
+  --ob-check-bg: #eef1f7;
+  --ob-check-border: #aae6d2;
+  --ob-check-done: #10b98114;
+  --ob-identity-line: #08081214;
+  --ob-wire: #10b98124;
+  --ob-port: #10b98124;
+  --ob-port-border: #aae6d2;
+  --ob-pulse: #6ee7b7;
+  --ob-pulse-glow: #5bffa080;
+  --ob-caption: #5c6079;
+  --ob-tile-bg: #ffffff;
+  --ob-tile-hover: #0808120a;
+  --ob-well: #eef1f780;
+  --ob-tile-label: #0a0a14;
+}
+
 .onboarding-shell > header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  max-width: 1104px;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  height: var(--ob-header-h);
+  max-width: var(--ob-content-w);
+  width: 100%;
   margin: 0 auto;
 }
+/* `1 0 auto`: this box is never shorter than what it holds, so a composition taller
+   than the window pushes the shell into its own scroll rather than being clipped above
+   the fold — and centring a child inside it can never push that child off the top. */
 .onboarding-shell-content {
+  flex: 1 0 auto;
   display: flex;
-  align-items: center;
-  min-height: calc(100% - 44px);
-  padding: 28px 0;
+  align-items: flex-start;
+  justify-content: center;
 }
+/* The two steps are anchored differently because the design anchors them differently.
+   JuwcG and KIxnF centre the welcome in their frame; IWQi6 tops the setup out at its
+   own 64.5 padding. So the welcome's y is a RESULT of the window height — it is 65 at
+   the design's own 756 content box and lower in a taller one — while the setup's is the
+   position itself. Whichever is taller than the window scrolls from its top edge. */
+.onboarding-welcome { align-self: center; }
 .onboarding-welcome, .onboarding-setup {
   display: flex;
   flex-direction: column;
   align-items: center;
   width: 100%;
-  max-width: 880px;
+  max-width: var(--ob-content-w);
   margin: 0 auto;
   gap: 24px;
 }
 .onboarding-heading { text-align: center; width: 100%; }
+/* The live design's headline: 34/1.35/600 at -1.6 tracking (nodes XKQOx, Igagh and
+   hv9DA all agree), shared by the welcome and the setup title. */
 .onboarding-heading h1, .onboarding-heading h2 {
   font-size: 34px;
+  line-height: 1.35;
   font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.5px;
+  letter-spacing: -1.6px;
 }
-.onboarding-heading p { margin-top: 10px; font-size: 14px; color: var(--muted); }
-.onboarding-story { position: relative; width: 100%; }
-.onboarding-collaboration { position: relative; padding-bottom: 44px; }
-.onboarding-collaboration-cards { display: flex; justify-content: space-between; gap: 24px; }
+.onboarding-heading p { margin-top: 10px; font-size: 14px; line-height: 22px; color: var(--muted); }
+
+/* ---- Collaboration story ------------------------------------------------ */
+
+.onboarding-story { position: relative; width: 100%; display: flex; align-items: flex-start; justify-content: center; }
+.onboarding-collaboration {
+  position: relative;
+  width: 100%;
+  max-width: var(--ob-content-w);
+  /* The diagram is sized from its own width, so the authored 880x272 proportion holds
+     at every width up to the cap, where it is the approved 1104x341.2. Narrow bands
+     set an explicit height instead: wrapped labels need more room than the proportion. */
+  aspect-ratio: 880 / 272;
+  height: var(--ob-diagram-h, auto);
+  container-type: inline-size;
+}
+.onboarding-collaboration-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 27.272727%));
+  justify-content: space-between;
+  /* The cards occupy 228 of the 272 rows; the rest is the return wire's band. */
+  height: calc(100% * 228 / 272);
+  position: relative;
+  z-index: 1;
+  /* One design unit: the frames are drawn on an 880 box, so everything the card draws
+     is written as its authored number times this unit and stays proportional as the
+     diagram grows to the cap. Text and icons keep their own sizes on purpose — a card
+     that is a quarter taller should not read as a zoomed screenshot. */
+  --ob-u: calc(100cqw / 880);
+}
 .onboarding-collaboration-card {
-  flex: 0 1 240px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   min-width: 0;
-  height: 228px;
-  border-radius: 16px;
-  padding: 18px 20px;
-  background: linear-gradient(150deg, var(--surface-2), var(--surface));
-  transition: border-color 180ms, box-shadow 180ms;
+  border-radius: calc(16 * var(--ob-u));
+  border: 1px solid var(--ob-card-border);
+  background: var(--ob-card);
+  padding: calc(18 * var(--ob-u)) calc(20 * var(--ob-u));
+  overflow: hidden;
+  transition: border-color 650ms, box-shadow 650ms;
 }
-.onboarding-collaboration-card[data-active="true"], .onboarding-assistant:hover, .onboarding-assistant:focus-within {
-  border-color: color-mix(in srgb, var(--mint) 34%, transparent);
-  box-shadow: var(--shadow-glow-lg-mint);
+.onboarding-collaboration-card[data-active="true"],
+.onboarding-assistant:hover, .onboarding-assistant:focus-within {
+  border-color: var(--ob-active-border);
+  box-shadow: var(--ob-active-shadow);
 }
-.onboarding-wires { position: absolute; inset: 0; width: 100%; height: 272px; pointer-events: none; }
-.onboarding-story-status { display: flex; align-items: center; gap: 7px; font-size: 10px; height: 14px; color: var(--muted); }
-.onboarding-story-status > span { flex: 1; white-space: nowrap; }
-.onboarding-status-glyph { width: 14px; height: 14px; flex-shrink: 0; }
-.onboarding-status-copy { animation: onboarding-status-in 250ms ease-out; }
-@keyframes onboarding-status-in { from { opacity: 0; } to { opacity: 1; } }
-.onboarding-skeleton { height: 134px; padding-top: 22px; display: flex; flex-direction: column; gap: 10px; }
-.onboarding-skeleton-row { display: flex; align-items: center; gap: 10px; height: 7px; }
-.onboarding-skeleton-line { display: block; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--foreground) 12%, transparent); }
-.onboarding-skeleton-claude .onboarding-skeleton-row:first-child .onboarding-skeleton-line { height: 9px; width: 55% !important; background: color-mix(in srgb, var(--foreground) 25%, transparent); }
-.onboarding-skeleton-codex .onboarding-skeleton-line { background: color-mix(in srgb, var(--cyan) 36%, transparent); }
-.onboarding-skeleton-codex .onboarding-skeleton-row:nth-child(even) .onboarding-skeleton-line { background: color-mix(in srgb, var(--violet) 36%, transparent); }
-.onboarding-code-number { font: 8px monospace; color: var(--muted); }
-.onboarding-skeleton-opencode { gap: 18px; }
-.onboarding-test-check { display: flex; width: 12px; height: 12px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--mint-ink); font-size: 10px; align-items: center; justify-content: center; flex-shrink: 0; }
-.onboarding-story-identity { display: flex; align-items: center; gap: 11px; padding-top: 16px; border-top: 1px solid var(--border); }
-.onboarding-story-identity strong { font-size: 14px; font-weight: 600; }
-.onboarding-story-identity > span:last-child { margin-left: auto; font-size: 11px; color: var(--muted); }
-.onboarding-story-caption { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); padding: 0 14px; background: var(--background); color: var(--muted); font-size: 10px; white-space: nowrap; }
-.onboarding-motion-controls { position: absolute; right: 0; bottom: -6px; display: flex; color: var(--muted); }
-.onboarding-access { max-width: 640px; width: 100%; padding: 16px 0; }
-.onboarding-access > p { text-align: center; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+/* The card's 192 of content is authored as 14 status + 119 skeleton + 15 + 44 identity.
+   The skeleton is the flexible one, so anything the other three fail to claim pools
+   below the last bar — which is exactly what an unscaled 16px glyph and 28px logo did
+   at the cap. Both ends therefore reserve their authored share in design units, and the
+   skeleton keeps the 119 it was drawn at. Reserving rather than fixing also aligns the
+   three separators, since the rows above them are now the same height by construction. */
+.onboarding-story-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  min-height: calc(14 * var(--ob-u));
+  color: var(--muted);
+  font-size: 10px;
+}
+.onboarding-status-icon { flex-shrink: 0; }
+.onboarding-status-text { white-space: nowrap; }
+.onboarding-status-enter { animation: onboarding-caption-enter 250ms ease-out both; }
+@keyframes onboarding-caption-enter { from { opacity: 0; } to { opacity: 1; } }
+/* 14, so the glyph fits the status row it sits in at the design's own scale instead
+   of forcing that row two pixels taller than the 14 it is drawn at. */
+.onboarding-status-glyph {
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--mint-ink);
+}
+.onboarding-status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ob-idle-dot); }
+/* One ring, mounted from the first working frame through completion. */
+.onboarding-status-mark {
+  display: block;
+  width: 14px;
+  height: 14px;
+  overflow: visible;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.onboarding-status-ring { stroke-width: 1.4; stroke-dasharray: 1; }
+.onboarding-status-check {
+  stroke-width: 1.8;
+  transform-box: view-box;
+  transform-origin: 8.5px 12.5px;
+  animation: onboarding-check-grow 300ms both;
+}
+@keyframes onboarding-check-grow {
+  0% { opacity: 0; transform: scale(0); }
+  10% { opacity: 1; }
+  65% { transform: scale(1.16); }
+  85% { transform: scale(0.96); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.onboarding-write-line {
+  opacity: 0;
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 100ms ease-out, opacity 80ms ease-out;
+}
+.onboarding-write-visible { opacity: 1; clip-path: inset(0 0 0 0); }
+.onboarding-skeleton { flex: 1; min-height: 0; padding-top: calc(17 * var(--ob-u)); position: relative; overflow: hidden; }
+.onboarding-bar {
+  display: block;
+  height: calc(6 * var(--ob-u));
+  border-radius: calc(3 * var(--ob-u));
+  background: var(--ob-skeleton);
+  flex-shrink: 0;
+}
+/* h5qtNn's own rhythm inside its 119 box: 17 above the heading, then 12 / 8 / 14 / 7 / 7
+   between the six lines, leaving 14 below the last one. The heading is excluded here
+   rather than left to lose: a class selector cannot outrank a child selector, so the
+   generic 8 silently ate the 12 this rule is the reason for. 14 is written as the
+   paragraph's own margin because it collapses with the 8 above it — the larger wins,
+   which is the gap the design draws between the two blocks. */
+.onboarding-skeleton-document > .onboarding-bar:not(.onboarding-bar-heading) { margin-bottom: calc(8 * var(--ob-u)); }
+.onboarding-bar-heading { height: calc(9 * var(--ob-u)); margin-bottom: calc(12 * var(--ob-u)); background: var(--ob-skeleton-strong); }
+.onboarding-skeleton-paragraph { display: flex; flex-direction: column; gap: calc(7 * var(--ob-u)); margin-top: calc(14 * var(--ob-u)); }
+.onboarding-bar-subheading { height: calc(7 * var(--ob-u)); background: var(--ob-card-border); }
+.onboarding-collaboration-card[data-state="working"] .onboarding-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-110%);
+  background: linear-gradient(110deg, transparent 20%, var(--ob-shimmer-soft) 45%,
+    var(--ob-shimmer) 50%, var(--ob-shimmer-soft) 55%, transparent 80%);
+  animation: onboarding-shimmer 750ms ease-in-out both;
+  pointer-events: none;
+}
+@keyframes onboarding-shimmer { to { transform: translateX(110%); } }
+
+/* u3bGM: six 11-tall rows on a 16 pitch, 14 below the box top — and, like the document,
+   14 left under the last one. The row is 11 because that is what its line number
+   occupies; the bars inside it are 6 and centre against that. */
+.onboarding-skeleton-code { display: flex; flex-direction: column; gap: calc(5 * var(--ob-u)); padding-top: calc(14 * var(--ob-u)); }
+.onboarding-code-row { display: flex; align-items: center; gap: calc(10 * var(--ob-u)); height: calc(11 * var(--ob-u)); }
+.onboarding-code-number { font-family: ui-monospace, monospace; font-size: 8px; line-height: 1; width: 7px; color: var(--ob-line-number); }
+.onboarding-code-bars { display: flex; align-items: center; gap: calc(6 * var(--ob-u)); flex: 1; min-width: 0; }
+.onboarding-bar-cyan { background: var(--ob-code-cyan); }
+.onboarding-bar-violet { background: var(--ob-code-violet); }
+
+/* xyNG1: four 12-tall rows on a 23 pitch, 17 below the box top. Fewer rows than the
+   other two, so this skeleton ends higher — the design's own asymmetry, not slack. */
+.onboarding-skeleton-tests { display: flex; flex-direction: column; gap: calc(11 * var(--ob-u)); padding-top: calc(17 * var(--ob-u)); }
+.onboarding-test-row { display: flex; align-items: center; gap: calc(9 * var(--ob-u)); }
+.onboarding-test-check {
+  height: calc(12 * var(--ob-u));
+  width: calc(12 * var(--ob-u));
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ob-skeleton-strong);
+  border-radius: calc(3 * var(--ob-u));
+  background: var(--ob-check-bg);
+  color: transparent;
+}
+/* The four checks tick in order while the tests card is working. */
+.onboarding-collaboration-card[data-state="working"] .onboarding-test-check {
+  animation: onboarding-test-pass 340ms both;
+  animation-delay: calc(var(--test-index) * 160ms);
+}
+.onboarding-tests-done .onboarding-test-check {
+  color: var(--mint-ink);
+  border-color: var(--ob-check-border);
+  background: var(--ob-check-done);
+}
+@keyframes onboarding-test-pass {
+  0%, 50% { color: transparent; border-color: var(--ob-skeleton-strong); background: var(--ob-check-bg); }
+  100% { color: var(--mint-ink); border-color: var(--ob-check-border); background: var(--ob-check-done); }
+}
+
+/* 44 from the separator to the card's inner edge, 15 of clear space above it. The
+   28px logo does not scale, so without the reserved height this block shrank as the
+   diagram grew and handed the difference to the skeleton above it. */
+.onboarding-story-identity {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex-shrink: 0;
+  min-height: calc(44 * var(--ob-u));
+  border-top: 1px solid var(--ob-identity-line);
+  padding-top: calc(16 * var(--ob-u));
+  margin-top: calc(15 * var(--ob-u));
+}
+.onboarding-story-identity > svg { flex-shrink: 0; }
+.onboarding-story-identity strong { font-size: 14px; font-weight: 550; letter-spacing: -0.3px; white-space: nowrap; }
+.onboarding-story-identity > span:last-child { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+.onboarding-wires { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.onboarding-wire { stroke: var(--ob-wire); stroke-width: 1; }
+.onboarding-port { fill: var(--ob-port); stroke: var(--ob-port-border); stroke-width: 1; }
+/* A single 16-unit segment of a 100-unit path: the pulse crosses once and leaves. */
+.onboarding-pulse-core, .onboarding-pulse-halo {
+  stroke-dasharray: 16 116;
+  stroke-dashoffset: 16;
+  stroke-linecap: round;
+  opacity: 0;
+}
+.onboarding-pulse-core { stroke: var(--ob-pulse); stroke-width: 1.6; }
+.onboarding-pulse-halo { stroke: var(--ob-pulse-glow); stroke-width: 4; }
+
+.onboarding-story-caption {
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 12px;
+  background: var(--background);
+  color: var(--ob-caption);
+  font-size: 10px;
+  line-height: 18px;
+  white-space: nowrap;
+  transition: color 300ms;
+}
+.onboarding-story-caption[data-returning="true"] { color: var(--mint-ink); }
+
+/* ---- Access tiles -------------------------------------------------------- */
+
+/* The outer tile edges land on the two vertical legs of the return wire (x=120 and
+   x=760 of the 880 viewBox), so this block is 640/880 of the diagram — and of the
+   diagram as it currently is, not of the cap. Both are laid out in the same column, so
+   one percentage keeps the edges on the legs at every width: 802.9 at the 1104 cap,
+   674.9 at a 928 content box, and so on down to the phone band. */
+.onboarding-access { width: calc(100% * 640 / 880); text-align: center; padding: 17px 0; }
+.onboarding-access > p { font-size: 12px; line-height: 20px; color: var(--muted); margin-bottom: 14px; }
 .onboarding-access-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 10px; list-style: none; }
-.onboarding-access-tile { display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font-size: 12px; }
-.onboarding-access-icon { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex-shrink: 0; transition: transform 180ms; }
-.onboarding-access-tile:hover, .onboarding-access-tile:focus, .onboarding-access-tile[data-emphasis="true"] { background: color-mix(in srgb, var(--border) 50%, var(--surface)); }
-.onboarding-access-tile:hover .onboarding-access-icon, .onboarding-access-tile:focus .onboarding-access-icon, .onboarding-access-tile[data-emphasis="true"] .onboarding-access-icon { transform: scale(1.18); }
-.onboarding-access-tile:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-.onboarding-setup { align-self: flex-start; padding-top: 24px; }
-.onboarding-assistants { width: 100%; display: flex; flex-direction: column; gap: 12px; }
-.onboarding-assistants-header { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 13px; }
-.onboarding-assistant { transition: border-color 180ms, box-shadow 180ms; }
-.onboarding-assistant-main { display: flex; align-items: center; gap: 16px; min-height: 86px; padding: 16px 20px; }
-.onboarding-assistant-logo { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; background: var(--background); border-radius: 10px; flex-shrink: 0; }
+.onboarding-access-tile {
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--ob-tile-bg);
+  color: var(--ob-tile-label);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  outline: none;
+  transition: background-color 180ms ease;
+}
+.onboarding-access-tile:hover, .onboarding-access-tile:focus-visible, .onboarding-access-tile[data-emphasis="true"] {
+  background: var(--ob-tile-hover);
+}
+.onboarding-access-tile:focus-visible { outline: 1px solid var(--mint); outline-offset: 2px; }
+.onboarding-access-icon {
+  height: 28px;
+  width: 28px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--ob-well);
+  display: grid;
+  place-items: center;
+  transition: transform 180ms ease;
+}
+.onboarding-access-tile:hover .onboarding-access-icon,
+.onboarding-access-tile:focus-visible .onboarding-access-icon,
+.onboarding-access-tile[data-emphasis="true"] .onboarding-access-icon { transform: scale(1.18); }
+
+/* ---- Primary action ------------------------------------------------------ */
+
+/* The reference draws this CTA as a flat mint fill — design.pen has no glow on any
+   button, and `brand` carries one at rest. The fill, the label pairing and the hover
+   stay the variant's; only the halo goes, which is presentation and nothing else. */
+.onboarding-primary-action {
+  box-shadow: none;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 144px;
+  height: 44px;
+  padding: 0 22px;
+  gap: 10px;
+}
+
+/* ---- Assistant setup ----------------------------------------------------- */
+
+/* The design spaces the section bar and every row by 12 (frame i3vw9: rows at 41, 141
+   and 241 below a 29 tall bar), so one gap owns both.
+   sNs1V draws this as a 360 slot holding a 329 bar-and-list, and the 24 below it is the
+   step's own gap. That 31 of remainder is the breathing space before the footer, so it
+   is reserved here rather than left over: a row that grows for an error or a wrapped
+   label takes it back, and the slot grows past 360 only once it is used up. */
+.onboarding-assistants { width: 100%; display: flex; flex-direction: column; gap: 12px; min-height: 360px; }
+.onboarding-assistants-header { display: flex; justify-content: space-between; align-items: center; }
+.onboarding-assistants-header h3 { font-size: 14px; font-weight: 600; color: var(--foreground); }
+/* The design's 88 is the row's own height, border included, so it lives here rather
+   than on the inner block; the row still grows when an error is shown. */
+.onboarding-assistant {
+  display: flex;
+  flex-direction: column;
+  min-height: 88px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  transition: border-color 650ms, box-shadow 650ms;
+}
+/* The design's 20 is measured from the row's outer edge and the row carries a 1px
+   border, so the padding inside it is 19. */
+.onboarding-assistant-main { flex: 1; display: flex; align-items: center; gap: 16px; padding: 16px 19px; }
+.onboarding-assistant-logo {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--ob-well);
+}
 .onboarding-assistant-identity { flex: 1; min-width: 0; }
 .onboarding-assistant-identity h3 { font-size: 15px; font-weight: 600; }
 .onboarding-assistant-identity p { font-size: 12px; margin-top: 4px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .onboarding-assistant-status, .onboarding-assistant-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.onboarding-assistant-error { padding: 0 20px 16px; font-size: 12px; color: var(--destructive-ink); overflow-wrap: anywhere; }
+.onboarding-assistant-error { padding: 0 19px 16px; font-size: 12px; color: var(--destructive-ink); overflow-wrap: anywhere; }
 .onboarding-assistant-error pre { margin-top: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
 .onboarding-assistant-error summary { margin-top: 8px; cursor: pointer; }
 .onboarding-setup-footer { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-@media (max-width: 900px) {
+
+/* ---- Bands --------------------------------------------------------------- */
+
+/* Below the design width the collaboration keeps its proportions and only loses
+   height; the grid percentages carry the rest. A band's `--ob-diagram-h` is the whole
+   272-row box, of which the cards keep 228 — so 250px is a 210px card. */
+@media (max-width: 1023px) {
+  .onboarding-shell { --ob-gutter: 24px; }
+}
+@media (max-width: 959px) {
+  .onboarding-shell { --ob-diagram-h: 250px; }
+  /* Below the proportional bands the card is sized by hand, so the interior returns to
+     its authored rhythm instead of following the diagram's width. */
+  .onboarding-collaboration-cards { --ob-u: 1px; }
+  /* A deliberate narrow-screen adaptation, not the design's number: the title drops to
+     30 here, and its tracking follows it proportionally (-1.6 at 34 is -0.047em). */
+  .onboarding-heading h1, .onboarding-heading h2 { font-size: 30px; letter-spacing: -1.4px; }
+  .onboarding-collaboration-card { padding: 16px; }
+  .onboarding-story-identity { gap: 8px; padding-top: 12px; margin-top: 10px; }
+  .onboarding-story-identity strong { font-size: 13px; }
+  .onboarding-story-identity > span:last-child { font-size: 10px; }
+  .onboarding-story-identity > svg { width: 25px; height: 25px; }
+}
+/* Tablet portrait and below: the caption moves under the icon row so a full label
+   wraps instead of shrinking to an unreadable size. */
+@media (max-width: 767px) {
+  .onboarding-story-status { flex-wrap: wrap; row-gap: 4px; min-height: 32px; align-content: flex-start; }
+  .onboarding-status-text { order: 3; width: 100%; white-space: normal; font-size: 11px; line-height: 13px; }
+  .onboarding-story-identity { flex-wrap: wrap; gap: 6px; }
+  .onboarding-story-identity > span:last-child { margin-left: 0; width: 100%; }
   .onboarding-assistant-main { flex-wrap: wrap; }
-  .onboarding-assistant-identity p { white-space: normal; }
   .onboarding-assistant-identity { flex-basis: calc(100% - 60px); }
   .onboarding-assistant-actions { margin-left: auto; flex-wrap: wrap; }
 }
-@media (max-width: 767px) {
-  .onboarding-shell { padding: 16px; }
-  .onboarding-heading h1, .onboarding-heading h2 { font-size: 28px; }
-  .onboarding-collaboration-cards { flex-direction: column; align-items: center; gap: 24px; }
-  .onboarding-collaboration-card { width: min(100%, 320px); flex: none; }
-  .onboarding-wires { display: none; }
-  .onboarding-collaboration-card { position: relative; }
-  .onboarding-collaboration-card + .onboarding-collaboration-card::before { content: ''; position: absolute; height: 24px; width: 1px; background: var(--border-strong); top: -25px; left: 50%; }
-  .onboarding-access-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .onboarding-assistant-main { gap: 12px; padding: 16px; }
-  .onboarding-assistant-actions { margin-left: 0; }
-  .onboarding-motion-controls { bottom: -28px; }
+@media (max-width: 599px) {
+  .onboarding-shell { --ob-gutter: 16px; --ob-diagram-h: 300px; }
+  /* Phones loosen rather than follow the proportion: -1.2 would be the 34/-1.6 ratio at
+     this size, and tight tracking is exactly what costs legibility on a small screen. */
+  .onboarding-heading h1, .onboarding-heading h2 { font-size: 25px; line-height: 1.4; letter-spacing: -0.8px; }
+  .onboarding-heading p { font-size: 12px; line-height: 20px; }
+  .onboarding-welcome, .onboarding-setup { gap: 20px; }
+  .onboarding-collaboration-card { padding: 10px 8px; border-radius: 10px; }
+  /* The kind glyph stays: it is the one mark that says which of the three kinds of work
+     a card is doing, and at 13px it costs a third of a row it already reserves. */
+  .onboarding-story-status { min-height: 46px; }
+  .onboarding-skeleton { padding-top: 12px; }
+  .onboarding-bar { height: 4px; }
+  .onboarding-bar-heading { height: 6px; margin-bottom: 8px; }
+  .onboarding-skeleton-document > .onboarding-bar:not(.onboarding-bar-heading) { margin-bottom: 5px; }
+  .onboarding-skeleton-paragraph { gap: 5px; margin-top: 8px; }
+  .onboarding-bar-subheading { height: 5px; }
+  .onboarding-skeleton-code { gap: 6px; padding-top: 12px; }
+  .onboarding-code-row { gap: 4px; height: 6px; }
+  .onboarding-code-number { font-size: 6px; }
+  .onboarding-code-bars { gap: 3px; padding-left: 0 !important; }
+  .onboarding-skeleton-tests { gap: 7px; padding-top: 12px; }
+  .onboarding-test-row { gap: 5px; }
+  .onboarding-test-check { width: 10px; height: 10px; border-radius: 2px; }
+  .onboarding-test-check svg { width: 8px; height: 8px; }
+  /* One arrangement for all three cards, rather than whichever one each name's length
+     produces. A card is ~62px wide here, so "Claude Code" wraps and "Codex" does not:
+     free flex wrapping therefore put two logos above their names and the third beside
+     one, and left the three separators as much as 21px apart. An explicit stack — logo,
+     name, role, each on its own row — with the name's box holding the two lines the
+     longest of them needs makes the three identities the same height by construction,
+     and the skeleton above absorbs the difference, so the separators line up. Nothing
+     is truncated or scaled to fit: both lines of a wrapped name are shown. */
+  .onboarding-story-identity {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+    padding-top: 9px;
+    margin-top: 8px;
+    gap: 4px;
+  }
+  .onboarding-story-identity > svg { width: 20px; height: 20px; }
+  .onboarding-story-identity strong {
+    font-size: 11px;
+    line-height: 14px;
+    letter-spacing: -0.4px;
+    white-space: normal;
+    min-height: 28px;
+  }
+  .onboarding-story-identity > span:last-child { font-size: 10px; line-height: 13px; min-height: 13px; }
+  /* The one width that deliberately leaves the wire relation: two columns of 640/880 of
+     a phone would be ~200px of tiles inside a 360px screen, so below this band the
+     block takes the full width and the tiles stay a readable target. */
+  .onboarding-access { width: 100%; padding: 10px 0; }
+  .onboarding-access-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .onboarding-access-tile { min-height: 44px; padding: 0 9px; gap: 8px; }
+  /* Small screens let the row follow its wrapped contents instead of the design's 88. */
+  .onboarding-assistant { min-height: 0; }
+  .onboarding-assistant-main { gap: 12px; padding: 14px 16px; }
+  .onboarding-assistant-logo { width: 36px; height: 36px; }
+  .onboarding-assistant-identity { flex-basis: calc(100% - 48px); }
+  .onboarding-assistant-identity p { white-space: normal; }
+  .onboarding-assistant-status, .onboarding-assistant-actions { margin-left: 0; flex-wrap: wrap; }
 }
+/* The narrowest supported width still shows every label; English needs a third line. */
+@media (max-width: 374px) {
+  .onboarding-shell { --ob-diagram-h: 320px; }
+  .onboarding-story-status { min-height: 62px; }
+}
+/* A short window scrolls. There used to be a `max-height: 760px` rule here that took
+   the step gaps from 24 to 16 and squeezed the access block, which bought roughly 30px
+   and spent the design's own spacing to do it — at 1200x800, the reference's own frame
+   size, where nothing was wrong. Whitespace is the composition; scrolling is an
+   accepted outcome. Only the narrow bands adapt, and they adapt by width. */
+
+/* ---- Stopping ------------------------------------------------------------ */
+
+/* Pausing has to stop what is being drawn, not only the clock the cards are read from.
+   The skeleton shimmer and the four test ticks are CSS animations on their own
+   timeline, which `page.clock`-style time control and a frozen React tree both leave
+   running; the same is true of a hidden tab, where they would play on unseen and
+   reappear mid-sweep. `paused` holds each of them at its current frame, so resuming
+   continues the same sweep instead of jumping to wherever wall-clock time had got to. */
+/* `!important` for the same reason the reduced-motion block below uses it: this is a
+   lifecycle override, and no authored rule should be able to out-specify "the tab is not
+   being presented". Without it the shimmer kept running — its own rule carries a class
+   more than this one, and the `animation` shorthand it uses resets play state to
+   running, so the longest effect on the screen was the one this never reached. */
+.onboarding-collaboration[data-motion="paused"],
+.onboarding-collaboration[data-motion="paused"] *,
+.onboarding-collaboration[data-motion="paused"] *::before,
+.onboarding-collaboration[data-motion="paused"] *::after {
+  animation-play-state: paused !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .onboarding-shell *, .onboarding-shell *::before { animation: none !important; transition: none !important; }
+  .onboarding-shell *, .onboarding-shell *::before, .onboarding-shell *::after {
+    animation: none !important;
+    transition: none !important;
+  }
   .onboarding-access-icon { transform: none !important; }
+  .onboarding-pulse-core, .onboarding-pulse-halo { stroke-dasharray: none; }
 }

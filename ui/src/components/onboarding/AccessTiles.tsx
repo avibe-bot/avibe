@@ -1,17 +1,20 @@
 import { useEffect, useState } from 'react';
-import { useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { PlatformIcon } from '../visual';
+import { useOnboardingMotion } from './motion';
 
 const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'];
 
-export function AccessTiles({ paused }: { paused: boolean }) {
+export function AccessTiles() {
   const { t } = useTranslation();
-  const reducedMotion = useReducedMotion() === true;
+  const { ref, running } = useOnboardingMotion();
   const [pointerInside, setPointerInside] = useState(false);
   const [focusInside, setFocusInside] = useState(false);
   const [emphasis, setEmphasis] = useState<number | null>(null);
-  const automatic = !paused && !reducedMotion && !pointerInside && !focusInside;
+  // Same lifecycle as the story: a hidden tab, a reduced-motion preference, or these
+  // tiles being scrolled out of sight stops the rotation; pointer and keyboard
+  // interaction still yield the emphasis to the user.
+  const automatic = running && !pointerInside && !focusInside;
   useEffect(() => {
     if (!automatic) return;
     const timer = window.setInterval(() => {
@@ -22,7 +25,7 @@ export function AccessTiles({ paused }: { paused: boolean }) {
   }, [automatic]);
 
   return (
-    <section className="onboarding-access" aria-label={t('onboarding.access.label')}>
+    <section ref={ref} className="onboarding-access" aria-label={t('onboarding.access.label')}>
       <p>{t('onboarding.access.description')}</p>
       <ul className="onboarding-access-grid" onPointerEnter={() => setPointerInside(true)} onPointerLeave={() => setPointerInside(false)}
         onFocus={() => setFocusInside(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusInside(false); }}>
