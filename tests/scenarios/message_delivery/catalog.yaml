@@ -332,5 +332,11 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_steering_preparation_failure_preserves_a_definitively_unwritten_batch
+  - id: MESSAGE-DELIVERY-320
+    name: Harness restart notices retain same-Session Retry without reviving historical work
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_harness_failure_retry.py::test_harness_restart_notice_retries_through_web_and_controller
 next_priority:
-  - MESSAGE-DELIVERY-320
+  - MESSAGE-DELIVERY-321

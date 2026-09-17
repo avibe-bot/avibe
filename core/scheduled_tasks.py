@@ -6526,6 +6526,15 @@ class ScheduledTaskService:
                         str(run.get("error") or "").strip() or body,
                         display_text=body,
                         failure_id=failure_id,
+                        # The durable notice owns this identity, not a parsed
+                        # failure_id or a live context token. Other delivery
+                        # rungs report the failure without offering a retry in
+                        # an unrelated Session.
+                        turn_id=(
+                            failure_notices.notice_turn_id(notice)
+                            if session_id and session_id == run.get("session_id")
+                            else None
+                        ),
                         delivery=rung,
                     )
                 except Exception as exc:

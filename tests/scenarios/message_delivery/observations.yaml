@@ -1,6 +1,19 @@
 version: 1
 capability: message_delivery
 observations:
+  - id: OBS-MESSAGE-DELIVERY-008
+    source: user_feedback_and_read_only_runtime_diagnosis
+    related_scenarios:
+      - MESSAGE-DELIVERY-320
+    summary: Harness-owned restart notifications still lacked Retry after ordinary restart notifications gained it.
+    previous_assumption: Preserving the existing Harness notification owner also preserved the failed-Turn action contract.
+    observed_behavior: The accepted failed Turn and owed notice were durably linked in one Session, but the replay emitter omitted turn_id and historical Activity provenance.
+    required_updates:
+      - carry the owed notice's authoritative Turn only to the Run's own explicit Session
+      - mark replayed notifications as historical without supplying a live context token
+      - reuse Web Retry admission and one continue Delivery without rerunning Tasks or Watches
+      - retain unlinked and cross-Session fallback reports as informational notices
+      - cover real Run settlement, delivery, persistence, Web/controller admission, and existing frontend rendering
   - id: OBS-MESSAGE-DELIVERY-007
     source: user_feedback
     related_scenarios:

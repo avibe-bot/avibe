@@ -267,6 +267,7 @@ async def emit_replayed_backend_failure(
     diagnostic: str,
     *,
     failure_id: str,
+    turn_id: str | None = None,
     display_text: str | None = None,
     delivery: DeliveryEvidence | None = None,
 ) -> None:
@@ -305,6 +306,11 @@ async def emit_replayed_backend_failure(
 
     ``delivery`` is filled in with what the notify attempt actually proved; the
     drain acks its durable notice on that evidence, never on a clean return.
+
+    ``turn_id`` is the durable notice's failed Turn, supplied only when the
+    delivery target is that Run's own Session. It is message provenance, never a
+    live context token. Unlinked and cross-Session reports remain informational;
+    all replays stay outside foreground Activity even when Retry is available.
     """
 
     backend_name = str(backend or "backend").strip() or "backend"
@@ -317,6 +323,9 @@ async def emit_replayed_backend_failure(
         backend_name,
         failure_id=failure_id,
         failure_id_authoritative=True,
+        output=MessageOutput(
+            metadata={"turn_id": str(turn_id or "").strip() or None, "replayed": True},
+        ),
     )
     # ``delivery`` is passed ONLY when a caller asked for it: controller-like objects
     # that implement ``emit_agent_message`` without the keyword must keep working.
