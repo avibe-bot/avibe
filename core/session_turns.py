@@ -179,8 +179,8 @@ def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
 # context.platform_specific provenance that the gate must restore when the row is
 # finally flushed — so a scheduled run enqueued behind an active turn keeps its
 # delivery override / suppression / task attribution + runs as SOURCE_SCHEDULED, not
-# a plain human turn (#84). Only immutable source=harness plus a scheduled
-# trigger makes this host provenance; user metadata cannot establish it.
+# a plain human turn (#84). Only immutable source=harness makes this host
+# provenance; user metadata cannot establish it.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3

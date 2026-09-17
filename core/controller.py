@@ -3405,7 +3405,8 @@ class Controller:
         from storage.message_deliveries import delegated_memory_owner
 
         owner = delegated_memory_owner(metadata.get("delegated_memory_owner")) if isinstance(metadata, dict) else None
-        if not admitted and owner and payload.get("delivery_source") == "harness" and payload.get("task_trigger_kind"):
+        trigger = payload.get("task_trigger_kind")
+        if not admitted and owner and payload.get("delivery_source") == "harness" and isinstance(trigger, str) and trigger.strip():
             from avibe_memory.admission import InboundTurnFacts
             from storage.resource_access_service import metadata_allows_harness_runtime
 

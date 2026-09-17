@@ -258,3 +258,21 @@ user-row injection: both remain human and never call the Memory provider.
 Existing authenticated UI, stable proof/replay, persisted restart, OpenCode
 retry/restore, Claude caching, and public projections remain in the selection.
 Changed Python Ruff passes. Real Incus acceptance remains unverified.
+
+### CI lifecycle compatibility correction (PM decision, 2026-09-17)
+
+The clean-reviewed head `cef490d11` failed an existing scheduled-gate lifecycle
+contract: explicit `submit_scheduled` without a task trigger still means scheduled
+execution. Separate execution classification from Memory eligibility. The shared
+provenance reader requires host harness source and structured provenance only;
+owner extraction/signing and delegated admission retain the nonempty string
+trigger requirement. Keep the existing lifecycle assertion unchanged and prove
+no-trigger scheduled execution grants neither proof nor Memory reads, even with
+owner metadata. No new mechanism or identity exception is introduced.
+
+Validation: all 410 cases in full `test_internal_server.py`, durable lifecycle
+`test_session_delivery_fsm.py`, and delegated contracts pass. The original failing
+scheduled lifecycle test is unchanged. New `MEMORY-SEARCH-033` exercises the real
+shared scheduled gate with owner metadata but no trigger: dispatch remains
+scheduled, host issuance omits proof, and HTTP reads deny without provider calls.
+Changed Python Ruff passes. A new head requires fresh Codex review and CI.

@@ -799,3 +799,34 @@ def test_ordinary_ui_injection_never_becomes_scheduled(managers, monkeypatch, tm
     assert response.get_json()["author_id"] is None
     assert seen == [True]
     engine.dispose()
+
+
+def test_no_trigger_harness_retains_scheduling_without_memory(managers, monkeypatch):
+    """MEMORY-SEARCH-033: execution classification does not grant Memory eligibility."""
+    from core.caller_context import caller_env_for_platform_payload
+
+    manager, _fresh, engine, _other, _starts = managers
+    controller = _memory_controller()
+    controller.session_turns = manager
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    monkeypatch.setattr("core.internal_server.get_cached_sqlite_engine", lambda: engine)
+    create_app(controller)
+    manager._build_context = _context
+    observed = []
+
+    async def dispatched(_session, ctx, _text, **kwargs):
+        assert kwargs["source"] == "scheduled"
+        assert ctx.platform_specific["delivery_source"] == "harness"
+        assert ctx.platform_specific["message_metadata"]["delegated_memory_owner"]["user_id"] == "local"
+        assert "AVIBE_CALLER_SESSION_PROOF" not in caller_env_for_platform_payload(ctx.platform_specific, message=ctx)
+        assert not configure_memory_cli_access(controller, ctx)
+        await _search(controller, status=403)
+        controller.memory_search_payload.assert_not_called()
+        observed.append(True)
+
+    manager._run = dispatched
+    context = _context()
+    context.platform_specific["message_metadata"] = {
+        "delegated_memory_owner": {"platform": "avibe", "user_id": "local", "is_dm": False}}
+    asyncio.run(controller.session_turn_gate.submit_scheduled("ses_fsm", context, "fixture", delivery_intent="queue"))
+    assert observed == [True]

@@ -207,3 +207,9 @@ scenarios:
     kind: authorization
     layer: scenario
     test: tests/test_memory_delegated_reads.py::test_ordinary_ui_injection_never_becomes_scheduled
+  - id: MEMORY-SEARCH-033
+    name: Explicit no-trigger harness dispatch stays scheduled without granting Memory authority
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_no_trigger_harness_retains_scheduling_without_memory

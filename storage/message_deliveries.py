@@ -586,8 +586,10 @@ def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None
     elif payload.get("source") == "harness":
         provenance = scheduled_delivery_provenance(payload)
         spec = provenance["platform_specific"] if provenance else {}
+        trigger = spec.get("task_trigger_kind")
         metadata = spec.get("message_metadata")
-        owner = metadata.get("delegated_memory_owner") if isinstance(metadata, Mapping) else None
+        owner = (metadata.get("delegated_memory_owner")
+                 if isinstance(trigger, str) and trigger.strip() and isinstance(metadata, Mapping) else None)
     else:
         owner = None
     return delegated_memory_owner(owner)
@@ -610,8 +612,7 @@ def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] 
     metadata = payload.get("metadata")
     provenance = metadata.get("scheduled_provenance") if isinstance(metadata, Mapping) else None
     spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
-    trigger = spec.get("task_trigger_kind") if isinstance(spec, Mapping) else None
-    return provenance if isinstance(trigger, str) and trigger.strip() else None
+    return provenance if isinstance(spec, Mapping) else None
 
 
 def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
