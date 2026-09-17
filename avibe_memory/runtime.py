@@ -1226,10 +1226,12 @@ class MemoryRuntime:
             reason = acquired.local_observation_reason(maintenance_reason)
             if not acquired.same_lifecycle(before) or reason is not None:
                 return FailureLogObservation((), reason or "busy")
-            # Per-call durable failure history was retired with the delivery
-            # protocol. Keep the diagnostics capability explicit: unavailable
-            # is distinct from an authorized empty result.
-            return FailureLogObservation((), "memory_failure_history_unavailable")
+            # These bounded observations survive child recovery, not controller
+            # restart. Do not present them as a complete durable failure history.
+            return FailureLogObservation(
+                self.module.write_failure_observations(),
+                "memory_failure_history_unavailable",
+            )
 
     async def _processing_record_sources(
         self,

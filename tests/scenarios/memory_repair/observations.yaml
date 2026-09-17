@@ -27,3 +27,8 @@ observations:
       - MEMORY-WAKE-204
       - MEMORY-WAKE-205
     observation: Darwin arm64 tests inject the psutil boot-time read locally; public references survive the display-time shift. The real EverOS 1.2.3 pipeline requires 1024-dimensional embedding responses. Native production Wake, claims, writer, extraction, indexing and keyword recall run with test-owned storage and loopback model doubles; this is not model-quality or four-platform deployment evidence. Local Incus provisioning is blocked before target creation by required IM/model seed configuration.
+  - id: MEMORY-REPAIR-OBS-005
+    scenarios:
+      - MEMORY-WAKE-206
+      - MEMORY-WAKE-207
+    observation: Released darwin-arm64 EverOS 1.2.3 archive SHA-256 296f320ec9acc55fc01f5c4f6ff2a4a338710a33b73e41615f957ce0569e3e07 passed the isolated native route/memorize contract trial on 2026-09-17. A synthetic pipeline acknowledges after 31 seconds; withholding its response reports an ambiguous write and a later request succeeds. Real external models and unified Incus surfaces remain residual integration checks.

@@ -735,3 +735,22 @@ def test_aggregate_list_cursor_is_bound_to_selected_owner() -> None:
             projects=projects,
             fingerprint=agent_fingerprint,
         )
+
+
+@pytest.mark.asyncio
+async def test_write_anomaly_is_visible_through_processing_record(tmp_path):
+    runtime = _runtime(tmp_path)
+    writer = runtime.module._writer
+    writer._record_failure(
+        "result_unknown", "memory_provider_timeout", state="unknown", operation="add",
+    )
+    observation = await runtime._processing_record_failure_log(None)
+    assert observation.items[0].kind == "result_unknown"
+    assert observation.unavailable_reason == "memory_failure_history_unavailable"
+    from avibe_memory.processing_record import MemoryProcessingRecord, MemoryProcessingRecordPort
+    from types import SimpleNamespace
+    record = MemoryProcessingRecord(SimpleNamespace(failure_log=runtime._processing_record_failure_log))
+    projection = await record._read_durable_anomalies(None, asyncio.get_running_loop().time() + 5)
+    assert projection.source.status == "partial"
+    assert projection.items == observation.items
+    await runtime.close()

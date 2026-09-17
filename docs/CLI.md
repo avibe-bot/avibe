@@ -233,6 +233,16 @@ scan or backfill is performed by this feature.
 
 Read scoped local Memory or submit context for best-effort, process-local capture — facts the user explicitly asked to remember, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. Acceptance does not guarantee provider delivery or persistence. This command does not start a service and has no clear, configuration, export, or delete subcommands.
 
+Memory Settings' Processing Record retains up to 50 recent write anomalies for
+this service process. It distinguishes an unknown submitted result from captures
+discarded before submission; consecutive discarded captures share an
+`affected_count`. Native engine recovery preserves these observations, while a
+service restart or explicit data clear removes them. The source is partial,
+not a complete failure history; sanitized service logs retain operational events.
+An unknown capture is never automatically replayed. A healthy engine does not
+prove an earlier write completed. Add and flush wait for the native six-minute
+processing budget plus a ten-second response margin.
+
 `status` works from a normal terminal. `profile`, `list`, `search`, and `remember`
 require an eligible Agent shell where Avibe has injected the current Session
 context; running them from a normal terminal returns `memory_access_denied`.

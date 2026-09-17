@@ -1161,3 +1161,72 @@ def test_writer_bounds_are_fixed_and_not_user_tunable() -> None:
     assert MAX_WRITER_PERMITS == MAX_DUPLICATE_ENTRIES == MAX_PENDING_SESSIONS == 256
     assert MAX_PENDING_MESSAGE_IDS == MAX_UNFLUSHED_MESSAGES == 100
     assert MAX_UNFLUSHED_AGE_SECONDS == 30 * 60
+
+
+@pytest.mark.asyncio
+async def test_unknown_write_and_unsubmitted_drops_remain_visible_after_recovery(tmp_path):
+    """MEMORY-WAKE-207: recovery cannot erase unknown work observations."""
+    provider = FakeMemoryProvider(ingest_failures=deque([
+        MemoryProviderFailure("memory_provider_timeout", ambiguous=True),
+    ]))
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda _: True)
+    start = writer._ensure_worker
+    writer._ensure_worker = lambda: None
+    _reserve_and_offer(writer, 0)
+    _reserve_and_offer(writer, 1)
+    assert writer.offer_barrier("raw-session-1") == "queued"
+    writer._ensure_worker = start
+    start()
+    await writer.wait_idle_for_tests()
+    await writer.close()
+    recovered = FakeMemoryProvider()
+    writer.replace_provider(recovered)
+    writer.resume_intake()
+    _reserve_and_offer(writer, 2)
+    await writer.wait_idle_for_tests()
+    entries = writer.failure_observations()
+    assert [(e.kind, e.state, e.operation) for e in entries] == [
+        ("delivery_abandoned", "not_submitted", "add"),
+        ("result_unknown", "unknown", "add"),
+    ]
+    assert len(recovered.captures) == 1
+    assert "message-" not in repr(entries)
+    assert writer.dropped_count() == 1
+    assert writer._permits == MAX_WRITER_PERMITS
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_close_reports_only_unsubmitted_captures(tmp_path):
+    writer = _writer(tmp_path, FakeMemoryProvider())
+    writer._ensure_worker = lambda: None
+    _reserve_and_offer(writer, 1)
+    assert writer.offer_barrier("raw-session-1") == "queued"
+    writer._unavailable = True
+    await writer.close()
+    assert [(e.kind, e.state) for e in writer.failure_observations()] == [
+        ("delivery_abandoned", "not_submitted"),
+    ]
+    assert writer.dropped_count() == 1
+    assert writer._permits == MAX_WRITER_PERMITS
+    writer.reset_duplicate_generation()
+    assert writer.failure_observations() == ()
+
+
+@pytest.mark.asyncio
+async def test_failure_evidence_is_bounded_and_server_errors_do_not_claim_no_write(tmp_path):
+    writer = _writer(tmp_path, FakeMemoryProvider(add_results=deque([
+        AddRejected("synthetic", "INTERNAL_ERROR", server_fault=True),
+    ])))
+    _reserve_and_offer(writer, 0)
+    await writer.wait_idle_for_tests()
+    entry = writer.failure_observations()[0]
+    assert (entry.kind, entry.state, entry.request_id) == ("result_unknown", "unknown", "synthetic")
+    for _ in range(MAX_WRITER_PERMITS):
+        writer._record_unsubmitted_drop()
+    assert writer.failure_observations()[0].affected_count == MAX_WRITER_PERMITS
+    assert writer.failure_observations()[1] == entry
+    for _ in range(60):
+        writer._record_failure("result_unknown", "memory_provider_timeout", state="unknown", operation="add")
+    assert len(writer.failure_observations()) == 50
+    await writer.close()

@@ -2649,3 +2649,19 @@ def test_sidecar_failure_logs_never_contain_capture_or_response_canaries(caplog)
     assert rejection.error_code is None
     assert capture_canary not in caplog.text
     assert response_canary not in caplog.text
+
+
+def test_write_transport_outlasts_native_memorize_deadline():
+    """Both native write routes await the same bounded memorize invocation."""
+    def handler(request):
+        assert request.extensions["timeout"]["read"] > 360.0
+        status = "accumulated" if request.url.path.endswith("/add") else "no_extraction"
+        return httpx.Response(200, json={"request_id": "test", "data": {"status": status}})
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/unused-memory-test.sock"))
+        await provider.add(ProviderCapture(SESSION_REF, "synthetic", 1))
+        await provider.flush(SESSION_REF)
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())

@@ -410,3 +410,4 @@ class MemoryFailureLogEntry:
     state: str = "unknown"
     operation: str = "unknown"
     generation: int = 0
+    affected_count: int = 1

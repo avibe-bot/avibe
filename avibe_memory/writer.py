@@ -7,9 +7,10 @@ import logging
 import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Literal
+from uuid import uuid4
 
 from avibe_memory.attachments import AttachmentPinError, AttachmentPinStore, PinnedBundle
 from core.blocking import run_blocking
@@ -28,7 +29,9 @@ from avibe_memory.everos import (
 )
 from avibe_memory.observations import AddResult, FlushResult
 from avibe_memory.store import MemoryStore, VolatileAdmission
-from avibe_memory.types import CaptureAttachment, ProviderSessionRef
+from avibe_memory.types import (
+    CaptureAttachment, MemoryFailureKind, MemoryFailureLogEntry, ProviderSessionRef,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -148,6 +151,7 @@ class BestEffortMemoryWriter:
         self._unavailable = False
         self._attachments_disabled = False
         self.dropped = 0
+        self._failures: deque[MemoryFailureLogEntry] = deque(maxlen=50)
 
     @property
     def unavailable(self) -> bool:
@@ -157,8 +161,45 @@ class BestEffortMemoryWriter:
     def attachments_enabled(self) -> bool:
         return not self._attachments_disabled
 
+    def failure_observations(self) -> tuple[MemoryFailureLogEntry, ...]:
+        """Recent process-local anomalies; retained across native child recovery."""
+
+        return tuple(reversed(self._failures))
+
+    def _record_failure(
+        self, kind: MemoryFailureKind, error: str, *,
+        state: str, operation: str, request_id: str | None = None,
+    ) -> None:
+        occurred_at = self._now()
+        if occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+        entry = MemoryFailureLogEntry(
+            id=uuid4().hex, kind=kind,
+            occurred_at=occurred_at.astimezone(timezone.utc).isoformat(timespec="milliseconds"),
+            error_code=error, state=state, operation=operation, request_id=request_id,
+        )
+        self._failures.append(entry)
+        # Stable, content-free evidence also survives a controller restart in
+        # the ordinary service log. Never include captures or exception bodies.
+        logger.warning(
+            "Memory write observation id=%s kind=%s operation=%s state=%s error=%s",
+            entry.id, kind, operation, state, error,
+        )
+
+    def _record_unsubmitted_drop(self) -> None:
+        self.dropped += 1
+        if self._failures and self._failures[-1].state == "not_submitted":
+            previous = self._failures[-1]
+            self._failures[-1] = replace(previous, affected_count=previous.affected_count + 1)
+            logger.warning("Memory unsubmitted drops id=%s count=%s", previous.id, previous.affected_count + 1)
+        else:
+            self._record_failure(
+                "delivery_abandoned", "memory_sidecar_unavailable",
+                state="not_submitted", operation="add",
+            )
+
     def dropped_count(self) -> int:
-        """Return the process-local count of queue insertions discarded as full."""
+        """Return process-local queue saturation and recovery-drop counts."""
 
         return self.dropped
 
@@ -189,6 +230,7 @@ class BestEffortMemoryWriter:
         """Forget process-local duplicate claims after a completed Clear."""
 
         self._duplicate_lru.clear()
+        self._failures.clear()
 
     def reserve(
         self,
@@ -384,6 +426,8 @@ class BestEffortMemoryWriter:
             except asyncio.QueueEmpty:
                 break
             if isinstance(item, _CaptureItem):
+                if self._unavailable:
+                    self._record_unsubmitted_drop()
                 await self._cleanup_item(item)
             elif item.owns_permit:
                 self._release_permit()
@@ -445,6 +489,7 @@ class BestEffortMemoryWriter:
             try:
                 if isinstance(item, _CaptureItem):
                     if self._unavailable:
+                        self._record_unsubmitted_drop()
                         await self._cleanup_item(item)
                     else:
                         await self._deliver(item)
@@ -555,7 +600,10 @@ class BestEffortMemoryWriter:
                         sender_name=capture.sender_name,
                     )
                     continue
-                await self._terminal_failure(item, "memory_processing_failed")
+                await self._terminal_failure(
+                    item, "memory_processing_failed", request_id=result.request_id,
+                    unknown=result.server_fault,
+                )
                 return
             await self._ambiguous_outcome("memory_provider_response_invalid")
             await self._cleanup_item(item)
@@ -588,10 +636,17 @@ class BestEffortMemoryWriter:
         pending.last_ack_at = now
         await self._cleanup_item(item)
 
-    async def _terminal_failure(self, item: _CaptureItem, error: str) -> None:
+    async def _terminal_failure(
+        self, item: _CaptureItem, error: str, *, request_id: str | None = None,
+        unknown: bool = False,
+    ) -> None:
         if not self._enabled():
             await self._cleanup_item(item)
             return
+        self._record_failure(
+            "result_unknown" if unknown else "delivery_abandoned", error,
+            state="unknown" if unknown else "failed", operation="add", request_id=request_id,
+        )
         try:
             await run_blocking(self._store.set_last_error, error)
         except Exception:
@@ -652,20 +707,20 @@ class BestEffortMemoryWriter:
                     self._pending.pop(key, None)
                     await self._ambiguous_outcome(
                         "memory_provider_timeout",
-                        recover=False,
+                        recover=False, operation="flush",
                     )
                     raise
                 except MemoryProviderFailure as failure:
                     if failure.ambiguous:
                         self._pending.pop(key, None)
-                        await self._ambiguous_outcome(failure.error)
+                        await self._ambiguous_outcome(failure.error, operation="flush")
                         return
                     if failure.retryable and attempt < MAX_ATTEMPTS:
                         continue
                     result = FlushRejected(None, failure.error, True)
                 except Exception:
                     self._pending.pop(key, None)
-                    await self._ambiguous_outcome("memory_provider_response_invalid")
+                    await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush")
                     return
                 finally:
                     self._active_provider_calls = max(0, self._active_provider_calls - 1)
@@ -674,14 +729,25 @@ class BestEffortMemoryWriter:
                 break
             if isinstance(result, FlushUnknown):
                 self._pending.pop(key, None)
-                await self._ambiguous_outcome("memory_provider_timeout")
+                await self._ambiguous_outcome(
+                    "memory_provider_timeout" if result.reason == "timeout" else "memory_sidecar_unavailable",
+                    operation="flush",
+                )
                 return
             if isinstance(result, FlushSucceeded) and (
                 result.status not in {"extracted", "no_extraction"}
                 or not _valid_receipt(result.request_id)
             ):
-                await self._ambiguous_outcome("memory_provider_response_invalid")
+                await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush")
                 return
+            if isinstance(result, (FlushRejected, FlushRetryable)):
+                unknown = isinstance(result, FlushRejected) and result.server_fault
+                self._record_failure(
+                    "result_unknown" if unknown else "distillation_rejected",
+                    "memory_processing_failed", state="unknown" if unknown else "failed",
+                    operation="flush",
+                    request_id=result.request_id if isinstance(result, FlushRejected) else None,
+                )
             if isinstance(result, (FlushSucceeded, FlushRejected, FlushRetryable)):
                 # A retryable response that survives the fixed attempt budget
                 # is settled as volatile loss; never leave a scheduled marker
@@ -724,11 +790,16 @@ class BestEffortMemoryWriter:
         except asyncio.CancelledError:
             return
 
-    async def _ambiguous_outcome(self, _error: str, *, recover: bool = True) -> None:
+    async def _ambiguous_outcome(
+        self, error: str, *, recover: bool = True, operation: str = "add",
+    ) -> None:
         if not self._enabled():
             return
+        self._record_failure("result_unknown", error, state="unknown", operation=operation)
         self._unavailable = True
         self._intake_paused = True
+        if self._pending:
+            logger.warning("Memory flush tracking discarded sessions=%s", len(self._pending))
         self._pending.clear()
         if self._ambiguous_stop_reap is not None:
             try:

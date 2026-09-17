@@ -52,6 +52,7 @@ from avibe_memory.types import (
     CaptureRequest,
     CaptureSkipped,
     MemoryErrorCode,
+    MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
     MemoryListItem,
@@ -272,6 +273,11 @@ class MemoryModule:
             yield True
         finally:
             lock.release()
+
+    def write_failure_observations(self) -> tuple[MemoryFailureLogEntry, ...]:
+        """Return bounded process-local write evidence, including child recoveries."""
+
+        return self._writer.failure_observations()
 
     def pause_claims(self) -> None:
         """Synchronously fence new volatile writer admissions."""

@@ -53,8 +53,12 @@ _SIDECAR_TIMEOUT_SECONDS = 20.0
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
 _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS = 0.05
-_ADD_TIMEOUT_SECONDS = 30.0
-_FLUSH_TIMEOUT_SECONDS = 300.0
+# Both routes await memorize() in the pinned EverOS runtime. Keep the
+# transport outside its enforced invocation deadline so a slow success can reply.
+MEMORIZE_TIMEOUT_SECONDS = 360.0
+_WRITE_RESPONSE_MARGIN_SECONDS = 10.0
+_ADD_TIMEOUT_SECONDS = MEMORIZE_TIMEOUT_SECONDS + _WRITE_RESPONSE_MARGIN_SECONDS
+_FLUSH_TIMEOUT_SECONDS = _ADD_TIMEOUT_SECONDS
 PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS = 8.0
 PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS = 2.0
 PROCESSING_PROBE_MAX_ENDPOINTS = 4
@@ -465,7 +469,10 @@ class EverOSPort:
             logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
         except httpx.TimeoutException as exc:
-            logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
+            logger.warning(
+                "EverOS sidecar timeout route=%s latency_ms=%s timeout_kind=%s",
+                route, _elapsed_ms(started), type(exc).__name__,
+            )
             raise MemoryProviderFailure(
                 "memory_provider_timeout",
                 ambiguous=True,

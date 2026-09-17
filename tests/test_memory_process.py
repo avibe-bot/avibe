@@ -594,6 +594,9 @@ def test_generated_ome_profile_strategies_follow_switch(tmp_path: Path, profile_
     attachments = tmp_path / "attachments"
     memory_dir.mkdir(parents=True); (memory_dir / "generated").mkdir(); provider_root.mkdir(parents=True); attachments.mkdir(parents=True)
     _write_memory_child_config(memory_dir=memory_dir, provider_root=provider_root, attachments_root=attachments, settings=EverOSProcessSettings(profile_enabled=profile_enabled))
+    from avibe_memory.everos import MEMORIZE_TIMEOUT_SECONDS
+    native = tomllib.loads((provider_root / "everos.toml").read_text())
+    assert native["memorize"]["session_lock_timeout_seconds"] == MEMORIZE_TIMEOUT_SECONDS
     ome = tomllib.loads((provider_root / "ome.toml").read_text())
     strategies = ome["strategies"]
     assert strategies["trigger_profile_clustering"]["enabled"] is profile_enabled
