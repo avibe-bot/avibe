@@ -1,5 +1,16 @@
 # Shared Web and Desktop design implementation
 
+## Issue map (created before implementation)
+
+The owner requested 3–4 clear, independently reviewable GitHub issues. The following four issues are the implementation boundaries; no implementation has started from them:
+
+1. [#2010 — Shared first-use Welcome and assistant setup](https://github.com/avibe-bot/avibe/issues/2010)
+2. [#2011 — Shared backend connection and setup readiness](https://github.com/avibe-bot/avibe/issues/2011)
+3. [#2012 — Shared Workbench shell and General Settings](https://github.com/avibe-bot/avibe/issues/2012)
+4. [#2013 — Desktop integration and native Settings menu](https://github.com/avibe-bot/avibe/issues/2013)
+
+Issues #2010–#2012 are shared React/Python Web/Desktop work and can be accepted one at a time. Issue #2013 starts only after the first three accepted results are in the shared master path and targets the long-lived `desktop` branch. Each issue body records its reuse points, acceptance criteria, and out-of-scope boundary. The issue comments record the dependency order.
+
 ## Current status: planning only; implementation paused
 
 Owner session: `sestqz5wvu5ty`. Latest instruction: 2026-09-17 11:44 Asia/Shanghai.
