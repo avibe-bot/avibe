@@ -686,6 +686,82 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     return migrated_payload, True, tuple(warnings)
 
 
+def _migrate_legacy_opencode_catalog(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
+    """Fill released catalog omissions using only persisted routing evidence.
+
+    This is a disk-load migration, not a relaxed write parser. A selected model
+    with no unambiguous, representable native protocol must keep the original
+    file and the ordinary recovery write guard instead of losing its selection.
+    """
+    hub = payload.get("model_hub")
+    if not isinstance(hub, dict) or not isinstance(hub.get("agents"), dict):
+        return payload, False, ()
+    agent = hub["agents"].get("opencode")
+    if not isinstance(agent, dict):
+        return payload, False, ()
+    rows = agent.get("models")
+    missing_catalog = "models" not in agent
+    if not missing_catalog and (
+        not isinstance(rows, list)
+        or not any(isinstance(row, dict) and "native_protocol" not in row for row in rows)
+    ):
+        return payload, False, ()
+
+    try:
+        menu = ModelHubMenuConfig.from_payload(agent.get("menu"))
+        if missing_catalog:
+            rows = [{"id": model_id} for model_id in menu.checked]
+        models = [ModelHubBackendModelConfig.from_payload(row) for row in rows]
+        source_order = ModelHubAgentSourcesConfig.from_payload(agent.get("sources", {"order": []})).order
+        raw_sources = hub.get("sources", [])
+        raw_routes = agent.get("routes", {})
+        if not isinstance(raw_sources, list) or not isinstance(raw_routes, dict):
+            return payload, False, ()
+        sources = {
+            source.id: source
+            for source in (
+                ModelHubSourceConfig.from_payload(raw, repairing=True)
+                for raw in raw_sources
+            )
+        }
+        routes = {
+            model_id: ModelHubRouteConfig.from_payload(route, repairing=True)
+            for model_id, route in raw_routes.items()
+        }
+    except (TypeError, ValueError):
+        # Let the strict parser report malformed/retired fields as before.
+        return payload, False, ()
+
+    migrated_rows = copy.deepcopy(rows)
+    for row, model in zip(migrated_rows, models):
+        if "native_protocol" in row:
+            continue
+        route = routes.get(model.id)
+        if route and route.hops:
+            supplier_ids = [hop.source_id for hop in route.hops]
+        else:
+            supplier_ids = [
+                source_id for source_id in source_order
+                if source_id in sources
+                and any(item.id == model.id for item in sources[source_id].models)
+            ]
+        protocols = {
+            sources[source_id].protocol if source_id in sources else None
+            for source_id in supplier_ids
+        }
+        if len(protocols) != 1 or not protocols <= {"anthropic", "openai_responses"}:
+            return payload, False, (
+                "Model Hub legacy OpenCode selection has no unambiguous supported native_protocol; "
+                "repair model_hub.agents.opencode.models with an explicit native_protocol "
+                "for each selected model. The original config is preserved.",
+            )
+        row["native_protocol"] = next(iter(protocols))
+
+    migrated = copy.deepcopy(payload)
+    migrated["model_hub"]["agents"]["opencode"]["models"] = migrated_rows
+    return migrated, True, ()
+
+
 def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
     """Neutralize the legacy wall-clock default echo on reload, once.
 
@@ -726,9 +802,10 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
 
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
-    model_hub_changed = changed or migrated.get("model_hub") != payload.get("model_hub")
+    migrated, catalog_changed, catalog_warnings = _migrate_legacy_opencode_catalog(migrated)
+    model_hub_changed = changed or catalog_changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
-    return migrated, model_hub_changed, warnings
+    return migrated, model_hub_changed, (*warnings, *catalog_warnings)
 
 
 # The spellings a hand-edited config may use for a boolean, both sides in one

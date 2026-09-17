@@ -761,6 +761,27 @@ def test_member_settings_save_uses_config_recovery_semantics(management_http, ra
     assert config_path.read_bytes() == raw  # The policy read never persists recovery.
 
 
+@pytest.mark.parametrize("role", ["member", "owner"])
+def test_legacy_opencode_catalog_clears_recovery_and_allows_config_save(management_http, role):
+    """MODEL-HUB-MIGRATION-001: disk migration restores settings writes for both roles."""
+    request = management_http(role)
+    path = paths.get_config_path()
+    payload = json.loads(path.read_text())
+    payload["model_hub"]["agents"]["opencode"].pop("models")
+    path.write_text(json.dumps(payload))
+
+    response = request("GET", "/api/config")
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["config_recovery"]["required"] is False
+    response = request("POST", "/api/config", payload={"show_duration": True})
+    assert response.status_code == 200, response.get_json()
+    saved = V2Config.load()
+    assert saved.load_warnings == ()
+    assert saved.show_duration is True
+    assert saved.model_hub.agents["opencode"].models == []
+    assert json.loads(path.read_text())["remote_access"] == payload["remote_access"]
+
+
 @pytest.mark.parametrize("discord", [[], "invalid", {"bot_token": 12}])
 @pytest.mark.parametrize("surface", ["channels", "thread", "users"])
 def test_remote_member_can_save_with_recovered_discord_section(management_http, discord, surface):

@@ -144,6 +144,8 @@ capabilities:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_admission.py
       - tests/test_model_hub_config.py
+      - tests/test_model_hub_legacy_opencode_migration.py
+      - tests/test_member_management_parity.py
       - tests/test_model_hub_provenance.py
       - tests/test_model_hub_retention.py
       - tests/test_model_hub_resolution.py
