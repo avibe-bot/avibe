@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.17.3
+version: 0.17.4
 ---
 
 # Background Watch Hook
@@ -253,6 +253,17 @@ has terminal runs. Every distinct matching run ID is included, so an earlier fai
 rerun remains visible to the follow-up turn. Set the forever Watch's `--timeout 0`:
 the default 21600-second per-cycle timeout treats six quiet hours as a terminal
 failure, which is not a meaningful end condition for a PR delivery loop.
+
+The durable Actions snapshot is the notification baseline, not the latest poll.
+Missing runs, nonterminal responses, and older rerun attempts do not erase a
+previously reported result. A new head starts a new baseline; complete terminal
+results for new run IDs, rerun attempts, or conclusions still wake the Agent.
+An inventory missing a previously known run cannot establish a new CI verdict.
+Review/comment/thread activity remains reportable while CI is incomplete.
+The current head's known run inventory is retained separately from notification
+progress, including through a PR-only report or a restart. Existing cursor files
+are accepted without reseeding; notification history already overwritten by an
+older waiter cannot be reconstructed.
 
 ```bash
 STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"

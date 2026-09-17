@@ -95,6 +95,7 @@ ISSUE_COMMENT_FINGERPRINTS_KEY = "issue_comment_fingerprints"
 REVIEW_THREAD_STATES_KEY = "review_thread_states"
 PR_SNAPSHOT_KEY = "snapshot"
 ACTIONS_SNAPSHOT_KEY = "actions"
+ACTIONS_OBSERVED_KEY = "actions_observed"
 PR_FINGERPRINT_KEYS = (
     REVIEW_FINGERPRINTS_KEY,
     REVIEW_COMMENT_FINGERPRINTS_KEY,
@@ -1545,9 +1546,51 @@ def _saved_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _saved_actions_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
-    value = saved.get(ACTIONS_SNAPSHOT_KEY)
+def _saved_actions_snapshot(saved: dict[str, Any], key: str = ACTIONS_SNAPSHOT_KEY) -> dict[str, Any]:
+    value = saved.get(key)
     return value if isinstance(value, dict) else {}
+
+
+def _actions_snapshot_regressed(current: dict[str, Any], previous: dict[str, Any]) -> bool:
+    """An incomplete inventory or older attempt cannot establish a new verdict."""
+
+    for workflow, previous_runs in previous.items():
+        current_runs = {run.get("id"): run for run in current.get(workflow, [])}
+        for previous_run in previous_runs:
+            current_run = current_runs.get(previous_run.get("id"))
+            if current_run is None:
+                return True
+            previous_attempt = previous_run.get("run_attempt")
+            current_attempt = current_run.get("run_attempt")
+            if isinstance(previous_attempt, int) and (
+                not isinstance(current_attempt, int) or current_attempt < previous_attempt
+            ):
+                return True
+    return False
+
+
+def _observe_actions(
+    previous: dict[str, Any], current: dict[str, Any], head_sha: str
+) -> dict[str, Any]:
+    """Remember known run IDs/attempts without treating observation as delivery."""
+
+    observed = {}
+    for workflow, runs in current.items():
+        known = {
+            run.get("id"): run
+            for run in previous.get(workflow, [])
+            if str(run.get("head_sha") or "").casefold() == head_sha.casefold()
+        }
+        for run in runs:
+            old_attempt = known.get(run.get("id"), {}).get("run_attempt")
+            new_attempt = run.get("run_attempt")
+            if isinstance(old_attempt, int) and (
+                not isinstance(new_attempt, int) or new_attempt < old_attempt
+            ):
+                continue
+            known[run.get("id")] = run
+        observed[workflow] = list(known.values())
+    return normalize_selected_runs(observed)
 
 
 def _ci_enabled(args: argparse.Namespace) -> bool:
@@ -2087,7 +2130,7 @@ def main() -> int:
         # replay an already observed terminal Actions result.
         actions_snapshot = normalize_selected_runs(selected_actions)
     elif resumed:
-        actions_snapshot = _saved_actions_snapshot(saved)
+        actions_snapshot = normalize_selected_runs(_saved_actions_snapshot(saved))
     else:
         # Explicit PR cursor replay does not replay an unrelated already-terminal
         # Actions result. A fresh normal watch still needs the current CI snapshot
@@ -2126,6 +2169,15 @@ def main() -> int:
             review_threads_available=token is not None,
         )
         actions_snapshot = normalize_selected_runs(selected_actions) if ci_enabled else None
+
+    actions_observed = (
+        _observe_actions(
+            _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY) or _saved_actions_snapshot(saved),
+            normalize_selected_runs(selected_actions),
+            args.sha or observed_head_sha,
+        )
+        if ci_enabled else {}
+    )
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -2219,29 +2271,50 @@ def main() -> int:
 
         def _render_combined(
             cursors: tuple[int, int, int, int, str],
-        ) -> tuple[str | None, int, int, int, int, str]:
+        ) -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
             pr_result = _render(cursors)
             if not ci_enabled:
-                return pr_result
+                return (*pr_result, None)
 
-            current_actions = normalize_selected_runs(selected_actions)
-            actions_output = None
-            if actions_snapshot is None or current_actions != actions_snapshot:
-                actions_output, _failed = render_actions_result(
-                    repo=args.repo,
-                    branch=args.branch,
-                    head_sha=_active_ci_head_sha(),
-                    selected=selected_actions,
-                    success_conclusions=success_conclusions,
-                )
+            actions_output = _render_new_actions()
             if actions_output is None:
-                return pr_result
+                return (*pr_result, None)
+            reported_actions = normalize_selected_runs(selected_actions)
             if pr_result[0] is None:
-                return (actions_output, *pr_result[1:])
-            return (f"{pr_result[0]}\n{actions_output}", *pr_result[1:])
+                return (actions_output, *pr_result[1:], reported_actions)
+            return (f"{pr_result[0]}\n{actions_output}", *pr_result[1:], reported_actions)
+
+        def _render_new_actions() -> str | None:
+            current_actions = normalize_selected_runs(selected_actions)
+            if _actions_snapshot_regressed(current_actions, actions_observed):
+                return None
+            # A push starts a new CI epoch even if it returns to an earlier SHA.
+            previous = actions_snapshot if tracked_head_sha == _active_ci_head_sha() else None
+            if previous is not None and current_actions == previous:
+                return None
+            output, _failed = render_actions_result(
+                repo=args.repo,
+                branch=args.branch,
+                head_sha=_active_ci_head_sha(),
+                selected=selected_actions,
+                success_conclusions=success_conclusions,
+            )
+            return output
+
+        def _advance_actions_baseline(reported_actions: dict[str, Any] | None) -> None:
+            nonlocal actions_snapshot
+            if not ci_enabled:
+                return
+            # Only a reported terminal result advances the notification baseline.
+            # Quiet polls and PR-only reports must not erase an acknowledged CI
+            # result. The existing pending transaction covers this state too.
+            if reported_actions is not None:
+                actions_snapshot = reported_actions
+            elif tracked_head_sha != _active_ci_head_sha():
+                actions_snapshot = {workflow: [] for workflow in args.workflow}
 
         def _refresh_actions() -> None:
-            nonlocal selected_actions
+            nonlocal selected_actions, actions_observed
             if ci_enabled:
                 selected_actions = select_matching_runs(
                     state.get("actions", []),
@@ -2249,12 +2322,18 @@ def main() -> int:
                     branch=args.branch,
                     head_sha=_active_ci_head_sha(),
                 )
+                actions_observed = _observe_actions(
+                    actions_observed, normalize_selected_runs(selected_actions), _active_ci_head_sha()
+                )
 
         def _actions_waiting_for_terminal_result() -> bool:
             if not ci_enabled:
                 return False
             current_actions = normalize_selected_runs(selected_actions)
-            if actions_snapshot is not None and current_actions == actions_snapshot:
+            previous = actions_snapshot if tracked_head_sha == _active_ci_head_sha() else None
+            if _actions_snapshot_regressed(current_actions, actions_observed):
+                return True
+            if previous is not None and current_actions == previous:
                 return False
             actions_output, _failed = render_actions_result(
                 repo=args.repo,
@@ -2289,7 +2368,8 @@ def main() -> int:
                 PR_SNAPSHOT_KEY: snapshot or {},
             }
             if ci_enabled:
-                fields[ACTIONS_SNAPSHOT_KEY] = normalize_selected_runs(selected_actions)
+                fields[ACTIONS_SNAPSHOT_KEY] = actions_snapshot or {workflow: [] for workflow in args.workflow}
+                fields[ACTIONS_OBSERVED_KEY] = actions_observed
             return fields
 
         def _persist_pr_state(
@@ -2337,9 +2417,9 @@ def main() -> int:
             _persist_pr_state()
 
         def _settle(
-            first: tuple[str | None, int, int, int, int, str],
+            first: tuple[str | None, int, int, int, int, str, dict[str, Any] | None],
             pending: tuple[int, int, int, int, str],
-        ) -> tuple[str | None, int, int, int, int, str]:
+        ) -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
             """Re-poll while a batch is still landing so it costs one Agent turn."""
 
             nonlocal state
@@ -2347,12 +2427,11 @@ def main() -> int:
                 return first
 
             best = first
-            best_pr_only = _render(pending) if ci_enabled else None
 
-            def _fallback() -> tuple[str | None, int, int, int, int, str]:
-                if _actions_waiting_for_terminal_result():
-                    return best_pr_only or (None, *best[1:])
-                return best
+            def _fallback() -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
+                # Revalidate against the latest successful poll, not a transient
+                # earlier candidate that may now equal the delivered baseline.
+                return _render_combined(pending)
 
             for _round in range(SETTLE_MAX_ROUNDS):
                 # The batch is already worth a turn, so waiting for the rest of it must
@@ -2402,17 +2481,14 @@ def main() -> int:
                     return _fallback()
                 state, _count = settle_request.value
                 _refresh_actions()
-                pr_candidate = _render(pending)
                 if _actions_waiting_for_terminal_result():
-                    if pr_candidate[0] is not None:
-                        best_pr_only = pr_candidate
                     continue
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
-                candidate = _render_combined(pending)
+                candidate = _fallback()
                 if candidate[0] is None:
-                    return best
-                if candidate[1:] == best[1:]:
+                    return candidate
+                if candidate[1:6] == best[1:6]:
                     return candidate
                 best = candidate
             return _fallback()
@@ -2426,7 +2502,7 @@ def main() -> int:
         )
         pre_event_fields = _pr_state_fields()
         initial_result = (
-            (None, *pending_cursors)
+            (None, *pending_cursors, None)
             if args.seed_state
             else _render_combined(pending_cursors)
         )
@@ -2439,7 +2515,9 @@ def main() -> int:
             issue_comment_cursor,
             reaction_cursor,
             pr_status,
+            reported_actions,
         ) = initial_result
+        _advance_actions_baseline(reported_actions)
         observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
         _advance_since()
         review_fingerprints = _fingerprint_map(state["reviews"])
@@ -2631,6 +2709,7 @@ def main() -> int:
                 issue_comment_cursor,
                 reaction_cursor,
                 pr_status,
+                reported_actions,
             ) = result
             observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
             _advance_since()
@@ -2652,8 +2731,7 @@ def main() -> int:
                 committed_snapshot=snapshot,
                 review_threads_available=token is not None,
             )
-            if ci_enabled:
-                actions_snapshot = normalize_selected_runs(selected_actions)
+            _advance_actions_baseline(reported_actions)
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.

@@ -4273,6 +4273,274 @@ def test_dynamic_combined_cycles_report_activity_that_lands_during_the_follow_up
     assert second_payload[module.STAGED_KEY]["cursors"]["issue_comment_cursor"] == 601
 
 
+def _ci_run(run_id=7, *, attempt=1, workflow="CI", head="head-1", status="completed", conclusion="success"):
+    return {
+        "id": run_id,
+        "name": workflow,
+        "head_sha": head,
+        "head_branch": "feature",
+        "status": status,
+        "conclusion": conclusion,
+        "run_attempt": attempt,
+        "html_url": f"https://github.com/example/actions/runs/{run_id}",
+    }
+
+
+def _ci_state(*runs, head="head-1", comment=False):
+    state = _pr_state(review_comments=[_review_comment(501)] if comment else [])
+    state["pull_request"]["head"] = {"sha": head}
+    state["actions"] = list(runs)
+    return state
+
+
+def _seed_ci_state(module, path, *runs, workflows=("CI",)):
+    state = _ci_state(*runs)
+    _managed_state(
+        module,
+        path,
+        "wat_9",
+        **_complete_pr_baseline_fields(module, state),
+        actions=module.normalize_selected_runs(
+            module.select_matching_runs(list(runs), workflows=list(workflows), branch="feature", head_sha="head-1")
+        ),
+    )
+
+
+def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0):
+    """Use real cursor IO in tmp_path, fake GitHub, and a bounded virtual clock."""
+    clock = 0.0
+    polls = iter(states)
+    latest = states[-1]
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def fetch(*args, **kwargs):
+        nonlocal latest
+        latest = next(polls, latest)
+        return latest, 2
+
+    workflow_args = tuple(arg for workflow in workflows for arg in ("--workflow", workflow))
+    with (
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+        patch.object(module.time, "sleep", side_effect=sleep),
+    ):
+        return _run_managed(
+            module,
+            path,
+            fetch,
+            delivery=delivery,
+            extra_args=(
+                "--branch", "feature", *workflow_args, "--interval", "1", "--timeout", "100",
+                "--settle", str(settle),
+            ),
+        )
+
+
+@pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])
+def test_combined_ci_does_not_reannounce_observed_results_after_snapshot_regression(tmp_path, intermediate):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    first = _ci_run(attempt=2, conclusion="failure")
+    second = _ci_run(8)
+    _seed_ci_state(module, path, first, second)
+    regressed = {
+        "missing": _ci_state(),
+        "nonterminal": _ci_state(_ci_run(attempt=2, status="in_progress", conclusion=None), second),
+        "older-attempt": _ci_state(_ci_run(attempt=1, conclusion="failure"), second),
+        "partial": _ci_state(first),
+    }[intermediate]
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_ci_state(first, second), regressed, _ci_state(first, second)]
+    )
+
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_remembers_a_result_across_pr_only_delivery_and_restart(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    run = _ci_run()
+    _seed_ci_state(module, path, run)
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(comment=True)])
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert "GitHub Actions" not in output
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(run, comment=True)], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("new_result", ["rerun", "new-run", "new-head", "conclusion"])
+def test_combined_ci_still_reports_new_terminal_results_and_acknowledges_once(tmp_path, new_result):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    new = {
+        "rerun": _ci_run(attempt=2),
+        "new-run": _ci_run(8),
+        "new-head": _ci_run(9, head="head-2"),
+        "conclusion": _ci_run(conclusion="failure"),
+    }[new_result]
+    state = _ci_state(old, new) if new_result == "new-run" else _ci_state(new, head=new["head_sha"])
+
+    rc, first_output, payload = _ci_cycle(module, path, [state])
+    assert rc == 0
+    assert "GitHub Actions" in first_output
+    assert payload[module.STAGED_KEY]["output"] == first_output.strip()
+    assert payload["actions"] == module.normalize_selected_runs({"CI": [old]})
+
+    # Losing the acknowledgement must replay even when the API is unavailable.
+    def unavailable(*args, **kwargs):
+        raise AssertionError("replay must not reach GitHub")
+
+    rc, replay, _ = _run_managed(
+        module, path, unavailable, delivery="1", extra_args=("--branch", "feature", "--workflow", "CI")
+    )
+    assert rc == 0
+    assert replay == first_output
+
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_settle_drops_a_candidate_that_returns_to_the_reported_baseline(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_ci_state(old), _ci_state(_ci_run(attempt=2)), _ci_state(old)], settle=1
+    )
+
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_waits_for_all_workflows_without_reannouncing_a_restored_one(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    ci = _ci_run()
+    security = _ci_run(8, workflow="Security Scan")
+    workflows = ("CI", "Security Scan")
+    _seed_ci_state(module, path, ci, security, workflows=workflows)
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_ci_state(ci), _ci_state(ci, security)], workflows=workflows
+    )
+    assert rc == 124
+    assert output == ""
+
+    pending = _ci_run(attempt=2, status="in_progress", conclusion=None)
+    completed = _ci_run(attempt=2)
+    rc, output, _ = _ci_cycle(
+        module, path,
+        [_ci_state(pending, security), _ci_state(completed), _ci_state(completed, security)],
+        workflows=workflows,
+    )
+    assert rc == 0
+    assert "CI: status=completed" in output
+    assert "Security Scan: status=completed" in output
+
+
+@pytest.mark.parametrize("with_comment", [False, True])
+def test_combined_ci_settle_does_not_commit_a_terminal_subset_of_its_candidate(tmp_path, with_comment):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    failed = _ci_run(8, conclusion="failure")
+    succeeded = _ci_run(9)
+    _seed_ci_state(module, path, old)
+    candidate = _ci_state(old, failed, succeeded, comment=with_comment)
+    partial = _ci_state(old, succeeded, comment=with_comment)
+
+    rc, output, payload = _ci_cycle(
+        module, path, [_ci_state(old), candidate, partial], settle=1
+    )
+    assert rc == (0 if with_comment else 124)
+    assert "GitHub Actions" not in output
+    fields = payload[module.STAGED_KEY]["cursors"] if with_comment else payload
+    assert fields["actions"] == module.normalize_selected_runs({"CI": [old]})
+
+    # Remember the missing failed run across a restart, including a PR-only ack.
+    rc, output, _ = _ci_cycle(module, path, [partial], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+    # The candidate was withdrawn, so the full result must still be delivered.
+    rc, output, payload = _ci_cycle(module, path, [candidate], delivery="2")
+    assert rc == 0
+    assert "GitHub Actions failure" in output
+    assert "actions/runs/8" in output
+    assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs(
+        {"CI": [old, failed, succeeded]}
+    )
+
+
+def test_combined_ci_run_order_and_timestamp_changes_are_not_events(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    first = _ci_run()
+    second = _ci_run(8)
+    _seed_ci_state(module, path, first, second)
+    first["run_started_at"] = "2026-01-02T00:00:00Z"
+    second["run_started_at"] = "2026-01-01T00:00:00Z"
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(second, first)])
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_new_head_does_not_inherit_old_known_runs_or_lose_completion(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(conclusion="failure"))
+    pending = _ci_run(9, head="head-2", status="in_progress", conclusion=None)
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(pending, head="head-2")])
+    assert rc == 0
+    assert "pr_head" in output
+    assert "GitHub Actions" not in output
+
+    completed = _ci_run(9, head="head-2")
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(completed, head="head-2")], delivery="2")
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    assert "actions/runs/7" not in output
+
+
+def test_combined_ci_settle_fetch_failure_retains_the_report_and_its_snapshot(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old, new = _ci_run(), _ci_run(attempt=2)
+    _seed_ci_state(module, path, old)
+    error = urllib.error.HTTPError("https://api.github.com/example", 503, "Unavailable", hdrs=None, fp=None)
+    polls = iter([(_ci_state(new), 2), error])
+
+    def fetch(*args, **kwargs):
+        value = next(polls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    with patch.object(module.time, "sleep", return_value=None):
+        rc, output, payload = _run_managed(
+            module, path, fetch, delivery="1",
+            extra_args=("--branch", "feature", "--workflow", "CI", "--settle", "1", "--timeout", "0"),
+        )
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    assert payload["actions"] == module.normalize_selected_runs({"CI": [old]})
+    assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs({"CI": [new]})
+
+
 def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_path) -> None:
     """An unchanged delivery stamp means the report was never queued: replay it.
 
