@@ -13,7 +13,7 @@ Issues #2010–#2012 are shared React/Python Web/Desktop work and can be accepte
 
 ## Current status: implementation started for #2010 only
 
-Owner session: `sestqz5wvu5ty`. Latest instruction: 2026-09-17 11:44 Asia/Shanghai.
+Owner session: `sestqz5wvu5ty`. Active scope confirmed: 2026-09-17 15:36 Asia/Shanghai.
 
 The owner confirmed the complete design set on 2026-09-17 13:14 Asia/Shanghai and requested issue-first delivery. Issue #2010 is now the only active implementation slice. Do not dispatch #2011, #2012, or #2013 until #2010 is accepted by the owner. The source SHA below records the planning baseline; implementation code remains isolated in its assigned worktree.
 
@@ -26,8 +26,8 @@ The implementation agent must inspect the complete final Dark/Light and Chinese/
 - One installed assistant with one successfully applied subscription or API-key connection is sufficient to enter the workspace. Existing valid connections count. The user explicitly clicks Enter workspace; successful authorization alone never completes setup.
 - Reuse Settings -> Backends authorization and save semantics. Reuse the existing AgentRoutePicker and DirectoryBrowser interactions.
 - Keep existing product logo assets. Logo exploration boards are out of scope.
-- The design is shared by Web and Desktop. Owner is completing Light theme and English designs; wait for the complete approved design set before product implementation. The currently inspected Chinese Dark screens are planning evidence only. Final implementation must align both themes and languages together, preserve System mode, and use existing i18n ownership.
-- Current authorization is contract documentation only. The owner explicitly paused implementation pending design completion. Future implementation still follows shared master work first, desktop-specific integration second; merging, releasing, or changing the local running service requires its own applicable authorization.
+- The design is shared by Web and Desktop. The owner approved the complete design set on 2026-09-17; implementation must align both themes and languages together, preserve System mode, and use existing i18n ownership.
+- Current authorization covers implementation of #2010 only, followed by owner acceptance. Shared master work precedes desktop-specific integration; merging, releasing, or changing the local running service requires its own applicable authorization.
 
 Planning source snapshot: `7c028d74ebc4eb82b39a09991fcb09c8400253b0`.
 Design source: `/Users/max/workspace/ai/avibe/avibe-docs/design_desktop.pen`.
@@ -94,22 +94,22 @@ Deliver sidebar248 with header search/inbox and actual count; fixed navigation g
 
 ## Verification and delivery gates
 
-Each lane works in its own worktree and opens a real non-draft PR targeting `master`, never merges. After the owner resumes implementation, both fork from the same freshly prepared locally committed contract baseline based on then-latest master; this is an explicit orchestrator allowance to keep the contract versioned without directly committing/merging into protected master. Both PRs carry the identical plan commit; after one lands the other must rebase to remove the already-landed contract. No stacked PRs or product dependency between lanes is intended.
+Each issue uses an isolated worktree and a real non-draft PR targeting `master`, never merges without authorization. Delivery is sequential: #2010 is active from the committed contract baseline; prepare each subsequent issue from current master only after the preceding issue is accepted. Do not dispatch the historical parallel lane plan as an active mandate or stack product PRs.
 
 Load `pr-delivery-loop` and `background-watch-hook`; use exact-head Codex bot pass, zero unresolved threads across all heads, and all expected CI successful. One forever combined PR/CI watch per lane with timeout0; notify orchestrator at first PR creation so it arms its independent gate watch before subsequent pushes. Inventory findings by reviewed head and root-cause class before fixing; repeated class on two reviewed heads or three findings heads after model rewrite stops patching for orchestrator diagnosis.
 
-Run focused behavior tests, auth_setup scenario cases for onboarding, required UI build and theme/i18n validation, and Ruff on changed Python before push. Test state must be isolated from real HOME/config/keychains/services. Never restart local Avibe. Browser validation uses sanctioned local Incus runner; no reset, remote ops, or production credential writes. At final integration check both actual boundaries together, including non-ASCII draft/directory and Settings return, and record visual evidence against exported Dark frames. Unit/mock success is not a live OAuth/network claim.
+Run focused behavior tests, auth_setup scenario cases when auth changes, required UI build and theme/i18n validation, and Ruff on changed Python before push. Test state must be isolated from real HOME/config/keychains/services. Never restart local Avibe. For #2010 PM authorized fully API-mocked isolated browser checks; do not use the Incus runner, which writes primary-checkout metadata. At final integration check both actual boundaries together, including non-ASCII draft/directory and Settings return, and record visual evidence against exported Dark frames. Unit/mock success is not a live OAuth/network claim.
 
 ## Follow-on and pending inputs
 
-- Complete owner-approved Dark/Light and Chinese/English design set: pending and a prerequisite for implementation. Receive the owner start signal, reconcile the final set and this contract, then refresh master before dispatch.
+- The complete design set and #2010 start signal were received. #2011–#2013 remain queued until owner acceptance of each preceding issue; #2010 review repairs retain its existing authentication and completion boundaries.
 - Stage2 native desktop: after shared work is integrated, update from the shared master result and implement system Settings/menu/window specifics in desktop-based task worktrees. Preserve loopback/capability boundaries and existing lifecycle. No desktop->master wholesale merge is implied.
 - Master merge and release: wait for explicit owner instruction after concrete PR gates and acceptance evidence.
 
 ## Earlier pause verification
 
-On 2026-09-17, two implementation runs had been dispatched before the owner clarified the design-completion gate. Both were canceled and their session queues were verified empty. Both isolated implementation worktrees remained clean at the contract-only commit `ee14c1ad9`; neither had product-code changes or later implementation commits. The scheduled implementation liveness task was removed and no implementation watch remained armed. Preserve the worktrees as paused preparation, never treat their former briefs as a live mandate.
+On 2026-09-17, two implementation runs had been dispatched before the owner clarified the design-completion gate. Both were canceled and their session queues were verified empty. Both isolated implementation worktrees remained clean at the contract-only commit `ee14c1ad9`; neither had product-code changes or later implementation commits. The scheduled implementation liveness task was removed and no implementation watch remained armed. These earlier sessions remain canceled. The current #2010-only dispatch supersedes that pause for its assigned worktree; the shared-shell lane remains inactive.
 
 - Onboarding: session `sestvg9hbksrs`, canceled run `2c40a884e87f`, branch `feat/shared-onboarding`.
 - Shared shell/home/General: session `seshdfv3uqjxj`, canceled run `54372ae4d030`, branch `feat/shared-workspace-ui`.
-- Authoritative contract: branch `feat/shared-web-design-contract`; synchronize this pause into both prepared worktrees without starting their agents.
+- Historical contract baseline: branch `feat/shared-web-design-contract`. Its pause instruction was superseded for #2010 by the active issue-specific plan; it does not authorize starting the other issue lanes.

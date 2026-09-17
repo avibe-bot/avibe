@@ -86,10 +86,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({});
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<string | null>(null);
-  // True while a provider-modal close is reloading config into ``agents``; the
-  // promise lets handlePrimaryAction wait for and fold in that reload.
+  // One provider modal/reconciliation at a time; Configure and navigation stay
+  // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
-  const syncRef = useRef<Promise<Record<string, AgentState> | null> | null>(null);
   const [detectingAgents, setDetectingAgents] = useState<Record<string, boolean>>({});
   const [detectionErrors, setDetectionErrors] = useState<Record<string, string>>({});
   const pendingInstalls = useRef(new Set<string>());
@@ -111,6 +110,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     try {
       const result = await api.detectCli(binary || name);
       if (detectionTokens.current[name] !== token) return;
+      if (result.found) {
+        setInstallResults((prev) => {
+          if (!prev[name] || prev[name].ok) return prev;
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        });
+      }
       setAgents((prev) => ({
         ...prev,
         [name]: {
@@ -136,10 +143,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // made inside it (enabled / cli_path via useBackendRuntime) flow back into the
   // wizard's local ``agents`` state — otherwise handlePrimaryAction would save a
   // stale snapshot and clobber them. Then re-detect to refresh the status pill.
-  const syncBackendFromConfig = async (name: string): Promise<Record<string, AgentState> | null> => {
+  const syncBackendFromConfig = async (name: string) => {
     setSyncing(true);
     let cliPath = agents[name]?.cli_path;
-    let synced: Record<string, AgentState> | null = null;
     try {
       const config = await api.getConfig();
       const saved = config?.agents?.[name];
@@ -158,9 +164,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         // ``enabled`` is owned by the live card toggle, never this async sync's
         // snapshot: closing the provider modal kicks off this sync, but the user
         // may flip the toggle before it resolves. Apply the *live* enable state
-        // at both consumers — ``prev`` here, and the live ``agents`` in
-        // handlePrimaryAction — so a just-flipped toggle is never reverted.
-        synced = { [name]: merged };
+        // here so a just-flipped toggle is never reverted. Navigation consumes
+        // the live row after detection, never this pre-detection snapshot.
         setAgents((prev) => ({
           ...prev,
           [name]: { ...prev[name], ...merged, enabled: prev[name].enabled },
@@ -172,7 +177,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       setSyncing(false);
     }
-    return synced;
   };
 
   const toggle = (name: string, enabled: boolean) => {
@@ -238,31 +242,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     Object.values(agents).some((agent) => agent.enabled) && !opencodeNeedsPermission;
 
   const handlePrimaryAction = async () => {
-    // Wait for an in-flight provider-modal sync and fold its result into the
-    // snapshot we save, so a quick close-then-continue can't persist a stale
-    // ``agents`` object that reverts edits made inside the modal.
-    let mergedAgents = agents;
-    if (syncRef.current) {
-      try {
-        const synced = await syncRef.current;
-        if (synced) {
-          // Fold provider edits from the modal into the saved snapshot, but keep
-          // ``enabled`` from the live ``agents`` state — a toggle flipped after
-          // the sync started must win over the sync's stale snapshot.
-          mergedAgents = { ...agents };
-          for (const [backendName, syncedAgent] of Object.entries(synced)) {
-            mergedAgents[backendName] = {
-              ...syncedAgent,
-              enabled: agents[backendName]?.enabled ?? syncedAgent.enabled,
-            };
-          }
-        }
-      } catch {
-        // ignore — fall back to the current snapshot
-      }
-      syncRef.current = null;
-    }
-    const nextData = { agents: mergedAgents };
+    const nextData = { agents };
     if (isPage && onSave) {
       await onSave(nextData);
       return;
@@ -363,6 +343,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                         variant="secondary"
                         size="sm"
                         onClick={() => setProviderModal(name)}
+                        disabled={syncing}
                       >
                         <Sliders className="size-3.5" />
                         {t('agentDetection.configureProvider')}
@@ -446,8 +427,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               setProviderModal(null);
               // Re-read config + re-detect so runtime edits (enabled / cli_path /
               // provider defaults) and the status pill reflect whatever changed
-              // inside the modal. Keep the promise so Continue can await it.
-              if (name) syncRef.current = syncBackendFromConfig(name);
+              // inside the modal before Configure or navigation is available.
+              if (name) void syncBackendFromConfig(name);
               // The Configure-provider modal embeds its OWN useOpencodePermission
               // instance, so a permission write inside it doesn't touch this
               // wizard's gate/callout state. Re-read opencode.json so the gate
@@ -511,6 +492,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => setProviderModal(name)}
+            configuringDisabled={syncing}
             enabledControl={<label className="flex items-center gap-2 text-xs text-muted">
               <input type="checkbox" className="size-3.5 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                 checked={agent.enabled} onChange={(event) => toggle(name, event.target.checked)} />

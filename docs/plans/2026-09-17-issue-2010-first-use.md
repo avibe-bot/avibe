@@ -54,8 +54,43 @@ hover and keyboard focus suspend idle emphasis without moving the labels.
 
 No real backend login or live credential readiness claim is made in this slice.
 
+## Review circuit-breaker decision (2026-09-17)
+
+PM independently verified the full PR #2015 inventory at `03e1004fb`:
+`e1504ffc4` review 5232344841 found premature Back navigation (resolved thread
+PRRT_kwDOPbFPYs6jPxPy); `03e1004fb` review 5232430397 found overlapping provider
+reconciliation (open PRRT_kwDOPbFPYs6jP88p) and stale installation errors after
+successful detection (open PRRT_kwDOPbFPYs6jP88t). Two findings-bearing heads share
+the synchronization/navigation class, triggering the breaker. Both lint runs
+35192733742 and 35193718025 failed the same dynamic i18n key coverage check.
+
+PM authorized a local repair: admit only one provider configuration/reconciliation
+at a time, return the final live rows from both navigation actions without replaying
+a pre-detection snapshot, clear only obsolete failed-install evidence after a
+current successful detection, and use a literal Claude summary translation key.
+Deferred config/probe consumer tests must preserve canonical non-ASCII paths,
+provider fields, local enable toggles, other rows and independent installations.
+The existing owner remains sufficient; no auth/readiness model rewrite is allowed.
+PM must spot-check the concrete diff and tests before the next push.
+
+Keep the original combined Watch/cursor. Owner policy prohibits manual Codex review
+triggers: cyhhao triggers automatically after pushes; report any automation gap to
+PM. Exact-head review, CI and thread gates remain required. No merge or #2011 work.
+
+PM approved the seven-file repair before push at 15:47 Asia/Shanghai after reading
+the working diff, modal/navigation paths, consuming tests and red/green logs.
+PM independently ran AssistantSetup and keyCoverage: 2 files / 26 tests passed.
+The diagnosed two-head breaker is released for this bounded repair only; any
+new repeated-class findings require a fresh independent diagnosis before edits.
+
 ## Local evidence
 
+- Breaker repair reproduced Configure admission, Continue replaying a missing
+  status/noncanonical path, and obsolete install error projection before fixes.
+  Consumer tests cover two deferred configuration cycles through Back and
+  Continue, independent installation, unsuccessful probes and stale-token success.
+  Focused checks (81 tests including key coverage, wizard mutation, lifecycle and
+  authorization consumers), UI build/lint, test typechecks and theme/catalog pass.
 - UI build, lint, theme validation, and scenario-catalog validation passed.
 - Focused Vitest covers the timeline, Welcome/controller behavior, independent
   row installs, upgrade availability, existing configuration entry and wizard

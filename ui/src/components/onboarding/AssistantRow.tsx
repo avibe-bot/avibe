@@ -19,12 +19,13 @@ export interface AssistantRowProps {
   onInstall: () => void;
   onDetect: () => void;
   onConfigure: () => void;
+  configuringDisabled?: boolean;
   /** Presentation only. The connection owner must supply confirmed state. */
   connection?: 'subscription' | 'api_key';
 }
 
 export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, enabledControl,
-  onInstall, onDetect, onConfigure, connection }: AssistantRowProps) {
+  onInstall, onDetect, onConfigure, configuringDisabled = false, connection }: AssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
   return (
@@ -52,7 +53,7 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             {t(installing ? 'agentDetection.installing' : error ? 'common.retry' : 'onboarding.setup.install')}
           </Button>}
           {status === 'unknown' && !detecting && <Button variant="secondary" size="sm" onClick={onDetect}><RefreshCw size={14} />{t('common.retry')}</Button>}
-          <Button variant="secondary" size="sm" className="h-[34px]" onClick={onConfigure} disabled={installing || detecting}>
+          <Button variant="secondary" size="sm" className="h-[34px]" onClick={onConfigure} disabled={configuringDisabled || installing || detecting}>
             {connection ? <Check size={14} className="text-mint-ink" /> : <Sliders size={14} />}
             {t(connection ? `onboarding.setup.${connection}Connected` : 'agentDetection.configureProvider')}
           </Button>

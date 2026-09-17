@@ -52,7 +52,9 @@ export function CollaborationStory({ paused, onPausedChange }: {
                 data-state={state} aria-label={t(`onboarding.story.${backend}.name`)}>
                 <div className="onboarding-story-status" aria-hidden="true">
                   <Icon size={13} />
-                  <span key={phase} className={paused ? '' : 'onboarding-status-copy'}>{t(`onboarding.story.${backend}.${phase}`)}</span>
+                  <span key={phase} className={paused ? '' : 'onboarding-status-copy'}>
+                    {phase === 'summary' ? t('onboarding.story.claude.summary') : t(`onboarding.story.${backend}.${state}`)}
+                  </span>
                   <svg viewBox="0 0 14 14" className="onboarding-status-glyph">
                     <circle cx="7" cy="7" r="2.5" fill="currentColor" opacity={state === 'waiting' ? 0.5 : 0} />
                     <circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--mint)" strokeWidth="1.2"
