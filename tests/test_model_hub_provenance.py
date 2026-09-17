@@ -394,3 +394,35 @@ def test_model_history_client_rpc_http_share_nullable_read_only_result(monkeypat
     assert response.get_json() == {"ok": True, "contract_version": 10, "provenance": record}
     assert store.config.to_payload() == before
     assert adapter.synced == []
+
+
+@pytest.mark.parametrize("message,expected", [
+    (None, None),
+    ({"message": "not a string"}, None),
+    (" \n\t ", None),
+    ("worker\n unavailable", "worker unavailable"),
+    ('busy api_key="abc def"', 'busy [redacted]'),
+    ('busy Authorization: Basic YWJjOmRlZg==', 'busy [redacted]'),
+    ('busy https://user:password@example.test/path?token=secret', 'busy [redacted-url]'),
+    ('busy sk-fixturesecret1234', 'busy [redacted]'),
+    ('busy refresh_token=short', 'busy [redacted]'),
+])
+def test_upstream_error_message_sanitization(message, expected):
+    from core.handlers.model_hub.errors import sanitize_upstream_error_message
+
+    assert sanitize_upstream_error_message(message) == expected
+
+
+def test_error_message_observation_is_bounded_and_only_reads_error_envelopes():
+    from core.handlers.model_hub.stream_wire import ProtocolFactProjector
+
+    for error in [{}, {"message": {"secret": "not-a-string"}}, {"message": "x" * 20000}]:
+        projector = ProtocolFactProjector("openai_responses")
+        projector.feed(json.dumps({"error": error, "message": "not-an-error-message"}).encode())
+        observation = projector.finish(streamed=False)
+        assert observation.outcome == "failed_terminal"
+        assert observation.upstream_error_message is None
+
+    projector = ProtocolFactProjector("openai_responses")
+    projector.feed(b'{"error":{"message":"old"},"error":{"code":"server_error"}}')
+    assert projector.finish(streamed=False).upstream_error_message is None

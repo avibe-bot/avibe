@@ -29,6 +29,7 @@ from .classification import (
     ResolutionReason,
     machine_error_codes,
 )
+from .errors import sanitize_upstream_error_message
 from .events import (
     EVENT_REASON_AUTHORITY,
     RETIRED_PERSISTED_REASON_DEGRADATIONS,
@@ -1671,10 +1672,13 @@ class TurnCorrelationRegistry:
                 trace.served = identity.payload()
                 trace.terminal_error = None
                 return
+            message = sanitize_upstream_error_message(outcome.upstream_error_message)
+            diagnostic = {"upstream_error_message": message} if message is not None else {}
             if decision.action == "fallback" and decision.reason is not None:
                 trace.failed_attempts.append(
                     {
                         **identity.payload(), "reason": decision.reason,
+                        **diagnostic,
                         **({"http_status": outcome.http_status} if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599 else {}),
                     }
                 )
@@ -1696,6 +1700,7 @@ class TurnCorrelationRegistry:
                         else None
                     ),
                     "upstream_error_code": diagnostic_code,
+                    **diagnostic,
                 }
 
     def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:

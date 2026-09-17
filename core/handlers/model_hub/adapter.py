@@ -133,6 +133,8 @@ class RawCallOutcome:
     # Recognized model output or protocol success, independently of permissive
     # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
     recovery_verified: bool = False
+    # Diagnostic only; never fed back into classification or retry policy.
+    upstream_error_message: str | None = None
 
 
 class ObservationOutcome(str, Enum):

@@ -7388,3 +7388,100 @@ def test_supervisor_fails_closed_with_direct_mode_escape(tmp_path: Path) -> None
     assert exc_info.value.error_key == "models.engine.install_failed"
     assert exc_info.value.reason == "model_hub_engine_archive_checksum_mismatch"
     assert exc_info.value.direct_mode_available is True
+
+
+@pytest.mark.parametrize("protocol", ("anthropic", "openai_responses", "openai_chat"))
+@pytest.mark.parametrize("transport", ("http_error", "buffered_200", "sse", "sse_after_output"))
+def test_d9_upstream_error_message_survives_transport_and_persistence(tmp_path, monkeypatch, protocol, transport):
+    """D9: retain the concrete error without changing classification or forwarding."""
+    from dataclasses import replace
+
+    from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
+    from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+
+    async def run():
+        message = 'GPU worker unavailable; api_key="short-secret" Bearer abcdefghijklmnop ' + 'x' * 1500
+        error = {"type": "server_error", "message": message}
+        streamed = transport.startswith("sse")
+        after_output = transport == "sse_after_output"
+        status = 503 if transport == "http_error" else 200
+        if streamed:
+            event, payload = {
+                "anthropic": ("error", {"type": "error", "error": error}),
+                "openai_responses": ("response.failed", {"type": "response.failed", "response": {"error": error}}),
+                "openai_chat": (None, {"error": error}),
+            }[protocol]
+            output_event, output = {
+                "anthropic": ("content_block_delta", {"type": "content_block_delta", "delta": {"text": "hello"}}),
+                "openai_responses": ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "hello"}),
+                "openai_chat": (None, {"choices": [{"delta": {"content": "hello"}}]}),
+            }[protocol]
+
+            def frame(name, data):
+                return ((f"event: {name}\n" if name else "") + "data: " + json.dumps(data) + "\n\n").encode()
+
+            chunks = ([frame(output_event, output)] if after_output else []) + [frame(event, payload)]
+        else:
+            chunks = [json.dumps({"error": error, "request": "do-not-retain-body"}).encode()]
+        unread = iter(chunks)
+
+        class Content:
+            async def read(self, _size):
+                return next(unread, b"")
+
+            async def iter_chunked(self, _size):
+                for chunk in unread:
+                    yield chunk
+
+        class Response:
+            content = Content()
+            headers = {"Content-Type": "text/event-stream" if streamed else "application/json"}
+
+            def close(self):
+                pass
+
+        response = Response()
+        response.status = status
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return response
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord("src_fixture123", "custom", protocol, "https://example.test/v1",
+                              "cred_fixture123", (), ("model-a",), "source-fixture123")
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=streamed, request_protocol=protocol,
+        )
+        if handle.stream is not None:
+            assert b"".join([chunk async for chunk in handle.stream]) == b"".join(chunks)
+        outcome = await handle.outcome()
+        assert outcome.http_status == status
+        assert outcome.upstream_error_message.startswith("GPU worker unavailable;")
+        assert len(outcome.upstream_error_message) == 1024
+        assert "short-secret" not in outcome.upstream_error_message
+        assert "abcdefghijklmnop" not in outcome.upstream_error_message
+        decision = classify_outcome(outcome)
+        assert decision == classify_outcome(replace(outcome, upstream_error_message=None))
+        assert decision.reason == "server_error"
+        assert decision.action == ("surface" if after_output else "fallback")
+
+        store = BoundedProvenanceStore(tmp_path / "records.json")
+        registry = TurnCorrelationRegistry(store)
+        token = registry.credentials("codex", "fixture", "turn-message")
+        registry.begin_gateway_request(backend="codex", token=token, requested_model_id="model-a")
+        registry.begin_attempt("turn-message", source_id=source.source_id, resolved_model_id="model-a",
+                               channel="hub", via_mapping=False)
+        registry.finish_attempt("turn-message", outcome=outcome, decision=decision)
+        registry.settle("turn-message", settled_by=SETTLED_BY_TERMINAL_RESULT)
+        record = BoundedProvenanceStore(store.path).get("turn-message")
+        diagnostic = record["terminal_error"] if after_output else record["failed_attempts"][0]
+        assert diagnostic["upstream_error_message"] == outcome.upstream_error_message
+        schema = json.loads((Path(__file__).parents[1] / "docs/plans/model-hub-contracts/turn-provenance.schema.json").read_text())
+        Draft7Validator(schema).validate(record)
+        assert "do-not-retain-body" not in store.path.read_text()
+
+    asyncio.run(run())

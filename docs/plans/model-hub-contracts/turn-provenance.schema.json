@@ -5,6 +5,12 @@
   "description": "Persisted debug record for one exactly attributed Gateway turn. It records exact Source/model attempts from the effective plan in attempted order and one terminal outcome. Historical records remain readable without a route_origin or manual_override field; ambiguous attempts produce no record.",
   "type": "object",
   "definitions": {
+    "upstreamErrorMessage": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Optional credential-redacted upstream error.message, diagnostic only. Omitted when absent, unreadable or beyond the bounded JSON observation limit."
+    },
     "strippedReasoningEfforts": {
       "type": "array",
       "minItems": 1,
@@ -88,6 +94,7 @@
           "channel": { "enum": ["native_cli", "hub"] },
           "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
           "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" },
+          "upstream_error_message": { "$ref": "#/definitions/upstreamErrorMessage" },
           "http_status": {
             "type": "integer",
             "minimum": 100,
@@ -167,6 +174,7 @@
           ]
         },
         "stream_started": { "type": "boolean" },
+        "upstream_error_message": { "$ref": "#/definitions/upstreamErrorMessage" },
         "http_status": {
           "type": ["integer", "null"],
           "minimum": 100,
@@ -200,7 +208,7 @@
             "api_error",
             null
           ],
-          "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, raw messages, bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
+          "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, raw bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
         }
       },
       "dependencies": {

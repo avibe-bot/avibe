@@ -1216,7 +1216,7 @@ was observed and classification returned `upstream_request_invalid`, retain it o
 co-occurring generic `invalid_request_error` type; otherwise use existing specificity
 order. This is diagnostic selection, not a classifier rank/decision change. Never infer
 `model_not_found` from `invalid_parameter`, the requested model, or today's route.
-Unknown upstream strings, raw bodies, messages, headers and credentials are not
+Unknown machine-code strings, raw bodies, headers and credentials are not
 retained. These optional observations do not change classification, fallback or Source
 health. Historical records may omit both fields and keep their existing read behavior.
 
@@ -1225,6 +1225,22 @@ health. Historical records may omit both fields and keep their existing read beh
 It records the original upstream status, for example 503 even when native
 compatibility uses 400. Older retained records without it remain readable.
 This additive diagnostic changes neither the failure reason nor classifier.
+
+`failed_attempts[].upstream_error_message` and
+`terminal_error.upstream_error_message` optionally retain the concrete string
+`message` from the recognized upstream error envelope, including errors inside
+HTTP 200 SSE responses. Credential patterns, sensitive assignments and URLs are
+redacted before whitespace normalization and a 1,024-character cap. The existing
+bounded JSON observer omits oversized/unreadable strings; it never retains a raw
+response as a fallback. Missing messages and historical records omit the field.
+This is diagnostic-only: the classifier still receives its existing fixed message.
+The existing per-turn and latest-model provenance endpoints expose the field;
+retention remains the same 500-turn store. No UI or new logging system is added.
+
+Change contract: carry this single optional message from the shared protocol
+observer through the runtime outcome to existing provenance persistence. Validate
+HTTP and SSE errors, classification invariance, redaction, bounds, reload and
+historical compatibility under scenario D9.
 
 The dialog independently reads this projection on demand and labels it "Latest recorded
 turn" / "最近已记录回合". Its error panel and details action use the same structured record,

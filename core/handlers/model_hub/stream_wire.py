@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
 
+from .errors import sanitize_upstream_error_message
 from .async_owner import run_owned_in_thread
 from .json_wire import JSONEvent, JSONPath, JSONScope, SelectiveJSONParser
 
@@ -429,6 +430,7 @@ class ProtocolObservation:
     outcome: ProtocolObservationOutcome | None = None
     model_output_started: bool = False
     error_payload: bytes | None = None
+    upstream_error_message: str | None = None
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     sequence_number: int | None = None
     message: str | None = None
@@ -863,7 +865,7 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
             if envelope.required_error_code_path is not None:
                 paths.add(envelope.required_error_code_path)
     for error_path in _protocol_error_paths(taxonomy):
-        paths.update((error_path, (*error_path, "type"), (*error_path, "code")))
+        paths.update((error_path, (*error_path, "type"), (*error_path, "code"), (*error_path, "message")))
     if taxonomy.sequence_number_path is not None:
         paths.add(taxonomy.sequence_number_path)
     for container_path in taxonomy.usage.container_paths:
@@ -984,6 +986,7 @@ class ProtocolFactProjector:
             return ProtocolObservation(
                 outcome="failed_terminal" if matched_paths else "served",
                 error_envelope_paths=matched_paths,
+                upstream_error_message=self._error_message(matched_paths),
                 usage=usage,
                 error_type_candidates=(type_candidates if matched_paths else ()),
                 error_code_candidates=(code_candidates if matched_paths else ()),
@@ -1019,6 +1022,7 @@ class ProtocolFactProjector:
             code_candidates = self._machine_candidates("code", error_paths)
             return ProtocolObservation(
                 outcome=envelope.terminal_outcome,
+                upstream_error_message=self._error_message(error_paths),
                 model_output_started=model_output_started,
                 error_envelope_paths=(
                     envelope.error_envelope_paths
@@ -1123,6 +1127,13 @@ class ProtocolFactProjector:
             if not inside(candidate)
         }
 
+    def _error_message(self, error_paths: tuple[ErrorEnvelopePath, ...]) -> str | None:
+        for path in error_paths:
+            message = sanitize_upstream_error_message(self._scalars.get((*path, "message")))
+            if message is not None:
+                return message
+        return None
+
     def _machine_candidates(
         self,
         field: Literal["type", "code"],
@@ -1207,11 +1218,12 @@ def observe_protocol_response(
     # evidence shares the incremental reader's handling of malformed JSON.
     projector = ProtocolFactProjector(protocol)
     projector.feed(data)
-    recovery_verified = projector.finish(
+    projected = projector.finish(
         streamed=streamed,
         event_name=event_name,
         previous_sequence_number=previous_sequence_number,
-    ).recovery_verified
+    )
+    recovery_verified = projected.recovery_verified
 
     if not streamed:
         if any(
@@ -1222,6 +1234,7 @@ def observe_protocol_response(
             return ProtocolObservation(
                 outcome="failed_terminal",
                 error_payload=data,
+                upstream_error_message=projected.upstream_error_message,
                 error_envelope_paths=taxonomy.buffered_error_envelope_paths,
                 usage=usage,
             )
@@ -1261,6 +1274,7 @@ def observe_protocol_response(
             outcome=envelope.terminal_outcome,
             model_output_started=model_output_started,
             error_payload=(data if envelope.terminal_outcome == "failed_terminal" else None),
+            upstream_error_message=projected.upstream_error_message,
             error_envelope_paths=(
                 envelope.error_envelope_paths if envelope.terminal_outcome == "failed_terminal" else ()
             ),
@@ -1284,6 +1298,7 @@ class ProtocolSSEState:
     tokenizer: SSEObservationTokenizer = field(init=False)
     terminal_outcome: StreamTerminalOutcome | None = None
     error_payload: bytes | None = None
+    upstream_error_message: str | None = None
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     last_sequence_number: int = -1
     model_output_started: bool = False
@@ -1345,6 +1360,7 @@ class ProtocolSSEState:
             )
         if observation.outcome in {"served", "failed_terminal"}:
             self.terminal_outcome = observation.outcome
+            self.upstream_error_message = observation.upstream_error_message
         if observation.error_payload is not None:
             self.error_payload = observation.error_payload
             self.error_envelope_paths = observation.error_envelope_paths
@@ -1373,6 +1389,7 @@ class ProtocolSSEState:
             return ProtocolObservation(
                 outcome=self.terminal_outcome,
                 error_payload=self.error_payload,
+                upstream_error_message=self.upstream_error_message,
                 error_envelope_paths=self.error_envelope_paths,
                 model_output_started=self.model_output_started,
                 usage=self.usage,
