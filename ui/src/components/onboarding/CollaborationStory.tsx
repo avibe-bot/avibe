@@ -127,7 +127,7 @@ function Circuit({ handoff }: { handoff: { wire: number; progress: number } | nu
 /** The design has no playback controls, so the loop starts with the screen and owns itself. */
 export function CollaborationStory() {
   const { t } = useTranslation();
-  const { reducedMotion, running } = useOnboardingMotion();
+  const { ref, reducedMotion, running } = useOnboardingMotion();
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (!running) return;
@@ -145,10 +145,12 @@ export function CollaborationStory() {
   return (
     <section className="onboarding-story" aria-label={t('onboarding.story.label')}>
       <p className="sr-only">{t('onboarding.story.description')}</p>
-      {/* `data-motion` hands the same running state to the stylesheet: when the tab is
-          hidden it holds every CSS animation inside the diagram at its current frame
-          instead of letting it play on unseen against a stopped clock. */}
-      <div className="onboarding-collaboration" data-reduced-motion={reducedMotion}
+      {/* `data-motion` hands the same running state to the stylesheet: when the diagram
+          is not being presented — the tab is hidden, or it has been scrolled out of
+          sight — it holds every CSS animation inside at its current frame instead of
+          letting it play on unseen against a stopped clock. The ref is what makes the
+          second of those readable: it is this element's own visibility that decides. */}
+      <div ref={ref} className="onboarding-collaboration" data-reduced-motion={reducedMotion}
         data-motion={running ? 'running' : 'paused'}>
         <Circuit handoff={frame.handoff} />
         <div className="onboarding-collaboration-cards">

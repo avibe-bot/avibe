@@ -7,12 +7,13 @@ const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'];
 
 export function AccessTiles() {
   const { t } = useTranslation();
-  const { running } = useOnboardingMotion();
+  const { ref, running } = useOnboardingMotion();
   const [pointerInside, setPointerInside] = useState(false);
   const [focusInside, setFocusInside] = useState(false);
   const [emphasis, setEmphasis] = useState<number | null>(null);
-  // Same running state as the story, so a hidden tab or a reduced-motion preference
-  // stops both; pointer and keyboard interaction still yield the emphasis to the user.
+  // Same lifecycle as the story: a hidden tab, a reduced-motion preference, or these
+  // tiles being scrolled out of sight stops the rotation; pointer and keyboard
+  // interaction still yield the emphasis to the user.
   const automatic = running && !pointerInside && !focusInside;
   useEffect(() => {
     if (!automatic) return;
@@ -24,7 +25,7 @@ export function AccessTiles() {
   }, [automatic]);
 
   return (
-    <section className="onboarding-access" aria-label={t('onboarding.access.label')}>
+    <section ref={ref} className="onboarding-access" aria-label={t('onboarding.access.label')}>
       <p>{t('onboarding.access.description')}</p>
       <ul className="onboarding-access-grid" onPointerEnter={() => setPointerInside(true)} onPointerLeave={() => setPointerInside(false)}
         onFocus={() => setFocusInside(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusInside(false); }}>

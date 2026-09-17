@@ -21,6 +21,15 @@ import {
  * proportion (1104/880 = 1.2545...), not a re-measured design.
  */
 const DESIGN_FRAME = { width: 1200, height: 756 };
+/**
+ * The one moment every still is taken at, carried into the filename so an artifact says
+ * which phase it is rather than leaving a reader to infer it. Since `openOnboarding`
+ * pauses the clock before the page loads, this is exact and not merely settled: the same
+ * phase draws the same cards across themes, languages and sizes, which is what makes a
+ * dark/light pair of one size a content A/B rather than two unrelated frames.
+ */
+const CAPTURE_PHASE = 'codex-working';
+const CAPTURE_STATES = ['complete', 'working', 'waiting'];
 /** 20px of shell padding plus the 45px language bar: the setup's authored top (IWQi6). */
 const SETUP_TOP = 65;
 
@@ -208,6 +217,11 @@ test.describe('desktop reference geometry', () => {
 
     const assistants = await box(page, '.onboarding-assistants');
     expect(round(assistants.width)).toBe(1104);
+    // The block keeps native sNs1V's 360 slot as a reserved minimum: small content growth
+    // — a detection error, an install chip — is absorbed by the slack already there
+    // instead of moving the button, and anything larger grows the block naturally.
+    expect(await page.locator('.onboarding-assistants').evaluate((node) => getComputedStyle(node).minHeight)).toBe('360px');
+    expect(assistants.height).toBeGreaterThanOrEqual(360);
     await expect(page.locator('.onboarding-assistant')).toHaveCount(3);
     for (let index = 0; index < 3; index += 1) {
       const row = await box(page, '.onboarding-assistant', index);
@@ -231,6 +245,14 @@ test.describe('desktop reference geometry', () => {
     // The setup heading keeps the welcome's 24 to the block below it.
     const setupHeading = await box(page, '.onboarding-heading');
     expect(header.y - (setupHeading.y + setupHeading.height)).toBeCloseTo(24, 0);
+    // And the same 24 below the slot, which puts the button 52 under the last row: the
+    // slot's own spare height plus that gap. Measuring both is what proves the 52 comes
+    // from the 360 slot rather than from a margin someone tuned to match it.
+    const footer = await box(page, '.onboarding-setup-footer');
+    const lastRow = await box(page, '.onboarding-assistant', 2);
+    const cta = await box(page, '.onboarding-primary-action');
+    expect(footer.y - (assistants.y + assistants.height)).toBeCloseTo(24, 0);
+    expect(cta.y - (lastRow.y + lastRow.height)).toBeCloseTo(52, 0);
 
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath('setup-1200x800-dark-en.png') });
@@ -472,6 +494,61 @@ test.describe('motion lifecycle', () => {
     expect(await renderedPhase(page)).not.toEqual(before);
   });
 
+  /**
+   * The other half of the same lifecycle. A hidden tab is not the only way a story goes
+   * unwatched: at 390x300 the diagram and the button below it cannot share the screen, so
+   * reading the button puts the whole composition above the viewport while the document
+   * stays perfectly visible. Element visibility is what closes that, and `threshold: 0`
+   * is what keeps a partly scrolled composition alive instead of stuttering at the seam.
+   */
+  test('a story scrolled out of sight suspends, and partial visibility does not', async ({ page }, info) => {
+    const denied = await serveProduct(page);
+    await page.setViewportSize({ width: 390, height: 300 });
+    await openOnboarding(page);
+    await freezeAt(page, PHASES['codex-working']);
+    const diagram = page.locator('.onboarding-collaboration');
+    const rect = () => diagram.evaluate((node) => {
+      const found = node.getBoundingClientRect();
+      return { top: Math.round(found.top), bottom: Math.round(found.bottom) };
+    });
+    // Whichever element actually scrolls here, the page or the shell inside it.
+    const scrollBy = (delta: number) => page.evaluate((amount) => {
+      const shell = document.querySelector('.onboarding-shell') as HTMLElement | null;
+      const scroller = shell && shell.scrollHeight > shell.clientHeight ? shell : document.scrollingElement!;
+      scroller.scrollTop += amount;
+    }, delta);
+
+    await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
+    expect((await rect()).bottom).toBeLessThanOrEqual(0);
+    expect(await page.evaluate(() => document.hidden)).toBe(false);
+    await expect(diagram).toHaveAttribute('data-motion', 'paused');
+
+    const before = await renderedPhase(page);
+    const stopped = await cssEffects(page);
+    expect(stopped.every((effect) => effect.state === 'paused')).toBe(true);
+    await page.clock.runFor(3000);
+    await page.waitForTimeout(250);
+    expect(await renderedPhase(page)).toEqual(before);
+    expect(await cssEffects(page)).toEqual(stopped);
+    // The companion still for the design-frame crop: the CTA, reached by scrolling.
+    await page.screenshot({ path: info.outputPath('scrolled-cta-390x300.png') });
+
+    // Partly back: any intersecting pixel counts, so the story is live again at the seam.
+    await scrollBy(-100);
+    await page.waitForTimeout(150);
+    const seam = await rect();
+    expect(seam.top).toBeLessThan(0);
+    expect(seam.bottom).toBeGreaterThan(0);
+    await expect(diagram).toHaveAttribute('data-motion', 'running');
+
+    // And it resumed rather than restarted or skipped: the phase is the one it was
+    // holding, and it moves on from there once the clock runs again.
+    expect(await renderedPhase(page)).toEqual(before);
+    await freezeAt(page, PHASES['pm-summary'] - PHASES['codex-working']);
+    expect(await renderedPhase(page)).not.toEqual(before);
+    expect(denied).toEqual([]);
+  });
+
   test('a reduced-motion preference draws the settled story and no pulse', async ({ page }, info) => {
     await serveProduct(page);
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -561,15 +638,18 @@ test.describe('capture', () => {
   for (const viewport of VIEWPORTS) {
     for (const theme of ['dark', 'light'] as const) {
       for (const lang of ['en', 'zh'] as const) {
-        // Settled stills: every CSS effect is held past its end, so two runs of the same
-        // phase produce the same image and it can be compared against a static frame.
+        // Settled stills: the clock is held at one named phase and every CSS effect is
+        // held past its end, so two runs — or two themes — produce the same drawing and
+        // it can be compared against a static frame. The phase is in the filename because
+        // a still that does not say which moment it is cannot be compared with anything.
         test(`${size(viewport)} ${theme} ${lang}`, async ({ page }, info) => {
           await page.setViewportSize(viewport);
           await serveProduct(page);
           await openOnboarding(page, { lang, theme });
-          await freezeAt(page, PHASES['codex-working']);
+          await freezeAt(page, PHASES[CAPTURE_PHASE]);
+          expect((await renderedPhase(page)).states).toEqual(CAPTURE_STATES);
           await settleEffects(page);
-          await page.screenshot({ path: info.outputPath(`welcome-${size(viewport)}-${theme}-${lang}.png`), fullPage: true });
+          await page.screenshot({ path: info.outputPath(`welcome-${size(viewport)}-${theme}-${lang}-${CAPTURE_PHASE}.png`), fullPage: true });
           await openSetup(page, lang);
           await settleEffects(page);
           await page.screenshot({ path: info.outputPath(`setup-${size(viewport)}-${theme}-${lang}.png`), fullPage: true });
@@ -578,14 +658,22 @@ test.describe('capture', () => {
     }
   }
 
-  // The design's own content box, for overlaying an exported frame at 1:1.
+  // The design's own content box, for overlaying an exported frame at 1:1. This still is
+  // a VIEWPORT CROP, not the whole composition: at 756 the primary action sits below the
+  // fold, which is the accepted outcome rather than a layout the product should shrink to
+  // fit. The companion below shows it scrolled to, so the pair covers what one cannot.
   test('design frame content box', async ({ page }, info) => {
     await page.setViewportSize(DESIGN_FRAME);
     await serveProduct(page);
     await openOnboarding(page);
-    await freezeAt(page, PHASES['codex-working']);
+    await freezeAt(page, PHASES[CAPTURE_PHASE]);
+    expect((await renderedPhase(page)).states).toEqual(CAPTURE_STATES);
     await settleEffects(page);
-    await page.screenshot({ path: info.outputPath('welcome-design-frame-1200x756.png') });
+    await page.screenshot({ path: info.outputPath(`welcome-design-frame-1200x756-${CAPTURE_PHASE}.png`) });
+    await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
+    await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
+    await settleEffects(page);
+    await page.screenshot({ path: info.outputPath(`welcome-design-frame-1200x756-cta-${CAPTURE_PHASE}.png`) });
     await openSetup(page, 'en');
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath('setup-design-frame-1200x756.png') });

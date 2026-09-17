@@ -22,7 +22,7 @@ PR #2015 merged successfully but did not faithfully reproduce the approved Welco
 1. Every shared surface delivered by #2010 is compared to its corresponding final design state at the same effective content viewport. Record native-titlebar exclusion explicitly, retaining the designed Web content geometry. No arbitrary max-width, global zoom, or screenshot-only CSS may stand in for the designed layout.
 2. At the desktop reference, collaboration is 880x272, each card 240x228, access area 640 wide, primary Welcome action 144x44, and assistant rows 880x88. **Superseded on 2026-09-17 by the owner's accepted 1104 cap — see "Accepted width" below; the frames' 880 numbers remain the source proportion.** Read precise text, spacing, radii, borders, fills and effects from Pencil, including Light values. Larger viewports preserve designed component widths and center the content. Smaller/shorter screens adapt without clipping, horizontal overflow, overlapping labels, disconnected wires, or unreachable controls; keep the collaborative sequence legible.
 3. Welcome reproduces the authored 8.9-second loop: PM 0–1.5s; first handoff 1.5–2.25s; Codex 2.25–3.75s; second handoff 3.75–4.5s; tests 4.5–6s; return 6–7s; summary 7–8.9s. Source remains active in transit; destination activates on arrival. Document/code reveal, sequential test ticks, 850ms progress circle, 300ms hinge check, 250ms caption fade, wire ports/glow, and return caption follow the design/reference. Completed PM work stays complete during summary.
-4. ~~Pause/replay synchronize all animated layers~~ — **superseded on 2026-09-17 18:30 by the owner: the design has no playback controls, so none ship.** Hidden/offscreen content suspends nonessential work; reduced motion gives a complete static narrative. Access-tile interaction and emphasis follow the reference and preserve keyboard use. See "Playback controls removed" below.
+4. ~~Pause/replay synchronize all animated layers~~ — **superseded on 2026-09-17 18:26 by the owner: the design has no playback controls, so none ship.** Hidden/offscreen content suspends nonessential work; reduced motion gives a complete static narrative. Access-tile interaction and emphasis follow the reference and preserve keyboard use. See "Playback controls removed" below.
 5. Dark/Light and Chinese/English use the same faithful component geometry. There is no separate Light English frame: combine the approved English copy and Light visual specification. Existing logos remain unchanged. Existing configuration, detection, installation, synchronization, navigation, and recovery invariants stay intact.
 6. Evidence includes design exports, actual product screenshots, a same-size side-by-side or overlay comparison, measured geometry, and captured motion phases. Inspect desktop, intermediate, wide, narrow and short viewports; the representative matrix includes 1200x800, 1440x900, 1024x768, 768x1024, 390x844 and 320x568. A test count or a no-overflow assertion alone is not visual acceptance.
 7. Before PR delivery, PM independently checks rendered fidelity and one consuming regression test. Run focused behavior/motion/i18n tests, UI build/lint, theme/catalog checks and the scoped Impeccable detector. Changes stay hermetic with mocked APIs; never claim live OAuth or real installation coverage from mocks.
@@ -173,9 +173,10 @@ Measured from the frames rather than the exports, both screens run one rhythm fr
 - Setup (`i3vw9`): the same heading block, 24, a 29 tall section bar, 12, then 88 tall rows on a
   100 pitch, 24, and a footer that spaces action, hint and Back by 10. Inside a row: a 44 well 20
   from the outer edge, identity 16 further in, status and action against the opposite 20.
-- The setup frame already lays its container out at x=48 of the 1200 frame — it *is* 1104 wide.
-  The accepted cap is therefore the design's own setup width, applied to the welcome too, and 48
-  is the gutter at which the cap is reached.
+- The setup frame's OUTER container starts at x=48 of the 1200 frame and is 1104 wide, but the
+  rows and content inside it are drawn at 880 like the welcome's. 1104 is therefore the design's
+  own outer container, not its content width; the content reaches it only by the owner's amendment,
+  and 48 is the gutter at which that cap is met.
 
 The amendment changes exactly one term of that rhythm: the collaboration is 341.2 rather than 272,
 so the welcome needs 781 of content height where the design needed 692. A 1200x800 desktop window
@@ -194,7 +195,7 @@ PM held the first repair before push and issued a bounded correction list; the o
 part of it directly. This section is the source-backed disposition and replaces any earlier claim in
 this plan that contradicts it.
 
-#### Playback controls removed (owner, 18:30)
+#### Playback controls removed (owner, 18:26)
 
 "不需要暂停和播放按钮，设计图里都没有呀". Every user-facing pause / play / resume / replay control
 is gone, together with its reserved layout space, its state and handlers, and its copy and styles.
@@ -202,11 +203,18 @@ No substitute control replaces it. The loop starts with the screen and owns itse
 
 What stays is lifecycle only, because the browser — not the user — asks for it:
 
-- `useOnboardingMotion()` returns `running` from a reduced-motion preference and document
-  visibility. It has no setter and no UI.
+- `useOnboardingMotion()` returns `running` from a reduced-motion preference, document visibility
+  and whether the composition is on screen. It has no setter and no UI.
 - A hidden tab stops both halves of the motion together: the React clock the cards are read from,
   and the CSS animations the shimmer and the test ticks run on. Stopping only the first would leave
   the second playing on unseen and reappearing mid-sweep.
+- Being scrolled out of sight stops the same two halves, because a visible document is only half
+  the question: on a short window the diagram sits entirely above the viewport while the user reads
+  the button below it. The hook observes the element each consumer attaches its ref to, so the story
+  and the access tiles suspend independently: both are normally on screen together at desktop sizes,
+  while a short or narrow window can give them different intersection. `threshold: 0` is the
+  reading the incumbent observer in `vault-chat-requests` takes, so any intersecting pixel counts
+  and a composition at the seam stays live instead of stuttering.
 - No restart machinery was built for the removed button. Resuming continues the same sweep.
 
 Manual pause/replay UI tests are deleted; the suite now asserts the *absence* of playback controls
@@ -290,6 +298,11 @@ existing logo assets and `PlatformIcon` are untouched, an idle Codex card is aut
 is authored, and dual-card glow in a settled still is a comparison artefact of holding every effect
 at one time rather than leakage.
 
+Two observations from the 21:40 read-only visual pass are recorded as non-blocking rather than
+fixed: the English testing caption takes three lines at 320 — the footer and card baselines stay
+aligned and every word is readable, so wrapping is preferred to shrinking it — and the optical
+top/bottom difference at 768 is explained by the native header's own space, so no redesign follows.
+
 #### Evidence claims
 
 - Settled stills (every CSS effect held past its end) are the only images compared against a static
@@ -300,16 +313,38 @@ at one time rather than leakage.
   switch live, and a stored explicit preference survives the OS moving in either direction and a
   reload.
 - The fixture stays hermetic: a deny-by-default route records every non-GET or off-origin request
-  and each test asserts that list is empty. No local service, no Incus runner, no auth or install
-  claim.
+  and each test asserts that list is empty. No local service, no Incus runner, and no OAuth or
+  install was ever performed — the assistants render an installed, permitted runtime because the
+  fixture answers those reads, which is a rendering claim and not a working-integration one.
 
-#### Open question for PM
+**Capture clock ownership, corrected 2026-09-17 21:52.** `page.clock.install()` replaces the timer
+functions but leaves the clock advancing with real time — measured directly: 38 ticks of a 16ms
+interval in 600ms of wall time. Only `pauseAt` holds it. Every "settled" still therefore landed
+wherever wall-clock time had carried the story, which is how a dark and a light capture of the same
+size ended up drawing different cards. `openOnboarding` now pauses at a fixed instant, after which
+only `freezeAt` moves it; each still names its phase in its filename and the capture asserts the
+rendered states are that phase's. This was found because the new offscreen test failed on it, not to
+improve a claim.
 
-Item 3's "minimum 360px slot at desktop plus the 24px gap" does not resolve against a measured
-region: below the diagram the welcome reserves 24 + access 160 + 24 + action 44 = 252, and the
-setup's assistant block is 48 + 12 + 3x88 + 2x12 = 348. Everything else in item 3 is implemented and
-asserted (no compression, 24px gaps, 88px rows, 12px spacing, scrolling preferred, no shrunk fonts
-or buttons). Naming the region would let the 360 be asserted directly.
+Two limitations stand in the batch as it exists:
+
+- `welcome-design-frame-1200x756-codex-working.png` is a VIEWPORT CROP, not a whole composition: at
+  756 the primary action is below the fold. It proves matching in-view geometry only. Scrolling is
+  the accepted outcome and the button is reachable; the companion `…-cta-…` still shows it scrolled
+  to, and a second companion at 390x300 comes from the offscreen test.
+- Images produced before the clock fix are not an exact-phase cross-theme pair, whatever their
+  filename said. No deterministic same-phase A/B may be claimed for that batch. The batch shipped
+  with this change is regenerated under the paused clock, where the phase is exact by construction.
+
+#### The 360 slot is the assistant block (PM, 21:38)
+
+Item 3's "minimum 360px slot" is `.onboarding-assistants`, the region native `sNs1V` names, and it
+already carries `min-height: 360px`. An earlier note in this plan added up 252 and 348 from the
+blocks *around* it and concluded the number did not resolve; those sums never measured the slot's
+own minimum and are withdrawn. No implementation change followed — the geometry case now asserts the
+slot directly (computed `min-height` 360, rendered height at least 360), together with the 24 below
+it and the 52 from the last row to the button. Measuring both gaps is what shows the 52 comes from
+the slot's spare height plus the 24, rather than from a margin tuned to match it.
 
 ### Follow-on boundary (not this patch)
 
@@ -330,7 +365,7 @@ No-touch: primary checkout, old shared-onboarding worktree, other task branches/
 - Port the authored sequence and skeleton/line/check shapes into the existing React components. Adapt imports/i18n/semantic theme ownership; avoid importing the Show runtime or introducing parallel controllers/dependencies.
 - Desktop width is constrained by design, not by available monitor width. On narrow screens preserve the pulse's source/destination connections through actual component sizing; do not solve overflow by discarding the narrative.
 - Build a hermetic browser fixture for the actual product entry with mocked network and isolated browser state. Explicitly deny unmatched write-capable requests. Never connect to the running local service or call the Incus runner. No real auth/install claim.
-- Capture design, before and after at the same content viewport and freeze the same timeline phase (reference is PM complete, Codex working, tests waiting); record crop/native-titlebar rules. Capture each phase and a representative full loop, plus hidden/reduced motion — ~~pause/replay~~ superseded 18:30, there are no playback controls to capture. Automated bounding rectangles supplement screenshots, not replace them.
+- Capture design, before and after at the same content viewport and freeze the same timeline phase (reference is PM complete, Codex working, tests waiting); record crop/native-titlebar rules. Capture each phase and a representative full loop, plus hidden/reduced motion — ~~pause/replay~~ superseded 18:26, there are no playback controls to capture. Automated bounding rectangles supplement screenshots, not replace them.
 - Test responsive invariants over wide/intermediate/narrow/short sizes; test Chinese/English and light/dark, preserve System mode. At 1200x800 do not inherit the prototype's preview-stage breakpoint that shrinks the cards merely because height <=850; the actual design has 240x228 cards there.
 - Before opening a PR, deliver a concrete diff, local verification and screenshot/motion evidence for PM spot-check. No new product-direction approval is required. PM checks fidelity and consumer regressions before the first push.
 - After the reviewed patch is ready, create PR with `Closes #2017`, base master, include scenario IDs and evidence/residual checks. Immediately notify PM with PR/head so an independent PM Watch can be armed; keep one durable lane combined PR/CI Watch. Never manually trigger Codex. Review/CI follow-up uses the normal circuit breaker.
@@ -343,6 +378,7 @@ No-touch: primary checkout, old shared-onboarding worktree, other task branches/
 - [x] Complete source-to-render difference table and fix shared visuals.
 - [x] Complete same-viewport screenshot, motion and responsive evidence.
 - [x] Bounded repair of the 18:23-18:36 disposition, recorded above.
+- [x] Offscreen suspension, the 360 slot assertion, and the capture clock fix (PM 21:38/21:40).
 - [ ] PM independent pre-push spot-check.
 - [ ] PR, exact-head review, zero unresolved threads, all required CI green.
 - [ ] Owner visual acceptance; merge requires a fresh explicit instruction.

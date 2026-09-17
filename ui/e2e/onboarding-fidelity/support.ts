@@ -95,11 +95,21 @@ export async function serveProduct(page: Page) {
  * story is meant to be watched at the speed it was authored at, and a frozen clock can
  * only ever show it one still at a time.
  */
+/** Any fixed instant; the story reads elapsed time, so only determinism matters. */
+const FIXED_TIME = new Date('2026-09-17T09:00:00Z');
+
 export async function openOnboarding(
   page: Page,
   options: { lang?: string; theme?: string | null; realTime?: boolean } = {},
 ) {
-  if (!options.realTime) await page.clock.install();
+  if (!options.realTime) {
+    // `install` alone replaces the timers but leaves the clock ticking with real time,
+    // so the story still lands wherever wall-clock time carried it between two runs —
+    // which is how a dark and a light capture of "the same phase" end up different.
+    // `pauseAt` is what actually holds it: afterwards only `freezeAt` moves it.
+    await page.clock.install({ time: FIXED_TIME });
+    await page.clock.pauseAt(FIXED_TIME);
+  }
   const query = new URLSearchParams({ lang: options.lang ?? 'en' });
   // `theme: null` omits the parameter, which is the only way to watch the provider
   // choose for itself — the query overrides the stored preference by design.
