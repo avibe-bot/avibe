@@ -744,6 +744,9 @@ const arrivesIn = (value: unknown, key: string, containers: readonly Container[]
  * and "resolves" means one thing file-wide: EXISTENCE, PARITY and RESIDUE all
  * inherit it, and no value-shaped hole can be open in one and closed in another.
  *
+ * What that ruling settled is VALIDITY, and presence is a different fact that
+ * still has to be asked somewhere — see `presentFor` below, the one place it is.
+ *
  * The plural half matters: a family with no plain key (`usageSummary_one` and
  * `_other`, no `usageSummary`) renders nothing bare, so asking only that way
  * would drop every family out of PARITY and miss the locale that kept the family
@@ -759,6 +762,32 @@ const resolvesIn = (
   representativeCounts(lng).some((count) =>
     arrivesIn(instance.t(key, { count, returnObjects: true }), key, containers),
   );
+
+/**
+ * Whether the bundle HAS an entry for this name under these options — presence,
+ * which is the other fact, and the only question `exists()` is asked here.
+ *
+ * Presence and validity are not the same question and one predicate cannot be
+ * both. `resolvesIn` above says whether copy comes back; this says whether
+ * anything is there at all. Answering the second with the first is the #1969
+ * conflation one level up, and it is what let two calls through: a name whose
+ * value does not fit the container someone picked looked ABSENT, so every call
+ * to it was excused as "the bundles never had this".
+ *
+ * So no approximation is invented for it. `value !== key` looks like presence
+ * and is not: a bundle may store the key AS its value, and the real resolver
+ * separates the two — `card.echo: 'card.echo'` is present (invalid copy someone
+ * must fix), `card.absent` is absent (a fallback may legitimately cover it),
+ * and both hand `t()` back the same string. Only `exists()` tells them apart.
+ *
+ * The options are handed in rather than dropped, because presence is per
+ * SELECTED FORM: with only `card_one` present, `{ count: 1 }` exists and
+ * `{ count: 2 }` does not. A defaulted call reaching the second renders its own
+ * fallback and is owed nothing, which is legitimate and must not be failed
+ * merely because a sibling category is there.
+ */
+const presentFor = (instance: I18n, key: string, options: Record<string, unknown>): boolean =>
+  instance.exists(key, { ...options, returnObjects: true });
 
 /**
  * The names that are key PREFIXES rather than keys, pinned by hand.
@@ -944,6 +973,14 @@ const appCandidateKeys = (referenced: Reference[]): string[] =>
  * `listed` is read off the same collector every other fact here comes from, so
  * this enumerates no positions and no prop names: a second `returnObjects`
  * consumer is covered the day it is written.
+ *
+ * One name, one answer — and that is sound only because this side is not the
+ * only side. A name with both a `returnObjects` consumer and a plain one gets
+ * `list` here, so the array it holds is a key the bundles have rather than a
+ * gap; the plain call that cannot render that array is still failed, by
+ * EXISTENCE, which reads each call rather than this table. Neither reading can
+ * stand in for the other, and the permission runs one way only: PARITY and
+ * RESIDUE consult this, EXISTENCE never does.
  */
 export type Containers = (key: string) => readonly Container[];
 
@@ -1023,9 +1060,17 @@ const consumable = (value: unknown, reference: Reference): boolean =>
  * the weakest honest demand, and still not the subtree one, because whichever
  * options that call passes, i18next hands it a string it renders or a list it
  * maps and never a node anything renders. Reading the subtree question here was
- * the same conflation #1969 names, one call shape over. A `none` call renders
- * its own fallback and is filtered out before this, since there is no copy it
- * can fail to find.
+ * the same conflation #1969 names, one call shape over.
+ *
+ * A `none` call is asked the same question wherever its key is THERE. Carrying
+ * a `defaultValue` buys exactly one thing — the key may be missing — and buys it
+ * per selected form, since that is how i18next spends it. Where the form is
+ * absent the fallback renders and nothing is owed; where it is present the
+ * fallback is never reached, i18next hands back the stored value, and that value
+ * faces the same container and the same plural probes as a call carrying none.
+ * Excusing the whole call was the second escape of this round: a defaulted call
+ * on a pinned prefix rendered a node's diagnostic while the guard stayed silent,
+ * and the prefix pin could not catch it because a prefix pin is name-side.
  *
  * The residual is stated rather than hidden: an opaque options object that
  * hides a `defaultValue` would be asked for copy the call does not need. That
@@ -1035,8 +1080,10 @@ const consumable = (value: unknown, reference: Reference): boolean =>
 const missingCopy = (instance: I18n, lng: string, reference: Reference): boolean =>
   (reference.demand === 'any'
     ? !resolvesIn(instance, lng, reference.key, ['copy', 'list'])
-    : probes(lng, reference).some(
-      (options) => !consumable(instance.t(reference.key, { ...options, returnObjects: true }), reference),
+    : probes(lng, reference).some((options) =>
+      (presentFor(instance, reference.key, options)
+        ? !consumable(instance.t(reference.key, { ...options, returnObjects: true }), reference)
+        : reference.demand !== 'none'),
     ));
 
 describe('app i18n key coverage', () => {
@@ -1229,19 +1276,42 @@ describe('app i18n key coverage', () => {
     expect(referenced).toContainEqual({ key: 'settings.models.backends.claude', counted: false, listed: false, demand: 'none' });
   });
 
-  // A key NO locale resolves is not an existence gap: nothing here can tell it
-  // apart from a name the bundles never had, which is RESIDUE's question and
-  // where it gets classified by hand. So the properties partition rather than
-  // overlap, and a key deleted from BOTH locales still fails — as an
-  // unclassified newcomer in the pin, naming itself just as loudly.
-  const unresolvedEverywhere = new Set(residueOf(referenced.map((reference) => reference.key), BUNDLES));
+  // A name the bundles never had is not an existence gap: nothing here can tell
+  // it apart from a key someone deleted, which is RESIDUE's question and where
+  // it gets classified by hand. So the properties partition rather than overlap,
+  // and a key deleted from BOTH locales still fails — as an unclassified
+  // newcomer in the pin, naming itself just as loudly.
+  //
+  // The partition is on PRESENCE, which is the whole of this round's correction.
+  // Asking `residueOf` instead asked "does the value fit the container I chose",
+  // and every answer of no was read as "the bundles never had this": an array
+  // key looked absent under `AS_COPY`, so a plain `t()` that renders `[object
+  // Object]` on it was skipped here, and the name side let the array through.
+  // That is a name-level classification cancelling a per-call demand — the exact
+  // thing the one-way rule promises cannot happen. It cannot now: presence is
+  // container-free, so `containersFor` is unreachable from this property, and a
+  // key present in ANY form reaches the per-call check for EVERY call to it.
+  const absentEverywhere = (() => {
+    const probesByLocale = BUNDLES.map(({ lng, bundle }) => ({
+      instance: localeInstance(lng, bundle),
+      options: [{}, ...representativeCounts(lng).map((count) => ({ count }))],
+    }));
+    return new Set(
+      referenced
+        .map((reference) => reference.key)
+        .filter((key) =>
+          probesByLocale.every(({ instance, options }) =>
+            options.every((probe) => !presentFor(instance, key, probe)),
+          ),
+        ),
+    );
+  })();
 
   it.each(BUNDLES)('translates every referenced call site in $lng', ({ lng, bundle }) => {
     const instance = localeInstance(lng, bundle);
     expect(
       referenced
-        .filter((reference) => reference.demand !== 'none')
-        .filter((reference) => !unresolvedEverywhere.has(reference.key))
+        .filter((reference) => !absentEverywhere.has(reference.key))
         .filter((reference) => missingCopy(instance, lng, reference))
         .map(label),
     ).toEqual([]);
@@ -1426,9 +1496,12 @@ describe('app i18n key coverage', () => {
         expect(resolvesIn(instance, lng, prefix, ['subtree']), `${prefix} in ${lng} has no copy under it`).toBe(true);
       }
     }
+    // Every demand, defaulted included: a `defaultValue` covers a name the
+    // bundles lack, and a pinned prefix is by definition a name they have, so it
+    // buys that call nothing and the exemption must not read as if it did.
     expect(
       referenced
-        .filter((reference) => reference.demand !== 'none' && KEY_PREFIXES.includes(reference.key))
+        .filter((reference) => KEY_PREFIXES.includes(reference.key))
         .map(label),
     ).toEqual([]);
   });
@@ -1506,6 +1579,60 @@ describe('app i18n key coverage', () => {
     // (42 sites) and is answered by `demand`, not by a claim that it never meets
     // a key this guard knows — it does, at 18 of those sites, since templates
     // started expanding. There is no `context` anywhere in `src/`.
+  });
+
+  it('separates a name being THERE from its value being copy, one selected form at a time', () => {
+    // What a `defaultValue` actually buys, and the fact only the resolver holds.
+    // A defaulted call is owed nothing where its key is MISSING and everything
+    // where its key is present, so presence decides which — per selected form,
+    // because that is how i18next spends the fallback.
+    const call = (bundle: unknown, reference: Reference) =>
+      missingCopy(localeInstance('en', bundle), 'en', reference);
+    const counted = (over: Partial<Reference> = {}): Reference =>
+      ({ key: 'card.count', counted: true, listed: false, demand: 'none', ...over });
+
+    // Partial availability with a fallback, which is the POSITIVE control: `one`
+    // is there and valid, `other` is not there at all, and the call renders its
+    // own default. Failing this because a sibling category exists would reject
+    // the one thing a `defaultValue` is for.
+    expect(call({ card: { count_one: 'One' } }, counted())).toBe(false);
+    // The same bundle, no fallback: a form the call can reach and the bundle
+    // lacks is still a gap, which is what keeps this from excusing everything.
+    expect(call({ card: { count_one: 'One' } }, counted({ demand: 'exact' }))).toBe(true);
+    // Present and malformed, the NEGATIVE control: the fallback is never reached
+    // because the key is there, so the stored value renders — and a blank
+    // category is missing copy whether or not the call carries a default.
+    expect(call({ card: { count_one: 'One', count_other: '' } }, counted())).toBe(true);
+    expect(call({ card: { count_one: 'One', count_other: '' } }, counted({ demand: 'exact' }))).toBe(true);
+
+    // Why presence is asked of the resolver and not of the value: a bundle may
+    // store the key AS its value. That is present and invalid — copy someone has
+    // to write — while the absent name is a fallback legitimately covering a
+    // missing key, and `t()` hands back the same string for both.
+    const echo: Reference = { key: 'card.echo', counted: false, listed: false, demand: 'none' };
+    expect(call({ card: { echo: 'card.echo' } }, echo)).toBe(true);
+    expect(call({ card: {} }, echo)).toBe(false);
+
+    // The escapes this round closed, at the boundary that closes them. Each name
+    // is fine on the NAME side — one is a list the app really reads, one is a
+    // pinned prefix — and neither classification reaches a call it cannot serve.
+    const onList = (over: Partial<Reference> = {}): Reference =>
+      ({ key: 'memory.rows', counted: false, listed: false, demand: 'exact', ...over });
+    const rows = { memory: { rows: ['one', 'two'] } };
+    expect(call(rows, onList())).toBe(true); // a plain call renders `[object Object]`
+    expect(call(rows, onList({ demand: 'none' }))).toBe(true); // and a default does not cover a present key
+    expect(call(rows, onList({ listed: true }))).toBe(false); // the consumer that reads it is untouched
+
+    expect(call(
+      { harness: { runStatus: { queued: 'Queued' } } },
+      { key: 'harness.runStatus', counted: false, listed: false, demand: 'none' },
+    )).toBe(true);
+
+    // A counted list, every reachable form asked: a valid `one` cannot carry an
+    // empty `other` past this, though the name resolves on either side of it.
+    const list: Reference = { key: 'probe.rows', counted: true, listed: true, demand: 'exact' };
+    expect(call({ probe: { rows_one: ['Row'], rows_other: [] } }, list)).toBe(true);
+    expect(call({ probe: { rows_one: ['Row'], rows_other: ['Rows'] } }, list)).toBe(false);
   });
 
   it('collects dotted literals wherever they sit, with no position enumerated', () => {

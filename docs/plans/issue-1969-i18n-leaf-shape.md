@@ -37,7 +37,21 @@ The container a value must arrive in is now a property of the NAME, with three a
 
 `isRenderable` is renamed `hasCopyUnder` and is now reachable only through the `subtree` container. The opaque-options (`any`) demand asks for `copy` or `list` — the weakest honest demand, since whatever options that call hides, i18next returns a string it renders or a list it maps, never a node. `consumable` is re-expressed through the same table and keeps its behaviour.
 
-The prefix permission is structurally one-way: `containersFor` is consulted only by PARITY and RESIDUE, never by EXISTENCE, which reads the call. A fixture asserts a plain `t()` on a pinned prefix still fails, and an app-level test asserts both directions on the real bundles — every pinned name is still a node with copy under it, and no pinned name is named by a copy-demanding call site.
+The prefix permission is structurally one-way: `containersFor` is consulted only by PARITY and RESIDUE, never by EXISTENCE, which reads the call. A fixture asserts a plain `t()` on a pinned prefix still fails, and an app-level test asserts both directions on the real bundles — every pinned name is still a node with copy under it, and no pinned name is named by any call site at all.
+
+### Correction: presence is not container fit
+
+The first reviewed head asserted that one-way rule and did not hold it. Two escapes, found independently by the PM and by Codex on the same head, were one root cause: EXISTENCE partitioned its work with `residueOf`, so "this value does not fit the container I chose" was read as "the bundles never had this name".
+
+- A plain `t()` on a key the app also reads with `returnObjects` was skipped, because the array looked unresolved under `AS_COPY` while the name side allowed it. A name-level classification was cancelling a per-call demand — the thing the one-way rule promises cannot happen.
+- Every `demand === 'none'` reference was filtered out of EXISTENCE outright. That is sound only where the key is missing; where it is present i18next never reaches the fallback, so `t('harness.runStatus', { defaultValue })` rendered a node's diagnostic in silence.
+
+The correction is one concept, not two patches: **EXISTENCE partitions on PRESENCE, which is container-free.** `containersFor` is now unreachable from EXISTENCE, so the one-way claim holds structurally rather than by inspection, and a key present in any form reaches the per-call check for every call that names it. Codex proposed passing `appContainers` into that `residueOf` call instead; that repairs the symptom while leaving the name-level allowance inside EXISTENCE, so it was not taken.
+
+Presence is asked of the resolver, per selected form:
+
+- `instance.exists()` answers it, and nothing else can. A bundle may store the key AS its value — `card.echo: 'card.echo'` is present and invalid, `card.absent` is absent and legitimately covered by a fallback — and `t()` hands back the same string for both. The earlier ruling against `exists()` was against it as a VALIDITY predicate, which it still is not; `rendersAsCopy` and `consumable` keep that job.
+- Per form, not per call: with only `card_one` present, `{ count: 1 }` exists and `{ count: 2 }` does not. A defaulted call reaching the second renders its own fallback and is owed nothing; reaching the first it is owed the same shape as a call carrying no default. So `defaultValue` buys exactly one thing, absence, and buys it one category at a time.
 
 ## Measured prefix census
 
@@ -66,13 +80,36 @@ Each probe mutates the real bundles, runs the real suite, and restores the bundl
 
 C2 is the invariant that absence and a broken present value stay different facts: an omitted defaulted key is still classified by hand in the residue pin, exactly as before this change, while a present object value is now rejected.
 
+After the presence correction all five behave as above, with M21 additionally failing EXISTENCE — its call carries a `defaultValue` and its key is present, so the call is now asked for the shape it renders. The escapes of the review round were reproduced the same way, by adding a real consuming component to `src/` and running the real guard:
+
+| Probe | Reproduction | Before | After |
+| --- | --- | --- | --- |
+| E1 | a component rendering `t('memory.settings.disclosure')`, the key's array and its `returnObjects` consumer untouched | passes | FAILS EXISTENCE in both locales, naming the key |
+| E2 | a component rendering `t('harness.runStatus', { defaultValue: 'Status' })` | passes | FAILS EXISTENCE in both locales AND the prefix pin |
+| E3 | a counted `returnObjects` consumer of a key whose `_one` is a valid array and whose `_other` is empty | passes | FAILS EXISTENCE, naming `probe.rows (count, returnObjects)` |
+
+E3 is Codex's witness for the same class: the name side resolves through `resolvesIn`'s `some` probe, and only the per-call check asks every reachable category. None of the three probe files or bundle edits is committed; the positive controls are the unmutated suite, which still passes with the real `returnObjects` consumer and the real defaulted call sites in place. The focused controls added for this round fail against the pre-correction `missingCopy`, which is how they are known to be load-bearing rather than merely green.
+
+## Review ledger
+
+One findings-bearing head so far, one root-cause class, so the circuit breaker does not trip.
+
+| Head | Source | Findings | Class |
+| --- | --- | --- | --- |
+| `650db4d4e` | Codex review 5232356759, threads `…jPy2D` / `…jPy2H` | 2 | container classification suppressing a per-call requirement |
+| `650db4d4e` | PM negative controls, executed against the real guard | 2 | the same class, independently found |
+
+The PM's two controls and the bot's two threads describe the same defect from different ends, so they are one class on one head rather than two findings-bearing heads. The #1963 history that preceded this issue is recorded separately and is not counted against this rewrite.
+
 ## Validation
 
-- `vitest run src/i18n/keyCoverage.test.ts` — 19 passed (15 pre-existing, 4 added), 3.6s; the pinned `ts.Program` cost is unchanged.
-- `vitest run` (whole UI suite) — 301 files, 4113 tests passed.
+- `vitest run src/i18n/keyCoverage.test.ts` — 20 passed (15 pre-existing, 5 added), 3.8s; the pinned `ts.Program` cost is unchanged.
+- `vitest run` (whole UI suite) — 301 files, 4114 tests passed.
 - `tsc --noEmit` on the guard directly under the app's strict options, including `noUnusedLocals` — clean. No new tsconfig was added: a second typecheck project for one file is a concept this change does not need.
 - `npm run lint` — baseline check passed, no drift. `npm run build` — succeeded.
 
 ## Residual limitations
 
-Unchanged by this PR and stated rather than rounded away: 51 genuinely dynamic template sites remain invisible; 852 bundle leaves are reached by no name in `src/` (#1968); a consumer's own TypeScript assertion on a `t()` result is not read (#1967). The prefix pin is a hand-maintained list of 2, which is the cost of a prefix being exactly a name no call site names — an unclassified new prefix fails loudly at the residue pin rather than passing quietly.
+Unchanged by this PR and stated rather than rounded away: genuinely dynamic template sites remain invisible; bundle leaves reached by no name in `src/` remain unpinned (#1968); a consumer's own TypeScript assertion on a `t()` result is not read (#1967). The prefix pin is a hand-maintained list of 2, which is the cost of a prefix being exactly a name no call site names — an unclassified new prefix fails loudly at the residue pin rather than passing quietly.
+
+No count is claimed for the first two. The figures quoted while #1963 was open were measured on a different head, and the orphan one is not comparable to a name census taken over bundle paths: terminal arrays, plural suffix paths and source-use coverage are three different denominators, and mixing them produces a number that describes nothing. Remeasuring either population belongs to the issue that owns it.
