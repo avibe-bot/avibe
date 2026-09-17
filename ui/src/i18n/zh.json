@@ -2170,6 +2170,7 @@
     "memory_runtime_install_requires_disabled_memory": "记忆运行时正在使用中。请先在「设置 → 记忆」中关闭记忆，再修复。",
     "memory_reconcile_failed": "Avibe 无法应用记忆设置。请查看运行时日志了解失败步骤。",
     "memory_sidecar_unavailable": "记忆 sidecar 当前不可访问。",
+    "memory_processing_interrupted": "记忆处理被中断，无法确认是否已完成。",
     "memory_provider_timeout": "记忆请求超时。",
     "memory_provider_response_invalid": "记忆返回了无效的响应。",
     "memory_capability_unavailable": "记忆模型暂时不可用。请在已配置的模型服务恢复后重试。",
@@ -4774,7 +4775,7 @@
       },
       "reason": {
         "busy": "来源数据正忙",
-        "memory_failure_history_unavailable": "捕获失败历史不会持久保留",
+        "memory_failure_history_unavailable": "仅提供本次服务进程保留的近期异常，不包含完整失败历史。",
         "native_memcells_unavailable": "无法读取原生消息",
         "native_runs_unavailable": "无法读取原生运行记录",
         "native_semantic_unavailable": "无法读取已关联的记忆文件",
@@ -4847,7 +4848,10 @@
         "dead": "已放弃",
         "degraded": "已降级",
         "manualRequired": "需要人工检查",
-        "rejected": "已拒绝"
+        "rejected": "已拒绝",
+        "unknown": "结果未知",
+        "failed": "失败",
+        "notSubmitted": "尚未提交"
       },
       "anomalyOperation": {
         "add": "添加",
@@ -4861,6 +4865,7 @@
         "occurredAt": "发生时间",
         "errorCode": "错误代码",
         "attempts": "尝试次数",
+        "affectedCount": "影响条数",
         "generation": "数据版本",
         "requestId": "请求 ID"
       },

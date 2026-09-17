@@ -735,3 +735,77 @@ def test_aggregate_list_cursor_is_bound_to_selected_owner() -> None:
             projects=projects,
             fingerprint=agent_fingerprint,
         )
+
+
+@pytest.mark.asyncio
+async def test_write_anomaly_is_visible_through_processing_record(tmp_path):
+    runtime = _runtime(tmp_path)
+    writer = runtime.module._writer
+    writer._record_failure(
+        "result_unknown", "memory_provider_timeout", state="unknown", operation="add",
+    )
+    observation = await runtime._processing_record_failure_log(None)
+    assert observation.items[0].kind == "result_unknown"
+    assert observation.unavailable_reason == "memory_failure_history_unavailable"
+    from avibe_memory.processing_record import MemoryProcessingRecord, MemoryProcessingRecordPort
+    from types import SimpleNamespace
+    record = MemoryProcessingRecord(SimpleNamespace(failure_log=runtime._processing_record_failure_log))
+    projection = await record._read_durable_anomalies(None, asyncio.get_running_loop().time() + 5)
+    assert projection.source.status == "partial"
+    assert projection.items == observation.items
+
+    async def read_failures(**_kwargs):
+        return projection, None
+
+    runtime._processing_record.read_failures = read_failures
+    payload = await runtime.failure_log_payload()
+    assert payload["source"]["status"] == "partial"
+    assert payload["source"]["reason"] == "memory_failure_history_unavailable"
+    assert payload["items"][0]["generation"] is None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_drains", [False, True])
+async def test_supervisor_crash_reports_unsubmitted_captures(tmp_path, monkeypatch, worker_drains):
+    """MEMORY-WAKE-207: crash callback fences queued delivery before Wake."""
+    from avibe_memory.everos import FakeMemoryProvider
+    from avibe_memory.store import VolatileAdmission
+    from avibe_memory.types import ProviderSessionRef
+    from avibe_memory.writer import MAX_WRITER_PERMITS
+
+    runtime = _runtime(tmp_path)
+    writer = runtime.module._writer
+    provider = FakeMemoryProvider()
+    writer.replace_provider(provider)
+    monkeypatch.setattr(writer, "_enabled", lambda: True)
+    start = writer._ensure_worker
+    monkeypatch.setattr(writer, "_ensure_worker", lambda: None)
+    ref = ProviderSessionRef("u-" + "1" * 32, 0, "default", "synthetic-session")
+    for index in range(2):
+        reservation = writer.reserve(f"digest-{index}")
+        assert not isinstance(reservation, str)
+        assert writer.offer_capture(
+            reservation, VolatileAdmission("accepted", f"digest-{index}", ref, index + 1, "raw-session"),
+            text="synthetic capture", attachments=(), bundle=None,
+        ) == "queued"
+    assert writer.offer_barrier("raw-session") == "queued"
+
+    runtime._current_sidecar_unavailable()
+    if worker_drains:
+        start()
+        await writer.wait_idle_for_tests()
+
+    async def wake():
+        assert writer._queue.empty()
+        assert writer._permits == MAX_WRITER_PERMITS
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime, "wake", wake)
+    assert await runtime._recover_current_sidecar()
+    assert provider.captures == []
+    assert writer.dropped_count() == 2
+    entries = runtime.module.write_failure_observations()
+    assert len(entries) == 1
+    assert (entries[0].state, entries[0].affected_count, entries[0].attempts) == ("not_submitted", 2, 0)
+    await runtime.close()

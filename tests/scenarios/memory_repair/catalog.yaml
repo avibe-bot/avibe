@@ -255,3 +255,27 @@ scenarios:
     when: An old memory is captured and Wake replaces the child before a new capture
     then: Old and newly processed inputs are both recallable
     evidence_boundary: External model responses are deterministic doubles; Incus deployment requires unavailable seed configuration
+  - id: MEMORY-WAKE-206
+    name: Native write acknowledgement outlasts legitimate synchronous processing
+    status: partial
+    kind: degradation
+    layer: integration
+    test: tests/test_memory_native_write_contract.py::test_native_slow_ack_response_loss_and_continued_writes
+    related_tests:
+      - tests/test_memory_everos.py::test_write_transport_outlasts_native_memorize_deadline
+    given: Verified released native artifact with isolated HOME and Unix socket
+    when: Processing takes over thirty seconds or a response is withheld after submission
+    then: A valid slow acknowledgement succeeds and response loss stays ambiguous without replay
+    evidence_boundary: Real native routes and memorize lock/deadline; synthetic pipeline writes, no external LLM or extraction-quality claim
+  - id: MEMORY-WAKE-207
+    name: Recovery keeps unknown writes distinct from unsubmitted capture disposal
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_memory_writer.py::test_unknown_write_and_unsubmitted_drops_remain_visible_after_recovery
+    related_tests:
+      - tests/test_memory_writer.py::test_recovery_close_reports_only_unsubmitted_captures
+      - tests/test_memory_runtime.py::test_write_anomaly_is_visible_through_processing_record
+    given: An in-flight write, unsent captures and barriers share the bounded writer
+    when: Response loss triggers recovery and later submissions succeed
+    then: The in-flight write is never replayed and recent partial diagnostics distinguish unknown from not submitted without counting barriers as messages

@@ -2015,6 +2015,7 @@ export type MemoryStatus = {
 export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
 
 export type MemoryFailureLogEntry = {
+  affected_count?: number;
   id: string;
   kind: string;
   state: string;
@@ -2022,12 +2023,13 @@ export type MemoryFailureLogEntry = {
   occurred_at: string;
   error_code: string | null;
   attempts: number;
-  generation: number;
+  generation: number | null;
   request_id: string | null;
 };
 
 export type MemoryFailureLog = {
   status: 'ok';
+  source?: MemoryProcessingSourceStatus;
   items: MemoryFailureLogEntry[];
 };
 

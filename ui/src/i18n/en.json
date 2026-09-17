@@ -2170,6 +2170,7 @@
     "memory_runtime_install_requires_disabled_memory": "Turn Memory off in Settings \u2192 Memory before repairing a running Memory runtime.",
     "memory_reconcile_failed": "Avibe couldn't apply the Memory settings. Check the runtime logs for the failing step.",
     "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
+    "memory_processing_interrupted": "Memory processing was interrupted before completion could be confirmed.",
     "memory_provider_timeout": "The Memory request timed out.",
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_capability_unavailable": "Memory models are temporarily unavailable. Try again when the configured model service is available.",
@@ -4774,7 +4775,7 @@
       },
       "reason": {
         "busy": "Source data is busy",
-        "memory_failure_history_unavailable": "Capture failure history is not retained",
+        "memory_failure_history_unavailable": "Only recent failures from this service process are available; complete failure history is not retained.",
         "native_memcells_unavailable": "Native messages cannot be read",
         "native_runs_unavailable": "Native runs cannot be read",
         "native_semantic_unavailable": "Linked memory files cannot be read",
@@ -4847,7 +4848,10 @@
         "dead": "Dead",
         "degraded": "Degraded",
         "manualRequired": "Manual review required",
-        "rejected": "Rejected"
+        "rejected": "Rejected",
+        "unknown": "Result unknown",
+        "failed": "Failed",
+        "notSubmitted": "Not submitted"
       },
       "anomalyOperation": {
         "add": "Add",
@@ -4861,6 +4865,7 @@
         "occurredAt": "Occurred at",
         "errorCode": "Error code",
         "attempts": "Attempts",
+        "affectedCount": "Affected items",
         "generation": "Data version",
         "requestId": "Request ID"
       },

@@ -555,8 +555,10 @@ async def test_quiesce_deadline_leaves_blocking_cleanup_fenced_in_background(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crashed", [False, True])
 async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
     tmp_path: Path,
+    crashed: bool,
 ) -> None:
     entered = asyncio.Event()
     stop_calls = 0
@@ -605,10 +607,17 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
         _ref(1), "raw-session-1", deque(["digest-1"]), 0.0, 0.0
     )
 
+    if crashed:
+        writer.pause_intake(unavailable=True)
     assert await writer.quiesce(timeout_seconds=1.0)
 
     assert stop_calls == 1
     assert recoveries == [False]
+    assert writer.dropped_count() == 0
+    assert writer.failure_observations()[0].state == "unknown"
+    assert writer.failure_observations()[0].error_code == (
+        "memory_sidecar_unavailable" if crashed else "memory_processing_interrupted"
+    )
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
@@ -616,8 +625,10 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crashed", [False, True])
 async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
     tmp_path: Path,
+    crashed: bool,
 ) -> None:
     flush_entered = asyncio.Event()
     reap_entered = asyncio.Event()
@@ -647,6 +658,8 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
     assert writer.offer_barrier("raw-session-0") == "queued"
     await flush_entered.wait()
 
+    if crashed:
+        writer.pause_intake(unavailable=True)
     closing = asyncio.create_task(writer.close())
     await reap_entered.wait()
 
@@ -658,11 +671,16 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
     assert recoveries == [False]
+    assert writer.failure_observations()[0].error_code == (
+        "memory_sidecar_unavailable" if crashed else "memory_processing_interrupted"
+    )
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crashed", [False, True])
 async def test_close_during_attachment_projection_releases_reservation(
     tmp_path: Path,
+    crashed: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     projection_entered = asyncio.Event()
@@ -702,7 +720,13 @@ async def test_close_during_attachment_projection_releases_reservation(
     ) == "queued"
     await projection_entered.wait()
 
+    if crashed:
+        writer.pause_intake(unavailable=True)
     await asyncio.wait_for(writer.close(), timeout=1.0)
+    assert writer.dropped_count() == int(crashed)
+    if crashed:
+        assert writer.failure_observations()[0].state == "not_submitted"
+        assert writer.failure_observations()[0].attempts == 0
 
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
@@ -1161,3 +1185,243 @@ def test_writer_bounds_are_fixed_and_not_user_tunable() -> None:
     assert MAX_WRITER_PERMITS == MAX_DUPLICATE_ENTRIES == MAX_PENDING_SESSIONS == 256
     assert MAX_PENDING_MESSAGE_IDS == MAX_UNFLUSHED_MESSAGES == 100
     assert MAX_UNFLUSHED_AGE_SECONDS == 30 * 60
+
+
+@pytest.mark.asyncio
+async def test_unknown_write_and_unsubmitted_drops_remain_visible_after_recovery(tmp_path):
+    """MEMORY-WAKE-207: recovery cannot erase unknown work observations."""
+    provider = FakeMemoryProvider(ingest_failures=deque([
+        MemoryProviderFailure("memory_provider_timeout", ambiguous=True),
+    ]))
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda _: True)
+    start = writer._ensure_worker
+    writer._ensure_worker = lambda: None
+    _reserve_and_offer(writer, 0)
+    _reserve_and_offer(writer, 1)
+    assert writer.offer_barrier("raw-session-1") == "queued"
+    writer._ensure_worker = start
+    start()
+    await writer.wait_idle_for_tests()
+    await writer.close()
+    recovered = FakeMemoryProvider()
+    writer.replace_provider(recovered)
+    writer.resume_intake()
+    _reserve_and_offer(writer, 2)
+    await writer.wait_idle_for_tests()
+    entries = writer.failure_observations()
+    assert [(e.kind, e.state, e.operation) for e in entries] == [
+        ("delivery_abandoned", "not_submitted", "add"),
+        ("result_unknown", "unknown", "add"),
+    ]
+    assert len(recovered.captures) == 1
+    assert "message-" not in repr(entries)
+    assert writer.dropped_count() == 1
+    assert writer._permits == MAX_WRITER_PERMITS
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_close_reports_only_unsubmitted_captures(tmp_path):
+    writer = _writer(tmp_path, FakeMemoryProvider())
+    writer._ensure_worker = lambda: None
+    _reserve_and_offer(writer, 1)
+    assert writer.offer_barrier("raw-session-1") == "queued"
+    writer._unavailable = True
+    await writer.close()
+    assert [(e.kind, e.state) for e in writer.failure_observations()] == [
+        ("delivery_abandoned", "not_submitted"),
+    ]
+    assert writer.dropped_count() == 1
+    assert writer._permits == MAX_WRITER_PERMITS
+    writer.reset_duplicate_generation()
+    assert writer.failure_observations() == ()
+
+
+@pytest.mark.asyncio
+async def test_failure_evidence_is_bounded_and_server_errors_do_not_claim_no_write(tmp_path):
+    writer = _writer(tmp_path, FakeMemoryProvider(add_results=deque([
+        AddRejected("synthetic", "INTERNAL_ERROR", server_fault=True),
+    ])))
+    _reserve_and_offer(writer, 0)
+    await writer.wait_idle_for_tests()
+    entry = writer.failure_observations()[0]
+    assert (entry.kind, entry.state, entry.request_id) == ("result_unknown", "unknown", "synthetic")
+    for _ in range(MAX_WRITER_PERMITS):
+        writer._record_unsubmitted_drop()
+    assert writer.failure_observations()[0].affected_count == MAX_WRITER_PERMITS
+    assert writer.failure_observations()[1] == entry
+    for _ in range(60):
+        writer._record_failure("result_unknown", "memory_provider_timeout", state="unknown", operation="add")
+    assert len(writer.failure_observations()) == 50
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["add", "flush"])
+@pytest.mark.parametrize("attempts", [1, MAX_ATTEMPTS])
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_submitted_anomalies_report_actual_provider_attempts(tmp_path, operation, attempts, unknown):
+    calls = 0
+
+    async def fail(*_args):
+        nonlocal calls
+        calls += 1
+        raise MemoryProviderFailure(
+            "memory_provider_timeout", retryable=calls < attempts,
+            ambiguous=unknown and calls == attempts,
+        )
+
+    provider = FakeMemoryProvider()
+    setattr(provider, operation, fail)
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda _: True)
+    if operation == "add":
+        _reserve_and_offer(writer, 0)
+        await writer.wait_idle_for_tests()
+    else:
+        ref = _ref()
+        writer._pending[ref.serialize()] = _PendingSession(ref, "raw-session-0", deque(["digest"]), 0, 0)
+        await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
+    assert calls == attempts
+    entry = writer.failure_observations()[0]
+    assert entry.attempts == calls
+    assert entry.state == ("unknown" if unknown else "failed")
+    assert entry.error_code == "memory_provider_timeout"
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_flush_failure_does_not_skip_other_sessions_in_barrier(tmp_path):
+    refs = [_ref(0), _ref(1)]
+    calls = []
+
+    async def flush(ref):
+        calls.append(ref)
+        if ref == refs[0]:
+            raise MemoryProviderFailure("memory_capability_unavailable", retryable=False)
+        return FlushSucceeded("synthetic", "no_extraction")
+
+    provider = FakeMemoryProvider()
+    provider.flush = flush
+    writer = _writer(tmp_path, provider)
+    for ref in refs:
+        writer._pending[ref.serialize()] = _PendingSession(ref, "shared-raw-session", deque(["digest"]), 0, 0)
+    await writer._flush_barrier(_BarrierItem(raw_session_id="shared-raw-session"))
+    assert calls == refs
+    assert not writer._pending
+    assert len(writer.failure_observations()) == 1
+    assert writer.failure_observations()[0].state == "failed"
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_separate_recoveries_do_not_coalesce_drop_observations(tmp_path):
+    writer = _writer(tmp_path, FakeMemoryProvider())
+    writer._ensure_worker = lambda: None
+    for index in range(2):
+        writer.replace_provider(FakeMemoryProvider())
+        writer.resume_intake()
+        _reserve_and_offer(writer, index)
+        writer.pause_intake(unavailable=True)
+        await writer.close()
+    entries = writer.failure_observations()
+    assert len(entries) == 2
+    assert entries[0].id != entries[1].id
+    assert [entry.affected_count for entry in entries] == [1, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["add", "flush"])
+@pytest.mark.parametrize("code", ["UNSUPPORTED_FORMAT", "secret-canary\nforged-log-line", None])
+async def test_rejection_observation_preserves_provider_code(tmp_path, operation, code, caplog):
+    from avibe_memory.observations import FlushRejected
+    provider = FakeMemoryProvider(
+        add_results=deque([AddRejected("synthetic", code, False)]),
+        flush_results=deque([FlushRejected("synthetic", code, False)]),
+    )
+    writer = _writer(tmp_path, provider)
+    if operation == "add":
+        _reserve_and_offer(writer, 0)
+        await writer.wait_idle_for_tests()
+        assert writer._store.get_meta().last_error == "memory_processing_failed"
+    else:
+        ref = _ref()
+        writer._pending[ref.serialize()] = _PendingSession(ref, "raw-session-0", deque(["digest"]), 0, 0)
+        await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
+    assert writer.failure_observations()[0].error_code == (code or "memory_processing_failed")
+    if code:
+        assert code not in caplog.text
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["retryable", "exception", "success"])
+async def test_flush_crash_fences_all_subsequent_calls(tmp_path, outcome):
+    calls = []
+
+    async def flush(ref):
+        calls.append(ref)
+        writer.pause_intake(unavailable=True)
+        if outcome == "exception":
+            raise MemoryProviderFailure("memory_sidecar_unavailable", retryable=True)
+        return FlushRetryable() if outcome == "retryable" else FlushSucceeded("receipt", "extracted")
+
+    provider = FakeMemoryProvider()
+    provider.flush = flush
+    writer = _writer(tmp_path, provider)
+    for ref in [_ref(0), _ref(1)]:
+        writer._pending[ref.serialize()] = _PendingSession(ref, "shared", deque(["digest"]), 0, 0)
+    await writer._flush_barrier(_BarrierItem(raw_session_id="shared"))
+    assert calls == [_ref(0)]
+    entries = writer.failure_observations()
+    if outcome == "success":
+        assert not entries
+    else:
+        assert len(entries) == 1
+        assert (entries[0].state, entries[0].attempts) == ("failed", 1)
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason,error", [
+    ("timeout", "memory_provider_timeout"),
+    ("transport", "memory_sidecar_unavailable"),
+    ("invalid_response", "memory_provider_response_invalid"),
+])
+async def test_flush_unknown_preserves_cause_without_retry(tmp_path, reason, error):
+    from avibe_memory.observations import FlushUnknown
+    provider = FakeMemoryProvider(flush_results=deque([FlushUnknown(reason)]))
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda _: True)
+    ref = _ref()
+    writer._pending[ref.serialize()] = _PendingSession(ref, "shared", deque(["digest"]), 0, 0)
+    await writer._flush_barrier(_BarrierItem(raw_session_id="shared"))
+    entry = writer.failure_observations()[0]
+    assert (entry.error_code, entry.state, entry.attempts) == (error, "unknown", 1)
+    assert not writer._pending
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system_failure", [False, True])
+async def test_crash_during_definite_add_failure_is_observed_once(tmp_path, system_failure):
+    from avibe_memory.everos import MemoryProviderSystemFailure
+    calls = 0
+
+    async def add(_capture):
+        nonlocal calls
+        calls += 1
+        writer.pause_intake(unavailable=True)
+        if system_failure:
+            raise MemoryProviderSystemFailure("memory_sidecar_unavailable")
+        raise MemoryProviderFailure("memory_sidecar_unavailable", retryable=True)
+
+    provider = FakeMemoryProvider()
+    provider.add = add
+    writer = _writer(tmp_path, provider)
+    _reserve_and_offer(writer, 0)
+    await writer.wait_idle_for_tests()
+    assert calls == 1
+    entries = writer.failure_observations()
+    assert len(entries) == 1
+    assert (entries[0].state, entries[0].attempts, entries[0].affected_count) == ("failed", 1, 1)
+    assert entries[0].generation is None
+    await writer.close()

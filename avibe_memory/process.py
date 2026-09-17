@@ -43,6 +43,7 @@ from avibe_memory.confined_filesystem import (
     required_no_follow_flag,
 )
 from avibe_memory.everos import (
+    MEMORIZE_TIMEOUT_SECONDS,
     EverOSPort,
     MULTIMODAL_EXPLICIT_ENV,
     PROCESSING_PROBE_MAX_DEADLINE_SECONDS,
@@ -2103,6 +2104,7 @@ def _write_memory_child_config(
             "",
             "[memorize]",
             'mode = "chat"',
+            f"session_lock_timeout_seconds = {MEMORIZE_TIMEOUT_SECONDS}",
             "",
             "[rerank]",
             'model = ""',

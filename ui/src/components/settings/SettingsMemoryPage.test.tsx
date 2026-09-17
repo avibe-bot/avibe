@@ -328,7 +328,7 @@ describe('SettingsMemoryPage', () => {
     expect(screen.queryByRole('button', { name: 'run-repair' })).toBeNull();
   });
 
-  it('treats intentionally unretained failure history as an informational notice', async () => {
+  it.each(['unavailable', 'partial'] as const)('shows the %s failure-history limitation as a notice', async (sourceStatus) => {
     api.getMemoryProcessingRecord.mockResolvedValue({
       status: 'ok',
       runtime: { source: status('running').source, health: null },
@@ -339,7 +339,7 @@ describe('SettingsMemoryPage', () => {
       },
       anomalies: {
         source: {
-          status: 'unavailable',
+          status: sourceStatus,
           observed_at: null,
           reason: 'memory_failure_history_unavailable',
         },

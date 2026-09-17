@@ -409,4 +409,5 @@ class MemoryFailureLogEntry:
     attempts: int = 0
     state: str = "unknown"
     operation: str = "unknown"
-    generation: int = 0
+    generation: int | None = None
+    affected_count: int = 1

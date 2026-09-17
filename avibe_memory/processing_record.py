@@ -401,7 +401,7 @@ class MemoryProcessingRecord:
             durable = observation.items
             source = (
                 SourceObservation(
-                    "unavailable",
+                    "partial" if durable else "unavailable",
                     reason=observation.unavailable_reason,
                 )
                 if observation.unavailable_reason is not None

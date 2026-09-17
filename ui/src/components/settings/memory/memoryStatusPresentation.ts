@@ -25,6 +25,9 @@ const ANOMALY_LABEL_KEYS = {
     result_unknown: 'memory.status.failureLog.kind.result_unknown',
   },
   state: {
+    unknown: 'memory.processingRecord.anomalyState.unknown',
+    failed: 'memory.processingRecord.anomalyState.failed',
+    not_submitted: 'memory.processingRecord.anomalyState.notSubmitted',
     dead: 'memory.processingRecord.anomalyState.dead',
     degraded: 'memory.processingRecord.anomalyState.degraded',
     manual_required: 'memory.processingRecord.anomalyState.manualRequired',
