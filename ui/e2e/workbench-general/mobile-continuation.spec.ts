@@ -156,6 +156,21 @@ const workspaceChip = (page: Page) => page.getByRole('button', { name: /^Workspa
 const popover = (page: Page) => page.locator('[data-radix-popper-content-wrapper]');
 const settingsSurface = (page: Page) => page.locator('[data-settings-overlay="true"]');
 const inboxTab = (page: Page) => page.locator('nav.fixed.bottom-0 a[href="/inbox"]');
+const brandHome = (page: Page) => page.locator('header a[href="/"]');
+// By label, not by role: what the phone's root back must do is leave Settings
+// behind, and asserting that through the control's element type would pass on a
+// link that merely pushed another home. Whether it is a close action at all is
+// the unit test's job.
+const backToWorkbench = (page: Page) => page.getByLabel('Back to Workbench');
+
+/**
+ * Where the current document sits in the session history — the number
+ * `closeSettingsOverlay` unwinds to. A push moves it forward, so a return that
+ * lands back on the recorded one proves the Settings entries were left behind
+ * rather than stacked in front of the home.
+ */
+const historyIndex = (page: Page) =>
+  page.evaluate(() => (window.history.state as { idx?: number } | null)?.idx ?? null);
 
 /**
  * Marks the live composer element. If the home is torn down and rebuilt, the
@@ -273,7 +288,7 @@ test.describe('Workbench continuations on a phone', () => {
 
     // Out the way the phone offers: section list, then the Workbench.
     await page.getByRole('link', { name: 'All settings' }).click();
-    await page.getByRole('link', { name: 'Back to Workbench' }).click();
+    await backToWorkbench(page).click();
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
 
     await expectHomeIntact(page, creates);
@@ -296,6 +311,62 @@ test.describe('Workbench continuations on a phone', () => {
     await expect(settingsSurface(page)).toHaveCount(0);
 
     await expectHomeIntact(page, creates);
+    expect(denied).toEqual([]);
+  });
+
+  test('leaves no Settings entry behind when the phone returns to the Workbench', async ({ page }) => {
+    const denied = await serveProduct(page);
+    const creates = await withWorkspaceApi(page);
+
+    // A genuine page before the home, so "where Back goes afterwards" has an
+    // answer that is not the document load itself.
+    await open(page, '/inbox');
+    await expect(page.getByRole('heading', { level: 1, name: 'Inbox' })).toBeVisible();
+    await brandHome(page).click();
+    await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
+    const homeIndex = await historyIndex(page);
+    expect(homeIndex).toBe(1);
+
+    await primeHome(page);
+
+    // Everything the phone can stack in front of the home: a continuation, the
+    // section list, a section, the list again.
+    await page.getByRole('link', { name: 'Continue on your phone' }).click();
+    await expect(page).toHaveURL(/\/settings\/remote-access$/);
+    await page.getByRole('link', { name: 'All settings' }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await page.getByRole('link', { name: 'General' }).click();
+    await expect(page).toHaveURL(/\/settings\/general$/);
+    await page.getByRole('link', { name: 'All settings' }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    expect(await historyIndex(page)).toBeGreaterThan(homeIndex!);
+
+    // The real exit control, not a scripted history call.
+    await backToWorkbench(page).click();
+    await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
+    await expect(settingsSurface(page)).toHaveCount(0);
+    // The home the user left, at the entry they left it from: everything opened
+    // over it is gone from the stack rather than sitting one Back away.
+    expect(await historyIndex(page)).toBe(homeIndex);
+    await expectHomeIntact(page, creates);
+
+    // The other continuation, out through the same control. The chevron inside
+    // Settings still steps up the rail — the origin rides along with it — and
+    // only the root action closes.
+    await page.locator('main a[href="/settings/platforms"]').click();
+    await expect(page).toHaveURL(/\/settings\/platforms$/);
+    await page.getByRole('link', { name: 'All settings' }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await backToWorkbench(page).click();
+    await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
+    expect(await historyIndex(page)).toBe(homeIndex);
+    await expectHomeIntact(page, creates);
+
+    // And Back from there is the page before the home, not Settings again.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/inbox$/);
+    await expect(page.getByRole('heading', { level: 1, name: 'Inbox' })).toBeVisible();
+    await expect(settingsSurface(page)).toHaveCount(0);
     expect(denied).toEqual([]);
   });
 

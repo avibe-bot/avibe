@@ -334,6 +334,10 @@ export const SettingsLayout: React.FC = () => {
       : activeSection.path;
   }, [activeTrail, atRoot, location.pathname]);
 
+  // One class string for both branches below, so the touch target and the
+  // chevron cannot drift apart depending on where the control points.
+  const mobileBackClassName = '-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden';
+
   const mobileBackLabel = mobileBackTarget === '/'
     ? t('settings.backToWorkbench')
     : mobileBackTarget === '/settings'
@@ -351,11 +355,22 @@ export const SettingsLayout: React.FC = () => {
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
       <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
-          {mobileBackTarget && (
+          {/* Leaving Settings for the Workbench is the same action whichever
+              control triggers it, so the phone's root back goes through
+              ReturnToApp like the desktop close and rail row do: with a retained
+              origin it unwinds the Settings entries it opened over, instead of
+              pushing a second home in front of them and leaving the whole chain
+              one Back away. Every destination inside Settings stays an ordinary
+              link, and a direct visit still gets one. */}
+          {mobileBackTarget === '/' ? (
+            <ReturnToApp aria-label={mobileBackLabel} className={mobileBackClassName}>
+              <ChevronLeft className="size-5" />
+            </ReturnToApp>
+          ) : (
             <NavLink
               to={mobileBackTarget}
               aria-label={mobileBackLabel}
-              className="-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden"
+              className={mobileBackClassName}
             >
               <ChevronLeft className="size-5" />
             </NavLink>

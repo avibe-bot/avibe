@@ -203,6 +203,41 @@ content over. Re-validated for this round: the five browser tests, the six affec
 `lint` on the changed files, and `build`. The earlier full-suite and screenshot gates are not re-run here, because
 nothing in this round changes what they measure.
 
+## Review round 2 repair — the phone's way out of a retained Settings chain
+
+One finding, in the same mobile Settings navigation-lifecycle class as round 1's second repair, so the two-head
+circuit breaker applied and the whole class was inventoried before anything was edited.
+
+Retaining the home's origin on mobile gave the phone something to close *back to*, but the phone's own root
+control was never told: at `/settings` the header chevron stayed an ordinary `NavLink` to `/`. It pushed a second
+home in front of every Settings entry the user had opened, so one Back re-entered Settings — with a deeper chain,
+several Backs. The home itself came back intact, which is why the round-1 evidence passed: it asserted what the
+returning surface held, and same-path reconciliation satisfies that even when the history behind it is wrong.
+
+Every other way out already goes through one owner, `closeSettingsOverlay`, which unwinds to the recorded history
+index or replaces with the origin when there is none:
+
+- the desktop close (`X`) and the rail's back row, both via `ReturnToApp`;
+- the dialog's own dismissal (Escape, outside click) via `onOpenChange`;
+- `AppShell`'s sidebar Settings toggle;
+- the browser/OS Back button, which needs no control at all.
+
+There is no other mobile exit to fix: `AppShell` treats a Settings route as `isFullScreenMobile`, so the mobile
+brand header and the bottom tab bar are not rendered over the surface, and the chevron's Settings-internal
+destinations are navigation *inside* Settings, not a close. So the repair is one missed caller joining the
+existing owner: when the chevron's target is the Workbench it renders `ReturnToApp` like the desktop controls do,
+and keeps its label, touch size and icon. A direct visit has no origin and still gets a plain link to `/`, and
+every internal destination stays a link so the origin rides along with the push.
+
+Evidence is the property, not the control's shape. A sixth browser case builds a real predecessor (Inbox → home),
+records the home's history index, primes the draft/Agent/manager-picked workspace, walks a continuation, the
+section list, General and back to the list, leaves through the actual control, and asserts the index is the one it
+started from — then repeats through the other continuation and finally goes Back to the Inbox rather than into
+Settings. Against the unrepaired product that assertion reads 6 where it must read 1; the case locates the control
+by label so it fails on the history, not on the element type. Unit scope adds the close behaviour at the phone
+root and holds internal back destinations to links. Re-validated: the six browser cases on the built app, the five
+affected unit files (91), the browser suite's `typecheck`, `lint` on the changed files, and `build`.
+
 ## Progress
 
 - [x] Owner parallel start, latest master and isolated workspace verified.

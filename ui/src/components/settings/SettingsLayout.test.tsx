@@ -426,6 +426,48 @@ describe('SettingsLayout', () => {
     expect(back.className).toContain('size-11');
   });
 
+  it('unwinds a retained overlay from the phone root instead of pushing a second home', async () => {
+    // A phone that opened Settings over a surface worth keeping now has the same
+    // origin the desktop controls close through, so its root back has to close
+    // rather than navigate: pushing '/' would leave the whole Settings chain one
+    // Back away from the user.
+    const user = userEvent.setup();
+    const origin: Location = {
+      pathname: '/chat/ses_7',
+      search: '?message=m1',
+      hash: '#tail',
+      state: { source: 'search' },
+      key: 'chat-origin',
+    };
+
+    renderLayout({ pathname: '/settings', state: settingsOverlayOpenState(origin) });
+
+    const back = screen.getByRole('button', { name: 'settings.backToWorkbench' });
+    expect(back.className).toContain('size-11');
+    expect(back.className).toContain('md:hidden');
+    await user.click(back);
+    expect(await screen.findByText('chat-body')).toBeTruthy();
+  });
+
+  it('keeps a retained origin on ordinary links inside settings', () => {
+    // Only the root action leaves; a section's back still steps one level up the
+    // rail, and does it as a link so the origin rides along with the push.
+    renderLayout({
+      pathname: '/settings/replies',
+      state: settingsOverlayOpenState({
+        pathname: '/chat/ses_7',
+        search: '',
+        hash: '',
+        state: null,
+        key: 'chat-origin',
+      } as Location),
+    });
+
+    const back = screen.getByRole('link', { name: 'settings.backToSections' });
+    expect(back.getAttribute('href')).toBe('/settings');
+    expect(screen.queryByRole('button', { name: 'settings.backToSections' })).toBeNull();
+  });
+
   it('shows the current version with a safe-area-aware mobile popup', async () => {
     const user = userEvent.setup();
     renderLayout('/settings');
