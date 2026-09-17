@@ -1485,7 +1485,7 @@
       "ownerRequired": "Instance Member or Owner access is required.",
       "confirmationRequired": "Clearing Skill statistics requires --yes.",
       "clearRequired": "--yes requires --clear.",
-      "helpCommand": "Inspect or clear local Skill statistics (Instance Owner only)",
+      "helpCommand": "Inspect or clear local Skill statistics (Instance Member or Owner)",
       "helpClear": "Clear Skill events and daily statistics.",
       "helpYes": "Confirm clearing Skill statistics."
     },

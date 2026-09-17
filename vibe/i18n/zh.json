@@ -1485,7 +1485,7 @@
       "ownerRequired": "需要实例成员或所有者权限。",
       "confirmationRequired": "清除 Skill 统计需要使用 --yes 确认。",
       "clearRequired": "--yes 必须与 --clear 一起使用。",
-      "helpCommand": "查看或清除本地 Skill 统计（仅限实例所有者）",
+      "helpCommand": "查看或清除本地 Skill 统计（实例成员或所有者）",
       "helpClear": "清除 Skill 事件及每日统计。",
       "helpYes": "确认清除 Skill 统计。"
     },

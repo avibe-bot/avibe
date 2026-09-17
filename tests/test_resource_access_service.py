@@ -2427,3 +2427,221 @@ def test_kindless_deferred_snapshot_fails_closed_when_pairing_is_unpaired(
     assert restored is not None
     assert restored.instance_role == "editor"
     assert restored.instance_kind is None
+
+
+@pytest.fixture
+def member_repair_race(monkeypatch, tmp_path, sqlite_schema_db_factory, family):
+    """Real WAL state shared by the migration and an independent runtime writer."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    db = tmp_path / "race.sqlite"
+    sqlite_schema_db_factory(db)
+    engine = create_sqlite_engine(db)
+    peer = create_sqlite_engine(db)
+    old = "2026-08-20T00:00:00Z"
+    metadata = {resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+        "sub": "member α", "vibe_instance_role": "member", "vibe_instance_access_source": "email",
+    }}
+    marker = {"schema_version": 2, "state": "completed", "instance_id": "same-instance",
+              "instance_kind": "personal", "completed_at": "2026-08-21T00:00:00Z"}
+    with engine.begin() as conn:
+        _seed_ready_binding(conn, instance_id="same-instance", instance_kind="personal")
+        conn.execute(state_meta.insert().values(
+            key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+            value_json=json.dumps(marker), updated_at=old,
+        ))
+        for kind in ("scheduled", "watch"):
+            conn.execute(run_definitions.insert().values(
+                id=kind, definition_type=kind, enabled=1, metadata_json=json.dumps(metadata),
+                created_at=old, updated_at=old,
+            ))
+        conn.execute(agent_runs.insert().values(
+            id="run", run_type="scheduled", status="queued", metadata_json=json.dumps(metadata),
+            created_at=old, updated_at=old,
+        ))
+        conn.execute(agent_sessions.insert().values(
+            id="session", agent_backend="codex", agent_variant="default", session_anchor="session",
+            native_session_id="native", status="active", metadata_json="{}", created_at=old, updated_at=old,
+        ))
+        delivery = enqueue_queued(conn, scope_id=None, session_id="session", text="你好", metadata=metadata, now=old)
+        # Only the selected family is eligible: an earlier table's write must
+        # not accidentally reserve the lock and hide a later family's race.
+        if family in {"scheduled", "watch"}:
+            conn.execute(run_definitions.delete().where(run_definitions.c.id != family))
+        elif family in {"run", "delivery"}:
+            conn.execute(run_definitions.delete())
+        if family not in {"run", "binding", "marker"}:
+            conn.execute(agent_runs.delete())
+        if family not in {"delivery", "binding", "marker"}:
+            conn.execute(message_deliveries.delete())
+    expected = {"legacy_deferred_definitions": 2, "legacy_deferred_runs": 1, "legacy_deferred_deliveries": 1}
+    if family not in {"binding", "marker"}:
+        expected = dict(_EMPTY_MIGRATION_COUNTS)
+        key = "legacy_deferred_definitions" if family in {"scheduled", "watch"} else f"legacy_deferred_{'runs' if family == 'run' else 'deliveries'}"
+        expected[key] = 1
+
+    def mutation(family):
+        later = "2026-08-22T00:00:00Z"
+        changed = json.dumps({**metadata, "concurrent_edit": "survives α"})
+        if family in {"scheduled", "watch"}:
+            return run_definitions, run_definitions.c.id == family, {"metadata_json": changed, "updated_at": later}
+        if family == "run":
+            return agent_runs, agent_runs.c.id == "run", {"metadata_json": changed, "updated_at": later, "status": "completed"}
+        if family == "delivery":
+            snapshot = json.dumps({"metadata_json": changed, "text": "peer α"})
+            return message_deliveries, message_deliveries.c.id == delivery["id"], {
+                "snapshot_json": snapshot, "snapshot_sha256": hashlib.sha256(snapshot.encode()).hexdigest(),
+                "updated_at": later, "state": "retired",
+            }
+        if family == "binding":
+            return state_meta, state_meta.c.key == "remote_access.instance_binding.v1", {
+                "value_json": json.dumps({"schema_version": 1, "state": "reconciling", "instance_id": "other-instance",
+                                          "instance_kind": "personal", "generation": 2}), "updated_at": later,
+            }
+        assert family == "marker"
+        return state_meta, state_meta.c.key == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY, {
+            "value_json": json.dumps({**marker, "state": "sealed_unattributed"}), "updated_at": later,
+        }
+
+    try:
+        yield SimpleNamespace(engine=engine, peer=peer, mutation=mutation, expected=expected)
+    finally:
+        peer.dispose()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("family", ["scheduled", "watch", "run", "delivery", "binding", "marker"])
+def test_member_repair_serializes_peer_writes_through_marker_seal(member_repair_race, family):
+    """PERMISSIONS-014: a writer after decision reads cannot race any repair effect."""
+    from concurrent.futures import ThreadPoolExecutor
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    state = member_repair_race
+    table, predicate, values = state.mutation(family)
+    attempts = []
+
+    def peer_write():
+        try:
+            with state.peer.begin() as conn:
+                conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+                conn.execute(table.update().where(predicate).values(**values))
+        except OperationalError as exc:
+            assert "locked" in str(exc)
+            return "blocked"
+        return "committed"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def after_read(_conn, _cursor, statement, parameters, _context, _many):
+            sql = " ".join(statement.split())
+            if attempts or not sql.startswith("SELECT") or f"FROM {table.name}" not in sql:
+                return
+            if family in {"marker", "binding"}:
+                key = "remote_access.instance_binding.v1" if family == "binding" else resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                if key not in parameters:
+                    return
+            # The SELECT has executed, but migration has not consumed its rows.
+            # Await a real second connection's completed write attempt, not time.
+            attempts.append(pool.submit(peer_write).result(timeout=5))
+
+        event.listen(state.engine, "after_cursor_execute", after_read)
+        try:
+            with state.engine.begin() as conn:
+                result = resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+                assert attempts == ["blocked"]
+                assert _migration_counts(result) == state.expected
+                assert json.loads(_stored_migration_marker(conn))["schema_version"] == 3
+                # The writer slot lasts through sealing until the caller commits.
+                assert pool.submit(peer_write).result(timeout=5) == "blocked"
+        finally:
+            event.remove(state.engine, "after_cursor_execute", after_read)
+        assert pool.submit(peer_write).result(timeout=5) == "committed"
+    with state.engine.connect() as conn:
+        row = conn.execute(select(table).where(predicate)).mappings().one()
+        assert {key: row[key] for key in values} == values
+
+
+@pytest.mark.parametrize("family", ["scheduled", "watch", "run", "delivery", "binding", "marker"])
+def test_member_repair_reads_peer_first_commit_after_writer_reservation(member_repair_race, family):
+    """A peer holding the writer first changes eligibility before the repair reads."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from sqlalchemy import event
+
+    state = member_repair_race
+    table, predicate, values = state.mutation(family)
+    entering = Event()
+    peer_committed = Event()
+
+    def entering_transaction(_conn, _cursor, statement, _parameters, _context, _many):
+        entering.set()
+        if statement.lstrip().startswith("SELECT"):
+            assert peer_committed.wait(timeout=5)
+
+    def repair():
+        with state.engine.begin() as conn:
+            return resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+
+    event.listen(state.engine, "before_cursor_execute", entering_transaction)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with state.peer.begin() as conn:
+                conn.execute(table.update().where(predicate).values(**values))
+                future = pool.submit(repair)
+                assert entering.wait(timeout=5)
+                # Release the earlier writer only once the migration is entering.
+            peer_committed.set()
+            counts = _migration_counts(future.result(timeout=5))
+    finally:
+        event.remove(state.engine, "before_cursor_execute", entering_transaction)
+    assert counts == _EMPTY_MIGRATION_COUNTS
+    with state.engine.connect() as conn:
+        row = conn.execute(select(table).where(predicate)).mappings().one()
+        assert {key: row[key] for key in values} == values
+
+
+@pytest.mark.parametrize("transaction", ["new", "writer", "savepoint"])
+def test_member_migration_reservation_supports_initial_schema_and_existing_transactions(tmp_path, transaction):
+    """The released initial schema owns agent_sessions.id used by nested reservation."""
+    from storage.migrations import INITIAL_REVISION
+
+    db = tmp_path / "initial.sqlite"
+    run_migrations(db, revision=INITIAL_REVISION)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.connect() as conn:
+            with conn.begin():
+                if transaction == "writer":
+                    conn.execute(state_meta.insert().values(key="caller-write", value_json="{}", updated_at="now"))
+                nested = conn.begin_nested() if transaction == "savepoint" else None
+                result = resource_access_service.migrate_legacy_deferred_resource_contexts(conn)
+                assert _migration_counts(result) == _EMPTY_MIGRATION_COUNTS
+                assert conn.connection.dbapi_connection.in_transaction
+                if nested:
+                    nested.rollback()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("family", ["scheduled"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_member_repair_keeps_existing_transaction_owned_by_caller(member_repair_race, family, nested):
+    state = member_repair_race
+    with state.engine.connect() as conn:
+        outer = conn.begin()
+        conn.execute(state_meta.insert().values(key="caller-write", value_json="{}", updated_at="now"))
+        savepoint = conn.begin_nested() if nested else None
+        assert _migration_counts(resource_access_service.migrate_legacy_deferred_resource_contexts(conn)) == state.expected
+        assert json.loads(_stored_migration_marker(conn))["schema_version"] == 3
+        if savepoint:
+            savepoint.rollback()
+            assert json.loads(_stored_migration_marker(conn))["schema_version"] == 2
+            assert conn.execute(select(state_meta.c.key).where(state_meta.c.key == "caller-write")).first()
+        outer.rollback()
+    with state.engine.connect() as conn:
+        assert json.loads(_stored_migration_marker(conn))["schema_version"] == 2
+        assert not conn.execute(select(state_meta.c.key).where(state_meta.c.key == "caller-write")).first()
+        snapshot = _legacy_definition_metadata(conn, "scheduled")[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+        assert "vibe_instance_id" not in snapshot

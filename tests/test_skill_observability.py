@@ -610,6 +610,8 @@ def test_skill_usage_help_follows_cli_language(monkeypatch, capsys, language):
     output = capsys.readouterr().out
     for key in ("helpCommand", "helpClear", "helpYes"):
         assert t(f"data.skillUsage.{key}", language) in output
+    assert ("Member or Owner" if language == "en" else "成员或所有者") in output
+    assert ("Owner only" if language == "en" else "仅限实例所有者") not in output
 
 
 @pytest.mark.parametrize("role", ["owner", "member"])

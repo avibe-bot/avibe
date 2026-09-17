@@ -61,3 +61,4 @@ observations:
       - validate actual signed HTTP storage and SSE consumers rather than capability predicates alone
 
       - include released Member deferred snapshots in binding migration without reopening unattributed or later work
+      - serialize migration provenance reads row decisions and marker seal with the existing SQLite writer reservation

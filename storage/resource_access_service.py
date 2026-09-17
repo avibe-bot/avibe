@@ -21,6 +21,7 @@ from sqlalchemy import text as sqlalchemy_text
 from sqlalchemy.engine import Connection
 
 from storage.db import get_cached_sqlite_engine
+from storage.agent_session_rows import reserve_write_lock
 from storage.models import (
     agent_runs,
     message_deliveries,
@@ -782,6 +783,13 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     while a known instance with an unknown kind remains pending until that same
     instance is authoritatively classified.
     """
+
+    # This migration decides from a marker, pairing config, durable binding and
+    # several deferred row families before updating any of them. Reserve the
+    # SQLite writer slot before the first read so that decision and seal share
+    # one serialized state. This also covers callers that already hold a
+    # transaction; reserve_write_lock is explicitly nested-transaction safe.
+    reserve_write_lock(connection)
 
     def _counts(
         *,

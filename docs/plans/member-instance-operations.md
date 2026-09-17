@@ -113,8 +113,10 @@ Allowed production scope: `vibe/authorization.py`, `vibe/ui_server.py`,
 `core/web_push_notifications.py`, and existing Harness/resource consumer modules
 only where a traced Member authorization call path requires alignment.
 PM-approved narrow extension (2026-09-17): `vibe/i18n/en.json` and
-`vibe/i18n/zh.json`, only the existing `data.skillUsage.ownerRequired` value,
-so the diagnostic denial accurately names Member or Owner; no new key.
+`vibe/i18n/zh.json`, only the existing `data.skillUsage.ownerRequired` and
+`data.skillUsage.helpCommand` values, so diagnostic denial and parser help
+accurately name Member or Owner; no new key. The help value was approved during
+the second review diagnosis below.
 UI scope: `ui/src/components/RemoteAccess.tsx`, its focused tests, and existing
 EN/ZH translation files only as necessary. Related focused tests, permission
 scenario catalog/harness and concise permission documentation are allowed.
@@ -240,3 +242,54 @@ additional broad Show run was interrupted during unrelated runtime preparation
 network I/O after three cases; it is not counted as passing. Targeted sharing
 coverage above replaces that irrelevant preparation path. CI supplies the full
 repository gate. All state is test-owned; execution/provider IPC is stubbed.
+
+
+## Review circuit-breaker diagnosis and resumption
+
+Two findings-bearing heads were independently inventoried by PM:
+
+- `02b96d475`, review `5237360393`, thread `PRRT_kwDOPbFPYs6jaBH1`:
+  Member was omitted from legacy deferred binding and previously completed
+  markers skipped the omitted rows. Fixed with the conservative proof above.
+- `e6987dc74`, review `5237677043`, thread `PRRT_kwDOPbFPYs6jaoeb`:
+  cutoff/provenance reads and ID-only updates were not one serialized decision.
+  This repeats the deferred migration compatibility/safety class, so the lane
+  stopped before editing or pushing. Thread `PRRT_kwDOPbFPYs6jaoeR` on this head
+  separately identified stale Owner-only EN/ZH Skill-usage parser help.
+
+PM reproduced a lost concurrent Task metadata update with two real SQLite/WAL
+engines and independently audited the call paths. Importer's migration file lock
+only excludes other migrations; runtime writers remain possible, and
+`engine.begin()` alone does not reserve SQLite's writer slot. The proof rule was
+correct only if the marker, config/binding, row eligibility and seal were evaluated
+against one serialized database state.
+
+PM authorized resumption on 2026-09-17 with a shared transaction-boundary fix:
+reuse `reserve_write_lock` at `migrate_legacy_deferred_resource_contexts` entry,
+before every decision read, holding it through the caller's commit/rollback.
+No per-table CAS, retry policy, new role model or migration state machine was
+introduced. `_configured_resource_state` remains read-only with
+`persist_migrations=False`, preserving config-before-database lock order and
+avoiding recursive bootstrap. The terminal/idempotent path also takes this short
+writer reservation.
+
+Callers audited: importer data migrations, post-stamp migrations, remote-access
+pending migration and authorization bootstrap all use caller-owned transactions.
+The initial released schema already supplies `agent_sessions.id` needed by the
+existing-transaction no-op reservation. Real initial-schema new/writer/savepoint
+fixtures and existing pre-Show/unversioned stamp tests cover that path; a successful
+repair inside an existing writer/savepoint remains rollbackable by its caller.
+
+Deterministic real two-connection tests cover each of Task, Watch, Run, Delivery,
+binding and marker. A peer attempting writes after migration reads is refused
+until the migration transaction completes, and its later legitimate update
+survives. A peer committing first is read after reservation, so now-ineligible or
+terminal rows and changed provenance remain untouched. All six after-read race
+cases fail against the reviewed `e6987dc74` migration function. Existing cutoff,
+identity, snapshot/hash, terminal-work and config-lock-order tests stay in the
+regression set. Actual parser help is exercised in both languages and names
+Member or Owner. This round passed 540 related regression tests, three existing
+initial/unversioned/pre-Show schema cases, changed-file Ruff and the UI build. PM
+independently inspected the shared boundary and ran 19 concurrency, legacy-schema,
+rollback and parser-help cases, all passing, then authorized this round's push.
+Subsequent exact-head review/CI remain required.
