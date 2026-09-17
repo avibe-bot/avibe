@@ -3402,8 +3402,10 @@ class Controller:
         read_contexts.pop(caller.session_id, None)
         delegated_facts = None
         metadata = payload.get("message_metadata") or {}
-        owner = metadata.get("delegated_memory_owner") if isinstance(metadata, dict) else None
-        if not admitted and isinstance(owner, dict):
+        from storage.message_deliveries import delegated_memory_owner
+
+        owner = delegated_memory_owner(metadata.get("delegated_memory_owner")) if isinstance(metadata, dict) else None
+        if not admitted and owner and payload.get("delivery_source") == "harness" and payload.get("task_trigger_kind"):
             from avibe_memory.admission import InboundTurnFacts
             from storage.resource_access_service import metadata_allows_harness_runtime
 

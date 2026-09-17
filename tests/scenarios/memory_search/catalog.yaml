@@ -189,3 +189,21 @@ scenarios:
     kind: authorization
     layer: scenario
     test: tests/test_memory_delegated_reads.py::test_owner_bound_proof_rejects_later_owner_and_subject_override
+  - id: MEMORY-SEARCH-030
+    name: Malformed persisted delegated owners omit execution proof without aborting launch
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_malformed_persisted_owner_omits_proof
+  - id: MEMORY-SEARCH-031
+    name: Task and Watch batches preserve one owner and resource authorization per Turn
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_queued_authority_remains_singular
+  - id: MEMORY-SEARCH-032
+    name: Ordinary UI and preexisting user deliveries cannot inject scheduled Memory authority
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_ordinary_ui_injection_never_becomes_scheduled

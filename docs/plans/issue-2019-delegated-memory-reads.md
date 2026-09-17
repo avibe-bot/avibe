@@ -224,3 +224,37 @@ OpenCode retry/snapshot, and public projection tests. Changed Python Ruff passes
 Unavailable durable storage omits the optional proof so ordinary Agent launch
 remains usable without granting delegated Memory. Real Incus acceptance remains
 unverified for the previously documented missing dedicated seed credentials.
+
+### Fourth-review execution-authority boundaries (PM decision, 2026-09-17)
+
+The fourth findings-bearing head stopped edits for whole-invariant diagnosis.
+The owner marker is execution authority: it must originate in host scheduling,
+have a usable shape, and remain constant across a merged Turn. Owner-bound HMAC
+continues to protect creation; no further credential mechanism is needed.
+
+Use one owner parser (nonempty string platform/user_id, normalized is_dm) and one
+source-aware known scheduled-provenance reader. Shared user snapshot intake strips
+reserved owner and scheduled provenance before persistence; hydration also strips
+old user-row injections. Hydration transports immutable Delivery.source as
+`delivery_source`, excluded from captured/restored metadata overlays. Delegated
+admission requires that host source and a scheduled trigger. Provenance presence
+alone never converts ordinary input into scheduled execution.
+
+One canonical authority component in `message_merge_identity` compares owner and
+resource_user_context at root and the known scheduled nested path. The existing
+queue collector and immutable acceptance both consume it: differing/absent
+identity separates Turns while equal authority remains batchable. No arbitrary
+metadata comparison, new permission database, or backend-specific policy is added.
+
+Fourth-review validation: 518 focused cases pass (503 cases already present on
+`abcb0147b`, plus 15 new parameter cases). `MEMORY-SEARCH-030` covers malformed
+raw nested metadata and owner fields through durable dispatch and host env
+issuance. `031` covers both Task and Watch batches: differing owner, absent owner,
+or resource snapshot separates execution; compatible authority still merges,
+normal native acceptance checks immutable identity, and HTTP reads retain the
+correct scope or denial. `032` drives actual UI POST through shared snapshot
+persistence and durable dispatch with strict author None, plus a valid historical
+user-row injection: both remain human and never call the Memory provider.
+Existing authenticated UI, stable proof/replay, persisted restart, OpenCode
+retry/restore, Claude caching, and public projections remain in the selection.
+Changed Python Ruff passes. Real Incus acceptance remains unverified.

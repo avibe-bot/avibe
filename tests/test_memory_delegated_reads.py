@@ -118,6 +118,24 @@ async def _search(controller, *, project="default", status=200):
         return call["cli_scope"]
 
 
+async def _persist_and_hydrate_scheduled(manager, controller, context):
+    """Use shared scheduled ingress and hydrate its actual durable snapshot."""
+    from core.session_turns import capture_scheduled_provenance
+
+    receipt = await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="fixture",
+        source="harness", author="harness", metadata={
+            **context.platform_specific["message_metadata"],
+            "scheduled_provenance": capture_scheduled_provenance(context),
+        }), context=_context())
+    with manager._sqlite_engine().connect() as conn:
+        row = message_deliveries.get_delivery(conn, receipt.delivery_id)
+    manager._hydrate_delivery_context(context, row)
+    manager._restore_scheduled_dispatch_context(context, row)
+    with manager._sqlite_engine().begin() as conn:
+        assert message_deliveries.retire_queued(conn, "ses_fsm", row["id"])
+    return context
+
+
 def _create_definition(kind, path, *, owner_metadata=None, session_id="ses_fsm"):
     metadata = owner_metadata or {"created_by": {"caller": {"session_id": session_id, "user_id": "FORGED"}}}
     if kind == "scheduled":
@@ -353,6 +371,7 @@ def test_remote_delegations_isolate_users_and_recheck_revoked_binding(managers, 
                     metadata=task.metadata,
                     trigger_kind="scheduled",
                 )
+                await _persist_and_hydrate_scheduled(manager, controller, continued)
                 assert configure_memory_cli_access(controller, continued)
                 scope = await _search(controller, project="notes")
                 assert controller.memory_scope_for_cli_session("ses_fsm") is None
@@ -532,6 +551,7 @@ def test_owner_bound_proof_rejects_later_owner_and_subject_override(managers, de
     manager, _fresh, engine, _other, _starts = managers
     monkeypatch.setattr('storage.db.get_cached_sqlite_engine', lambda: engine)
     monkeypatch.setattr(auth, 'get_cached_sqlite_engine', lambda: engine)
+    monkeypatch.setattr('core.internal_server.get_cached_sqlite_engine', lambda: engine)
     config = V2Config.default()
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_id = 'fixture-instance'
@@ -591,6 +611,7 @@ def test_owner_bound_proof_rejects_later_owner_and_subject_override(managers, de
                     scheduled = await ScheduledTaskService(controller=controller, store=store)._build_context(
                         parse_session_key('avibe::channel::ses_fsm'), session_id='ses_fsm', execution_id='',
                         task_id=task.id, trigger_kind='scheduled', metadata=task.metadata)
+                    await _persist_and_hydrate_scheduled(manager, controller, scheduled)
                     admitted = configure_memory_cli_access(controller, scheduled)
                     await _search(controller, status=200 if admitted else 403)
                     outcomes.append((mode, task.metadata.get('delegated_memory_owner'), admitted))
@@ -614,3 +635,167 @@ def test_exact_owner_turn_never_falls_back(memory_owner_turn):
     assert not verify_caller_session_proof("ses_wb", alice, {"platform": "avibe", "user_id": "remote:bob"})
     assert issue_caller_session_proof("ses_wb", turn_id="missing") is None
     assert issue_caller_session_proof("other-session", turn_id=old) is None
+
+
+@pytest.mark.parametrize("metadata", [
+    {"scheduled_provenance": ["invalid"]},
+    {"scheduled_provenance": {"platform_specific": "invalid"}},
+    {"scheduled_provenance": {"platform_specific": {"task_trigger_kind": "watch", "message_metadata": [1]}}},
+    {"scheduled_provenance": {"platform_specific": {"task_trigger_kind": "watch", "message_metadata": {"delegated_memory_owner": {"user_id": "local"}}}}},
+    {"scheduled_provenance": {"platform_specific": {"task_trigger_kind": "watch", "message_metadata": {"delegated_memory_owner": {"platform": "avibe", "user_id": 7}}}}},
+])
+def test_malformed_persisted_owner_omits_proof(managers, monkeypatch, metadata):
+    """MEMORY-SEARCH-030: optional raw identity never aborts ordinary launch."""
+    from core.caller_context import caller_env_for_platform_payload
+
+    manager, _fresh, engine, _other, _starts = managers
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    seen = []
+
+    async def run(_session, ctx, _text, **_kwargs):
+        env = caller_env_for_platform_payload(ctx.platform_specific, message=ctx)
+        assert "AVIBE_CALLER_SESSION_PROOF" not in env
+        assert not configure_memory_cli_access(_memory_controller(), ctx)
+        seen.append(True)
+
+    manager._run = run
+    asyncio.run(manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="fixture",
+        source="harness", author="harness", metadata=metadata), context=_context()))
+    assert seen == [True]
+
+
+@pytest.mark.parametrize("change", ["owner", "absent", "resource", "same"])
+@pytest.mark.parametrize("trigger", ["scheduled", "watch"])
+def test_queued_authority_remains_singular(managers, monkeypatch, change, trigger):
+    """MEMORY-SEARCH-031: queue batching and acceptance retain each prompt's scope."""
+    from copy import deepcopy
+    from tests.test_session_delivery_fsm import _activate, _row
+
+    manager, _fresh, engine, _other, _starts = managers
+    controller = _memory_controller()
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    active, _ = asyncio.run(_activate(manager))
+    authority = {"delegated_memory_owner": {"platform": "avibe", "user_id": "local", "is_dm": False}}
+    second = deepcopy(authority)
+    if change == "owner":
+        second["delegated_memory_owner"]["user_id"] = "remote:bob"
+    elif change == "absent":
+        second = {}
+    elif change == "resource":
+        # An invalid/revoked authorization must not inherit the older local grant.
+        second["resource_user_context"] = {"sub": "revoked", "vibe_instance_role": "viewer"}
+    queued = []
+    for text, metadata in (("Alice prompt", authority), ("next prompt", second)):
+        queued.append(asyncio.run(manager.deliver(DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content=text, source="harness", author="harness",
+            author_id="same-definition", metadata={**metadata, "scheduled_provenance": {"platform_specific": {
+                "task_trigger_kind": trigger, "task_definition_id": "same-definition", "message_metadata": metadata,
+            }}}), context=_context())))
+    observed = []
+
+    async def dispatched(_session, ctx, text, **_kwargs):
+        token = ctx.platform_specific["turn_token"]
+        manager._active_identity = lambda _backend, _session, logical: (logical, f"native-{logical}")
+        # Normal native acceptance runs the storage batch-identity assertion.
+        manager.on_native_start(ctx, backend="codex", runtime_key=f"runtime-{token}", runtime_turn_id=token)
+        admitted = configure_memory_cli_access(controller, ctx)
+        scope = await _search(controller, status=200 if admitted else 403)
+        observed.append((token, text, scope))
+
+    manager._run = dispatched
+    asyncio.run(manager.terminalize_turn(active))
+    assert len(observed) == 1
+    first_turn, first_text, first_scope = observed[0]
+    assert first_scope is not None
+    if change == "same":
+        assert "Alice prompt" in first_text and "next prompt" in first_text
+        assert _row(engine, queued[1].delivery_id)["turn_id"] == first_turn
+    else:
+        assert first_text == "Alice prompt"
+        assert _row(engine, queued[1].delivery_id)["turn_id"] is None
+        asyncio.run(manager.terminalize_turn(first_turn))
+        if change == "resource":
+            assert len(observed) == 1  # Current runtime authorization rejects it before native input.
+            assert _row(engine, queued[1].delivery_id)["state"] in {"retired", "cancelled"}
+        else:
+            assert len(observed) == 2 and observed[1][0] != first_turn
+            assert observed[1][1] == "next prompt"
+            assert observed[1][2] != first_scope
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_ordinary_ui_injection_never_becomes_scheduled(managers, monkeypatch, tmp_path, preexisting):
+    """MEMORY-SEARCH-032: real UI persistence -> durable dispatch rejects reserved authority."""
+    import json
+    from sqlalchemy import update
+    from storage.models import message_deliveries as delivery_table
+    from tests.test_ui_session_stream import _make_session
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe.ui_server import app
+
+    manager, _fresh, _engine, _other, _starts = managers
+    # UI and controller consume the same test-owned database.
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    manager._engine = engine
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    _, session_id = _make_session(tmp_path)
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    monkeypatch.setattr("vibe.ui_server._web_push_user_key", lambda: "local")
+    monkeypatch.setattr("vibe.ui_server.is_direct_loopback_memory_request", lambda: False)
+    monkeypatch.setattr("vibe.ui_server._load_remote_access_config", lambda: None)
+    owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
+    injected = {"delegated_memory_owner": owner, "scheduled_provenance": {"platform_specific": {
+        "task_trigger_kind": "watch", "delivery_source": "harness", "turn_source": "scheduled",
+        "message_metadata": {"delegated_memory_owner": owner},
+    }}}
+    controller = _memory_controller()
+    seen = []
+
+    async def dispatched(_session, ctx, _text, **kwargs):
+        token = ctx.platform_specific["turn_token"]
+        manager._active_identity = lambda _backend, _session, logical: (logical, f"native-{logical}")
+        manager.on_native_start(ctx, backend="codex", runtime_key=f"runtime-{token}", runtime_turn_id=token)
+        from core.caller_context import caller_env_for_platform_payload
+        assert "AVIBE_CALLER_SESSION_PROOF" not in caller_env_for_platform_payload(ctx.platform_specific, message=ctx)
+        assert kwargs["source"] == "human"
+        assert ctx.platform_specific["delivery_source"] == "user"
+        assert not ctx.platform_specific.get("task_trigger_kind")
+        assert "delegated_memory_owner" not in ctx.platform_specific["message_metadata"]
+        assert not configure_memory_cli_access(controller, ctx)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(controller)), base_url="http://test") as client:
+            response = await client.post("/internal/memory/search", headers={CALLER_SESSION_HEADER: session_id},
+                json={"query": "fixture", "policy": {"mode": "keyword"}})
+        assert response.status_code == 403
+        controller.memory_search_payload.assert_not_called()
+        seen.append(True)
+
+    manager._run = dispatched
+
+    async def dispatch(payload):
+        with engine.begin() as conn:
+            row = message_deliveries.get_delivery(conn, payload["user_message_id"])
+            snapshot = json.loads(row["snapshot_json"])
+            assert "delegated_memory_owner" not in json.loads(snapshot["metadata_json"])
+            assert "scheduled_provenance" not in json.loads(snapshot["metadata_json"])
+            if preexisting:
+                # Simulate a row written before reserved-field intake sanitation.
+                snapshot["metadata_json"] = json.dumps(injected)
+                conn.execute(update(delivery_table).where(delivery_table.c.id == row["id"]).values(
+                    snapshot_json=json.dumps(snapshot),
+                    snapshot_sha256=hashlib.sha256(json.dumps(snapshot).encode()).hexdigest()))
+        result = await manager.deliver(DeliveryRequest(session_id=session_id, priority="p3",
+            delivery_id=row["id"], content="LAN fixture"), context=_context(session_id))
+        assert result.turn_id
+        return {"status_code": 202, "body": {"ok": True, "session_id": session_id, "delivery_state": "accepted"}}
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", dispatch)
+    client = app.test_client()
+    response = client.post(f"/api/sessions/{session_id}/messages",
+        json={"text": "LAN fixture", "metadata": injected}, headers=csrf_headers(client))
+    assert response.status_code == 201, response.get_json()
+    assert response.get_json()["author_id"] is None
+    assert seen == [True]
+    engine.dispose()

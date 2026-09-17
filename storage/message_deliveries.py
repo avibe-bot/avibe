@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
@@ -206,6 +207,9 @@ def message_snapshot(
     if source == "harness" and author == "user" and resolved_type == "user":
         author = "harness"
         resolved_type = "harness"
+    if source == "user":
+        metadata = metadata_without_delegated_owner(metadata)
+        metadata.pop("scheduled_provenance", None)
     filtered_metadata = {
         key: value
         for key, value in (metadata or {}).items()
@@ -580,12 +584,34 @@ def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None
             "is_dm": "::user::" in str(payload.get("scope_id") or ""),
         }
     elif payload.get("source") == "harness":
-        provenance = source_metadata.get("scheduled_provenance") or {}
-        spec = provenance.get("platform_specific") or {}
-        owner = (spec.get("message_metadata") or {}).get("delegated_memory_owner")
+        provenance = scheduled_delivery_provenance(payload)
+        spec = provenance["platform_specific"] if provenance else {}
+        metadata = spec.get("message_metadata")
+        owner = metadata.get("delegated_memory_owner") if isinstance(metadata, Mapping) else None
     else:
         owner = None
-    return dict(owner) if isinstance(owner, dict) and owner.get("user_id") else None
+    return delegated_memory_owner(owner)
+
+
+def delegated_memory_owner(value: object) -> dict[str, Any] | None:
+    """Normalize the optional host owner fact; admission owns platform policy."""
+    if not isinstance(value, Mapping):
+        return None
+    platform, user_id = value.get("platform"), value.get("user_id")
+    if not all(isinstance(field, str) and field.strip() for field in (platform, user_id)):
+        return None
+    return {"platform": platform, "user_id": user_id, "is_dm": value.get("is_dm") is True}
+
+
+def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Only a host harness Delivery can restore scheduling authority."""
+    if payload.get("source") != "harness":
+        return None
+    metadata = payload.get("metadata")
+    provenance = metadata.get("scheduled_provenance") if isinstance(metadata, Mapping) else None
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    trigger = spec.get("task_trigger_kind") if isinstance(spec, Mapping) else None
+    return provenance if isinstance(trigger, str) and trigger.strip() else None
 
 
 def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
@@ -652,6 +678,19 @@ _MESSAGE_MERGE_IDENTITY_FIELDS = (
 )
 
 
+def _delegated_authority_merge_identity(metadata: Mapping[str, Any]) -> str:
+    provenance = metadata.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, Mapping) else None
+    nested = spec.get("message_metadata") if isinstance(spec, Mapping) else None
+    # Compare raw authority, including absent/malformed values, before batching.
+    # Execution IDs and unrelated metadata must not disable normal coalescing.
+    return _canonical_json([
+        {key: value.get(key) for key in ("delegated_memory_owner", "resource_user_context")}
+        if isinstance(value, Mapping) else None
+        for value in (metadata, nested)
+    ])
+
+
 def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     """Return the Message fields that must stay singular after batching."""
 
@@ -666,6 +705,7 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     return (
         *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
         kind,
+        _delegated_authority_merge_identity(metadata),
         legacy_memory_merge_identity(metadata),
     )
 
