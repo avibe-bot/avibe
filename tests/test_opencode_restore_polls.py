@@ -29,6 +29,9 @@ from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
 NATIVE_PART_ID = "prt_1234567890abcdef1234567890abcdef"
 
+from tests.test_memory_delegated_reads import memory_owner_turn  # noqa: F401 -- durable owner fixture
+from tests.test_session_delivery_fsm import managers, _fsm_schema_template  # noqa: F401 -- fixture dependencies
+
 
 def _make_poll(*, platform: str, base_session_id: str, opencode_session_id: str) -> ActivePollInfo:
     return ActivePollInfo(
@@ -156,9 +159,14 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     return agent, status_writes, removed, request_sessions
 
 
-def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
+@pytest.mark.parametrize("later_owner", [False, True])
+def test_restore_rebinds_persisted_remote_caller_context(monkeypatch, memory_owner_turn, later_owner) -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    turn_id = memory_owner_turn()
+    if later_owner:
+        memory_owner_turn(owner="remote:user-2", terminal=False)
     poll.processing_indicator = {
+        "opencode_native_steering": {"target_session_id": "ses_wb", "logical_turn_id": turn_id},
         "platform": "avibe",
         "user_id": "remote:user-1",
         "opencode_caller_context_env": {
@@ -212,7 +220,8 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
     from core.caller_context import verify_caller_session_proof
 
-    assert verify_caller_session_proof("ses_wb", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"])
+    assert verify_caller_session_proof("ses_wb", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "remote:user-1"})
+    assert not verify_caller_session_proof("ses_wb", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "remote:user-2"})
     assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
 
 
@@ -241,9 +250,11 @@ def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> No
     assert removed == ["oc-1"]
 
 
-def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> None:
+def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch, memory_owner_turn) -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    turn_id = memory_owner_turn()
     poll.processing_indicator = {
+        "opencode_native_steering": {"target_session_id": "ses_wb", "logical_turn_id": turn_id},
         "opencode_caller_context_env": {"AVIBE_SESSION_ID": "ses_wb"},
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
@@ -254,7 +265,7 @@ def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> No
         nonlocal attempts
         from core.caller_context import verify_caller_session_proof
 
-        assert verify_caller_session_proof("ses_wb", _kwargs["extra_env"]["AVIBE_CALLER_SESSION_PROOF"])
+        assert verify_caller_session_proof("ses_wb", _kwargs["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "remote:user-1"})
         assert "AVIBE_CALLER_SESSION_PROOF" not in poll.processing_indicator["opencode_caller_context_env"]
 
         attempts += 1

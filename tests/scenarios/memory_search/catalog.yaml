@@ -183,3 +183,9 @@ scenarios:
     kind: lifecycle
     layer: scenario
     test: tests/test_agent_steering.py::test_opencode_coordinator_error_aborts_through_steering_owner
+  - id: MEMORY-SEARCH-029
+    name: Same-Session owner changes reject retained proofs even with caller subject override
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_owner_bound_proof_rejects_later_owner_and_subject_override

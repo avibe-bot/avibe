@@ -32,8 +32,6 @@ pytestmark = pytest.mark.usefixtures("delegated_owner_transport")
 @pytest.fixture
 def delegated_owner_transport(monkeypatch, tmp_path):
     """Real client serialization + ASGI endpoint + verifier, no admitted flag."""
-    from core.caller_context import caller_env_for_platform_payload
-
     app = create_app(_memory_controller())
 
     class InternalTransport(httpx.BaseTransport):
@@ -47,8 +45,47 @@ def delegated_owner_transport(monkeypatch, tmp_path):
 
     monkeypatch.setattr("vibe.internal_client._verified_socket_path", lambda _path: tmp_path / "test.sock")
     monkeypatch.setattr("vibe.internal_client.httpx.HTTPTransport", lambda **_kwargs: InternalTransport())
-    for key, value in caller_env_for_platform_payload(_context().platform_specific, message=_context()).items():
+
+
+@pytest.fixture
+def memory_owner_turn(managers, monkeypatch):
+    """Host-owned accepted Delivery for backend proof lifecycle tests."""
+    from tests.test_session_delivery_fsm import _seed_session
+
+    manager, _fresh, engine, _other, _starts = managers
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    sessions = {"ses_fsm"}
+
+    def create(session_id="ses_wb", owner="remote:user-1", *, terminal=True):
+        if session_id not in sessions:
+            _seed_session(engine, session_id)
+            sessions.add(session_id)
+
+        async def accept(_session, ctx, _text, **_kwargs):
+            token = ctx.platform_specific["turn_token"]
+            manager._active_identity = lambda _backend, _session, logical: (logical, f"native-{logical}")
+            manager.on_native_start(ctx, backend="codex", runtime_key=f"runtime-{token}", runtime_turn_id=token)
+
+        manager._run = accept
+        result = asyncio.run(manager.deliver(
+            DeliveryRequest(session_id=session_id, priority="p3", content="fixture", author_id=owner),
+            context=_context(session_id),
+        ))
+        if terminal:
+            manager._terminalize_durable_turn(result.turn_id, "completed", settled_by="terminal_result",
+                evidence_kind="fixture", resume_successors=False)
+        return result.turn_id
+
+    return create
+
+
+def _publish_caller_env(monkeypatch, context):
+    from core.caller_context import caller_env_for_platform_payload
+
+    env = caller_env_for_platform_payload(context.platform_specific, message=context)
+    for key, value in env.items():
         monkeypatch.setenv(key, value)
+    return env
 
 
 def _memory_controller():
@@ -137,6 +174,7 @@ def test_delegated_read_survives_definition_and_controller_restart(managers, mon
 
     async def direct_start(_session, context, _text, **_kwargs):
         accept(manager, context)
+        _publish_caller_env(monkeypatch, context)
         assert configure_memory_cli_access(direct, context)
         observed.append(await _search(direct))
         assert await _search(direct, project="notes") == observed[0]
@@ -289,6 +327,7 @@ def test_remote_delegations_isolate_users_and_recheck_revoked_binding(managers, 
                 token = ctx.platform_specific["turn_token"]
                 manager._active_identity = lambda _backend, _session, logical: (logical, f"native-{logical}")
                 manager.on_native_start(ctx, backend="codex", runtime_key=f"runtime-{token}", runtime_turn_id=token)
+                _publish_caller_env(monkeypatch, ctx)
                 store = ScheduledTaskStore(tmp_path / f"{user}.json")
                 args = dict(
                     session_key="avibe::channel::ses_fsm",
@@ -357,12 +396,19 @@ def test_im_session_override_rejected(managers, monkeypatch, tmp_path, proof_kin
 
     manager, _fresh, engine, _other_engine, _starts = managers
     monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    from tests.test_session_delivery_fsm import _seed_session
+    _seed_session(engine, "attacker_session")
+    attacker_proofs = []
+
+    async def attacker_active(_session, context, _text, **_kwargs):
+        attacker_proofs.append(caller_env_for_platform_payload(context.platform_specific, message=context)[AVIBE_CALLER_SESSION_PROOF_ENV])
+
+    manager._run = attacker_active
+    asyncio.run(manager.deliver(DeliveryRequest(session_id="attacker_session", priority="p3", content="attacker", author_id="local"), context=_context("attacker_session")))
     observed = []
 
     async def victim_active(_session, context, _text, **_kwargs):
-        source = "ses_fsm" if proof_kind == "valid" else "attacker_session"
-        source_context = _context(source)
-        proof = caller_env_for_platform_payload(source_context.platform_specific, message=source_context)[AVIBE_CALLER_SESSION_PROOF_ENV]
+        proof = caller_env_for_platform_payload(context.platform_specific, message=context)[AVIBE_CALLER_SESSION_PROOF_ENV] if proof_kind == "valid" else attacker_proofs[0]
         monkeypatch.setenv(AVIBE_CALLER_SESSION_PROOF_ENV, {"missing": "", "tampered": "伪造"}.get(proof_kind, proof))
         # A different Agent can replace these ordinary CLI environment locators.
         monkeypatch.setenv("AVIBE_SESSION_ID", "ses_fsm")
@@ -471,3 +517,100 @@ def test_public_definition_projection_preserves_sqlite_runtime_owner(managers, m
     finally:
         public.close()
         raw.close()
+
+
+def test_owner_bound_proof_rejects_later_owner_and_subject_override(managers, delegated_owner_transport, monkeypatch, tmp_path):
+    """MEMORY-SEARCH-029: an old owner cannot harvest a later owner’s scope."""
+    from config.v2_config import V2Config
+    from core.caller_context import caller_context_from_env, caller_resource_user_context, caller_env_for_platform_payload
+    from storage import remote_access_authorization_service as auth
+    from storage.resource_access_service import ResourceUserContext, metadata_with_resource_user_context
+    import json
+    import time
+    issued_at = int(time.time())
+
+    manager, _fresh, engine, _other, _starts = managers
+    monkeypatch.setattr('storage.db.get_cached_sqlite_engine', lambda: engine)
+    monkeypatch.setattr(auth, 'get_cached_sqlite_engine', lambda: engine)
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = 'fixture-instance'
+    config.remote_access.vibe_cloud.instance_kind = 'personal'
+    config.remote_access.vibe_cloud.instance_secret = 'fixture-not-real'
+    config.save()
+    transition = auth.begin_instance_binding_transition(instance_id='fixture-instance', instance_kind='personal')
+    auth.complete_instance_binding_transition(instance_id='fixture-instance', instance_kind='personal', generation=transition['generation'])
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    retained = {}
+    outcomes = []
+
+    async def run():
+        for user in ('alice', 'alice', 'bob'):
+            async def active(_session, ctx, _text, **_kwargs):
+                token = ctx.platform_specific['turn_token']
+                manager._active_identity = lambda _backend, _session, logical: (logical, f'native-{logical}')
+                manager.on_native_start(ctx, backend='codex', runtime_key=f'runtime-{token}', runtime_turn_id=token)
+                if user == 'alice':
+                    # Host creates Alice's normal authenticated execution context.
+                    alice = ResourceUserContext(subject='alice', instance_role='editor',
+                        instance_access_source='email', instance_id='fixture-instance',
+                        instance_kind='personal', is_remote=True, claims_issued_at=issued_at)
+                    ctx.user_id = 'remote:alice'
+                    ctx.platform_specific['message_metadata'] = metadata_with_resource_user_context({}, alice)
+                    issued = caller_env_for_platform_payload(ctx.platform_specific, message=ctx, session_stable_only=True)
+                    if retained:
+                        assert issued == retained  # Same owner across distinct durable Turns.
+                    retained.update(issued)
+                    return
+                for mode in ('unchanged', 'ordinary_env_sub_override', 'rightful_owner'):
+                    env = dict(retained)
+                    if mode != 'unchanged':
+                        # Only mutate the ordinary JSON env field. No Bob credential,
+                        # signed authorization, host DB change, or new HMAC is supplied.
+                        resource = json.loads(env['AVIBE_CALLER_RESOURCE_CONTEXT'])
+                        resource['sub'] = 'bob'
+                        env['AVIBE_CALLER_RESOURCE_CONTEXT'] = json.dumps(resource)
+                    if mode == 'rightful_owner':
+                        bob = ResourceUserContext(subject='bob', instance_role='editor',
+                            instance_access_source='email', instance_id='fixture-instance',
+                            instance_kind='personal', is_remote=True, claims_issued_at=issued_at)
+                        ctx.user_id = 'remote:bob'
+                        ctx.platform_specific['message_metadata'] = metadata_with_resource_user_context({}, bob)
+                        env = caller_env_for_platform_payload(ctx.platform_specific, message=ctx, session_stable_only=True)
+                        assert env['AVIBE_CALLER_SESSION_PROOF'] != retained['AVIBE_CALLER_SESSION_PROOF']
+                    for key, value in env.items():
+                        monkeypatch.setenv(key, value)
+                    caller = caller_context_from_env()
+                    store = ScheduledTaskStore(tmp_path / f'{mode}.json')
+                    task = await asyncio.to_thread(store.add_task,
+                        session_key='avibe::channel::ses_fsm', session_id='ses_fsm', prompt='recall',
+                        schedule_type='at', timezone_name='UTC', run_at='2099-01-01T00:00:00+00:00',
+                        metadata={'created_by': {'caller': caller.to_metadata()}},
+                        user_context=caller_resource_user_context(caller))
+                    controller = _memory_controller()
+                    scheduled = await ScheduledTaskService(controller=controller, store=store)._build_context(
+                        parse_session_key('avibe::channel::ses_fsm'), session_id='ses_fsm', execution_id='',
+                        task_id=task.id, trigger_kind='scheduled', metadata=task.metadata)
+                    admitted = configure_memory_cli_access(controller, scheduled)
+                    await _search(controller, status=200 if admitted else 403)
+                    outcomes.append((mode, task.metadata.get('delegated_memory_owner'), admitted))
+            manager._run = active
+            result = await manager.deliver(DeliveryRequest(session_id='ses_fsm', priority='p3',
+                content='fixture', author_id=f'remote:{user}', message_kind='original'), context=_context())
+            manager._terminalize_durable_turn(result.turn_id, 'completed', settled_by='terminal_result',
+                evidence_kind='fixture', resume_successors=False)
+    asyncio.run(run())
+    assert outcomes == [('unchanged', None, False), ('ordinary_env_sub_override', None, False),
+        ('rightful_owner', {'platform': 'avibe', 'user_id': 'remote:bob', 'is_dm': False}, True)]
+
+
+def test_exact_owner_turn_never_falls_back(memory_owner_turn):
+    from core.caller_context import issue_caller_session_proof, verify_caller_session_proof
+
+    old = memory_owner_turn(owner="remote:alice")
+    memory_owner_turn(owner="remote:bob", terminal=False)
+    alice = issue_caller_session_proof("ses_wb", turn_id=old)
+    assert verify_caller_session_proof("ses_wb", alice, {"platform": "avibe", "user_id": "remote:alice"})
+    assert not verify_caller_session_proof("ses_wb", alice, {"platform": "avibe", "user_id": "remote:bob"})
+    assert issue_caller_session_proof("ses_wb", turn_id="missing") is None
+    assert issue_caller_session_proof("other-session", turn_id=old) is None

@@ -554,13 +554,15 @@ def metadata_with_delegated_memory_owner(
     return result
 
 
-def current_delivery_memory_owner(session_id: str) -> dict[str, Any] | None:
-    """Controller-only lookup, after authenticating the creating Session proof."""
+def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None) -> dict[str, Any] | None:
+    """Host owner from an exact same-Session Turn, or the current candidate."""
     from storage.db import get_cached_sqlite_engine
 
     with get_cached_sqlite_engine().connect() as conn:
-        turn = active_turn(conn, session_id)
-        delivery = delivery_for_turn(conn, turn["id"]) if turn else None
+        turn = get_turn(conn, turn_id) if turn_id is not None else active_turn(conn, session_id)
+        if not turn or turn["session_id"] != session_id:
+            return None
+        delivery = delivery_for_turn(conn, turn["id"])
         if delivery is None:
             return None
         # Acceptance moves the immutable content into Message and clears the

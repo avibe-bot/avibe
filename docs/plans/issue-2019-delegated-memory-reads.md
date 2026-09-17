@@ -62,11 +62,13 @@ PR #2023's first review exposed a normal CLI override: changing
 alone is not authentication. The orchestrator approved this bounded correction:
 
 - Shared `caller_env_for_platform_payload` issues `AVIBE_CALLER_SESSION_PROOF`,
-  an HMAC-SHA256 of the Session ID using one random controller-process key.
+  an HMAC-SHA256 of canonical `[session_id, platform, user_id]` using one
+  random controller-process key (strengthened after the third review).
   The deterministic proof is stable for Claude's session-cached environment.
 - Definition creation sends the proof and same target Session to the existing
   Unix transport's `/internal/memory/delegated-owner` accessor. Constant-time
-  verification precedes the raw exact-Delivery lookup. There is no signing API.
+  verification binds the current exact-Delivery owner candidate before returning
+  that same owner object. There is no signing API.
   Missing/bad proof or unavailable controller leaves ordinary definitions usable
   but grants no delegated Memory identity. In-process event-loop creation does
   not call its own socket synchronously and likewise leaves identity absent.
@@ -74,7 +76,7 @@ alone is not authentication. The orchestrator approved this bounded correction:
   The key stays in memory. Proofs travel in existing execution transport (including
   Codex shell scripts and OpenCode binding files); they are excluded from caller
   metadata and OpenCode durable processing snapshots. OpenCode restores a fresh
-  proof from its host-owned poll Session identity. No registry, schema, per-task
+  proof from its host-owned poll Session and exact logical Turn identity. No registry, schema, per-task
   credential, or backend-specific authorization policy is introduced.
 - Threat boundary: documented CLI locator overrides are untrusted; a same-UID
   process editing host SQLite, transport files, or process memory is outside this
@@ -190,3 +192,35 @@ covers the five families, malformed optional metadata, public Run output, native
 binding retry/restore, CLI Task/Watch, and existing Harness run/status projections.
 Scenario IDs `MEMORY-SEARCH-027/028` identify Run-copy and binding-retry evidence.
 Run lifecycle SSE events also use a fixed field list without metadata.
+
+### Third-review owner-binding correction (orchestrator decision, 2026-09-17)
+
+The retained Session-only proof could authorize a later Workbench owner's
+Delivery when the caller changed an unsigned resource-context subject. A hermetic
+creation/dispatch/HTTP-read reproduction confirmed unchanged Alice context was
+denied, but replacing its ordinary JSON subject with Bob yielded Bob's scope.
+The third-head circuit breaker stopped edits; the orchestrator authorized only
+strengthening the existing HMAC over canonical `[session_id, platform, user_id]`.
+Same-owner later turns may reuse the proof: per-turn freshness is not required.
+
+Host issuance reuses the one Delivery-owner extractor with the context's exact
+`turn_token` when present. OpenCode restoration uses its stored logical Turn and
+target Session, never another current turn's owner. A missing/wrong-Session exact
+Turn has no fallback. The accessor reads one current owner candidate and verifies
+against that same object before returning it. Caller JSON and routing author IDs
+cannot supply signed ownership. No nonce, registry, token payload, cache, or new
+endpoint is added. Claude's existing env reconciliation changes clients only
+when the signed owner changes; ordinary same-owner turns remain stable.
+
+Persisted owner facts and current authorization remain unchanged; restart rotates
+the process key and can reissue from the exact stored Delivery. Any further
+findings-bearing head requires another PM reassessment before edits/push.
+
+Third-review focused validation: 234 cases passed, including the new full
+create/dispatch/read cross-owner replay contract (`MEMORY-SEARCH-029`), exact-Turn
+missing/mismatched Session denial, and restored old-owner OpenCode poll coverage.
+The selection retains Claude cached-client, Task/Watch persistence/key rotation,
+OpenCode retry/snapshot, and public projection tests. Changed Python Ruff passes.
+Unavailable durable storage omits the optional proof so ordinary Agent launch
+remains usable without granting delegated Memory. Real Incus acceptance remains
+unverified for the previously documented missing dedicated seed credentials.

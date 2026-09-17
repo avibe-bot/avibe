@@ -2625,8 +2625,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 (steering_snapshot.get("target_session_id") if isinstance(steering_snapshot, dict) else None)
                 or poll_info.base_session_id or ""
             )
-            if restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
-                restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = issue_caller_session_proof(restored_session_id)
+            if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
+                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id)
+                if proof:
+                    restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
             if (
                 poll_platform == "avibe"
                 and str(restored_context.user_id or "").startswith("remote:")

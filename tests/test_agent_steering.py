@@ -976,7 +976,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     manager, _fresh, engine, _other, _starts = managers
     _seed_session(engine, "avibe-session")
     monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
-    await manager.deliver(
+    durable = await manager.deliver(
         DeliveryRequest(session_id="avibe-session", priority="p3", content="delegate", author_id="local"),
         context=_context("avibe-session"),
     )
@@ -986,6 +986,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     monkeypatch.setattr("modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS", 0)
     metadata, prefix = native_input
     primary = _primary_request(backend="opencode")
+    primary.context.platform_specific["turn_token"] = durable.turn_id
     primary.input_metadata = metadata
     poll_started = asyncio.Event()
     fail_poll = asyncio.Event()
@@ -1121,7 +1122,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         from core.caller_context import verify_caller_session_proof
 
         env = kwargs["extra_env"]
-        assert verify_caller_session_proof(env["AVIBE_SESSION_ID"], env["AVIBE_CALLER_SESSION_PROOF"])
+        assert verify_caller_session_proof(env["AVIBE_SESSION_ID"], env["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "local"})
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         for kind in ("scheduled", "watch"):
@@ -1161,7 +1162,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     assert state.awaiting_active_status_observed is False
     target = ActiveSteerTarget(
         runtime_key=primary.base_session_id,
-        logical_turn_id="logical-turn",
+        logical_turn_id=durable.turn_id,
         context=primary.context,
         agent_request=primary,
         agent=agent,

@@ -1684,9 +1684,12 @@ def create_app(
 
         body = await request.json()
         session_id, proof = body.get("session_id"), body.get("proof")
-        if not isinstance(session_id, str) or not isinstance(proof, str) or not verify_caller_session_proof(session_id, proof):
+        if not isinstance(session_id, str) or not isinstance(proof, str):
             return JSONResponse(status_code=403, content={"owner": None})
-        return {"owner": current_delivery_memory_owner(session_id)}
+        owner = current_delivery_memory_owner(session_id)
+        if not verify_caller_session_proof(session_id, proof, owner):
+            return JSONResponse(status_code=403, content={"owner": None})
+        return {"owner": owner}
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:

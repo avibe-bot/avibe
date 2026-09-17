@@ -448,7 +448,9 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
     assert set(full) - set(scoped) == {AVIBE_CALLER_USER_ID_ENV, AVIBE_CALLER_MESSAGE_ID_ENV}
     from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV, validated_caller_env_snapshot
 
-    assert full[AVIBE_CALLER_SESSION_PROOF_ENV] == scoped[AVIBE_CALLER_SESSION_PROOF_ENV]
+    # No durable execution owner in this pure caller-shape fixture.
+    assert AVIBE_CALLER_SESSION_PROOF_ENV not in full
+    assert AVIBE_CALLER_SESSION_PROOF_ENV not in scoped
     assert AVIBE_CALLER_SESSION_PROOF_ENV not in validated_caller_env_snapshot(full)
     assert AVIBE_CALLER_SESSION_PROOF_ENV not in caller_context_from_env(full).to_metadata()
 

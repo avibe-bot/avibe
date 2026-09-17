@@ -14,14 +14,29 @@ AVIBE_CALLER_SESSION_PROOF_ENV = "AVIBE_CALLER_SESSION_PROOF"
 _SESSION_PROOF_KEY = secrets.token_bytes(32)
 
 
-def issue_caller_session_proof(session_id: str) -> str:
-    """Host-only execution transport proof, stable for this controller lifetime."""
-    return hmac.new(_SESSION_PROOF_KEY, session_id.encode(), hashlib.sha256).hexdigest()
+def _session_owner_proof(session_id: str, owner: Mapping[str, Any]) -> str:
+    identity = json.dumps([session_id, owner["platform"], owner["user_id"]], separators=(",", ":"))
+    return hmac.new(_SESSION_PROOF_KEY, identity.encode(), hashlib.sha256).hexdigest()
 
 
-def verify_caller_session_proof(session_id: str, proof: str) -> bool:
-    return bool(session_id and proof) and hmac.compare_digest(
-        issue_caller_session_proof(session_id).encode(), proof.encode()
+def issue_caller_session_proof(session_id: str, *, turn_id: str | None = None) -> str | None:
+    """Host-only proof of the exact execution's owner, stable across its turns."""
+    from storage.message_deliveries import current_delivery_memory_owner
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        owner = current_delivery_memory_owner(session_id, turn_id=turn_id)
+    except SQLAlchemyError:
+        # Missing/unavailable durable execution identity must not interrupt an
+        # ordinary Agent launch, and cannot authorize Memory delegation.
+        return None
+    return _session_owner_proof(session_id, owner) if owner else None
+
+
+def verify_caller_session_proof(session_id: str, proof: str, owner: Mapping[str, Any] | None) -> bool:
+    return bool(session_id and proof and owner) and hmac.compare_digest(
+        _session_owner_proof(session_id, owner).encode(), proof.encode()
     )
 
 
@@ -483,5 +498,7 @@ def caller_env_for_platform_payload(
     if session_stable_only:
         context = context.session_stable()
     env = context.to_env()
-    env[AVIBE_CALLER_SESSION_PROOF_ENV] = issue_caller_session_proof(context.session_id)
+    proof = issue_caller_session_proof(context.session_id, turn_id=_clean((payload or {}).get("turn_token")) or None)
+    if proof:
+        env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
     return env
