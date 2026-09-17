@@ -2170,9 +2170,16 @@ def main() -> int:
         )
         actions_snapshot = normalize_selected_runs(selected_actions) if ci_enabled else None
 
+    # Explicit PR replay baselines CI at the current head, independently of the
+    # historical PR cursor. Explicit seed likewise adopts the current snapshot.
+    if ci_enabled and args.seed_state:
+        actions_snapshot = normalize_selected_runs(selected_actions)
+    actions_head_sha = observed_head_sha if explicit_replay or args.seed_state else tracked_head_sha
     actions_observed = (
         _observe_actions(
-            _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY) or _saved_actions_snapshot(saved),
+            {} if args.seed_state else (
+                _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY) or _saved_actions_snapshot(saved)
+            ),
             normalize_selected_runs(selected_actions),
             args.sha or observed_head_sha,
         )
@@ -2204,6 +2211,9 @@ def main() -> int:
 
         def _active_ci_head_sha() -> str:
             return args.sha or _current_pr_head_sha(state.get("pull_request"))
+
+        def _same_actions_head() -> bool:
+            return actions_head_sha is not None and actions_head_sha.casefold() == _active_ci_head_sha().casefold()
 
         def _initial_cursor(flag_value: int | None, saved_key: str, items_key: str) -> int:
             if flag_value is not None:
@@ -2271,8 +2281,12 @@ def main() -> int:
 
         def _render_combined(
             cursors: tuple[int, int, int, int, str],
+            *,
+            fallback_pr: tuple[str | None, int, int, int, int, str] | None = None,
         ) -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
             pr_result = _render(cursors)
+            if pr_result[0] is None and fallback_pr is not None:
+                pr_result = fallback_pr
             if not ci_enabled:
                 return (*pr_result, None)
 
@@ -2289,7 +2303,7 @@ def main() -> int:
             if _actions_snapshot_regressed(current_actions, actions_observed):
                 return None
             # A push starts a new CI epoch even if it returns to an earlier SHA.
-            previous = actions_snapshot if tracked_head_sha == _active_ci_head_sha() else None
+            previous = actions_snapshot if _same_actions_head() else None
             if previous is not None and current_actions == previous:
                 return None
             output, _failed = render_actions_result(
@@ -2302,7 +2316,7 @@ def main() -> int:
             return output
 
         def _advance_actions_baseline(reported_actions: dict[str, Any] | None) -> None:
-            nonlocal actions_snapshot
+            nonlocal actions_snapshot, actions_head_sha
             if not ci_enabled:
                 return
             # Only a reported terminal result advances the notification baseline.
@@ -2310,8 +2324,9 @@ def main() -> int:
             # result. The existing pending transaction covers this state too.
             if reported_actions is not None:
                 actions_snapshot = reported_actions
-            elif tracked_head_sha != _active_ci_head_sha():
+            elif not _same_actions_head():
                 actions_snapshot = {workflow: [] for workflow in args.workflow}
+            actions_head_sha = _active_ci_head_sha()
 
         def _refresh_actions() -> None:
             nonlocal selected_actions, actions_observed
@@ -2330,7 +2345,7 @@ def main() -> int:
             if not ci_enabled:
                 return False
             current_actions = normalize_selected_runs(selected_actions)
-            previous = actions_snapshot if tracked_head_sha == _active_ci_head_sha() else None
+            previous = actions_snapshot if _same_actions_head() else None
             if _actions_snapshot_regressed(current_actions, actions_observed):
                 return True
             if previous is not None and current_actions == previous:
@@ -2427,11 +2442,14 @@ def main() -> int:
                 return first
 
             best = first
+            best_pr = _render(pending)
 
             def _fallback() -> tuple[str | None, int, int, int, int, str, dict[str, Any] | None]:
                 # Revalidate against the latest successful poll, not a transient
                 # earlier candidate that may now equal the delivered baseline.
-                return _render_combined(pending)
+                # PR evidence remains at-least-once even if a later collection
+                # omits it; only the provisional CI verdict can be withdrawn.
+                return _render_combined(pending, fallback_pr=best_pr)
 
             for _round in range(SETTLE_MAX_ROUNDS):
                 # The batch is already worth a turn, so waiting for the rest of it must
@@ -2481,6 +2499,9 @@ def main() -> int:
                     return _fallback()
                 state, _count = settle_request.value
                 _refresh_actions()
+                pr_candidate = _render(pending)
+                if pr_candidate[0] is not None:
+                    best_pr = pr_candidate
                 if _actions_waiting_for_terminal_result():
                     continue
                 # Rendered from the same cursors as the first hit, so the result is a

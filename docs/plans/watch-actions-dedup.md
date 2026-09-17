@@ -56,6 +56,12 @@ tests, related Watch supervisor tests, skill guidance tests, and changed-file li
 Obtain independent read-only review and exact-head GitHub review/CI before
 delivery close-out. Existing live Watches retain their IDs, cursors, and filters.
 
+Explicit PR replay baselines unrelated CI at the currently fetched head without
+altering the requested PR history. SHA comparisons use the same case-insensitive
+contract as preflight and run selection. An explicit ownerless seed writes the
+current CI baseline and inventory; this supported CLI operation is distinct from
+ordinary Watch re-arming, which must never reseed.
+
 ## Known by design
 
 - Missing or regressed Actions observations do not establish a fresh terminal

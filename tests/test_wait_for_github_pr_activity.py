@@ -4293,20 +4293,20 @@ def _ci_state(*runs, head="head-1", comment=False):
     return state
 
 
-def _seed_ci_state(module, path, *runs, workflows=("CI",)):
-    state = _ci_state(*runs)
+def _seed_ci_state(module, path, *runs, workflows=("CI",), head="head-1", owner="wat_9"):
+    state = _ci_state(*runs, head=head)
     _managed_state(
         module,
         path,
-        "wat_9",
+        owner,
         **_complete_pr_baseline_fields(module, state),
         actions=module.normalize_selected_runs(
-            module.select_matching_runs(list(runs), workflows=list(workflows), branch="feature", head_sha="head-1")
+            module.select_matching_runs(list(runs), workflows=list(workflows), branch="feature", head_sha=head)
         ),
     )
 
 
-def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0):
+def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0, sha=None):
     """Use real cursor IO in tmp_path, fake GitHub, and a bounded virtual clock."""
     clock = 0.0
     polls = iter(states)
@@ -4322,6 +4322,7 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
         return latest, 2
 
     workflow_args = tuple(arg for workflow in workflows for arg in ("--workflow", workflow))
+    sha_args = ("--sha", sha) if sha is not None else ()
     with (
         patch.object(module.time, "monotonic", side_effect=lambda: clock),
         patch.object(module.time, "sleep", side_effect=sleep),
@@ -4332,7 +4333,7 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
             fetch,
             delivery=delivery,
             extra_args=(
-                "--branch", "feature", *workflow_args, "--interval", "1", "--timeout", "100",
+                "--branch", "feature", *workflow_args, *sha_args, "--interval", "1", "--timeout", "100",
                 "--settle", str(settle),
             ),
         )
@@ -4539,6 +4540,113 @@ def test_combined_ci_settle_fetch_failure_retains_the_report_and_its_snapshot(tm
     assert "GitHub Actions success" in output
     assert payload["actions"] == module.normalize_selected_runs({"CI": [old]})
     assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs({"CI": [new]})
+
+
+def test_combined_ci_pinned_sha_case_does_not_start_a_new_epoch(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    run = _ci_run(head="abc123")
+    _seed_ci_state(module, path, run, head="abc123")
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(run, head="abc123")], sha="ABC123")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("with_comment", [False, True])
+def test_explicit_pr_replay_does_not_replay_unrelated_completed_ci(with_comment):
+    module = _load_module()
+    state = _ci_state(_ci_run(), comment=with_comment)
+    stdout = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", return_value=(state, 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "monotonic", side_effect=[0, 2]),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI",
+             "--since-review-comment-id", "0", "--timeout", "1"],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+    assert rc == (0 if with_comment else 124)
+    assert "GitHub Actions" not in stdout.getvalue()
+    assert ("review_comment #501" in stdout.getvalue()) == with_comment
+
+
+@pytest.mark.parametrize("head", ["head-1", "head-2"])
+def test_explicit_seed_replaces_an_ownerless_actions_baseline_with_current_state(tmp_path, head):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(conclusion="failure"), owner=None)
+    current = _ci_run(8, head=head)
+    state = _ci_state(current, head=head)
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", return_value=(state, 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature",
+             "--workflow", "CI", "--state-file", str(path), "--seed-state"],
+        ),
+        patch("sys.stdout", io.StringIO()),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        assert module.main() == 0
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = module.normalize_selected_runs({"CI": [current]})
+    assert saved["actions"] == expected
+    assert saved[module.ACTIONS_OBSERVED_KEY] == expected
+    rc, output, _ = _ci_cycle(module, path, [state])
+    assert rc == 124
+    assert output == ""
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(current, _ci_run(9, head=head), head=head)])
+    assert rc == 0
+    assert "GitHub Actions success" in output
+
+
+@pytest.mark.parametrize("with_ci", [False, True])
+def test_settle_preserves_detected_pr_activity_when_later_polls_omit_it(tmp_path, with_ci):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    first = _ci_state(_ci_run(attempt=2), comment=True)
+    quiet = _ci_state(old)
+    calls = 0
+    clock = 0.0
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def fetch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return (first if calls == 1 else quiet), 2
+
+    ci_args = ("--branch", "feature", "--workflow", "CI") if with_ci else ()
+    with (
+        patch.object(module.time, "sleep", side_effect=sleep),
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+    ):
+        rc, output, payload = _run_managed(
+            module, path, fetch, delivery="1",
+            extra_args=(*ci_args, "--settle", "1", "--timeout", "100"),
+        )
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert "GitHub Actions" not in output
+    assert payload[module.STAGED_KEY]["output"] == output.strip()
+    if with_ci:
+        assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs({"CI": [old]})
 
 
 def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_path) -> None:
