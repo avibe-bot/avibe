@@ -111,7 +111,7 @@ function atRuleNames(source) {
   // channel read a FEATURE TEST -- text whose entire purpose is to ask whether
   // a value is supported -- as an applied glow. That is the false-positive
   // direction: a stylesheet spelled in valid CSS fails the gate.
-  postcss.parse(source).walkAtRules((rule) => names.set(rule.source.start.offset, rule.name.toLowerCase()));
+  postcss.parse(source, { map: false }).walkAtRules((rule) => names.set(rule.source.start.offset, rule.name.toLowerCase()));
   return names;
 }
 

@@ -63,12 +63,13 @@ function* eachStylesheet(root) {
       // one layer along. What it cannot read it also cannot scan, so the miss is
       // symmetric; `src` has no such stretch today.
       if (file.endsWith('.css')) {
-        yield [origin, postcss.parse(text)];
+        // Validation needs the CSS text, never files named by sourceMappingURL.
+        yield [origin, postcss.parse(text, { map: false })];
         continue;
       }
       let sheet;
       try {
-        sheet = postcss.parse(text);
+        sheet = postcss.parse(text, { map: false });
       } catch {
         continue;
       }

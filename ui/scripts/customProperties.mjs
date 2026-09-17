@@ -36,7 +36,7 @@ function customPropertiesIn(css, into = new Map()) {
     if (value !== undefined) into.get(name).add(value);
   };
 
-  const root = typeof css === 'string' ? postcss.parse(css) : css;
+  const root = typeof css === 'string' ? postcss.parse(css, { map: false }) : css;
   root.walkDecls((decl) => record(decl.prop, decl.value));
   root.walkAtRules('property', (rule) => {
     let initial;
@@ -67,7 +67,7 @@ function customPropertiesIn(css, into = new Map()) {
 const COLOUR_ONLY_SYNTAX = /^<color>[#+]?$/;
 
 function colourRegistrationsIn(css, into = new Set()) {
-  const root = typeof css === 'string' ? postcss.parse(css) : css;
+  const root = typeof css === 'string' ? postcss.parse(css, { map: false }) : css;
   root.walkAtRules('property', (rule) => {
     let syntax;
     rule.walkDecls('syntax', (decl) => { syntax = decl.value; });

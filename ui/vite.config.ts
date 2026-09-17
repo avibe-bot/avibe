@@ -41,6 +41,10 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
+      // Monaco copies DOMPurify into its package; an npm override does not
+      // replace that file. Route its exact ESM import to our patched dependency
+      // in both dependency prebundling and production builds.
+      './dompurify/dompurify.js': fileURLToPath(new URL('./node_modules/dompurify/dist/purify.es.mjs', import.meta.url)),
     },
   },
   server: {
