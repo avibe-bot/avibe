@@ -11,13 +11,13 @@ The owner requested 3–4 clear, independently reviewable GitHub issues. The fol
 
 Issues #2010–#2012 are shared React/Python Web/Desktop work and can be accepted one at a time. Issue #2013 starts only after the first three accepted results are in the shared master path and targets the long-lived `desktop` branch. Each issue body records its reuse points, acceptance criteria, and out-of-scope boundary. The issue comments record the dependency order.
 
-## Current status: planning only; implementation paused
+## Current status: implementation started for #2010 only
 
 Owner session: `sestqz5wvu5ty`. Latest instruction: 2026-09-17 11:44 Asia/Shanghai.
 
-Only this contract may be refined now. Wait until the owner confirms that all design work is complete and implementation may start. A file save, elapsed time, a partial Dark/Light/English update, an old lane brief, or an automatic callback is not a resumption signal. Do not dispatch/resume implementation, edit product/test code, push implementation branches, open implementation PRs, deploy, or integrate branches during this pause. No automatic restart task or waiter remains armed.
+The owner confirmed the complete design set on 2026-09-17 13:14 Asia/Shanghai and requested issue-first delivery. Issue #2010 is now the only active implementation slice. Do not dispatch #2011, #2012, or #2013 until #2010 is accepted by the owner. The source SHA below records the planning baseline; implementation code remains isolated in its assigned worktree.
 
-When the owner gives the start signal: inspect the complete final Dark/Light and Chinese/English design set through Pencil, reconcile this draft in one pass, explicitly fetch the then-latest master, refresh the isolated lane baselines, freeze final contracts, and only then dispatch implementation. The source SHA below records the planning snapshot, not the future implementation base. The implementation lanes and technical contracts below describe planned work, not currently active assignments.
+The implementation agent must inspect the complete final Dark/Light and Chinese/English design set through Pencil before coding. The implementation lanes and technical contracts below describe the active #2010 slice and the later queued slices.
 
 ## Owner decisions and delivery boundary
 
@@ -106,7 +106,7 @@ Run focused behavior tests, auth_setup scenario cases for onboarding, required U
 - Stage2 native desktop: after shared work is integrated, update from the shared master result and implement system Settings/menu/window specifics in desktop-based task worktrees. Preserve loopback/capability boundaries and existing lifecycle. No desktop->master wholesale merge is implied.
 - Master merge and release: wait for explicit owner instruction after concrete PR gates and acceptance evidence.
 
-## Pause verification
+## Earlier pause verification
 
 On 2026-09-17, two implementation runs had been dispatched before the owner clarified the design-completion gate. Both were canceled and their session queues were verified empty. Both isolated implementation worktrees remained clean at the contract-only commit `ee14c1ad9`; neither had product-code changes or later implementation commits. The scheduled implementation liveness task was removed and no implementation watch remained armed. Preserve the worktrees as paused preparation, never treat their former briefs as a live mandate.
 
