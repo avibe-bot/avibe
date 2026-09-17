@@ -57,6 +57,7 @@ class _CaptureItem:
     bundle: PinnedBundle | None
     reservation: "WriterReservation"
     raw_session_id: str
+    submitted: bool = False  # Provider invocation began; completion may still be unknown.
 
 
 @dataclass(slots=True)
@@ -152,6 +153,7 @@ class BestEffortMemoryWriter:
         self._attachments_disabled = False
         self.dropped = 0
         self._failures: deque[MemoryFailureLogEntry] = deque(maxlen=50)
+        self._drop_observation_id: str | None = None
 
     @property
     def unavailable(self) -> bool:
@@ -188,7 +190,7 @@ class BestEffortMemoryWriter:
 
     def _record_unsubmitted_drop(self) -> None:
         self.dropped += 1
-        if self._failures and self._failures[-1].state == "not_submitted":
+        if self._failures and self._failures[-1].id == self._drop_observation_id:
             previous = self._failures[-1]
             self._failures[-1] = replace(previous, affected_count=previous.affected_count + 1)
             logger.warning("Memory unsubmitted drops id=%s count=%s", previous.id, previous.affected_count + 1)
@@ -197,6 +199,7 @@ class BestEffortMemoryWriter:
                 "delivery_abandoned", "memory_sidecar_unavailable",
                 state="not_submitted", operation="add",
             )
+            self._drop_observation_id = self._failures[-1].id
 
     def dropped_count(self) -> int:
         """Return process-local queue saturation and recovery-drop counts."""
@@ -216,6 +219,7 @@ class BestEffortMemoryWriter:
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         self._provider = provider
         self._unavailable = False
+        self._drop_observation_id = None
 
     def pause_intake(self, *, unavailable: bool = False) -> None:
         self._intake_paused = True
@@ -233,6 +237,7 @@ class BestEffortMemoryWriter:
 
         self._duplicate_lru.clear()
         self._failures.clear()
+        self._drop_observation_id = None
 
     def reserve(
         self,
@@ -428,8 +433,6 @@ class BestEffortMemoryWriter:
             except asyncio.QueueEmpty:
                 break
             if isinstance(item, _CaptureItem):
-                if self._unavailable:
-                    self._record_unsubmitted_drop()
                 await self._cleanup_item(item)
             elif item.owns_permit:
                 self._release_permit()
@@ -491,7 +494,6 @@ class BestEffortMemoryWriter:
             try:
                 if isinstance(item, _CaptureItem):
                     if self._unavailable:
-                        self._record_unsubmitted_drop()
                         await self._cleanup_item(item)
                     else:
                         await self._deliver(item)
@@ -541,12 +543,13 @@ class BestEffortMemoryWriter:
         )
         attempt = 0
         while attempt < MAX_ATTEMPTS:
-            if not self._enabled():
+            if not self._enabled() or self._unavailable:
                 await self._cleanup_item(item)
                 return
             attempt += 1
             self._active_provider_calls += 1
             try:
+                item.submitted = True
                 result = await self._provider.add(capture)
             except asyncio.CancelledError:
                 await self._ambiguous_outcome(
@@ -604,7 +607,7 @@ class BestEffortMemoryWriter:
                     continue
                 await self._terminal_failure(
                     item, "memory_processing_failed", request_id=result.request_id,
-                    unknown=result.server_fault, attempts=attempt,
+                    unknown=result.server_fault, attempts=attempt, provider_error=result.error_code,
                 )
                 return
             await self._ambiguous_outcome("memory_provider_response_invalid", attempts=attempt)
@@ -640,13 +643,13 @@ class BestEffortMemoryWriter:
 
     async def _terminal_failure(
         self, item: _CaptureItem, error: str, *, attempts: int, request_id: str | None = None,
-        unknown: bool = False,
+        unknown: bool = False, provider_error: str | None = None,
     ) -> None:
         if not self._enabled():
             await self._cleanup_item(item)
             return
         self._record_failure(
-            "result_unknown" if unknown else "delivery_abandoned", error,
+            "result_unknown" if unknown else "delivery_abandoned", provider_error or error,
             state="unknown" if unknown else "failed", operation="add", request_id=request_id, attempts=attempts,
         )
         try:
@@ -659,6 +662,8 @@ class BestEffortMemoryWriter:
         if not item.reservation.active:
             return
         try:
+            if self._unavailable and not item.submitted:
+                self._record_unsubmitted_drop()
             if item.bundle is not None and self._attachment_store is not None:
                 try:
                     await run_blocking(
@@ -752,7 +757,7 @@ class BestEffortMemoryWriter:
                 unknown = isinstance(result, FlushRejected) and result.server_fault
                 self._record_failure(
                     "result_unknown" if unknown else "distillation_rejected",
-                    "memory_processing_failed", state="unknown" if unknown else "failed",
+                    result.error_code or "memory_processing_failed", state="unknown" if unknown else "failed",
                     operation="flush", attempts=attempt,
                     request_id=result.request_id if isinstance(result, FlushRejected) else None,
                 )

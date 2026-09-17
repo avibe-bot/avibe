@@ -88,3 +88,12 @@ and supervisor crashes both fence queued provider calls; intentional authority
 changes retain their prior semantics. Non-ambiguous exceptions retain their
 original error and failed classification rather than becoming synthetic HTTP
 server failures. These changes use existing writer state only.
+
+Review of `2427c87` exposed the remaining diagnostic boundary class: captures
+already dequeued but still preparing attachments, coalescing across distinct
+recoveries, and loss of provider rejection codes. The orchestrator chose one
+cleanup accounting point guarded by the existing reservation lifetime. A capture
+records whether provider invocation began; only unavailable, never-submitted
+captures count as disposal. Provider replacement closes the coalescing incident.
+Native rejection codes remain diagnostic-only; persisted `last_error` retains
+its released generic code. No workflow or storage state is added.

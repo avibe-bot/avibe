@@ -609,6 +609,8 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
 
     assert stop_calls == 1
     assert recoveries == [False]
+    assert writer.dropped_count() == 0
+    assert writer.failure_observations()[0].state == "unknown"
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
@@ -661,8 +663,10 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crashed", [False, True])
 async def test_close_during_attachment_projection_releases_reservation(
     tmp_path: Path,
+    crashed: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     projection_entered = asyncio.Event()
@@ -702,7 +706,13 @@ async def test_close_during_attachment_projection_releases_reservation(
     ) == "queued"
     await projection_entered.wait()
 
+    if crashed:
+        writer.pause_intake(unavailable=True)
     await asyncio.wait_for(writer.close(), timeout=1.0)
+    assert writer.dropped_count() == int(crashed)
+    if crashed:
+        assert writer.failure_observations()[0].state == "not_submitted"
+        assert writer.failure_observations()[0].attempts == 0
 
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
@@ -1286,4 +1296,42 @@ async def test_explicit_flush_failure_does_not_skip_other_sessions_in_barrier(tm
     assert not writer._pending
     assert len(writer.failure_observations()) == 1
     assert writer.failure_observations()[0].state == "failed"
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_separate_recoveries_do_not_coalesce_drop_observations(tmp_path):
+    writer = _writer(tmp_path, FakeMemoryProvider())
+    writer._ensure_worker = lambda: None
+    for index in range(2):
+        writer.replace_provider(FakeMemoryProvider())
+        writer.resume_intake()
+        _reserve_and_offer(writer, index)
+        writer.pause_intake(unavailable=True)
+        await writer.close()
+    entries = writer.failure_observations()
+    assert len(entries) == 2
+    assert entries[0].id != entries[1].id
+    assert [entry.affected_count for entry in entries] == [1, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["add", "flush"])
+@pytest.mark.parametrize("code", ["UNSUPPORTED_FORMAT", None])
+async def test_rejection_observation_preserves_provider_code(tmp_path, operation, code):
+    from avibe_memory.observations import FlushRejected
+    provider = FakeMemoryProvider(
+        add_results=deque([AddRejected("synthetic", code, False)]),
+        flush_results=deque([FlushRejected("synthetic", code, False)]),
+    )
+    writer = _writer(tmp_path, provider)
+    if operation == "add":
+        _reserve_and_offer(writer, 0)
+        await writer.wait_idle_for_tests()
+        assert writer._store.get_meta().last_error == "memory_processing_failed"
+    else:
+        ref = _ref()
+        writer._pending[ref.serialize()] = _PendingSession(ref, "raw-session-0", deque(["digest"]), 0, 0)
+        await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
+    assert writer.failure_observations()[0].error_code == (code or "memory_processing_failed")
     await writer.close()
