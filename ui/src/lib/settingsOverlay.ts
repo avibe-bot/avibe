@@ -87,6 +87,17 @@ export const settingsOverlayStateForOrigin = (
   ...overlayStateForOrigin(origin),
 });
 
+/**
+ * The Workbench home is the one surface a phone user can be *mid-composition*
+ * on: an unsent draft plus the Agent and workspace it is aimed at, none of which
+ * is persisted anywhere. Its Settings continuations therefore record an origin on
+ * mobile too, which keeps that one Workbench instance mounted behind the
+ * full-screen mobile Settings surface so Back returns to the composer the user
+ * left instead of a new one. Every other mobile route keeps its ordinary
+ * unmount-on-navigate lifecycle, and a direct Settings link still invents none.
+ */
+const retainsOriginOnMobile = (pathname: string): boolean => pathname === '/';
+
 export const settingsOverlayNavigationState = ({
   destinationPathname,
   desktop,
@@ -104,8 +115,9 @@ export const settingsOverlayNavigationState = ({
   if (settingsOverlayOriginFromState(targetState)) return targetState;
 
   const retainedOrigin = settingsOverlayOriginFromState(source.state);
+  const retains = desktop || retainsOriginOnMobile(source.pathname);
   const origin = retainedOrigin
-    ?? (desktop && !isSettingsEntryPath(source.pathname)
+    ?? (retains && !isSettingsEntryPath(source.pathname)
       ? originFromLocation(source, historyState)
       : null);
   if (!origin) return targetState;

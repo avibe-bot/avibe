@@ -181,6 +181,11 @@ export const AppShell: React.FC = () => {
   const navigate = useNavigate();
   const settingsOverlayOrigin = useSettingsOverlayOrigin(location);
   const settingsOpen = isSettingsRoutePath(location.pathname);
+  // An origin can now exist on a phone too (the Workbench home retains its
+  // composer behind Settings), but only the desktop overlay is a layer *over*
+  // this shell. Below md the Settings surface covers the shell outright, so the
+  // chrome keeps reading the foreground route and stays full-screen — the
+  // retained origin changes what survives behind it, not what is drawn.
   const settingsOverlayOpen = isDesktop
     && isSettingsEntryPath(location.pathname)
     && settingsOverlayOrigin !== null;

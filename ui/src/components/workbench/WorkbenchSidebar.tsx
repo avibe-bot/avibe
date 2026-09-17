@@ -788,9 +788,12 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           to="/"
           className="group flex min-w-0 flex-1 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
         >
+          {/* Decorative: the link's accessible name is the localized brand text
+              beside it, so naming the image too would read the destination twice. */}
           <img
             src={logoImg}
-            alt="avibe logo"
+            alt=""
+            aria-hidden="true"
             className="h-9 w-[38px] shrink-0 rounded-[7px] border border-mint/35 bg-[var(--logo-well-background)] object-cover transition-shadow group-hover:shadow-glow-sm-mint"
           />
           <div className="min-w-0 leading-tight">

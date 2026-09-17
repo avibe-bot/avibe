@@ -141,6 +141,58 @@ Each is stated rather than silently closed:
   failed once in an early full run and has not reproduced in either full run since, including the final one; it
   is recorded rather than explained away.
 
+## Review round 1 repairs
+
+Five findings, all inside this lane's own surfaces. Each is stated by its root class, not by the comment that
+found it:
+
+1. **Redundant alt text on the sidebar brand image.** The link's accessible name is the localized brand text
+   beside it, so naming the image too read the destination twice. The image is decorative (`alt=""`,
+   `aria-hidden`). Only `WorkbenchSidebar`'s image is new in this PR; `AppShell`'s mobile header brand carries the
+   same pattern and predates it, so it is reported rather than swept in.
+2. **A phone lost an unsent composition when it followed a Settings continuation.** The Workbench home is the one
+   surface a user can be mid-composition on — an unsent draft plus the Agent and workspace it is aimed at, none of
+   which is persisted anywhere — so its Settings ingress now records an origin on mobile as well as desktop. That
+   keeps the one Workbench instance mounted behind the full-screen mobile Settings surface, and Back returns to the
+   composer the user left. Every other mobile route keeps its ordinary unmount-on-navigate lifecycle, and a direct
+   Settings link still invents no origin. The change is at the existing ingress owner (`settingsOverlay`); the
+   mobile chrome is unchanged, because `AppShell` keeps its own desktop guard — a retained origin changes what
+   survives behind the surface, not what is drawn over it. The one presentation seam, the dialog primitive's left
+   border at the viewport edge, is neutralized in the consumer so the surface looks identical either way.
+3. **The continuation row offered a member-and-above destination to everyone.** Both links are
+   `OWNER_ONLY_ROUTES`, so anyone else following one is bounced straight back. The whole row is gated on
+   `can_manage_instance` rather than the links alone, because the sentence around them exists only to introduce a
+   destination they cannot reach.
+4. **The retired `/settings/appearance` alias still pointed at Replies.** General took the theme controls over, so
+   the alias follows them; Account keeps pointing at Replies, which still owns it.
+5. **An installed PWA could not cold-launch back onto General.** `RESTORABLE_EXACT_PATHS` is an exact list, not a
+   prefix rule, and the new page was missing from it.
+
+What the audit established, and why the evidence is shaped the way it is:
+
+- The mobile Workbench home has exactly one Settings ingress — the two continuation links. The sidebar's Settings
+  toggle is inside a `md:flex` aside and the bottom tab bar has no Settings tab, so the origin policy covers the
+  whole chain rather than one of several doors.
+- Nothing in the product links to `/settings/appearance` any more, so the alias is reachable only as a stale
+  bookmark: a document load, which invents no origin by design. The origin-carrying alias hop is therefore
+  asserted at the boundary owner in unit scope, and the reachable flow is asserted in the browser.
+- The workspace picker and the continuation row cannot appear together. The server projects `can_manage_instance`
+  from member upward and `can_chat`/`can_use_files` from editor upward, so whoever can reach either continuation
+  destination also gets the directory-browser chip, and the role that gets the picker (editor) has no Settings
+  ingress on the home at all. The picked-workspace evidence accordingly runs under the editor projection, and the
+  continuation round trips assert the resolved workspace rather than a selected one.
+
+`mobile-continuation.spec.ts` (5, hermetic) covers this: both continuations preserving a non-ASCII draft, a
+non-default Agent and the same DOM instance across Settings-internal navigation — including General and its theme
+controls — and back; a control that leaves by an ordinary tab and returns the same way, where every one of those
+assertions fails because the home is a new one; a real non-default workspace pick through the shipped picker,
+which survives exactly as long as the home that holds it; and the retired alias landing on General with Account's
+destination unchanged. Unit scope adds the mobile origin policy and its onward hops, the PWA
+write→read→resolve chain, and an `App.tsx` AST assertion that each retired alias points at the page that took its
+content over. Re-validated for this round: the five browser tests, the six affected unit files (70), `typecheck`,
+`lint` on the changed files, and `build`. The earlier full-suite and screenshot gates are not re-run here, because
+nothing in this round changes what they measure.
+
 ## Progress
 
 - [x] Owner parallel start, latest master and isolated workspace verified.

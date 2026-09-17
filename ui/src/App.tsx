@@ -677,7 +677,9 @@ const settingsRoute = () => (
   <Route path="/settings" element={<SettingsLayout />}>
     <Route index element={null} />
     <Route path="general" element={<SettingsGeneralPage />} />
-    <Route path="appearance" element={<Navigate to="/settings/replies" replace />} />
+    {/* Appearance was the theme page; General now owns the theme controls, so the
+        alias follows them. Account keeps pointing at Replies, which still owns it. */}
+    <Route path="appearance" element={<Navigate to="/settings/general" replace />} />
     <Route path="account" element={<Navigate to="/settings/replies" replace />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />
     <Route path="service" element={<SettingsServicePage />} />

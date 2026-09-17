@@ -118,6 +118,7 @@ beforeEach(() => {
   newSession.send.mockResolvedValue({ sessionId: 'ses_1', initialMessage: 'x' });
   authorization.capabilities.can_chat = true;
   authorization.capabilities.can_manage_projects = true;
+  authorization.capabilities.can_manage_instance = true;
   readiness.value = null;
 });
 
@@ -297,5 +298,43 @@ describe('Workbench onboarding-completion event', () => {
     renderHome(afterConsuming);
     await waitFor(() => expect(screen.getByTestId('location-state')).toBeTruthy());
     expect(banner()).toBeNull();
+  });
+});
+
+// Both continuations point at OWNER_ONLY_ROUTES, so these cases are written as
+// the capability the route guard itself reads rather than as role labels the
+// test invents. The server projects `can_manage_instance` from member upward
+// and `can_chat` from editor upward (vibe/authorization.py), so the two states
+// below are the only ones this row can be in: an instance manager (owner or
+// member) sees it, an editor does not, and a viewer never reaches this page at
+// all — that redirect is covered above.
+describe('Workbench continuation row', () => {
+  const ownerOnlyLinks = () => screen
+    .queryAllByRole('link')
+    .map((link) => link.getAttribute('href') ?? '')
+    .filter((href) => href.startsWith('/settings/'));
+
+  it('offers both continuations to someone who can manage the instance', () => {
+    renderHome();
+
+    expect(screen.getByText(en.workbench.home.continueOnPhone)).toBeTruthy();
+    expect(screen.getByText('Connect chat apps in', { exact: false })).toBeTruthy();
+    expect(ownerOnlyLinks().sort()).toEqual(['/settings/platforms', '/settings/remote-access']);
+  });
+
+  it('hides the whole row from someone who cannot, while chat stays usable', async () => {
+    authorization.capabilities.can_manage_instance = false;
+    const user = userEvent.setup();
+    renderHome();
+
+    // No dead CTA: neither the links nor the sentence that only exists to
+    // introduce them survives.
+    expect(screen.queryByText(en.workbench.home.continueOnPhone)).toBeNull();
+    expect(screen.queryByText('Connect chat apps in', { exact: false })).toBeNull();
+    expect(ownerOnlyLinks()).toEqual([]);
+
+    await user.type(input(), '继续用聊天');
+    await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
+    expect(newSession.send).toHaveBeenCalledWith('继续用聊天');
   });
 });

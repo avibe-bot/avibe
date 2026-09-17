@@ -80,7 +80,12 @@ export const SettingsOverlayRouteSurface = ({
               // AppShell's actual `w-[248px]`; it is asserted against the
               // sidebar's measured edge rather than restated as a shared token,
               // so the two cannot drift apart unnoticed.
-              className="md:left-[248px]"
+              //
+              // Below md the surface is the whole viewport, so the primitive's
+              // left border would draw a hairline down the screen edge and make
+              // Settings-from-home look different from a direct Settings link.
+              // There is no sidebar to divide from until the offset applies.
+              className="border-l-0 md:left-[248px] md:border-l"
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;

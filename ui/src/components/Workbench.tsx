@@ -268,24 +268,29 @@ export const Workbench: React.FC = () => {
         )}
 
         {/* Continuation row (design CRERw) — where this conversation can carry on
-            when the user leaves the desk. */}
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <Link
-            to="/settings/remote-access"
-            className="flex items-center gap-1.5 text-[12px] font-semibold text-mint-ink transition-opacity hover:opacity-80"
-          >
-            <Smartphone className="size-[15px] shrink-0" />
-            <span>{t('workbench.home.continueOnPhone')}</span>
-          </Link>
-          <span className="text-[11px] text-muted">
-            <Trans
-              i18nKey="workbench.home.connectChatApps"
-              components={{
-                settings: <Link to="/settings/platforms" className="font-bold text-cyan-ink hover:underline" />,
-              }}
-            />
-          </span>
-        </div>
+            when the user leaves the desk. Both destinations are OWNER_ONLY_ROUTES,
+            so a member who followed either would be bounced straight back here;
+            the whole row goes rather than the links alone, because the sentence
+            around them only exists to introduce a destination they cannot reach. */}
+        {capabilities.can_manage_instance && (
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <Link
+              to="/settings/remote-access"
+              className="flex items-center gap-1.5 text-[12px] font-semibold text-mint-ink transition-opacity hover:opacity-80"
+            >
+              <Smartphone className="size-[15px] shrink-0" />
+              <span>{t('workbench.home.continueOnPhone')}</span>
+            </Link>
+            <span className="text-[11px] text-muted">
+              <Trans
+                i18nKey="workbench.home.connectChatApps"
+                components={{
+                  settings: <Link to="/settings/platforms" className="font-bold text-cyan-ink hover:underline" />,
+                }}
+              />
+            </span>
+          </div>
+        )}
       </div>
 
       {newProjectOpen && canCreateProject && (

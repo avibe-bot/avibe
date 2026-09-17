@@ -87,11 +87,71 @@ describe('Settings overlay navigation ownership', () => {
     expect(settingsOverlayOriginFromState(directRedirectState)).toBeNull();
   });
 
-  it('leaves mobile Settings ingress as a primary route', () => {
+  it('leaves mobile Settings ingress from an ordinary route as a primary route', () => {
     const state = settingsOverlayNavigationState({
       destinationPathname: '/settings/replies',
       desktop: false,
       source: origin().location,
+      targetState: undefined,
+    });
+    expect(settingsOverlayOriginFromState(state)).toBeNull();
+  });
+
+  it('retains the Workbench home behind mobile Settings and carries it onward', () => {
+    const home = location('/');
+    const state = settingsOverlayNavigationState({
+      destinationPathname: '/settings/remote-access',
+      desktop: false,
+      historyState: { idx: 4 },
+      source: home,
+      targetState: undefined,
+    });
+
+    const retained = settingsOverlayOriginFromState(state);
+    expect(retained).toEqual({ historyIndex: 4, location: home });
+
+    // Settings-internal navigation keeps the same origin rather than minting a
+    // second one, so Back still unwinds to the composer the user left.
+    const onward = settingsOverlayNavigationState({
+      destinationPathname: '/settings/general',
+      desktop: false,
+      historyState: { idx: 5 },
+      source: location('/settings/remote-access', state),
+      targetState: undefined,
+    });
+    expect(settingsOverlayOriginFromState(onward)).toEqual({ historyIndex: 4, location: home });
+
+    // Closing from anywhere in that chain unwinds every entry back to home.
+    const navigate = vi.fn();
+    closeSettingsOverlay(navigate, settingsOverlayOriginFromState(onward)!, { idx: 6 });
+    expect(navigate).toHaveBeenCalledWith(-2);
+  });
+
+  it('keeps the origin across a retired-alias redirect', () => {
+    const opened = settingsOverlayNavigationState({
+      destinationPathname: '/settings/appearance',
+      desktop: true,
+      historyState: { idx: 2 },
+      source: origin().location,
+      targetState: undefined,
+    });
+    // `<Navigate to="/settings/general" replace />` runs through the same
+    // boundary, so the page the alias lands on still knows what it covered.
+    const redirected = settingsOverlayNavigationState({
+      destinationPathname: '/settings/general',
+      desktop: true,
+      historyState: { idx: 3 },
+      source: location('/settings/appearance', opened),
+      targetState: undefined,
+    });
+    expect(settingsOverlayOriginFromState(redirected)).toEqual(origin());
+  });
+
+  it('invents no origin for a mobile Settings deep link', () => {
+    const state = settingsOverlayNavigationState({
+      destinationPathname: '/settings/general',
+      desktop: false,
+      source: location('/settings'),
       targetState: undefined,
     });
     expect(settingsOverlayOriginFromState(state)).toBeNull();

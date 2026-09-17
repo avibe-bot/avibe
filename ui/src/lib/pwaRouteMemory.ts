@@ -17,6 +17,7 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/apps/editor',
   '/apps/library',
   '/settings',
+  '/settings/general',
   '/settings/appearance',
   '/settings/account',
   '/settings/shortcuts',
