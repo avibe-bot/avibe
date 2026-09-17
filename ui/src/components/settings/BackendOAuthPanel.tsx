@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
+import { useBackendOAuth } from './oauth/useBackendOAuth';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle2, LogIn, Trash2, X } from 'lucide-react';
 
@@ -6,20 +7,10 @@ import { Button } from '../ui/button';
 import { Label } from '../ui/label';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from './oauth/OAuthFlowParts';
 import { useApi } from '@/context/ApiContext';
-import type { OAuthWebState } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
 
 type Backend = 'claude' | 'codex' | 'opencode';
-
-type LocalState = 'idle' | OAuthWebState;
-
-const POLL_INTERVAL_MS = 2000;
-// Stop polling 16 minutes in (matches AgentAuthService.setup_timeout_seconds
-// which gives the user 15 minutes to complete login). Anything still
-// polling past that has been abandoned and just burns the UI server's
-// background OAuth loop.
-const POLL_DEADLINE_MS = 16 * 60 * 1000;
 
 export type BackendOAuthPanelProps = {
   backend: Backend;
@@ -49,7 +40,8 @@ export type BackendOAuthPanelProps = {
   /** Optional callback fired once after the flow lands on ``state === "success"``.
    *  The parent typically re-reads ``getClaudeAuth`` / ``getCodexAuth`` here so
    *  the on-screen "signed in" indicators move. */
-  onSuccess?: () => void;
+  onSuccess?: () => void | Promise<void>;
+  onRemoved?: () => void | Promise<void>;
   /** Fires whenever the panel's internal flow is mid-handshake
    *  (``state`` ∈ {starting, awaiting_code, verifying}). The parent
    *  uses this to disable auth-mode switching: on iOS Safari the
@@ -83,178 +75,17 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   signedInDetail,
   hideRemove,
   onSuccess,
+  onRemoved,
   onActiveChange,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
 
-  const [state, setState] = useState<LocalState>('idle');
-  const [flowId, setFlowId] = useState<string | null>(null);
-  const [url, setUrl] = useState<string | null>(null);
-  const [deviceCode, setDeviceCode] = useState<string | null>(null);
-  const [code, setCode] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [starting, setStarting] = useState(false);
+  const { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
+    startFlow, cancelFlow, submitCallback, resetToIdle, copyUrl, copyDeviceCode, isActive } =
+    useBackendOAuth({ backend, opencodeProviderId, onSuccess, onActiveChange });
   const [removing, setRemoving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const pollTimer = useRef<number | null>(null);
-  const pollDeadlineRef = useRef<number | null>(null);
-  const onSuccessRef = useRef(onSuccess);
-  onSuccessRef.current = onSuccess;
-
-  const stopPolling = () => {
-    if (pollTimer.current !== null) {
-      window.clearTimeout(pollTimer.current);
-      pollTimer.current = null;
-    }
-    pollDeadlineRef.current = null;
-  };
-
-  const resetToIdle = () => {
-    stopPolling();
-    setState('idle');
-    setFlowId(null);
-    setUrl(null);
-    setDeviceCode(null);
-    setCode('');
-    setError(null);
-  };
-
-  // Broadcast in-progress flow state to the parent so it can lock the
-  // auth-mode segmented radio. On iOS Safari the device-code "Copy" tap
-  // was bouncing that radio mid-flow — we can't reproduce the exact
-  // event path in code, but freezing the radio while in-flight makes
-  // the bug impossible to trigger regardless of how the rogue event
-  // gets there.
-  const onActiveChangeRef = useRef(onActiveChange);
-  onActiveChangeRef.current = onActiveChange;
-  useEffect(() => {
-    const active = state === 'starting' || state === 'awaiting_code' || state === 'verifying';
-    onActiveChangeRef.current?.(active);
-  }, [state]);
-
-  // Poll the status endpoint until the flow lands on a terminal state.
-  // The server holds the flow alive across requests on its own event loop,
-  // so dropping the timer on success/failure is safe — we'll never miss a
-  // transition by stopping early.
-  useEffect(() => {
-    return () => stopPolling();
-  }, []);
-
-  const scheduleNextPoll = (currentFlowId: string) => {
-    if (pollDeadlineRef.current !== null && Date.now() > pollDeadlineRef.current) {
-      setError(t('settings.backends.oauthPollTimedOut') as string);
-      setState('failed');
-      stopPolling();
-      return;
-    }
-    pollTimer.current = window.setTimeout(() => {
-      void pollOnce(currentFlowId);
-    }, POLL_INTERVAL_MS);
-  };
-
-  const pollOnce = async (currentFlowId: string) => {
-    try {
-      const data = await api.getOAuthWebStatus(backend, currentFlowId);
-      if (!data.ok) {
-        setError(data.error || 'flow_not_found');
-        setState('failed');
-        stopPolling();
-        return;
-      }
-      if (data.url) setUrl(data.url);
-      if (data.device_code) setDeviceCode(data.device_code);
-      if (data.state) setState(data.state);
-      if (data.state === 'success') {
-        stopPolling();
-        showToast(t('settings.backends.oauthSuccess'), 'success');
-        onSuccessRef.current?.();
-        return;
-      }
-      if (data.state === 'failed' || data.state === 'cancelled') {
-        setError(data.error || (data.state === 'cancelled' ? 'cancelled' : 'unknown_failure'));
-        stopPolling();
-        return;
-      }
-      scheduleNextPoll(currentFlowId);
-    } catch (err) {
-      setError(errorMessage(err) || 'poll_failed');
-      setState('failed');
-      stopPolling();
-    }
-  };
-
-  const startFlow = async () => {
-    setStarting(true);
-    setError(null);
-    setCode('');
-    try {
-      const result =
-        backend === 'opencode'
-          ? await api.startOAuthWebForOpencodeProvider(opencodeProviderId || '', true)
-          : await api.startOAuthWeb(backend, true);
-      if (!result.ok || !result.flow_id) {
-        setError(result.detail || result.error || 'start_failed');
-        setState('failed');
-        return;
-      }
-      setFlowId(result.flow_id);
-      setUrl(result.url || null);
-      setDeviceCode(result.device_code || null);
-      setState(result.state || 'starting');
-      pollDeadlineRef.current = Date.now() + POLL_DEADLINE_MS;
-      scheduleNextPoll(result.flow_id);
-    } catch (err) {
-      setError(errorMessage(err) || 'start_failed');
-      setState('failed');
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const cancelFlow = async () => {
-    if (!flowId) {
-      resetToIdle();
-      return;
-    }
-    stopPolling();
-    try {
-      await api.cancelOAuthWeb(backend, flowId);
-    } catch {
-      // Swallow — even if the cancel rountrip failed, the UI should still
-      // return to the idle state so the user can retry without a stuck
-      // panel. The server-side flow times out on its own at 900s.
-    }
-    resetToIdle();
-  };
-
-  const submitCallback = async () => {
-    if (!flowId) return;
-    const trimmed = code.trim();
-    if (!trimmed) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      // Claude → ``code#state`` (Anthropic's callback fragment).
-      // OpenCode browser-redirect → ``http://127.0.0.1:<port>/callback?...``
-      // (the URL the provider redirected to). Both flow through the
-      // same endpoint; the server side dispatches by backend type.
-      const result = await api.submitOAuthWebCode(backend, flowId, trimmed);
-      if (!result.ok) {
-        setError(result.error || result.detail || 'submit_failed');
-        return;
-      }
-      // Server transitioned the flow to "verifying"; reflect that locally
-      // so the UI hides the code input immediately rather than waiting for
-      // the next poll tick.
-      setState('verifying');
-    } catch (err) {
-      setError(errorMessage(err) || 'submit_failed');
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   const removeAuth = async () => {
     if (backend === 'opencode') {
@@ -295,7 +126,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       } else {
         showToast(t('settings.backends.oauthRemoved'), 'success');
       }
-      onSuccessRef.current?.();
+      await (onRemoved || onSuccess)?.();
     } catch (err) {
       showToast(
         t('settings.backends.oauthRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
@@ -306,39 +137,6 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
     }
   };
 
-  const copyUrl = async (e?: React.MouseEvent) => {
-    // Defensively stop the click from bubbling. If a parent had an
-    // accidental form / radio handler, copying the URL must never
-    // also trigger a tab switch or a save.
-    e?.preventDefault();
-    e?.stopPropagation();
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-      showToast(t('settings.backends.oauthUrlCopied'), 'success');
-    } catch {
-      showToast(t('common.copyFailed'), 'error');
-    }
-  };
-
-  const copyDeviceCode = async (e?: React.MouseEvent) => {
-    // Same defensive bubble-stop as copyUrl. Reported symptom: clicking
-    // "Copy" on the Codex device code in Settings was bouncing the auth-
-    // mode segmented radio from OAuth to API Key, interrupting the
-    // login flow. Without seeing a repro path in code, guard the
-    // click here so the side effect can't survive in any browser.
-    e?.preventDefault();
-    e?.stopPropagation();
-    if (!deviceCode) return;
-    try {
-      await navigator.clipboard.writeText(deviceCode);
-      showToast(t('settings.backends.oauthDeviceCodeCopied'), 'success');
-    } catch {
-      showToast(t('common.copyFailed'), 'error');
-    }
-  };
-
-  const isActive = state !== 'idle' && state !== 'success' && state !== 'failed' && state !== 'cancelled';
   const showStartButton = state === 'idle' || state === 'success' || state === 'failed' || state === 'cancelled';
   const claudeAwaitingCode = backend === 'claude' && state === 'awaiting_code';
   // OpenCode browser-redirect providers (poe, gitlab, openai-browser)
@@ -348,7 +146,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   // their browser landed on; the backend replays it from inside the
   // container so OpenCode's listener consumes it.
   const opencodeAwaitingCallback =
-    backend === 'opencode' && state === 'awaiting_code' && url && !deviceCode;
+    backend === 'opencode' && state === 'awaiting_code' && (callbackKind === 'code' || callbackKind === 'redirect' || (!callbackKind && url && !deviceCode));
   // OpenCode device flows (openai headless, github-copilot) carry the
   // user-facing code in the same payload as Codex; reuse the same UI
   // affordance. Browser-redirect flows (gitlab, poe, openai browser)
@@ -472,7 +270,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       {opencodeAwaitingCallback && (
         <div className="flex flex-col gap-2">
           <Label htmlFor={`oauth-code-${backend}`} className="text-xs font-medium uppercase text-muted">
-            {t('settings.backends.opencodeCallbackUrlLabel')}
+            {t(callbackKind === 'code' ? 'onboarding.connection.manualCode' : 'settings.backends.opencodeCallbackUrlLabel')}
           </Label>
           <OAuthSubmitRow
             id={`oauth-code-${backend}`}
@@ -480,12 +278,12 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             onChange={setCode}
             onSubmit={() => void submitCallback()}
             submitting={submitting}
-            placeholder="http://127.0.0.1:..../callback?code=..."
+            placeholder={callbackKind === 'code' ? t('onboarding.connection.manualCodePlaceholder') : 'http://127.0.0.1:..../callback?code=...'}
             submitLabel={t('common.submit') as string}
             submittingLabel={t('common.submitting') as string}
           />
           <p className="text-[12px] leading-relaxed text-muted">
-            {t('settings.backends.opencodeCallbackUrlHint')}
+            {t(callbackKind === 'code' ? 'onboarding.connection.manualCodeHint' : 'settings.backends.opencodeCallbackUrlHint')}
           </p>
         </div>
       )}

@@ -396,6 +396,9 @@ class WebAuthFlow:
     url: str | None = None
     device_code: str | None = None
     awaiting_code: bool = False
+    callback_kind: str | None = None
+    provider_method: int = 0
+    provider_prompt_answers: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     last_status_text: str | None = None
     # Per-provider context for OpenCode flows; ``None`` for Claude / Codex
@@ -1125,9 +1128,10 @@ class AgentAuthService:
         waiter: Coroutine[Any, Any, None],
     ) -> None:
         """Publish and enforce one deadline from the waiter's start boundary."""
-        flow.expires_at_iso = (
-            datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
-        ).isoformat()
+        if flow.expires_at_iso is None:
+            flow.expires_at_iso = (
+                datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
+            ).isoformat()
         flow.waiter_task = asyncio.create_task(waiter)
 
     def _remaining_flow_timeout(self, flow: AgentAuthFlow | WebAuthFlow) -> float:
@@ -2231,8 +2235,7 @@ class AgentAuthService:
         callback code via ``submit_web_code``. For OpenCode the caller
         must pass ``provider_id``; the URL (and optional device code) are
         surfaced via ``WebAuthFlow.url`` / ``WebAuthFlow.device_code`` and
-        completion is auto-detected by OpenCode's daemon — no code submit
-        from the user.
+        completion follows its declared automatic or manual-code method.
         """
         if backend not in self.WEB_BACKENDS:
             raise ValueError(f"unsupported_backend:{backend}")
@@ -2276,6 +2279,25 @@ class AgentAuthService:
         if flow is None:
             return {"ok": False, "error": "flow_not_found"}
         if flow.backend == "opencode":
+            if flow.callback_kind == "code":
+                if flow.state != "awaiting_code" or not flow.awaiting_code:
+                    return {"ok": False, "error": "not_awaiting_code"}
+                raw = (code or "").strip()
+                if not raw:
+                    return {"ok": False, "error": "invalid_format"}
+                if self._remaining_flow_timeout(flow) <= 0:
+                    await self._terminate_web_flow(flow, final_state="failed", error="timed_out")
+                    return {"ok": False, "error": "timed_out"}
+                # Admission changes before any await: duplicate submissions cannot
+                # arm a second callback, and cancellation owns this same waiter.
+                flow.awaiting_code = False
+                flow.state = "verifying"
+                self._arm_flow_waiter(flow, self._wait_for_opencode_oauth_web(
+                    flow, flow.provider, flow.provider_method, flow.provider_prompt_answers, code=raw,
+                ))
+                return {"ok": True}
+            if flow.state not in {"awaiting_code", "verifying"}:
+                return {"ok": False, "error": "not_awaiting_code"}
             return await self._submit_opencode_callback_url(flow, code)
         if flow.backend != "claude":
             return {"ok": False, "error": "code_not_supported"}
@@ -2360,6 +2382,8 @@ class AgentAuthService:
             "awaiting_code": flow.awaiting_code,
             "error": flow.error,
         }
+        if flow.callback_kind is not None:
+            result["callback_kind"] = flow.callback_kind
         if any(
             getattr(flow, name, None) is not None
             for name in ("source_id", "vendor", "expires_at_iso")
@@ -3226,19 +3250,20 @@ class AgentAuthService:
             if match:
                 flow.device_code = match.group(1)
             flow.last_status_text = instructions
+        mode = authorize.get("method")
+        if mode not in {None, "auto", "code"}:
+            raise RuntimeError("opencode_authorize_unsupported_method")
+        flow.provider_method = method_index
+        flow.provider_prompt_answers = dict(prompt_answers)
+        flow.callback_kind = "code" if mode == "code" else "device" if flow.device_code else "redirect"
         flow.state = "awaiting_code"
-        # OpenCode auto-detects completion (device poll or local callback);
-        # no user-submitted code to enter. The waiter long-polls the daemon.
-        flow.awaiting_code = False
-        self._arm_flow_waiter(
-            flow,
-            self._wait_for_opencode_oauth_web(
-                flow,
-                provider_id,
-                method_index,
-                prompt_answers,
-            ),
-        )
+        flow.awaiting_code = mode == "code"
+        if flow.awaiting_code:
+            flow.expires_at_iso = (datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)).isoformat()
+        if not flow.awaiting_code:
+            self._arm_flow_waiter(
+                flow, self._wait_for_opencode_oauth_web(flow, provider_id, method_index, prompt_answers),
+            )
 
     async def _submit_opencode_callback_url(self, flow: WebAuthFlow, code: str) -> dict[str, Any]:
         """Forward a manually-pasted 127.0.0.1 callback URL to OpenCode.
@@ -3292,6 +3317,7 @@ class AgentAuthService:
         provider_id: str,
         method_index: int,
         prompt_answers: dict[str, Any],
+        *, code: str | None = None,
     ) -> None:
         try:
             server = await self._opencode_server()
@@ -3302,6 +3328,7 @@ class AgentAuthService:
                 method=method_index,
                 prompt_answers=prompt_answers,
                 timeout=self._remaining_flow_timeout(flow),
+                **({"code": code} if code is not None else {}),
             )
             flow.state = "verifying"
             # OpenCode persists into auth.json itself. Clear any Vibe-managed
@@ -3309,8 +3336,7 @@ class AgentAuthService:
             # credential, then ping the controller-refresh hook so the running
             # OpenCode agent (and the Settings page on the next poll) sees the
             # new auth state.
-            await self._clear_opencode_provider_options_key_for_oauth(provider_id)
-            await self._invoke_post_web_success_hook(flow.backend)
+            await self._commit_web_login(flow)
             flow.state = "success"
         except asyncio.TimeoutError:
             flow.state = "failed"
@@ -3388,8 +3414,7 @@ class AgentAuthService:
             flow.state = "verifying"
             ok, detail = await self._verify_web_login(flow.backend, force_oauth=flow.backend == "claude")
             if ok:
-                await self._invoke_post_web_success_hook(flow.backend)
-                await self._refresh_backend_runtime(flow.backend)
+                await self._commit_web_login(flow)
                 flow.state = "success"
             else:
                 flow.state = "failed"
@@ -3422,9 +3447,7 @@ class AgentAuthService:
                 claude_oauth_attempt=flow.claude_oauth_attempt,
             )
             if ok:
-                await self._invoke_post_web_success_hook(flow.backend)
-                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
-                await self._refresh_backend_runtime(flow.backend)
+                await self._commit_web_login(flow)
                 flow.state = "success"
             else:
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3480,7 +3503,32 @@ class AgentAuthService:
                 if task and not task.done():
                     task.cancel()
 
-    async def _invoke_post_web_success_hook(self, backend: str) -> None:
+    async def _commit_web_login(self, flow: WebAuthFlow) -> None:
+        """Finish one verified consent before cancellation can restore its backup.
+
+        Threaded config writes and marker delivery cannot be cancelled midway.
+        Settle them under the owning flow waiter, then let cancellation complete.
+        """
+        async def commit() -> None:
+            if flow.backend == "opencode":
+                await self._clear_opencode_provider_options_key_for_oauth(flow.provider)
+            else:
+                await self._persist_backend_auth_mode(flow.backend, "oauth", strict=True)
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
+            await self._invoke_post_web_success_hook(flow.backend, persist=False)
+
+        task = asyncio.create_task(commit())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Do not return a cancellation receipt while the credential/apply
+            # operation is still capable of mutating the next opened flow.
+            try:
+                await task
+            finally:
+                raise
+
+    async def _invoke_post_web_success_hook(self, backend: str, *, persist: bool = True) -> None:
         # OAuth completed via the web UI implies the user wants
         # ``auth_mode = "oauth"``. Persist it before the controller-refresh
         # hook fires so the live agent reloads with the right mode rather
@@ -3493,15 +3541,15 @@ class AgentAuthService:
         # Skipped for opencode: ``OpenCodeConfig`` has no ``auth_mode``
         # field (auth is per-provider, not global), so persisting one
         # would add a stray attribute and could mislead future readers.
-        if backend != "opencode":
-            await self._persist_backend_auth_mode(backend, "oauth")
+        if persist and backend != "opencode":
+            await self._persist_backend_auth_mode(backend, "oauth", strict=True)
         hook = self._post_web_success_hook
         if not callable(hook):
+            await self._refresh_backend_runtime(backend)
             return
-        try:
-            await asyncio.to_thread(hook, backend)
-        except Exception as err:  # noqa: BLE001
-            logger.warning("post_web_success_hook failed for %s: %s", backend, err)
+        # Failure must reach the flow's terminal result. Credentials may have
+        # been persisted, but an unacknowledged/failed apply is not connection.
+        await asyncio.to_thread(hook, backend)
 
     def _capture_codex_relay_for_oauth(self) -> tuple[dict | None, bool]:
         """Read the live relay identity before OAuth cleanup.
@@ -3842,7 +3890,7 @@ class AgentAuthService:
         """Backward-compatible name for API-key save cleanup."""
         return await self.clear_claude_oauth_credentials_only()
 
-    async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
+    async def _persist_backend_auth_mode(self, backend: str, auth_mode: str, *, strict: bool = False) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         captured_codex_relay: dict | None = None
         observed_codex_api_key_auth = False
@@ -3998,6 +4046,8 @@ class AgentAuthService:
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
                 auth_mode, backend, err,
             )
+            if strict:
+                raise
 
     async def _terminate_web_flow(
         self,
@@ -4006,19 +4056,19 @@ class AgentAuthService:
         final_state: WebFlowState,
         error: str | None = None,
     ) -> None:
-        await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.reader_task and not flow.reader_task.done():
             flow.reader_task.cancel()
             try:
                 await flow.reader_task
             except asyncio.CancelledError:
                 pass
-        if flow.waiter_task and not flow.waiter_task.done():
+        if flow.waiter_task and flow.waiter_task is not asyncio.current_task() and not flow.waiter_task.done():
             flow.waiter_task.cancel()
             try:
                 await flow.waiter_task
             except asyncio.CancelledError:
                 pass
+        await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.process is not None and flow.process.returncode is None:
             try:
                 flow.process.terminate()

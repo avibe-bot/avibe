@@ -2469,6 +2469,7 @@ class OpenCodeServerManager:
         method: int = 0,
         prompt_answers: Optional[Dict[str, Any]] = None,
         timeout: float = 900.0,
+        code: str | None = None,
     ) -> Dict[str, Any]:
         """Block until ``POST /provider/<id>/oauth/callback`` resolves.
 
@@ -2487,9 +2488,10 @@ class OpenCodeServerManager:
         ``aiohttp.ServerDisconnectedError``.
         """
         await self.ensure_running()
-        payload = {"method": method}
-        if prompt_answers:
-            payload.update(prompt_answers)
+        payload = {key: value for key, value in (prompt_answers or {}).items() if key not in {"method", "code"}}
+        payload["method"] = method
+        if code is not None:
+            payload["code"] = code
         # Skip ``_request_scope`` (the per-call semaphore) too — it
         # serialises all OpenCode HTTP calls behind a single lock, so
         # holding it for 15 minutes would block every other UI request

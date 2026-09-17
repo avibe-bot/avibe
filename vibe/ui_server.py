@@ -6853,6 +6853,14 @@ async def config_post():
                         agent_backend_runtime["restart_code"] = restart_result.get("code")
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
+    if agent_backend_runtime is not None:
+        from vibe import api
+
+        for backend in changed_agent_backends:
+            api.record_backend_apply_receipt(backend, {
+                "ok": bool(agent_backend_runtime.get("hot_reconciled") or agent_backend_runtime.get("apply_on_next_start")),
+                "message": agent_backend_runtime.get("restart_error") or agent_backend_runtime.get("error"),
+            })
     authorization_context = getattr(g, "authorization_context", None)
     response_payload = _config_api_payload_for_context(config, authorization_context)
     if remote_access_runtime is not None:
@@ -7902,6 +7910,20 @@ def agent_install_status(name, job_id):
 
 
 _ALLOWED_BACKENDS = set(AGENT_BACKENDS)
+
+
+@app.get("/api/backend/{name}/connection", include_in_schema=False)
+async def backend_connection(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        if name not in _ALLOWED_BACKENDS:
+            return jsonify({"ok": False, "error": "unsupported_backend"}), 400
+        from vibe import api
+
+        response = jsonify(await api.get_backend_connection(name))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/backend/<name>/runtime")

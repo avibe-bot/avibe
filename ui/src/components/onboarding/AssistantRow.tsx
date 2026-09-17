@@ -19,13 +19,17 @@ export interface AssistantRowProps {
   onInstall: () => void;
   onDetect: () => void;
   onConfigure: () => void;
+  onAddKey?: () => void;
+  onRefreshConnection?: () => void;
+  connectionPending?: boolean;
+  connectionError?: string;
   configuringDisabled?: boolean;
   /** Presentation only. The connection owner must supply confirmed state. */
   connection?: 'subscription' | 'api_key';
 }
 
 export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, enabledControl,
-  onInstall, onDetect, onConfigure, configuringDisabled = false, connection }: AssistantRowProps) {
+  onInstall, onDetect, onConfigure, configuringDisabled = false, connection, onAddKey, onRefreshConnection, connectionPending, connectionError }: AssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
   return (
@@ -55,11 +59,16 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
           {status === 'unknown' && !detecting && <Button variant="secondary" size="sm" onClick={onDetect}><RefreshCw size={14} />{t('common.retry')}</Button>}
           <Button variant="secondary" size="sm" className="h-[34px]" onClick={onConfigure} disabled={configuringDisabled || installing || detecting}>
             {connection ? <Check size={14} className="text-mint-ink" /> : <Sliders size={14} />}
-            {t(connection ? `onboarding.setup.${connection}Connected` : 'agentDetection.configureProvider')}
+            {t(connection ? `onboarding.setup.${connection}Connected` : 'onboarding.connection.addSubscription')}
           </Button>
+          {!connection && onAddKey && <Button variant="secondary" size="sm" className="h-[34px]" onClick={onAddKey} disabled={configuringDisabled || installing || detecting}>{t('onboarding.connection.addKey')}</Button>}
           {enabledControl}
         </div>
       </div>
+      {(connectionError || connectionPending) && <div className="onboarding-assistant-error" role={connectionError ? 'alert' : 'status'}>
+        {connectionPending ? t('common.loading') : connectionError}
+        {!connectionPending && onRefreshConnection && <Button variant="link" size="xs" onClick={onRefreshConnection}>{t('common.retry')}</Button>}
+      </div>}
       {error && <div className="onboarding-assistant-error" role="alert">
         <p>{error.message}</p>
         {error.output && <details><summary>{t('onboarding.details')}</summary><pre>{error.output}</pre></details>}

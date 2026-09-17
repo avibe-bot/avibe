@@ -1,5 +1,14 @@
 # Onboarding design fidelity repair — issue #2017
 
+> Status: #2017 merged through #2028. The 2026-09-18 owner amendment in
+> [the active #2011 contract](2026-09-18-shared-backend-connection.md) supersedes
+> every historical no-header-logo and vertically centered Welcome assertion below.
+> Web uses the existing BrandLogo at top left and language at right. Both steps
+> share title/subtitle top anchors and typography at the same viewport, with normal
+> flow and scrolling. The 1104 cap and authored animation remain unchanged.
+> Browser tests now measure actual EN/ZH transitions at desktop, tall and narrow
+> viewports; centering Welcome independently is no longer an acceptance invariant.
+
 PR #2015 merged successfully but did not faithfully reproduce the approved Welcome and assistant-setup design. The owner rejected the visual fidelity on 2026-09-17 and explicitly identified the existing animated Show Page as the implementation reference. At 16:55 the owner additionally required the designed widths and adaptation to different screens.
 
 ## Authority and scope

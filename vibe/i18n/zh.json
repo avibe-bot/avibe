@@ -1,4 +1,8 @@
 {
+  "backendConnection": {
+    "applyOnStart": "配置将在下次启动时应用。",
+    "applyUnacknowledged": "控制器未确认后端刷新请求。"
+  },
   "errors": {
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"

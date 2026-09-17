@@ -599,6 +599,7 @@ export type ApiContextType = {
   deleteMemoryData: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
   wakeMemory: () => Promise<MemoryWakeResult>;
   repairMemory: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
+  getBackendConnection: (name: 'claude' | 'codex' | 'opencode') => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -646,8 +647,8 @@ export type ApiContextType = {
   deleteOpencodeCustomProvider: (providerId: string) => Promise<OpencodeMutationResult>;
   setOpencodeProviderAuth: (
     providerId: string,
-    apiKey: string,
-    baseUrl?: string,
+    apiKey?: string,
+    baseUrl?: string | null,
   ) => Promise<OpencodeMutationResult>;
   deleteOpencodeProviderAuth: (providerId: string) => Promise<OpencodeMutationResult>;
   setOpencodeDefaultProvider: (providerId: string) => Promise<OpencodeMutationResult>;
@@ -2244,6 +2245,19 @@ export type MemoryDataOperationResult = {
   }>;
 };
 
+export type BackendConnectionState = {
+  ok: boolean;
+  backend: 'claude' | 'codex' | 'opencode';
+  installed: boolean;
+  enabled: boolean;
+  auth: 'subscription' | 'api_key' | 'none' | 'unknown';
+  application: 'applied' | 'draining' | 'failed' | 'stopped' | 'unknown';
+  ready: boolean;
+  entry_eligible: boolean;
+  permission_required?: boolean;
+  message?: string;
+};
+
 export type BackendRuntimeInfo = {
   ok: boolean;
   name?: string;
@@ -2406,11 +2420,12 @@ export type OAuthWebState =
 export type OAuthWebStartResult = {
   ok: boolean;
   flow_id?: string;
-  backend?: 'claude' | 'codex';
+  backend?: 'claude' | 'codex' | 'opencode';
   state?: OAuthWebState;
   url?: string | null;
   device_code?: string | null;
   awaiting_code?: boolean;
+  callback_kind?: 'code' | 'device' | 'redirect' | null;
   error?: string;
   detail?: string;
 };
@@ -2418,11 +2433,12 @@ export type OAuthWebStartResult = {
 export type OAuthWebStatus = {
   ok: boolean;
   flow_id?: string;
-  backend?: 'claude' | 'codex';
+  backend?: 'claude' | 'codex' | 'opencode';
   state?: OAuthWebState;
   url?: string | null;
   device_code?: string | null;
   awaiting_code?: boolean;
+  callback_kind?: 'code' | 'device' | 'redirect' | null;
   error?: string | null;
 };
 
@@ -2520,6 +2536,7 @@ export type OpencodeOptionsResult = {
 
 export type OpencodeMutationResult = {
   ok: boolean;
+  restart?: BackendRestartResult;
   message?: string;
   default_provider?: string;
   provider_id?: string;
@@ -3822,6 +3839,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     deleteMemoryData: (confirmLoss) => postJson('/api/memory/delete-data', { confirm_loss: confirmLoss }, { handleError: false }),
     wakeMemory: () => postJson('/api/memory/runtime/wake', {}, { handleError: false }),
     repairMemory: (confirmLoss) => postJson('/api/memory/repair', { confirm_loss: confirmLoss }, { handleError: false }),
+    getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

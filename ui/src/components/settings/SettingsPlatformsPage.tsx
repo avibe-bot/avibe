@@ -19,11 +19,7 @@ import {
   platformHasRunnableConfig,
 } from '@/lib/platforms';
 import { PlatformIcon } from '@/components/visual';
-import { SlackConfig } from '@/components/steps/SlackConfig';
-import { DiscordConfig } from '@/components/steps/DiscordConfig';
-import { TelegramConfig } from '@/components/steps/TelegramConfig';
-import { LarkConfig } from '@/components/steps/LarkConfig';
-import { WeChatConfig } from '@/components/steps/WeChatConfig';
+import { PlatformConfigEmbed } from './PlatformConfigEmbed';
 import { SettingsPageShell } from './SettingsPageShell';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -491,38 +487,4 @@ const PlatformCard: React.FC<{
       {expanded && <div className="border-t border-border bg-background/40">{children}</div>}
     </section>
   );
-};
-
-const PlatformConfigEmbed: React.FC<{
-  platform: string;
-  config: any;
-  onApply: (data: any) => Promise<void>;
-  onCancel: () => void;
-}> = ({ platform, config, onApply, onCancel }) => {
-  const noopNext = () => {};
-  if (platform === 'slack') {
-    return <SlackConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'discord') {
-    return <DiscordConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'telegram') {
-    return <TelegramConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'lark') {
-    return <LarkConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'wechat') {
-    return (
-      <WeChatConfig
-        data={config}
-        onNext={noopNext}
-        embedded
-        onApply={onApply}
-        onCancel={onCancel}
-        autoStartLogin={false}
-      />
-    );
-  }
-  return null;
 };

@@ -102,12 +102,24 @@ vibe
 
 This starts the local service and opens the Web UI setup wizard. If a browser does not open automatically, check the terminal output for the local URL.
 
-In the wizard, help the user choose:
+In the wizard, help the user install or detect Claude Code, Codex, or OpenCode,
+then connect one assistant with a subscription or API key. Existing valid
+credentials count; starting another login preserves them until the new login
+commits. Settings → Backends uses the same connection and recovery controls.
+OpenCode retains its explicit **Allow tool calls** action.
 
-1. Chat platform: Slack, Discord, Telegram, WeChat, or Lark / Feishu.
-2. Agent backend: Claude Code, OpenCode, or Codex.
-3. Project working directory.
-4. Channel or chat scopes that should be enabled.
+Select **Enter workspace** explicitly. A stopped service starts at this point;
+the wizard confirms application and an available Agent before completing setup.
+Pending application, uncertain keychain auth, or a failed start stays recoverable
+on this screen. For OpenCode, if the Agent's model names an unconnected provider,
+choose a compatible model in the inline recovery and apply it explicitly. The
+wizard never chooses a model or changes an existing usable default silently.
+
+IM is optional for a fresh installation. Configure Slack, Discord, Telegram,
+WeChat, or Lark / Feishu later in Settings. Existing enabled but incomplete IM
+configuration opens an explicit **Repair saved messaging configuration** action
+using the existing platform form. Repair only its reported missing credentials;
+setup does not disable adapters or erase their configuration to bypass validation.
 
 Platform docs:
 

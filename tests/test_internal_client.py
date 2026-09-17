@@ -1208,3 +1208,29 @@ def test_show_access_apply_waits_for_a_definitive_controller_result(socket_path)
     assert result["body"]["status"] == "no_change"
     assert captured["timeout"].connect == 1.0
     assert captured["timeout"].read is None
+
+
+def test_backend_application_uses_verified_socket_and_real_projection(socket_path):
+    from core.backend_restart import BackendRestartCoordinator
+    from core.internal_server import create_app
+    from tests.test_backend_restart import _AgentService, _controller
+    from unittest.mock import AsyncMock
+
+    service = _AgentService()
+    service.agents = {"claude": object()}
+    controller = _controller(service)
+    controller.backend_restart_coordinator = BackendRestartCoordinator(controller, AsyncMock())
+    app = create_app(controller)
+
+    async def run():
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=httpx.ASGITransport(app=app)):
+            result = await internal_client.backend_application("claude", socket_path=socket_path)
+            assert result["status_code"] == 200
+            assert result["body"]["state"] == "applied"
+            assert result["body"]["controller_pid"] == os.getpid()
+            missing = await internal_client.backend_application("codex", socket_path=socket_path)
+            assert missing["body"]["state"] == "unavailable"
+            with pytest.raises(ValueError, match="unsupported_backend"):
+                await internal_client.backend_application("other", socket_path=socket_path)
+
+    asyncio.run(run())

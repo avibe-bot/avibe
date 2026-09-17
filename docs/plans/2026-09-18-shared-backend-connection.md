@@ -2,7 +2,7 @@
 
 ## Authorization and baseline
 
-Owner session `sestqz5wvu5ty` explicitly requested implementation of #2011 on 2026-09-18 at 02:16:59 Asia/Shanghai. #2010 and its fidelity follow-up #2017 are merged (#2015 and #2028). This is the sole active redesign implementation slice; #2012 and #2013 remain queued. Previous #2010-only pause language in the shared plan is superseded for this issue.
+Owner session `sestqz5wvu5ty` explicitly requested implementation of #2011 on 2026-09-18 at 02:16:59 Asia/Shanghai. #2010 and its fidelity follow-up #2017 are merged (#2015 and #2028). #2011 and #2012 are active in separate worktrees with separate sole writers; #2013 remains deferred. Previous sequential and #2010-only pause language is superseded by the owner’s parallel authorization.
 
 Repository: avibe-bot/avibe. Branch: `feat/shared-backend-connection`. Assigned worktree: `/Users/max/workspace/ai/avibe/.worktrees/avibe/shared-backend-connection`. Starting master: `4019b704c99afe16223d475fccd9e1cb94a109d7`, verified against GitHub and containing #2028. The local clone has a narrow origin fetch refspec: `git fetch origin master` alone may leave origin/master stale. Refresh explicitly with `git fetch origin refs/heads/master:refs/remotes/origin/master` and verify the SHA before later integration.
 
@@ -16,7 +16,7 @@ This issue does not implement Workbench/General Settings, native Desktop present
 
 ## Contract and ownership
 
-One implementation writer owns the complete React/Python flow; a read-only design lane supplies source evidence. No parallel product writers or speculative cross-lane API types.
+One implementation writer owns this complete React/Python connection flow; a read-only design lane supplies source evidence. The separate #2012 writer consumes the frozen public readiness interface without modifying this lane’s owners.
 
 1. **Installation:** existing detect/install/lifecycle producers own CLI discovery and canonical paths. `found` is installation evidence only; a rejected probe is unknown/error, not confirmed missing. Keep per-backend ownership, live local toggles, canonical non-ASCII paths, stale-result protection and the reconciliation fixes from #2015.
 2. **Claude:** `ApiContext.getClaudeAuth` / `saveClaudeAuth` and their existing Python handlers own effective state and persistence. `active_auth_mode`, `has_api_key`, `credential_type`, `has_oauth_credentials`, and runtime apply receipts must be interpreted consistently with Settings. Support subscription/manual callback, API Key and Auth Token. No plaintext credential readback or copying into another store.
@@ -61,13 +61,242 @@ The owner authorized implementation, tests, branch commits, push and non-draft P
 
 After PM checks: open non-draft PR to master, `Closes #2011`, read back title/body/base/head, immediately seed and arm one durable combined PR+lint lane Watch (`--forever`, both timeout layers 0, independent persistent cursor). New-PR bootstrap exception applies. Notify PM with PR/full head/Watch ID so PM arms its independent Watch. **Never manually post `@codex review`; cyhhao triggers automatically.** Observe pickup and report a verified gap instead of duplicate triggering.
 
-Paginate all findings/threads and count reviewed heads/root-cause classes each round. Two heads with a repeated class, or three findings-bearing heads after a model rewrite, stop blind repair for PM diagnosis; green tests do not waive the breaker. Final report precedes lane Watch cleanup. No merge, release, service restart or #2012/#2013 start.
+Paginate all findings/threads and count reviewed heads/root-cause classes each round. Two heads with a repeated class, or three findings-bearing heads after a model rewrite, stop blind repair for PM diagnosis; green tests do not waive the breaker. Final report precedes lane Watch cleanup. No merge, release, service restart or work on the parallel #2012 / deferred #2013 implementation.
 
 ## Progress
 
 - [x] Owner start instruction and latest master verified; isolated worktree created.
-- [ ] Native design evidence and Settings/API ownership inventory.
-- [ ] Implement shared connection forms/lifecycle and authoritative readiness/completion.
+- [x] Native design evidence and Settings/API ownership inventory.
+- [x] Implement shared connection forms/lifecycle and authoritative readiness/completion.
 - [ ] Focused/scenario/browser verification and independent PM spot-check.
 - [ ] PR, exact-head Codex review, complete CI and zero unresolved threads.
 - [ ] Owner acceptance / separately authorized merge.
+
+## Whole-path inventory and UI extraction (2026-09-18)
+
+- `AgentDetection` owns per-backend discovery/install/canonical paths and live
+  enable drafts; `Wizard` owns explicit completion. The old unconditional
+  OpenCode permission gate must become specific to OpenCode's readiness.
+- Settings providers currently own native credential reads and saves. Extract a
+  shared connection form used by Settings and the compact dialog; runtime,
+  Model Hub supply controls, provider/model management and optional billable
+  probes remain in Settings. No new credential persistence.
+- `BackendOAuthPanel` owns start/status/submit/cancel. Extract its controller for
+  both presentations. An operation generation invalidates stale async work;
+  unmount/cancel invalidates first, cancels known flows, and cancels a late start
+  by its returned flow ID. Duplicate start/submit use synchronous ownership.
+  Native backend login uses `force_reset=false`: merely starting or cancelling
+  login must not run logout. The existing Claude settings backup owns recovery.
+- Key save keeps absent key = reuse, empty/null base URL = clear, and no OAuth
+  base-URL writes. Masked values are display-only. Errors retain entered values.
+  Save/apply warnings and fresh effective reads are shared across consumers.
+- Native `Get` confirmed 568px / padding24 / gap20 / radius16 / shadow 0 18 48
+  (#00000088 Dark), 40px method segment, 42px fields, 38px actions, 40px logo
+  well with 28px existing logo; title20/600, target12, introduction13/1.55.
+  Full observer packet supplies Light and all language/state variants.
+
+### Exact type additions before their consumers
+
+- `OpencodeMutationResult.restart?: BackendRestartResult`: producer already
+  exists in `save_opencode_provider_auth_async`; both Settings and connection
+  form consume it. `ok:true` means persisted, `restart.ok:false` means failed
+  live apply and must retain a recoverable state, never connected.
+- `OAuthWebStartResult.backend` and `OAuthWebStatus.backend` include `opencode`:
+  existing Python producers already emit this value; the originating backend
+  remains the controller identity for every later operation.
+- Shared UI form accepts `{backend, provider?, onConnected?, onCancel?, compact?}`.
+  `provider` is a runtime catalog row and is required only for OpenCode. Its
+  read/save callbacks always target OpenCode ownership. `onConnected` runs only
+  after persisted/apply results and a fresh effective read agree; dismissal
+  invalidates that callback without pretending a submitted write was undone.
+
+Runtime/readiness IPC additions follow the approved disposition and exact
+producer/consumer contract below. Canonical `V2Config.default()` is workbench-only. Existing
+incomplete enabled IM drafts retain the existing completion validator and data.
+
+### PM-approved runtime observation boundary
+
+PM approved the scoped IPC/coordinator extension on 2026-09-18. No persistent
+ledger, config generations, schema or second lifecycle controller is added.
+
+- `BackendRestartCoordinator.snapshot(backend)` produces `{state, error?}` with
+  `state: applied | draining | failed | unavailable`. It reads the existing
+  task, retained last outcome and actual registered backend. Prepare failures,
+  task failures and cancellation remain failed until a successful application.
+- Verified UDS `GET /internal/backend-application/{backend}` projects that state
+  through the existing allowlist. The UI's existing API owner combines it with
+  original save/OAuth receipts. A bounded process-local receipt per backend
+  retains failure to deliver a refresh marker; querying an idle controller
+  cannot erase that failure. Only explicit successful apply clears it.
+- `GET /api/backend/{backend}/connection` produces `BackendConnectionState`:
+  `{ok, backend, installed, enabled, auth: subscription | api_key | none | unknown,
+  application: applied | draining | failed | stopped | unknown, ready,
+  entry_eligible, permission_required?, message?}`. The existing native auth
+  readers/provider catalog produce `auth`; no model-call test is added. A
+  provider counts only with an effective API/OAuth entry, not a keyless/local
+  catalog row. Codex keychain uncertainty is `unknown` regardless of saved mode.
+- `ready` requires the same backend installed/enabled, confirmed credential
+  source, controller applied and (OpenCode only) existing tool permission.
+  `entry_eligible` additionally accepts a confirmed stopped controller with
+  persisted auth. A running service with unavailable IPC stays unknown.
+- A fresh GET observes native launch auth and the last Avibe application, not
+  continuous remote credential validity or external-file hot reload. This
+  limitation applies equally to Settings; known apply failure takes precedence.
+- Wizard explicitly rechecks candidates, starts only a confirmed stopped
+  service through the existing start owner, confirms usable application/Agent
+  selection, and writes only `setup_completed` before navigation. If start
+  requires completion first, the ordering and failure recovery will be tested
+  and documented before choosing that route. Existing invalid enabled IM drafts
+  retain credential validation and the inline saved-platform recovery below.
+
+### Owner amendment and parallel delivery
+
+On 2026-09-18 the owner restored the existing Web `BrandLogo` at the left of the
+header (language remains right) and required Welcome and setup to share the
+same top-anchored title/subtitle geometry, including wrapped narrow copy. This
+supersedes the earlier centered Welcome and no-logo statements. Both screens
+use the same normal-flow layout and scroll on short windows. No host detection
+or playback controls are added.
+
+#2011 and #2012 now run in parallel from master `4019b704c`, in separate task
+worktrees with one writer each. #2011 owns auth/install/runtime/API/Wizard and
+onboarding, this plan and the shared plan's status consolidation. #2012 owns
+Workbench/sidebar/Composer/General/Settings shell and `App.tsx` General wiring;
+AuthGuard is unchanged. Global `index.css`, primitive additions and language
+presentation belong to #2012; #2011 consumes existing public APIs and uses
+scoped styles. Shared localization edits are disjoint (`onboarding`/auth/provider
+versus `sharedWorkspace`/General/workbench/nav/layout), preserving sibling text.
+#2013 native work remains deferred. No primary worktree, merge or service update.
+
+The canonical exported consumer interface is `BackendConnectionState` and
+`ApiContext.getBackendConnection(name: 'claude' | 'codex' | 'opencode'):
+Promise<BackendConnectionState>`. Its fields are listed above. #2012 consumes
+`ready === true` only to corroborate the transient completion banner, with real
+Agent/default identity. `enabled` alone and `onboardingCompleted` authorize
+nothing. Ordinary existing Workbench remains accessible when readiness expires.
+No second auth/start/save/restart in that consumer. Integration verifies the
+actual transition after #2011 merge; separate fixtures do not prove the seam.
+
+First start does not require `setup_completed` in the service start owner.
+Wizard therefore checks entry eligibility, explicitly starts a stopped service,
+re-reads runtime application and real enabled Agents, preserves a usable default
+(or selects an existing ready Agent if the seeded default is unusable), then
+saves only `setup_completed=true` and navigates. A failed start leaves completion
+false. The existing enabled-IM validator remains the final save boundary.
+
+### Runtime-declared OpenCode callback mode (PM disposition, 2026-09-18)
+
+`WebAuthFlow`, its start/status serializers and `OAuthWebStartResult` /
+`OAuthWebStatus` add optional `callback_kind: 'code' | 'device' | 'redirect'`.
+The producer maps OpenCode authorize `method: code` to `code`; it retains the
+selected method index and prompt inputs on that same flow. `auto` (and missing
+method for compatibility) uses `device` when a device code exists, otherwise
+`redirect`. Unknown explicit methods fail start. Claude/Codex can omit this
+field; their existing callback/device contract is unchanged.
+
+Manual-code flows make no callback request until explicit submit, share the
+existing waiter and cancellation lifetime, and send the code only to the existing
+OpenCode callback endpoint. `OpenCodeServerManager.wait_provider_oauth` adds an
+optional code argument; reserved method/code fields cannot be replaced by prompt
+answers. The scope extension includes this one transport method and direct
+transport tests, with the auth_setup runtime-provider scenario consuming it.
+No backend readiness fields or parallel-lane interfaces change.
+
+The internal application projection also returns `controller_pid` from the
+serving process. Failed UI apply receipts retain the already-existing runtime
+owner PID. A registered backend in a confirmed *new* controller clears an old
+failed delivery receipt because startup loaded persisted config; an unchanged
+controller (including recovered IPC and a new browser page) cannot erase it.
+This uses existing process identity only, with no generation/config-epoch scheme.
+The public BackendConnectionState contract remains unchanged.
+
+### OpenCode Agent/model recovery (PM disposition, 2026-09-18 03:29)
+
+Backend readiness remains the frozen auth/application contract above. Explicit
+completion separately checks accessible enabled Agent routing: Claude/Codex keep
+existing usability rules; OpenCode Direct provider-qualified models require
+that provider's effective API/OAuth auth. Catalog membership or configured=true
+alone does not prove that auth. Hub uses its existing canonical model catalog
+and supply owner, never Direct prefix parsing. Preserve a usable current default
+and allow another usable backend to bypass an unrelated OpenCode mismatch.
+
+When no usable Agent exists and an accessible manageable OpenCode Agent has the
+Direct mismatch, expose an inline recovery using the existing model catalog,
+Combobox and updateVibeAgent. Display the Agent and current model; require an
+explicit compatible model selection and Apply. Do not choose a model, create an
+Agent or infer untouched intent from builtin source/timestamps. Save only model
+(and effort only if the catalog explicitly requires a compatibility change).
+After save rerun fresh connection/default/completion checks. Display, cancel and
+catalog reads never write. Unavailable/empty catalogs and failed saves retain
+credentials, old persisted selection and the setup gate, with local retry.
+
+Focused consumers cover Anthropic/Poe-only auth, seeded OpenAI mismatch,
+explicit model persistence, cancellation/failure, preserved custom default and
+another usable backend. A hermetic auth_setup scenario crosses the real Agent
+store/default, OpenCode route resolution and narrow setup completion. Desktop
+and narrow browser recovery checks extend the existing frozen dialog evidence;
+no new dialog capture matrix or changes to #2012-owned picker files are needed.
+
+### Actual-image review and targeted confirmation
+
+The read-only observer viewed all 16 frozen final renders. PM confirmed compact
+labels must use Credential type / API Key / Auth Token and generic provider key
+labels; Settings retains its technical variable disclosure. Locked segmented
+controls use whole-control opacity .6 once, with disabled radio semantics and
+visible mint selection. Scoped focus-visible styling uses the existing ring
+token. Light primary white-on-mint is the approved pairing; disabled opacity .4
+and enabled state are verified separately, without a palette change.
+
+Existing backend glyph/tile accent differences are inherited and outside scope.
+Text-flow height differences (428 versus native 423/434; 536 versus 552) are
+accepted. EN Light and narrow compose approved tokens/copy because no complete
+authored counterparts exist. The frozen 16 captures stay unchanged; only small
+corrected label/lock/focus/Light action crops and model recovery are added.
+
+### Saved incomplete IM recovery (PM disposition, 2026-09-18 03:48)
+
+Before explicit startup/completion, Wizard reads fresh config and its server
+platform catalog. Existing platformHasRunnableConfig/credential_fields and
+redacted has_* markers identify already-enabled incomplete adapters; WeChat
+retains its runtime-waits-for-QR exception. Canonical enabled=[] has no IM step.
+Only the explicit Repair saved messaging configuration action mounts the
+existing embedded platform editor, extracted unchanged from Settings into a
+shared switch. No AuthGuard, platform selection, enablement or routing changes.
+
+Apply derives configChanges only within the affected config_key, preserving
+other fields and concurrent edits. Existing form validation and masked-secret
+semantics remain; no automatic auth test, second restart or setup_completed
+write in the editor. Failure retains drafts, cancellation writes nothing. After
+a successful repair the normal fresh completion checks run again. Generic
+completion failures offer local retry rather than an unreachable Settings link.
+AUTH-SETUP-120 covers real API preservation/validation; actual Wizard consumers
+cover explicit mounting, narrow payloads, failure/cancel and canonical bypass.
+
+### Verification record and observation limits
+
+- Native source: 36 dialogs and 9 boards read/exported with explicit document
+  identity. The observer viewed all 16 initial final renders, then all 9
+  corrected crops; D1/D2/D4 resolved with no new defect. Frozen evidence is
+  `/tmp/issue2011/final-render/` and `/tmp/issue2011/corrected-render/`; the latter
+  includes model recovery at desktop/narrow. Separate narrow Slack recovery
+  verifies existing-form reachability. No source design changes were made.
+- AUTH-SETUP-119 crosses manual provider callback transport, test-owned native
+  persistence, coordinator drain and ASGI application projection. 120 covers
+  canonical no-IM and saved incomplete IM narrow repair, and actual Wizard
+  consumers cover explicit repair/masked secrets/failure/cancel. 121 covers
+  Anthropic/Poe provider auth, real Agent/default persistence, route resolution
+  and completion. IDs were checked unique locally and absent on remote master.
+- Existing auth regression, focused lifecycle/native-route/readiness tests,
+  actual consuming UI tests and the 70-test onboarding browser suite pass.
+  Additional focused browser checks verify corrected label bounds, focus ring,
+  Light action opacity and locked selection, model recovery and legacy repair.
+  Final gate logs are recorded in the PR report against the committed head.
+- Fixtures own config/HOME/XDG/native paths and local upstream transports.
+  Screenshot/UI mocks do not prove real provider OAuth or installation. No
+  production credentials, native keychain, real CLI login, billable model call,
+  local runtime restart, Incus, primary checkout or design mutation was used.
+- Readiness observes native launch credentials and Avibe-owned application. It
+  does not continuously validate upstream tokens or certify externally edited
+  files were hot-applied. Upstream automatic OAuth already sent to a provider
+  may commit externally; cancellation settles Avibe-owned work and prevents
+  stale UI effects, rather than claiming remote transaction rollback.
