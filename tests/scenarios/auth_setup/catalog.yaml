@@ -310,4 +310,11 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_instance_manager_backend_credentials_round_trip
+  - id: AUTH-SETUP-907
+    name: Cloud pairing origin consumers reach the effective UI listener in its address family
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cloud_pairing_origin_reaches_effective_ui_listener
 next_priority: []
