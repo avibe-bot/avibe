@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
@@ -206,6 +207,9 @@ def message_snapshot(
     if source == "harness" and author == "user" and resolved_type == "user":
         author = "harness"
         resolved_type = "harness"
+    if source == "user":
+        metadata = metadata_without_delegated_owner(metadata)
+        metadata.pop("scheduled_provenance", None)
     filtered_metadata = {
         key: value
         for key, value in (metadata or {}).items()
@@ -506,6 +510,169 @@ def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
     )
 
 
+def metadata_with_delegated_memory_owner(
+    metadata: dict[str, Any], *, session_id: str | None
+) -> dict[str, Any]:
+    """Stamp same-Session delegation from its current host-owned Delivery.
+
+    Caller identifiers locate the execution; caller-supplied owner values never
+    authorize it. A continuation carries its already stamped owner without an
+    ancestry lookup. Missing identity leaves ordinary Memory denial intact.
+    """
+    result = dict(metadata)
+    result.pop("delegated_memory_owner", None)
+    created_by = result.get("created_by")
+    caller = created_by.get("caller") if isinstance(created_by, dict) else None
+    if not session_id or not isinstance(caller, dict) or caller.get("session_id") != session_id:
+        return result
+    import asyncio
+    import os
+    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV
+    from vibe.internal_client import delegated_memory_owner_sync, InternalServerUnavailable
+
+    proof = os.environ.get(AVIBE_CALLER_SESSION_PROOF_ENV, "")
+    if not proof:
+        return result
+    # Definition creation in a controller event loop must not synchronously
+    # call its own socket. Agent CLI creation runs outside that loop.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return result
+    try:
+        owner = delegated_memory_owner_sync(session_id, proof)
+    except InternalServerUnavailable:
+        return result
+    if not owner:
+        return result
+    # Resource Owner is not itself a Memory identity. In particular a caller
+    # cannot borrow another remote user's admitted Delivery by naming its Session.
+    if owner.get("platform") == "avibe":
+        remote = result.get("resource_user_context")
+        expected = f"remote:{remote.get('sub')}" if isinstance(remote, dict) and remote.get("sub") else "local"
+        if owner["user_id"] != expected:
+            return result
+    result["delegated_memory_owner"] = dict(owner)
+    return result
+
+
+def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None) -> dict[str, Any] | None:
+    """Host owner from an exact same-Session Turn, or the current candidate."""
+    from storage.db import get_cached_sqlite_engine
+
+    with get_cached_sqlite_engine().connect() as conn:
+        turn = get_turn(conn, turn_id) if turn_id is not None else active_turn(conn, session_id)
+        if not turn or turn["session_id"] != session_id:
+            return None
+        delivery = delivery_for_turn(conn, turn["id"])
+        if delivery is None:
+            return None
+        payload = execution_delivery_payload(conn, delivery)
+    return memory_owner_from_payload(payload)
+
+
+def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
+    """Read this exact Delivery's immutable content, including after acceptance."""
+    snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
+    return _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+
+
+def memory_owner_from_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One owner representation for authenticated humans and host continuations."""
+    source_metadata = payload.get("metadata") or {}
+    if payload.get("author") == "user" and payload.get("source") == "user":
+        user_id = payload.get("author_id")
+        if not user_id:
+            user_id = legacy_admitted_user_id(source_metadata) if legacy_is_cli_admitted(source_metadata) else None
+        owner = {
+            "platform": payload.get("platform"),
+            "user_id": user_id,
+            "is_dm": "::user::" in str(payload.get("scope_id") or ""),
+        }
+    elif payload.get("source") == "harness":
+        provenance = scheduled_delivery_provenance(payload)
+        spec = provenance["platform_specific"] if provenance else {}
+        trigger = spec.get("task_trigger_kind")
+        metadata = spec.get("message_metadata")
+        owner = (metadata.get("delegated_memory_owner")
+                 if isinstance(trigger, str) and trigger.strip() and isinstance(metadata, Mapping) else None)
+    else:
+        owner = None
+    return delegated_memory_owner(owner)
+
+
+def delegated_memory_owner(value: object) -> dict[str, Any] | None:
+    """Normalize the optional host owner fact; admission owns platform policy."""
+    if not isinstance(value, Mapping):
+        return None
+    platform, user_id = value.get("platform"), value.get("user_id")
+    if not all(isinstance(field, str) and field.strip() for field in (platform, user_id)):
+        return None
+    return {"platform": platform, "user_id": user_id, "is_dm": value.get("is_dm") is True}
+
+
+def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Only a host harness Delivery can restore scheduling authority."""
+    if payload.get("source") != "harness":
+        return None
+    metadata = payload.get("metadata")
+    provenance = metadata.get("scheduled_provenance") if isinstance(metadata, Mapping) else None
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    return provenance if isinstance(spec, Mapping) else None
+
+
+def memory_authority_for_payload(payload: Mapping[str, Any]) -> str:
+    """Compare human and delegated authority without credential-refresh noise."""
+    owner = memory_owner_from_payload(payload)
+    provenance = scheduled_delivery_provenance(payload)
+    metadata = provenance["platform_specific"].get("message_metadata") if provenance else payload.get("metadata")
+    resource = metadata.get("resource_user_context") if isinstance(metadata, Mapping) else None
+    if isinstance(resource, Mapping):
+        # Refreshing the same credential does not change its resource authority.
+        resource = {key: value for key, value in resource.items()
+                    if key not in {"claims_issued_at", "authorization_expires_at"}}
+    return _canonical_json([owner, resource])
+
+
+def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
+    """Project the two known owner locations without changing stored metadata."""
+    result = dict(metadata) if isinstance(metadata, dict) else {}
+    result.pop("delegated_memory_owner", None)
+    provenance = result.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
+    if isinstance(nested, dict):
+        public_nested = dict(nested)
+        public_nested.pop("delegated_memory_owner", None)
+        result["scheduled_provenance"] = {
+            **provenance, "platform_specific": {**spec, "message_metadata": public_nested},
+        }
+    return result
+
+
+def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Hide execution identity in both queued and accepted public messages."""
+    def without_private_fields(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item for key, item in value.items()
+            if key != "resource_user_context"
+            and not str(key).startswith(("_web_push_", "_memory_"))
+        }
+
+    result = without_private_fields(metadata_without_delegated_owner(metadata))
+    provenance = result.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
+    if isinstance(nested, dict):
+        result["scheduled_provenance"] = {
+            **provenance,
+            "platform_specific": {**spec, "message_metadata": without_private_fields(nested)},
+        }
+    return result
+
+
 def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Return a Delivery payload without server-owned identity metadata."""
 
@@ -516,12 +683,7 @@ def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     )
     metadata = payload.get("metadata")
     if isinstance(metadata, dict):
-        payload["metadata"] = {
-            key: value
-            for key, value in metadata.items()
-            if key != "resource_user_context"
-            and not str(key).startswith(("_web_push_", "_memory_"))
-        }
+        payload["metadata"] = public_message_metadata(metadata)
     return payload
 
 
@@ -538,6 +700,19 @@ _MESSAGE_MERGE_IDENTITY_FIELDS = (
 )
 
 
+def _delegated_authority_merge_identity(metadata: Mapping[str, Any]) -> str:
+    provenance = metadata.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, Mapping) else None
+    nested = spec.get("message_metadata") if isinstance(spec, Mapping) else None
+    # Compare raw authority, including absent/malformed values, before batching.
+    # Execution IDs and unrelated metadata must not disable normal coalescing.
+    return _canonical_json([
+        {key: value.get(key) for key in ("delegated_memory_owner", "resource_user_context")}
+        if isinstance(value, Mapping) else None
+        for value in (metadata, nested)
+    ])
+
+
 def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     """Return the Message fields that must stay singular after batching."""
 
@@ -552,6 +727,7 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     return (
         *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
         kind,
+        _delegated_authority_merge_identity(metadata),
         legacy_memory_merge_identity(metadata),
     )
 

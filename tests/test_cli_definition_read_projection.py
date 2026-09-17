@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from sqlalchemy import select, update
 
@@ -385,5 +386,111 @@ def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> Non
         assert cli.cmd_task_show("consumed-owner-success") == 0
         shown = json.loads(capsys.readouterr().out)["definition"]
         assert (shown["lifecycle_detail"], shown["state"]) == ("normal", "completed")
+    finally:
+        store.close()
+
+
+def test_public_definition_routes_hide_owner_without_changing_runtime_metadata():
+    from tests.ui_server_test_helpers import csrf_headers
+
+    private = {"delegated_memory_owner": {"platform": "slack", "user_id": "fixture", "is_dm": True},
+               "resource_user_context": {"sub": "fixture"}}
+    store = SQLiteBackgroundTaskStore()
+    try:
+        _task(store, "private-task", metadata=private)
+        _watch(store, "private-watch", metadata=private)
+        client = app.test_client()
+        for plural, identifier, field, read in (
+            ("tasks", "private-task", "task", store.get_scheduled_task),
+            ("watches", "private-watch", "watch", store.get_watch),
+        ):
+            for query in ("", "?page=1&limit=20"):
+                response = client.get(f"/api/harness/{plural}{query}")
+                assert response.status_code == 200
+                row = next(item for item in response.get_json()[plural] if item["id"] == identifier)
+                assert "delegated_memory_owner" not in row["metadata"]
+            for enabled in (False, True):
+                response = client.patch(
+                    f"/api/harness/{plural}/{identifier}", json={"enabled": enabled},
+                    headers=csrf_headers(client),
+                )
+                assert response.status_code == 200
+                assert "delegated_memory_owner" not in response.get_json()[field]["metadata"]
+                assert all(read(identifier)["metadata"][key] == value for key, value in private.items())
+    finally:
+        store.close()
+
+
+def test_definition_to_run_public_projection_keeps_raw_execution_owner(capsys):
+    """MEMORY-SEARCH-027: Task/Watch -> Run; Delivery/Message covered in delegated tests."""
+    from core.scheduled_tasks import ScheduledTaskStore, TaskExecutionStore
+    from core.watches import ManagedWatchService, ManagedWatchStore
+
+    owner = {"platform": "slack", "user_id": "fixture", "is_dm": True}
+    metadata = {"delegated_memory_owner": owner, "resource_user_context": {"sub": "fixture"},
+                "scheduled_provenance": {"platform_specific": {"message_metadata": {
+                    "delegated_memory_owner": owner, "visible": "retained",
+                }}}}
+    store = SQLiteBackgroundTaskStore()
+    requests = TaskExecutionStore()
+    try:
+        _task(store, "owner-task", metadata=metadata)
+        _watch(store, "owner-watch", metadata=metadata)
+        task = ScheduledTaskStore().get_task("owner-task")
+        watch = ManagedWatchStore().get_watch("owner-watch")
+        scheduled = requests.enqueue_task_run(task.id, task=task)
+        service = ManagedWatchService.__new__(ManagedWatchService)
+        service.request_store = requests
+        hook = service._hook_request(watch, prompt="fixture", event_detected=True)
+        requests.enqueue(hook)
+        client = app.test_client()
+        for run in (scheduled, hook):
+            assert requests.get_run(run.id)["metadata"]["delegated_memory_owner"] == owner
+            shown = client.get(f"/api/harness/runs/{run.id}").get_json()["run"]
+            listed = next(row for row in client.get("/api/harness/runs?page=1&limit=20").get_json()["runs"]
+                          if row["id"] == run.id)
+            assert cli.cmd_runs_show(SimpleNamespace(run_id=run.id)) == 0
+            cli_run = json.loads(capsys.readouterr().out)["run"]
+            for output in (shown, listed, cli_run):
+                public = output["metadata"]
+                assert "delegated_memory_owner" not in public
+                assert public["resource_user_context"] == metadata["resource_user_context"]
+                assert public["scheduled_provenance"]["platform_specific"]["message_metadata"] == {"visible": "retained"}
+            reloaded = TaskExecutionStore().get_run(run.id)
+            assert reloaded["metadata"]["delegated_memory_owner"] == owner
+            assert reloaded["metadata"]["resource_user_context"] == metadata["resource_user_context"]
+    finally:
+        requests.sqlite_backend.close()
+        store.close()
+
+
+def test_public_metadata_nonobjects_degrade_without_rewriting_rows(capsys):
+    from sqlalchemy import select
+
+    store = SQLiteBackgroundTaskStore()
+    try:
+        _task(store, "shape-task")
+        _watch(store, "shape-watch")
+        store.enqueue_run({"id": "shape-run", "request_type": "scheduled", "status": "queued",
+                          "created_at": NOW, "updated_at": NOW})
+        client = app.test_client()
+        for shape in (["legacy"], "legacy", []):
+            encoded = json.dumps(shape)
+            with store.engine.begin() as conn:
+                conn.execute(update(run_definitions).values(metadata_json=encoded))
+                conn.execute(update(agent_runs).values(metadata_json=encoded))
+            for plural, identifier, field, command in (
+                ("tasks", "shape-task", "definition", cli.cmd_task_show),
+                ("watches", "shape-watch", "definition", cli.cmd_watch_show),
+                ("runs", "shape-run", "run", lambda identifier: cli.cmd_runs_show(SimpleNamespace(run_id=identifier))),
+            ):
+                response = client.get(f"/api/harness/{plural}?page=1&limit=20")
+                assert response.status_code == 200
+                assert response.get_json()[plural][0]["metadata"] == {}
+                assert command(identifier) == 0
+                assert json.loads(capsys.readouterr().out)[field]["metadata"] == {}
+            with store.engine.connect() as conn:
+                assert conn.execute(select(run_definitions.c.metadata_json)).scalars().all() == [encoded, encoded]
+                assert conn.execute(select(agent_runs.c.metadata_json)).scalar_one() == encoded
     finally:
         store.close()

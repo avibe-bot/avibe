@@ -155,6 +155,19 @@ delivery remains process-local; pending Agent-owner work may be lost across rest
 or runtime replacement and is never replayed from an older queue. Already
 submitted provider outcomes are never replayed by this path.
 
+## Delegated reads
+
+A Task or Watch created during an authorized turn can keep reading the same
+user's default or named Memory project when it resumes that same Session,
+including after a controller restart. The definition carries the authenticated
+owner from the creating turn; a Task can pass that identity to a Watch it creates.
+Current binding and resource authorization still apply. Missing owner identity
+(including older definitions without this fact) stays denied.
+
+Background events remain synthetic and are not automatically captured as user
+input. This read capability does not enable `remember`, configuration, or
+administrative operations. Arbitrary cross-Session delegation is not covered.
+
 ## IM attachment capture
 
 Memory can extract supported attachments from bound one-to-one conversations on

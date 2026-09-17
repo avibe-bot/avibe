@@ -3258,7 +3258,8 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
 
 
 class SQLiteBackgroundTaskStore:
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, *, include_private_metadata: bool = True):
+        self._include_private_metadata = include_private_metadata
         self.db_path = db_path or paths.get_sqlite_state_path()
         guard_source_checkout_default_state_migration(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9125,6 +9126,11 @@ class SQLiteBackgroundTaskStore:
                 # exit — and the row must not claim a waiter is dead on the
                 # strength of never having looked.
                 row["process_alive"] = None if runtime is None else bool(runtime.get("running"))
+        if not self._include_private_metadata:
+            from storage.message_deliveries import metadata_without_delegated_owner
+
+            for row in rows:
+                row["metadata"] = metadata_without_delegated_owner(row.get("metadata"))
         return rows
 
     @staticmethod
@@ -9293,6 +9299,11 @@ class SQLiteBackgroundTaskStore:
                         continue
                     for field, blank in blanks[site.source]().items():
                         run.setdefault(field, blank)
+        if not self._include_private_metadata:
+            from storage.message_deliveries import metadata_without_delegated_owner
+
+            for run in runs:
+                run["metadata"] = metadata_without_delegated_owner(run.get("metadata"))
         return runs
 
     @staticmethod

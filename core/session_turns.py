@@ -179,8 +179,8 @@ def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
 # context.platform_specific provenance that the gate must restore when the row is
 # finally flushed — so a scheduled run enqueued behind an active turn keeps its
 # delivery override / suppression / task attribution + runs as SOURCE_SCHEDULED, not
-# a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
-# (vs a user send) for flush_queue.
+# a plain human turn (#84). Only immutable source=harness makes this host
+# provenance; user metadata cannot establish it.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
@@ -196,7 +196,7 @@ _TERMINAL_RESULT_LATCH_KEY = "_avibe_terminal_result_latch"
 # ``MessageDispatcher._get_target_context`` actually redirects delivery on — can't be
 # silently omitted (Codex P1 #3338692433).
 _FLUSH_REBUILT_KEYS = frozenset(
-    {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
+    {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token", "delivery_source"}
 )
 _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
     {
@@ -331,9 +331,7 @@ def _parse_queue_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _scheduled_provenance(row: dict[str, Any]) -> Optional[dict[str, Any]]:
-    metadata = row.get("metadata") or {}
-    provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
-    return provenance if isinstance(provenance, dict) else None
+    return delivery_store.scheduled_delivery_provenance(row)
 
 
 def _agent_run_merge_definition_id(spec: dict[str, Any]) -> str:
@@ -1257,13 +1255,14 @@ class SessionTurnManager:
             self._restore_scheduled_dispatch_context(context, deliveries[0])
         return await prepare(context, human=not scheduled)
 
-    @staticmethod
     def _restore_scheduled_dispatch_context(
+        self,
         context: "MessageContext",
         delivery: dict[str, Any],
     ) -> None:
-        payload = delivery_store.delivery_payload(delivery)
-        provenance = (payload.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
+        with self._sqlite_engine().connect() as conn:
+            payload = delivery_store.execution_delivery_payload(conn, delivery)
+        provenance = delivery_store.scheduled_delivery_provenance(payload)
         preserved = (
             provenance.get("platform_specific")
             if isinstance(provenance, dict)
@@ -1287,7 +1286,7 @@ class SessionTurnManager:
         delivery: dict[str, Any],
     ) -> "MessageContext":
         """Overlay only the exact queued Delivery's routing provenance."""
-        provenance = (delivery_store.delivery_payload(delivery).get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
+        provenance = delivery_store.scheduled_delivery_provenance(delivery_store.delivery_payload(delivery))
         preserved = provenance.get("platform_specific") if isinstance(provenance, dict) else None
         if not isinstance(preserved, dict):
             return context
@@ -2341,6 +2340,24 @@ class SessionTurnManager:
                 continue
             return None
 
+    def restore_memory_context(self, session_id: str, turn_id: str) -> Optional["MessageContext"]:
+        """Reconstruct only this still-live execution, never a later Session turn."""
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.get_turn(conn, turn_id)
+            if not turn or turn["session_id"] != session_id or turn["state"] not in delivery_store.TURN_OWNER_STATES:
+                return None
+            delivery = delivery_store.delivery_for_turn(conn, turn_id)
+        if delivery is None:
+            return None
+        context = self._delivery_context(session_id)
+        self._hydrate_delivery_context(context, delivery)
+        self._restore_scheduled_dispatch_context(context, delivery)
+        context.platform_specific["turn_token"] = turn_id
+        context.platform_specific["turn_source"] = (
+            SOURCE_SCHEDULED if context.platform_specific.get("delivery_source") == "harness" else SOURCE_HUMAN
+        )
+        return context
+
     def _hydrate_delivery_context(
         self,
         context: "MessageContext",
@@ -2348,7 +2365,8 @@ class SessionTurnManager:
     ) -> dict[str, Any]:
         """Restore dispatch inputs only from the durable Delivery snapshot."""
 
-        payload = delivery_store.delivery_payload(delivery)
+        with self._sqlite_engine().connect() as conn:
+            payload = delivery_store.execution_delivery_payload(conn, delivery)
         context.platform = str(payload.get("platform") or context.platform or "avibe")
         native_message_id = str(payload.get("native_message_id") or "").strip()
         context.message_id = (
@@ -2359,12 +2377,16 @@ class SessionTurnManager:
         if context.platform_specific is None:
             context.platform_specific = {}
         metadata = payload.get("metadata") or {}
+        if payload.get("source") != "harness":
+            metadata = delivery_store.metadata_without_delegated_owner(metadata)
+            metadata.pop(SCHEDULED_PROVENANCE_KEY, None)
+            payload["metadata"] = metadata
         raw_snapshot = delivery.get("snapshot_json")
         try:
             snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else {}
         except (TypeError, ValueError):
             snapshot = {}
-        legacy_workbench = context.platform == "avibe" and (
+        legacy_workbench = not delivery.get("message_id") and context.platform == "avibe" and (
             not isinstance(snapshot, dict) or "message_kind" not in snapshot
         )
         author_id = payload.get("author_id")
@@ -2383,6 +2405,7 @@ class SessionTurnManager:
         )
         memory_cli_admitted = bool(
             context.platform == "avibe"
+            and payload.get("source") == "user"
             and memory_enabled
             and author_id
             and (
@@ -2397,6 +2420,7 @@ class SessionTurnManager:
         context.platform_specific.update(
             {
                 "delivery_id": str(delivery["id"]),
+                "delivery_source": payload.get("source"),
                 "scope_id": payload.get("scope_id"),
                 "display_text": payload.get("text") or "",
                 "message_content": dict(payload.get("content") or {}),
@@ -2666,6 +2690,27 @@ class SessionTurnManager:
                 error_type=type(exc).__name__,
             )
 
+    def _compatible_steer_memory_authority(self, turn_id: str, deliveries: list[dict[str, Any]]) -> bool:
+        if not bool(getattr(getattr(self.controller.config, "memory", None), "enabled", False)):
+            return True
+        from avibe_memory.admission import InboundTurnFacts
+
+        with self._sqlite_engine().connect() as conn:
+            initial = delivery_store.delivery_for_turn(conn, turn_id)
+            active = delivery_store.execution_delivery_payload(conn, initial) if initial else {}
+            incoming = [delivery_store.execution_delivery_payload(conn, row) for row in deliveries]
+        payloads = [active, *incoming]
+        admission = self.controller._memory_admission()
+        delegated = [delivery_store.memory_owner_from_payload(payload)
+                     for payload in payloads if payload.get("source") == "harness"]
+        # Revoking a binding must not let foreign input enter a native Turn whose
+        # existing scope could become readable again when access is restored.
+        has_scope = active.get("session_id") in getattr(self.controller, "_memory_scopes_by_session", {})
+        if not any(owner and (has_scope or admission.admits(InboundTurnFacts(**owner))) for owner in delegated):
+            return True  # Human-only and Memory-ineligible group steering keep their policy.
+        authority = delivery_store.memory_authority_for_payload(active)
+        return all(delivery_store.memory_authority_for_payload(payload) == authority for payload in incoming)
+
     async def _dispatch_steer_batch(
         self,
         backend: str,
@@ -2677,6 +2722,10 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         delivery_id = str(deliveries[0]["id"])
+        if not self._compatible_steer_memory_authority(logical_turn_id, deliveries):
+            return await self._finish_steer(
+                delivery_id, steer_result(SteerOutcome.REFUSED, reason="memory_authority_changed"), context=context
+            )
         try:
             metadata = await self._steer_input_metadata(deliveries)
             request = SteerRequest(
@@ -4338,7 +4387,7 @@ class SessionTurnManager:
             resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
-            provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
+            provenance = delivery_store.scheduled_delivery_provenance(delivery_payload)
             source = SOURCE_HUMAN
             if isinstance(provenance, dict):
                 source = SOURCE_SCHEDULED
@@ -7636,9 +7685,7 @@ class SessionTurnManager:
                     if head is None:
                         continue
                     head_payload = delivery_store.delivery_payload(head)
-                    provenance = (head_payload.get("metadata") or {}).get(
-                        SCHEDULED_PROVENANCE_KEY
-                    )
+                    provenance = delivery_store.scheduled_delivery_provenance(head_payload)
                     spec = (
                         provenance.get("platform_specific")
                         if isinstance(provenance, dict)
@@ -7766,7 +7813,7 @@ class SessionTurnManager:
                                 if message is not None:
                                     record = message
                         metadata = record.get("metadata") or {}
-                        provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
+                        provenance = delivery_store.scheduled_delivery_provenance(record)
                         restored_spec = (
                             provenance.get("platform_specific")
                             if isinstance(provenance, dict)

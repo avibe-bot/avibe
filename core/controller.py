@@ -297,6 +297,7 @@ class Controller:
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
         self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
+        self._memory_cli_read_contexts: Dict[str, dict[str, Any]] = {}
         self._memory_implementation_cli_sessions: set[str] = set()
 
         # Session tracking (must be initialized before handlers)
@@ -3381,7 +3382,7 @@ class Controller:
         )
 
     def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
-        """Associate an admitted Agent session with its Memory read/write scope."""
+        """Associate a turn with its ordinary or delegated read-only Memory scope."""
 
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return False
@@ -3395,6 +3396,31 @@ class Controller:
         if not isinstance(facts_by_session, dict):
             facts_by_session = {}
             self._memory_cli_facts_by_session = facts_by_session
+        read_contexts = getattr(self, "_memory_cli_read_contexts", None)
+        if not isinstance(read_contexts, dict):
+            read_contexts = self._memory_cli_read_contexts = {}
+        read_contexts.pop(caller.session_id, None)
+        delegated_facts = None
+        metadata = payload.get("message_metadata") or {}
+        from storage.message_deliveries import delegated_memory_owner
+
+        owner = delegated_memory_owner(metadata.get("delegated_memory_owner")) if isinstance(metadata, dict) else None
+        trigger = payload.get("task_trigger_kind")
+        if not admitted and owner and payload.get("delivery_source") == "harness" and isinstance(trigger, str) and trigger.strip():
+            from avibe_memory.admission import InboundTurnFacts
+            from storage.resource_access_service import metadata_allows_harness_runtime
+
+            delegated_facts = InboundTurnFacts(
+                platform=owner.get("platform"),
+                user_id=owner.get("user_id"),
+                is_dm=owner.get("is_dm") is True,
+            )
+            admitted = bool(
+                metadata_allows_harness_runtime(metadata)
+                and self._memory_admission().admits(delegated_facts)
+            )
+            if admitted:
+                read_contexts[caller.session_id] = metadata
         implementation_error = getattr(self, "_memory_implementation_error", None)
         implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
         if implementation_error is not None:
@@ -3412,7 +3438,7 @@ class Controller:
             facts_by_session.pop(caller.session_id, None)
             return False
         admission = self._memory_admission()
-        facts = self._memory_turn_facts(context)
+        facts = delegated_facts or self._memory_turn_facts(context)
         principal_id = admission.principal_for(facts) if admitted else None
         project_id = admission.project_for(facts) if admitted else None
         if principal_id is None or project_id is None:
@@ -3429,7 +3455,19 @@ class Controller:
         return True
 
     def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
-        """Return the principal and project owned by an admitted Agent session."""
+        """Keep explicit Agent writes behind their existing human-turn admission."""
+        if session_id in getattr(self, "_memory_cli_read_contexts", {}):
+            return None
+        return self.memory_read_scope_for_cli_session(session_id)
+
+    def memory_read_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
+        """Resolve reads using current identity/binding authorization."""
+        metadata = getattr(self, "_memory_cli_read_contexts", {}).get(session_id)
+        if metadata is not None:
+            from storage.resource_access_service import metadata_allows_harness_runtime
+
+            if not metadata_allows_harness_runtime(metadata):
+                return None
 
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return None
@@ -3481,6 +3519,9 @@ class Controller:
         facts = getattr(self, "_memory_cli_facts_by_session", None)
         if isinstance(facts, dict):
             facts.pop(session_id, None)
+        read_contexts = getattr(self, "_memory_cli_read_contexts", None)
+        if isinstance(read_contexts, dict):
+            read_contexts.pop(session_id, None)
         implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
         if isinstance(implementation_sessions, set):
             implementation_sessions.discard(session_id)

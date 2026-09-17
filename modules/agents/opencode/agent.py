@@ -26,6 +26,8 @@ from core.caller_context import (
     AVIBE_SESSION_ID_ENV,
     caller_env_for_platform_payload,
     validated_caller_env_snapshot,
+    AVIBE_CALLER_SESSION_PROOF_ENV,
+    issue_caller_session_proof,
 )
 from core.message_output import stop_output_for, terminal_output_for
 from core.memory_cli_access import configure_memory_cli_access
@@ -1519,6 +1521,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     getattr(getattr(self, "controller", None), "config", None)
                 ),
             )
+            binding_extra_env = {**caller_context_env, **managed_skills_env}
             binding_token = secrets.token_hex(16)
             binding_payload = request.context.platform_specific or {}
             binding_bound = False
@@ -1529,7 +1532,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     binding_payload,
                     base_env=os.environ,
                     working_dir=request.working_path,
-                    extra_env=managed_skills_env,
+                    extra_env=binding_extra_env,
                     binding_token=binding_token,
                     **_binding_path_kwargs(caller_context_binding_path),
                     # The creation origin travels with the identity: an OpenCode shell
@@ -1553,7 +1556,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     caller_context_binding_path,
                     payload=binding_payload,
                     working_directory=request.working_path,
-                    extra_env=managed_skills_env,
+                    extra_env=binding_extra_env,
                     initially_bound=bool(binding_bound),
                     message=request.context,
                     fallback_platform=platform,
@@ -1592,7 +1595,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request
             )
             if caller_context_env:
-                processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = caller_context_env
+                processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = validated_caller_env_snapshot(caller_context_env)
             if project_base:
                 processing_indicator[_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY] = project_base
             if BUILTIN_SKILLS_SNAPSHOT_ENV in managed_skills_env:
@@ -2618,6 +2621,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
             )
             restored_context = restored_context_from_poll_info(poll_info)
+            restored_session_id = str(
+                (steering_snapshot.get("target_session_id") if isinstance(steering_snapshot, dict) else None)
+                or poll_info.base_session_id or ""
+            )
+            if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
+                memory_context = self.controller.session_turns.restore_memory_context(restored_session_id, logical_turn_id)
+                admitted = memory_context is not None and configure_memory_cli_access(self.controller, memory_context)
+                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id) if admitted else None
+                if proof:
+                    restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
             if (
                 poll_platform == "avibe"
                 and str(restored_context.user_id or "").startswith("remote:")

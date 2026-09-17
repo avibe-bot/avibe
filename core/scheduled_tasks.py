@@ -1618,6 +1618,11 @@ class ScheduledTaskStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
+        from storage.message_deliveries import metadata_with_delegated_memory_owner
+
+        metadata = metadata_with_delegated_memory_owner(
+            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
+        )
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1633,7 +1638,7 @@ class ScheduledTaskStore:
             cron=cron,
             run_at=run_at,
             timezone=timezone_name,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=metadata,
             shell_command=shell_command,
             command=command,
             timeout_seconds=timeout_seconds,
@@ -1689,6 +1694,16 @@ class ScheduledTaskStore:
             # mirror, so letting it "succeed" would erase the reclaim's pause reason.
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
+
+    @_serialize_task_mirror
+    def rebind_session(self, task_id: str, session_id: str) -> None:
+        """Host recovery changes only the binding, retaining authenticated metadata."""
+        task = self._tasks[task_id]
+        expect = self._read_state(task)
+        task.session_id = session_id
+        task.updated_at = _utc_now_iso()
+        if not self._write_task(task, expect):
+            raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
 
     @_serialize_task_mirror
     def update_task(
@@ -1763,6 +1778,11 @@ class ScheduledTaskStore:
         task.metadata = metadata_with_resource_user_context(
             metadata if metadata is not None else task.metadata,
             user_context,
+        )
+        from storage.message_deliveries import metadata_with_delegated_memory_owner
+
+        task.metadata = metadata_with_delegated_memory_owner(
+            task.metadata, session_id=session_id
         )
         task.updated_at = _utc_now_iso()
         if not self._write_task(
@@ -10008,24 +10028,7 @@ class ScheduledTaskService:
         return True
 
     def _write_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
-        self.store.update_task(
-            task.id,
-            name=task.name,
-            session_key=task.session_key,
-            session_id=session_id,
-            prompt=task.prompt,
-            schedule_type=task.schedule_type,
-            agent_name=task.agent_name,
-            session_policy=task.session_policy,
-            post_to=task.post_to,
-            deliver_key=task.deliver_key,
-            cron=task.cron,
-            run_at=task.run_at,
-            timezone_name=task.timezone,
-            cwd=task.cwd,
-            update_cwd=False,
-            metadata=task.metadata,
-        )
+        self.store.rebind_session(task.id, session_id)
 
     def _pause_task(self, task: ScheduledTask) -> None:
         try:
@@ -10842,6 +10845,10 @@ class ScheduledTaskService:
             platform_specific={
                 "platform": platform,
                 "is_dm": target.is_dm,
+                "message_metadata": {
+                    key: value for key, value in (metadata or {}).items()
+                    if key in {"delegated_memory_owner", "resource_user_context"}
+                },
                 "turn_source": "scheduled",
                 "agent_session_id": session_id,
                 "session_key_external": target.to_key(),

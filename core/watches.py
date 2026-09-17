@@ -670,6 +670,11 @@ class ManagedWatchStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
+        from storage.message_deliveries import metadata_with_delegated_memory_owner
+
+        metadata = metadata_with_delegated_memory_owner(
+            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
+        )
         watch = ManagedWatch(
             id=uuid4().hex[:12],
             name=name,
@@ -689,7 +694,7 @@ class ManagedWatchStore:
             retry_delay_seconds=retry_delay_seconds,
             post_to=post_to,
             deliver_key=deliver_key,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=metadata,
         )
         watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY] = watch.created_at
         return self.upsert_watch(
@@ -824,6 +829,11 @@ class ManagedWatchStore:
             if waiter_lifecycle_changed:
                 watch.metadata = dict(watch.metadata)
                 watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+            from storage.message_deliveries import metadata_with_delegated_memory_owner
+
+            watch.metadata = metadata_with_delegated_memory_owner(
+                watch.metadata, session_id=session_id
+            )
             watch.updated_at = _utc_now_iso()
             if not self._write_watch(
                 watch,

@@ -134,3 +134,100 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_memory_adapter.py::test_sender_name_snapshot_survives_rename_before_async_admission
+
+  - id: MEMORY-SEARCH-021
+    name: Same-Session Task and Watch retain default and named Memory reads
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_delegated_read_survives_definition_and_controller_restart
+  - id: MEMORY-SEARCH-022
+    name: Persisted continuation restores read identity after controller restart without capture or write expansion
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_delegated_read_survives_definition_and_controller_restart
+  - id: MEMORY-SEARCH-023
+    name: Missing or caller-forged delegated owner cannot authorize Memory
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_missing_and_forged_owner_stay_denied
+  - id: MEMORY-SEARCH-024
+    name: Delegated remote reads remain user-isolated and obey current binding revocation
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_remote_delegations_isolate_users_and_recheck_revoked_binding
+  - id: MEMORY-SEARCH-025
+    name: Session locator overrides cannot copy another IM user's delegated Memory owner
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_im_session_override_rejected
+  - id: MEMORY-SEARCH-026
+    name: Public continuation and definition payloads hide owner without erasing runtime identity
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_public_definition_projection_preserves_sqlite_runtime_owner
+  - id: MEMORY-SEARCH-027
+    name: Task and Watch execution Runs hide delegated owners in public output but retain runtime identity
+    status: covered
+    kind: boundary
+    layer: scenario
+    test: tests/test_cli_definition_read_projection.py::test_definition_to_run_public_projection_keeps_raw_execution_owner
+  - id: MEMORY-SEARCH-028
+    name: OpenCode initial binding failure retries with Session proof and preserves Task and Watch admission
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_agent_steering.py::test_opencode_coordinator_error_aborts_through_steering_owner
+  - id: MEMORY-SEARCH-029
+    name: Same-Session owner changes reject retained proofs even with caller subject override
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_owner_bound_proof_rejects_later_owner_and_subject_override
+  - id: MEMORY-SEARCH-030
+    name: Malformed persisted delegated owners omit execution proof without aborting launch
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_malformed_persisted_owner_omits_proof
+  - id: MEMORY-SEARCH-031
+    name: Task and Watch batches preserve one owner and resource authorization per Turn
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_queued_authority_remains_singular
+  - id: MEMORY-SEARCH-032
+    name: Ordinary UI and preexisting user deliveries cannot inject scheduled Memory authority
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_ordinary_ui_injection_never_becomes_scheduled
+  - id: MEMORY-SEARCH-033
+    name: Explicit no-trigger harness dispatch stays scheduled without granting Memory authority
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_no_trigger_harness_retains_scheduling_without_memory
+  - id: MEMORY-SEARCH-034
+    name: Active Task and Watch polls restore exact live authority through current admission
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_memory_delegated_lifecycle.py::test_active_poll_restores_proof_and_read_scope
+  - id: MEMORY-SEARCH-035
+    name: Host same-definition recovery preserves owner while ordinary edits re-admit
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_memory_delegated_lifecycle.py::test_internal_rebind_preserves_owner
+  - id: MEMORY-SEARCH-036
+    name: Direct pending promoted and restored steering cannot mix delegated authorities
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_lifecycle.py::test_steering_preserves_effective_memory_authority

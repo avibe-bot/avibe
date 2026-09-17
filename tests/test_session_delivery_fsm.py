@@ -1009,6 +1009,7 @@ def test_every_released_memory_admission_fact_fences_delivery_segments(
 def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
     def row(source_session_id: str) -> dict:
         return {
+            "source": "harness",
             "metadata": {
                 SCHEDULED_PROVENANCE_KEY: {
                     "platform_specific": {
@@ -2479,6 +2480,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
     prompt_controller.configure_memory_cli_session = (
         Controller.configure_memory_cli_session.__get__(prompt_controller)
     )
+    prompt_controller.memory_read_scope_for_cli_session = Controller.memory_read_scope_for_cli_session.__get__(prompt_controller)
     prompt_controller.memory_scope_for_cli_session = (
         Controller.memory_scope_for_cli_session.__get__(prompt_controller)
     )
@@ -2684,6 +2686,7 @@ def test_dispatch_uses_current_session_route_without_mutating_delivery_provenanc
                 session_id="ses_fsm",
                 priority="p3",
                 content="scheduled",
+                source="harness",
                 metadata={
                     SCHEDULED_PROVENANCE_KEY: {
                         "message_id": "scheduled:old",

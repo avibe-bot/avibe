@@ -286,6 +286,7 @@ def _build_controller_double(handler=None):
     """
 
     controller = MagicMock()
+    controller.memory_read_scope_for_cli_session = lambda session_id: controller.memory_scope_for_cli_session(session_id)
     controller.message_handler = MagicMock()
 
     async def _handle_user_message(
