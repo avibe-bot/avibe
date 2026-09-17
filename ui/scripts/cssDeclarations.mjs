@@ -32,7 +32,7 @@ import postcss from 'postcss';
 function declarationSpansIn(css, offset = 0, into = []) {
   let root;
   try {
-    root = postcss.parse(css);
+    root = postcss.parse(css, { map: false });
   } catch {
     if (css.length > 0) into.push([offset, offset + css.length]);
     return into;

@@ -110,7 +110,7 @@ function splitSelectors(selectorText) {
 }
 
 function resolveThemeTokens({ prefersLight, themeAttr, source = css }) {
-  const root = postcss.parse(source);
+  const root = postcss.parse(source, { map: false });
   const resolved = new Map();
   let order = 0;
 
@@ -475,7 +475,7 @@ function assertAccentAliasesKeepTheirTokenName(source) {
     `${fill}-hover`,
   ]));
 
-  postcss.parse(source).walkAtRules('theme', (atRule) => {
+  postcss.parse(source, { map: false }).walkAtRules('theme', (atRule) => {
     atRule.walkDecls((decl) => {
       const target = /^var\(\s*(--[\w-]+)\s*\)$/.exec(normalizeCssValue(decl.value))?.[1];
       if (!target || !accentTokens.has(target)) {
