@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // What a Show Page annotation draws in chat, distilled from ``content.annotation``.
 // Design: design.pen m31JWV (states) + TxFKk (anatomy and rules); the rule
 // numbers cited below are that frame's.
@@ -39,7 +40,7 @@ export function readAnnotationView(content: unknown): AnnotationView | null {
 // resolved agent mark is still titled "Agent 批注"; the marker below the body is
 // what says it is done. The direction is data on the row; the words are frontend
 // i18n, so switching UI language re-labels existing rows instead of rewriting them.
-export const annotationTitleKey = (direction: AnnotationView['direction']): string =>
+export const annotationTitleKey = (direction: AnnotationView['direction']): TranslationKey =>
   direction === 'user' ? 'chat.annotation.titleUser' : 'chat.annotation.titleAgent';
 
 // What names a queued annotation on the strip's single line when its author

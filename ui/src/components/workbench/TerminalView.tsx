@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
@@ -67,7 +68,7 @@ const SEARCH_DECORATIONS = {
 // Accessory key bar for phones (their soft keyboards lack these). Each button sends the raw
 // byte sequence the PTY expects; Ctrl is a sticky modifier. Labels go through i18n (the
 // control sequences stay here).
-const KEYS: { labelKey: string; seq?: string; ctrl?: boolean }[] = [
+const KEYS: { labelKey: TranslationKey; seq?: string; ctrl?: boolean }[] = [
   { labelKey: 'apps.terminal.keys.esc', seq: '\x1b' },
   { labelKey: 'apps.terminal.keys.tab', seq: '\t' },
   { labelKey: 'apps.terminal.keys.ctrl', ctrl: true },

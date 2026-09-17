@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
@@ -166,7 +167,7 @@ const sourceClientNonce = (): string => {
 const failureMessageKey = (failure: ReturnType<typeof apiFailure>): string | null =>
   failure?.detail ?? failure?.code ?? null;
 
-const REPLACE_FAILURE_KEY: Record<ModelHubFailureClass, string> = {
+const REPLACE_FAILURE_KEY: Record<ModelHubFailureClass, TranslationKey> = {
   'authoritative-terminal': 'settings.models.repair.replaceFailed',
   inconclusive: 'settings.models.repair.replaceFailed',
   'retryable-provider': 'settings.models.repair.replaceFailed',

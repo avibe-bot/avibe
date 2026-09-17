@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Loader2, RefreshCw } from 'lucide-react';
@@ -11,7 +12,6 @@ import { useMemoryResource } from './useMemoryResource';
 import { memoryOriginLabelKey } from './memoryOrigin';
 
 type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
-type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 const DISCLOSURE_TRIGGER_CLASSES =
   'flex min-w-0 items-center gap-1.5 rounded text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
@@ -83,13 +83,13 @@ const ProfileEntry: React.FC<{
 };
 
 /** A blank/whitespace-only category or trait still needs a discoverable, deterministic label. */
-const resolveEntryLabel = (t: Translate, raw: string | null, index: number): string => {
+const resolveEntryLabel = (t: TFunction, raw: string | null, index: number): string => {
   const trimmed = raw?.trim();
   return trimmed ? trimmed : t('memory.profile.entryFallback', { number: index + 1 });
 };
 
 /** Render provider values as inert text nodes, never as Markdown or HTML. */
-export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Translate }> = ({ profile, t }) => (
+export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: TFunction }> = ({ profile, t }) => (
   <div className="flex flex-col gap-4">
     {profile.summary ? (
       <section>
@@ -134,7 +134,7 @@ export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Tran
   </div>
 );
 
-export const MemoryProfileItemBlock: React.FC<{ item: MemoryItem; t: Translate }> = ({ item, t }) => (
+export const MemoryProfileItemBlock: React.FC<{ item: MemoryItem; t: TFunction }> = ({ item, t }) => (
   <div className="rounded-xl border border-border bg-surface px-4 py-3">
     <div className="mb-3 flex items-center gap-2">
       <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>

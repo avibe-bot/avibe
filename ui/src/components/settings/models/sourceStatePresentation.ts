@@ -1,9 +1,10 @@
+import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, AdoptedBy, NeedsActionDetailKey, SourceState, SourceStatus } from './types';
 
 export type SourceStateSurface = 'card' | 'detail';
 
 export type SourceStatePresentation = {
-  key: string | null;
+  key: TranslationKey | null;
   values?: Record<string, string>;
   /**
    * Copy that explains the label in place, for a reading whose plain meaning is
@@ -12,7 +13,7 @@ export type SourceStatePresentation = {
    * and the label is what it is called, and neither is a string a consumer may
    * invent at the keyboard.
    */
-  hint?: { labelKey: string; bodyKey: string };
+  hint?: { labelKey: TranslationKey; bodyKey: TranslationKey };
   textClass: string;
   dotClass: string;
 };
@@ -47,7 +48,7 @@ const STANDBY: SourceStatePresentation = {
   dotClass: 'bg-muted',
 };
 
-const NEEDS_ACTION_KEY: Readonly<Record<NeedsActionDetailKey, string>> = {
+const NEEDS_ACTION_KEY: Readonly<Record<NeedsActionDetailKey, TranslationKey>> = {
   'models.source.needs_action.oauth_expired': 'settings.models.sourceDetail.status.needsAction.oauthExpired',
   'models.source.needs_action.balance_exhausted': 'settings.models.sourceDetail.status.needsAction.balanceExhausted',
   'models.source.needs_action.credential_revoked': 'settings.models.sourceDetail.status.needsAction.credentialRevoked',

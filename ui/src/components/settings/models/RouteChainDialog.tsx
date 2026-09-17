@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
@@ -161,7 +162,7 @@ export const RouteChainDialog: React.FC<{
   const [unknownSourceCurrent, setUnknownSourceCurrent] = React.useState(false);
   const [selectorEpoch, setSelectorEpoch] = React.useState(0);
   const [announcement, setAnnouncement] = React.useState<{
-    key: string;
+    key: TranslationKey;
     params?: Record<string, unknown>;
   } | null>(null);
   const gripRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
@@ -229,7 +230,7 @@ export const RouteChainDialog: React.FC<{
   const dirty = manualDraft ? savedOverride === null || !sameRouteDraft(savedOverride.hops, draft) : savedOverride !== null;
   const canDiscardDraft = (phase === "ready" || phase === "rejected") && (dirty || restoring);
   const draftOrigin = manualDraft ? (draft.length ? 'manual' : null) : (preview ?? chain)?.route_origin ?? null;
-  const announce = (key: string, params?: Record<string, unknown>) =>
+  const announce = (key: TranslationKey, params?: Record<string, unknown>) =>
     setAnnouncement({ key, params });
   const focusAfterRender = (ref: React.RefObject<HTMLElement | null>) => {
     requestAnimationFrame(() => ref.current?.focus());
@@ -1099,7 +1100,7 @@ export const RouteChainDialog: React.FC<{
           <span>{t('settings.models.routing.restorePending')}</span>
         </div>}
         {preview && <div className="model-hub-route-preview" data-origin={preview.route_origin ?? 'unconfigured'} role="status">
-          <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`)}</strong>
+          <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`, { defaultValue: `settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}` })}</strong>
           <span>{t('settings.models.routing.restorePending')}</span>
         </div>}
         {!unresolvedPreview && <><h3 className="model-hub-route-label font-bold">

@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { Loader2, X } from 'lucide-react';
@@ -17,13 +18,13 @@ export const SourceMutationReport: React.FC<{
   const impact = report?.commit.impact ?? null;
   const action = report?.commit.action ?? 'edit';
   const copyKind = action === 'edit' ? 'edit' : 'remove';
-  const titleKey = impact
+  const titleKey: TranslationKey = impact
     ? `settings.models.sourceDetail.${copyKind}.impact.title`
     : `settings.models.sourceDetail.${copyKind}.settlement.title`;
-  const detailKey = impact
+  const detailKey: TranslationKey = impact
     ? `settings.models.sourceDetail.${copyKind}.impact.detail`
     : 'settings.models.sourceDetail.impact.refreshFail';
-  const actionKey = report?.landingFailed
+  const actionKey: TranslationKey = report?.landingFailed
     ? 'settings.models.sourceDetail.retry'
     : `settings.models.sourceDetail.${copyKind}.impact.done`;
 

@@ -1,3 +1,6 @@
+import type { TFunction } from 'i18next';
+import type { TranslationKey } from '@/i18n/types';
+
 export type PlatformName = string;
 
 export type PlatformCapabilities = {
@@ -41,7 +44,7 @@ export const WORKBENCH_PLATFORM_ID = 'avibe';
 export const isWorkbenchPlatform = (platform: string): boolean =>
   platform === WORKBENCH_PLATFORM_ID;
 
-const LEGACY_FALLBACK_CATALOG: PlatformDescriptor[] = [
+const LEGACY_FALLBACK_CATALOG: (PlatformDescriptor & { title_key: TranslationKey; description_key: TranslationKey })[] = [
   {
     id: 'slack',
     config_key: 'slack',
@@ -211,3 +214,10 @@ export const platformHasRunnableConfig = (data: any, platform: string): boolean 
 
 export const hasConfiguredPlatformCredentials = (data: any): boolean =>
   getEnabledPlatforms(data).some((platform) => platformHasRunnableConfig(data, platform));
+
+/** Catalog labels are server-selected; unknown names retain i18next's key fallback. */
+export function platformText(t: TFunction, id: string, field: 'title' | 'desc', key?: string): string {
+  const name = key || `platform.${id}.${field}`;
+  const value = t(name, { defaultValue: name, returnObjects: true });
+  return typeof value === 'string' ? value : name;
+}

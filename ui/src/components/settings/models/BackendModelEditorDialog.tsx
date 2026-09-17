@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // One editor for every backend catalog row, add and edit alike.
 //
 // It writes nothing. The row it commits goes back into the catalog dialog's
@@ -141,7 +142,7 @@ export const BackendModelEditorDialog: React.FC<{
   const [fillState, setFillState] = React.useState<FillState>('idle');
   /** Which sentence `fillState === 'error'` shows, resolved while the server's
    *  own answer is still in hand. */
-  const [fillFailedKey, setFillFailedKey] = React.useState('settings.models.gateway.modelEditor.fillFailed');
+  const [fillFailedKey, setFillFailedKey] = React.useState<TranslationKey>('settings.models.gateway.modelEditor.fillFailed');
   const [matches, setMatches] = React.useState<ModelsDevMatch[]>([]);
   /** The query the typeahead is answering; empty closes it. Held apart from
    *  `draft.id` because choosing a suggestion writes the id, and a list keyed on

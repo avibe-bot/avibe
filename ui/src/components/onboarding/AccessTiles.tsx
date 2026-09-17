@@ -3,7 +3,7 @@ import { useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { PlatformIcon } from '../visual';
 
-const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'];
+const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'] as const;
 
 export function AccessTiles({ paused }: { paused: boolean }) {
   const { t } = useTranslation();

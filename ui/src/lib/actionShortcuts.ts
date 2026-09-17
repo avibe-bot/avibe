@@ -1,3 +1,4 @@
+import type { TranslationSuffix } from '@/i18n/types';
 import { useMemo, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -212,7 +213,7 @@ const SYMBOL_KEY_LABELS: Readonly<Record<string, string>> = {
   Slash: '/',
 };
 
-const TRANSLATED_KEY_LABELS: Readonly<Record<string, string>> = {
+const TRANSLATED_KEY_LABELS: Readonly<Record<string, TranslationSuffix<'settings.shortcuts.keyLabels'>>> = {
   Backspace: 'backspace',
   CapsLock: 'capsLock',
   ContextMenu: 'contextMenu',

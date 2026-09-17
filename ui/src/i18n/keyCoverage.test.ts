@@ -537,6 +537,7 @@ export const collectDottedLiterals = (source: string, fileName = 'fixture.tsx'):
   );
   const found = new Set<string>();
   const visit = (node: ts.Node) => {
+    if (ts.isTypeNode(node)) return;
     if (ts.isStringLiteralLike(node) && DOTTED.test(node.text)) found.add(node.text);
     ts.forEachChild(node, visit);
   };
@@ -914,27 +915,6 @@ const NON_KEY_LITERALS = [
   // true of this guard. Deleting product code is out of scope for this PR.
   'workbench.createDialog.kindTask',
   'workbench.createDialog.kindWatch',
-
-  // Combinations a template's types allow and the app cannot reach. A union is
-  // an upper bound on what arrives at a call site, never the exact set, so
-  // expanding one names keys alongside the real ones — and the two are told
-  // apart the same way every other name here is: by the bundles. These have
-  // copy in neither locale because nothing ever asks for them.
-  //
-  // `OAuthConnectDialog` picks the prefix and the leaf from the SAME condition
-  // (`disabled ? 'opt' : 'badge'` beside `badgeKey = disabled ? 'added' : …`),
-  // so only 4 of the 8 products exist; the other 4 are these. Correlation
-  // between spans is real dataflow, and no expansion of independent parts can
-  // see it.
-  'settings.models.addSub.badge.added',
-  'settings.models.addSub.opt.recommended',
-  'settings.models.addSub.opt.secondary',
-  'settings.models.addSub.opt.supportedNotRecommended',
-  // `ShowPageSharingSettings` renders this behind
-  // `['conflict', 'invalid', 'error'].includes(gate)`, which narrows nothing
-  // for the compiler, so the other two members of `Gate` expand too.
-  'chat.showPage.sharingErrors.ready',
-  'chat.showPage.sharingErrors.share_id_taken',
 ];
 
 /** Every dotted literal the app carries, wherever it sits, sorted. */
@@ -1656,17 +1636,31 @@ describe('app i18n key coverage', () => {
       const sentence = 'Read the fixture.docs page for more';
       const single = 'undotted';
       const templated = \`fixture.\${dynamic}\`;
+      type Prefix = TranslationSuffix<'fixture.typeOnly'>;
+      interface Carrier { key: 'fixture.interfaceOnly' }
+      const alias = 'fixture.castValue' as 'fixture.castType';
+      const checked = 'fixture.satisfiesValue' satisfies 'fixture.satisfiesType';
+      const jsx = <Thing title={'fixture.jsxValue' as const} />;
+      enum State { Ready = 'fixture.enumValue' }
+      const typed = 'fixture.runtime' satisfies TranslationKey;
+      const asserted = 'fixture.asserted' as TranslationKey;
     `;
     expect(collectDottedLiterals(fixture)).toEqual([
       'avibe.editor.fontSize.v1',
       'editor.background',
+      'fixture.asserted',
       'fixture.attrHint',
       'fixture.attrLabel',
       'fixture.braced',
       'fixture.called',
+      'fixture.castValue',
+      'fixture.enumValue',
       'fixture.held',
       'fixture.inArray',
       'fixture.invented',
+      'fixture.jsxValue',
+      'fixture.runtime',
+      'fixture.satisfiesValue',
       'fixture.tableBody',
       'fixture.tableLabel',
     ]);

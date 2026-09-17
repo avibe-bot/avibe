@@ -5,6 +5,6 @@
     "noEmit": true,
     "tsBuildInfoFile": "../../../../node_modules/.tmp/model-hub-tests.tsbuildinfo"
   },
-  "include": ["./**/*.ts", "./**/*.tsx"],
+  "include": ["./**/*.ts", "./**/*.tsx", "../../../i18n/i18next.d.ts"],
   "exclude": []
 }

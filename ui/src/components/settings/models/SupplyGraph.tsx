@@ -1,3 +1,4 @@
+import type { TranslationSuffix } from '@/i18n/types';
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -130,7 +131,7 @@ export const SupplyGraph: React.FC<{
 };
 
 const LEGEND_ORDER: SupplyRelationKind[] = ['native', 'gateway', 'passthrough', 'connected_unused', 'takeover', 'unavailable'];
-const LEGEND_COPY: Record<SupplyRelationKind, string> = {
+const LEGEND_COPY: Record<SupplyRelationKind, TranslationSuffix<'settings.models.legend'>> = {
   native: 'native',
   gateway: 'viaGateway',
   passthrough: 'passthrough',

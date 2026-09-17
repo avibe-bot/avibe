@@ -17,7 +17,7 @@ export type BackendUiMeta = {
   iconCls: string;
 };
 
-export const AGENT_BACKENDS: BackendUiMeta[] = [
+export const AGENT_BACKENDS = [
   {
     id: 'opencode',
     label: 'OpenCode',
@@ -57,7 +57,7 @@ export const AGENT_BACKENDS: BackendUiMeta[] = [
     tileCls: 'bg-gold',
     iconCls: 'text-gold-foreground',
   },
-];
+] as const satisfies readonly BackendUiMeta[];
 
 export const DEFAULT_BACKEND_ID = 'opencode';
 

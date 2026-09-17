@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import type { TFunction } from 'i18next';
 
 import type { MemoryProcessingSourceStatus, MemoryStatus } from '../../../context/ApiContext';
@@ -98,7 +99,7 @@ const PROCESSING_REASON_LABEL_KEYS = {
   unknown: 'memory.processingRecord.reason.unknown',
 } as const;
 
-const knownLabel = (t: TFunction, keys: Record<string, string>, value: string): string => {
+const knownLabel = (t: TFunction, keys: Record<string, TranslationKey>, value: string): string => {
   const key = Object.prototype.hasOwnProperty.call(keys, value) ? keys[value] : undefined;
   return key ? t(key) : value;
 };
@@ -128,7 +129,7 @@ export const memoryStatusAnomalyLabel = (
   t: TFunction,
   group: AnomalyLabelGroup,
   value: string,
-): string => knownLabel(t, ANOMALY_LABEL_KEYS[group] as Record<string, string>, value);
+): string => knownLabel(t, ANOMALY_LABEL_KEYS[group], value);
 
 export const memoryStatusHealthLabel = (t: TFunction, value: string): string => (
   knownLabel(t, HEALTH_STATUS_LABEL_KEYS, value)
@@ -161,7 +162,7 @@ export const memoryStatusRuntimeFactLabel = (
   t: TFunction,
   group: RuntimeFactGroup,
   value: string,
-): string => knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group] as Record<string, string>, value);
+): string => knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group], value);
 
 export const formatMemoryStatusRuntimeFact = (
   t: TFunction,

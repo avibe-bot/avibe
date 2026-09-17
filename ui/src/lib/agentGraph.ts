@@ -1,3 +1,5 @@
+import type { TFunction } from 'i18next';
+import type { TranslationKey } from '@/i18n/types';
 // Shared types + pure helpers for the Agents · 运行图 (run graph).
 //
 // The wire shape is the frozen contract in
@@ -182,7 +184,7 @@ export type StatusTone = 'mint' | 'gold' | 'cyan' | 'muted' | 'destructive';
 export type StatusMeta = {
   tone: StatusTone;
   dotClass: string;
-  labelKey: string;
+  labelKey: TranslationKey;
   dim: boolean;
   // Which glyph the node header shows: a colored dot, a check, or a cross.
   glyph: 'dot' | 'check' | 'cross';
@@ -219,7 +221,7 @@ export function isBackground(node: Pick<AgentGraphNode, 'visibility'>): boolean 
 // ``t`` is required rather than optional because the unit is user-visible text:
 // an optional translator would leave a path that silently prints English into a
 // Chinese UI, which is how "等待 3h" shipped in the first place.
-export function formatElapsed(seconds: number | null | undefined, t: (key: string) => string): string {
+export function formatElapsed(seconds: number | null | undefined, t: TFunction): string {
   if (seconds == null) return '—';
   const s = Math.max(0, seconds);
   if (s < 60) return `${Math.round(s)}${t('common.duration.seconds')}`;

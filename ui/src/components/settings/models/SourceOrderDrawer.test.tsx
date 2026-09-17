@@ -103,7 +103,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
       expect(rows[index].classList.contains(index < 2 ? 'model-hub-order-row--ordered' : 'model-hub-order-row--held')).toBe(true);
       expect(rows[index].querySelector('.model-hub-order-row-actions')).not.toBeNull();
     });
-    for (const kind of ['ordered', 'heldOut']) {
+    for (const kind of ['ordered', 'heldOut'] as const) {
       const note = screen.getByText(locale.t(`settings.models.order.section.${kind}.note`));
       expect(note.classList.contains('model-hub-order-section-explanation')).toBe(true);
       expect(note.parentElement?.classList.contains('model-hub-order-section-head')).toBe(true);

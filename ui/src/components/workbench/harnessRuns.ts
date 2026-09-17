@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext';
 
 // Pure mappers behind the Harness run rows (plan §4.1/§4.2). They take ``t``
@@ -37,18 +38,20 @@ export function runTypeOptions(present: readonly string[] | undefined): string[]
 
 // Human words for an internal run_type. Same map feeds the row chip and the
 // type selector, so the two can never disagree.
-export function runTypeLabel(runType: string | null | undefined, t: (k: string) => string): string {
+export function runTypeLabel(runType: string | null | undefined, t: TFunction): string {
   if (!runType) return t('harness.runType.unknown');
-  return KNOWN_RUN_TYPES.has(runType) ? t(`harness.runType.${runType}`) : runType;
+  const known = RUN_TYPES.find((type) => type === runType);
+  return known ? t(`harness.runType.${known}`) : runType;
 }
 
-const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled'];
+const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled'] as const;
 
 // Human words for a run status. Same map feeds the detail pill and the status
 // segments; an unrecognised status still prints rather than blanking out.
-export function runStatusLabel(status: string | null | undefined, t: (k: string) => string): string {
+export function runStatusLabel(status: string | null | undefined, t: TFunction): string {
   if (!status) return '—';
-  return RUN_STATUSES.includes(status) ? t(`harness.runStatus.${status}`) : status;
+  const known = RUN_STATUSES.find((value) => value === status);
+  return known ? t(`harness.runStatus.${known}`) : status;
 }
 
 const WHITESPACE_RUN = /\s+/g;

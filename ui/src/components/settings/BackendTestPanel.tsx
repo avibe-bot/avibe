@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Play, Zap } from 'lucide-react';
@@ -64,7 +65,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
   const failureSentence = (result: BackendAuthTestResult): string => {
     const detail = (result.detail || '').trim();
     const code = (result.error || '').trim();
-    const map: Record<string, string> = {
+    const map: Record<string, TranslationKey> = {
       invalid_credentials: 'settings.backends.testFailureInvalidCredentials',
       forbidden: 'settings.backends.testFailureForbidden',
       model_not_found: 'settings.backends.testFailureModelNotFound',

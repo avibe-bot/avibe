@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -7,7 +8,7 @@ import { cn, copyTextToClipboard } from '@/lib/utils';
 
 // Display order: ETH first, then BTC modern → legacy. Each entry maps a backend
 // signing_addresses key to a short label; missing entries are skipped.
-const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: string }> = [
+const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: TranslationKey }> = [
   { key: 'eth', labelKey: 'vaults.addresses.eth' },
   { key: 'btc_segwit', labelKey: 'vaults.addresses.btcSegwit' },
   { key: 'btc_taproot', labelKey: 'vaults.addresses.btcTaproot' },

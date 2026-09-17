@@ -1,3 +1,4 @@
+import type { TranslationPrefix } from '@/i18n/types';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -6,7 +7,7 @@ interface WorkbenchModulePlaceholderProps {
   /** i18n key prefix (e.g. `workbench.modules.agents`). The component reads
    *  `${prefix}.title` and `${prefix}.description` plus the shared
    *  `workbench.modules.comingSoon` hint. */
-  i18nPrefix: string;
+  i18nPrefix: Extract<TranslationPrefix<'title'> & TranslationPrefix<'description'>, `workbench.modules.${string}`>;
 }
 
 // Shared placeholder used by all four capability modules and the inbox

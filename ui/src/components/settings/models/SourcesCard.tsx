@@ -27,8 +27,8 @@ export const SourcesCard: React.FC<{
     degraded: (staleData) => staleData,
   });
   const groups = [
-    { id: 'native', sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
-    { id: 'hub', sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
+    { id: 'native' as const, sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
+    { id: 'hub' as const, sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
   ].filter((group) => group.sources.length > 0);
   // The settings route pane owns vertical scrolling. This card grows with its
   // sources so users never have to coordinate a second scroll area here.

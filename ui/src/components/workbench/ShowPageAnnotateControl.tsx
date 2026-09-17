@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -27,8 +28,8 @@ import type { AnnotationMode, AnnotationState } from './useShowPageAnnotation';
 interface ModeDef {
   id: AnnotationMode;
   icon: LucideIcon;
-  labelKey: string;
-  descKey: string;
+  labelKey: TranslationKey;
+  descKey: TranslationKey;
 }
 
 const MODES: readonly ModeDef[] = [

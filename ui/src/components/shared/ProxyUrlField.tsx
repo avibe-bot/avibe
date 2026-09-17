@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useState } from 'react';
 import { ChevronDown, SplitSquareVertical } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -11,14 +12,14 @@ interface ProxyUrlFieldProps {
    * i18n key for the label. Defaults to `common.proxyUrl`. Telegram passes
    * `telegramConfig.proxyUrl` so its label can stay platform-flavored.
    */
-  labelKey?: string;
+  labelKey?: TranslationKey;
   /**
    * i18n key for the long hint shown below the input when expanded. Defaults
    * to `common.proxyUrlHint`. Telegram passes `telegramConfig.proxyUrlHint`
    * and Lark passes `larkConfig.proxyUrlLarkLimitation` so the SDK warning
    * stays where users see it.
    */
-  hintKey?: string;
+  hintKey?: TranslationKey;
 }
 
 export function ProxyUrlField({

@@ -1,9 +1,10 @@
+import type { TranslationKey } from '@/i18n/types';
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 
 import type { SupplyGap } from "./types";
 
-export const GuardGapList: React.FC<{ gaps: SupplyGap[]; labelKey?: string }> = ({
+export const GuardGapList: React.FC<{ gaps: SupplyGap[]; labelKey?: TranslationKey }> = ({
   gaps,
   labelKey = "settings.models.guard.gap.label",
 }) => {

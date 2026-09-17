@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
@@ -49,7 +50,7 @@ import { SortableProjectList, type ProjectDragHandle } from './SortableProjectLi
 
 interface CapabilityNavItem {
   to: string;
-  i18nKey: string;
+  i18nKey: TranslationKey;
   icon: LucideIcon;
 }
 

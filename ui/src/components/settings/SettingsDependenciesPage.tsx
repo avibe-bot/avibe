@@ -122,7 +122,7 @@ export const SettingsDependenciesPage: React.FC = () => {
       const res = await api.installDependency(dep.id);
       showToast(
         res.ok
-          ? t('settings.dependencies.installed', { name: t(`settings.dependencies.items.${displayId}.label`) })
+          ? t('settings.dependencies.installed', { name: t(`settings.dependencies.items.${displayId}.label`, { defaultValue: `settings.dependencies.items.${displayId}.label` }) })
           : localizedFailure(res),
         res.ok ? 'success' : 'error'
       );
@@ -228,8 +228,8 @@ export const SettingsDependenciesPage: React.FC = () => {
                   icon={meta.icon}
                   tileClassName={meta.tileCls}
                   iconClassName={meta.iconCls}
-                  title={t(`settings.dependencies.items.${id}.label`)}
-                  detail={t(`settings.dependencies.items.${id}.detail`)}
+                  title={t(`settings.dependencies.items.${id}.label`, { defaultValue: `settings.dependencies.items.${id}.label` })}
+                  detail={t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
                   actions={
                     <>
                       {checkProgress}
@@ -265,7 +265,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 icon={meta.icon}
                 tileClassName={meta.tileCls}
                 iconClassName={meta.iconCls}
-                title={t(`settings.dependencies.items.${id}.label`)}
+                title={t(`settings.dependencies.items.${id}.label`, { defaultValue: `settings.dependencies.items.${id}.label` })}
                 badges={
                   d.required && (
                     <Badge variant="secondary" className="font-mono uppercase tracking-[0.08em]">
@@ -275,7 +275,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 }
                 detail={
                   <>
-                    {t(`settings.dependencies.items.${id}.detail`)}
+                    {t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
                     {d.id === 'model-hub-engine' && d.latest_version && (
                       <span className="mt-1 block font-mono text-[11px]">
                         {t('settings.dependencies.targetVersion', {

@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // Rendering an i18n key the SERVER chose, safely.
 //
 // Two kinds of key reach this page from the backend. Closed vocabularies —
@@ -26,18 +27,20 @@ import type { TFunction } from 'i18next';
 export const serverText = (
   t: TFunction,
   key: string | null | undefined,
-  fallbackKey?: string,
+  fallbackKey?: TranslationKey,
 ): string | null => {
+  // Resolve the value for inspection; returnObjects here is not a list consumer.
+  const textResolutionOptions = { defaultValue: '', returnObjects: true } as const;
   if (key) {
     // `defaultValue: ''` rather than the fallback text itself: i18next returns
     // the default for a missing key, and an empty one lets us tell "missing" from
     // "translated to something" without string-comparing against the key.
-    const translated = t(key, { defaultValue: '' }) as string;
-    if (translated) return translated;
+    const translated = t(key, textResolutionOptions);
+    if (typeof translated === 'string' && translated) return translated;
   }
   if (!fallbackKey) return null;
-  const generic = t(fallbackKey, { defaultValue: '' }) as string;
-  return generic || null;
+  const generic = t(fallbackKey, textResolutionOptions);
+  return typeof generic === 'string' && generic ? generic : null;
 };
 
 /**
@@ -80,7 +83,7 @@ const MATERIALIZE_CODES = ['discovery_failed', 'migration_item_conflict'];
  * that user their source could not be CREATED names the wrong object and hides the
  * thing that just happened to the one they have.
  */
-export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney): string =>
+export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney): TranslationKey =>
   code && MATERIALIZE_CODES.includes(code)
     ? journey === 'reauth'
       ? 'settings.models.oauth.error.finalizeReauth'
@@ -91,7 +94,7 @@ export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney)
 export const NATIVE_SUBSCRIPTION_EXISTS_FAILURE = 'modelHub.errors.native_subscription_exists';
 export const NATIVE_LOGIN_IN_PROGRESS_FAILURE = 'modelHub.errors.native_login_in_progress';
 
-export const oauthStartFailureKey = (code: string | undefined): string =>
+export const oauthStartFailureKey = (code: string | undefined): TranslationKey =>
   code === NATIVE_SUBSCRIPTION_EXISTS_FAILURE
     ? 'settings.models.addSub.error.alreadyBound'
     : code === NATIVE_LOGIN_IN_PROGRESS_FAILURE
@@ -110,7 +113,7 @@ export const oauthStartFailureKey = (code: string | undefined): string =>
  * because a `modelHub.errors.*` key lives in the backend bundle and would
  * otherwise render to the user as a machine string.
  */
-const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, string>> = {
+const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, TranslationKey>> = {
   // authority-consumer: catalog.guard.error backend_model_in_route
   // authority-consumer: candidate.error candidate_suppliers_changed
   'modelHub.errors.backend_model_in_route': 'settings.models.gateway.catalog.saveRouted',
@@ -123,7 +126,7 @@ const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, string>> = {
   'modelHub.errors.backend_model_catalog_invalid': 'settings.models.gateway.catalog.saveInvalid',
 };
 
-export const catalogSaveFailureKey = (detail: string | undefined): string =>
+export const catalogSaveFailureKey = (detail: string | undefined): TranslationKey =>
   CATALOG_SAVE_FAILURE_COPY[detail ?? ''] ?? 'settings.models.gateway.catalog.saveFailed';
 
 /**
@@ -175,7 +178,7 @@ export const tierEditRefusedAsManaged = (
  * way forward is to stop retrying and type the fields in — every one of them is
  * editable whether or not a fill ever succeeds.
  */
-export const modelsDevFillFailureKey = (detail: string | undefined): string =>
+export const modelsDevFillFailureKey = (detail: string | undefined): TranslationKey =>
   detail === 'modelHub.errors.models_dev_unavailable'
     ? 'settings.models.gateway.modelEditor.fillUnavailable'
     : 'settings.models.gateway.modelEditor.fillFailed';

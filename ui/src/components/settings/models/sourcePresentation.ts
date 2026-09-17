@@ -1,7 +1,8 @@
+import type { TranslationKey } from '@/i18n/types';
 import type { Source } from './types';
 import { officialVendorForEndpoint } from './vendorMeta';
 
-export const SOURCE_PROVIDER_COPY_KEYS: Partial<Record<string, string>> = {
+export const SOURCE_PROVIDER_COPY_KEYS: Partial<Record<string, TranslationKey>> = {
   anthropic: 'settings.models.upstream.vendor.anthropic',
   openai: 'settings.models.upstream.vendor.openai',
 };

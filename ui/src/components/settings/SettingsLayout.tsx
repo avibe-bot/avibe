@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -40,7 +41,7 @@ import { modelHubEnabledFromConfig } from './models/featureFlags';
 
 type SettingsItem = {
   path: string;
-  labelKey: string;
+  labelKey: TranslationKey;
   icon: React.ComponentType<{ className?: string }>;
   ownerOnly?: boolean;
   feature?: 'models' | 'memory' | 'channels';
@@ -50,7 +51,7 @@ type SettingsItem = {
 };
 
 type SettingsGroup = {
-  labelKey: string;
+  labelKey: TranslationKey;
   items: SettingsItem[];
 };
 

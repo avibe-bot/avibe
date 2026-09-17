@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // 用量 — the metered-token report over a trailing local-day window
 // (`usage-summary.schema.json`).
 //
@@ -95,7 +96,7 @@ const TokenFigure: React.FC<{ counters: TokenCoverage; value: number }> = ({ cou
  * identity at all once its label is gone — its ledger key is a digest — so the
  * row says so in words instead of printing the key.
  */
-const RowIdentity: React.FC<{ identity: UsageIdentity; goneKey: string }> = ({ identity, goneKey }) => {
+const RowIdentity: React.FC<{ identity: UsageIdentity; goneKey: TranslationKey }> = ({ identity, goneKey }) => {
   const { t } = useTranslation();
   if (identity.kind === 'label') return <span className="truncate" title={identity.text}>{identity.text}</span>;
   return (
@@ -116,7 +117,7 @@ const SOURCE_COLUMNS = ['source', 'tokens', 'requests', 'cached', 'lastMetered']
 
 type SourceColumn = (typeof SOURCE_COLUMNS)[number];
 
-const columnLabel = (column: SourceColumn) => `settings.models.usage.bySource.col.${column}`;
+const columnLabel = (column: SourceColumn): TranslationKey => `settings.models.usage.bySource.col.${column}`;
 
 /**
  * One measured cell, told which column it answers.

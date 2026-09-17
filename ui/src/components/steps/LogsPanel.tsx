@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
@@ -32,7 +33,7 @@ const parseLogMessage = (message: string): { location?: string; content: string 
 };
 
 interface LogsPanelProps {
-  titleKey?: string;
+  titleKey?: TranslationKey;
   compactHeader?: boolean;
 }
 
