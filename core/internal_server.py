@@ -484,6 +484,7 @@ def create_app(
                         message_type="harness",
                         text=text,
                         metadata={
+                            **dict(submission_spec.get("message_metadata") or {}),
                             SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
                                 context
                             )
@@ -1308,13 +1309,15 @@ def create_app(
             logger.exception("internal memory preflight failed")
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})
 
-    def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
+    def _memory_cli_scope(request: Request, *, read_only: bool = False) -> tuple[str, str] | None:
         from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         if not session_id:
             return None
         resolve = getattr(controller, "memory_scope_for_cli_session", None)
+        if read_only:
+            resolve = getattr(controller, "memory_read_scope_for_cli_session", resolve)
         scope = resolve(session_id) if callable(resolve) else None
         if not bool(getattr(getattr(getattr(controller, "config", None), "memory", None), "enabled", False)):
             return None
@@ -1435,7 +1438,7 @@ def create_app(
             if user_key is None:
                 return None
             return user_key, None
-        scope = _memory_cli_scope(request)
+        scope = _memory_cli_scope(request, read_only=True)
         return (None, scope) if scope is not None else None
 
     @app.get("/internal/memory/status")

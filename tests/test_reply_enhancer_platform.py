@@ -516,6 +516,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             _memory_admission=lambda: admission,
         )
         controller.configure_memory_cli_session = Controller.configure_memory_cli_session.__get__(controller)
+        controller.memory_read_scope_for_cli_session = Controller.memory_read_scope_for_cli_session.__get__(controller)
         controller.memory_scope_for_cli_session = Controller.memory_scope_for_cli_session.__get__(controller)
         controller.memory_principal_for_cli_session = Controller.memory_principal_for_cli_session.__get__(controller)
         controller.memory_project_for_cli_session = Controller.memory_project_for_cli_session.__get__(controller)

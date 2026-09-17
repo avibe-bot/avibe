@@ -134,3 +134,28 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_memory_adapter.py::test_sender_name_snapshot_survives_rename_before_async_admission
+
+  - id: MEMORY-SEARCH-021
+    name: Same-Session Task and Watch retain default and named Memory reads
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_delegated_read_survives_definition_and_controller_restart
+  - id: MEMORY-SEARCH-022
+    name: Persisted continuation restores read identity after controller restart without capture or write expansion
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_delegated_read_survives_definition_and_controller_restart
+  - id: MEMORY-SEARCH-023
+    name: Missing or caller-forged delegated owner cannot authorize Memory
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_delegated_reads.py::test_missing_and_forged_owner_stay_denied
+  - id: MEMORY-SEARCH-024
+    name: Delegated remote reads remain user-isolated and obey current binding revocation
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/test_memory_delegated_reads.py::test_remote_delegations_isolate_users_and_recheck_revoked_binding

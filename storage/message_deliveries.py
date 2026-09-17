@@ -506,6 +506,61 @@ def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
     )
 
 
+def metadata_with_delegated_memory_owner(
+    metadata: dict[str, Any], *, session_id: str | None
+) -> dict[str, Any]:
+    """Stamp same-Session delegation from its current host-owned Delivery.
+
+    Caller identifiers locate the execution; caller-supplied owner values never
+    authorize it. A continuation carries its already stamped owner without an
+    ancestry lookup. Missing identity leaves ordinary Memory denial intact.
+    """
+    result = dict(metadata)
+    result.pop("delegated_memory_owner", None)
+    created_by = result.get("created_by")
+    caller = created_by.get("caller") if isinstance(created_by, dict) else None
+    if not session_id or not isinstance(caller, dict) or caller.get("session_id") != session_id:
+        return result
+    from storage.db import get_cached_sqlite_engine
+
+    with get_cached_sqlite_engine().connect() as conn:
+        turn = active_turn(conn, session_id)
+        delivery = delivery_for_turn(conn, turn["id"]) if turn else None
+        if delivery is None:
+            return result
+        # Acceptance moves the immutable content into Message and clears the
+        # temporary Delivery snapshot. Follow that exact FK, never history.
+        snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
+        payload = _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+    source_metadata = payload.get("metadata") or {}
+    if payload.get("author") == "user" and payload.get("source") == "user":
+        user_id = payload.get("author_id")
+        if not user_id:
+            user_id = legacy_admitted_user_id(source_metadata) if legacy_is_cli_admitted(source_metadata) else None
+        owner = {
+            "platform": payload.get("platform"),
+            "user_id": user_id,
+            "is_dm": "::user::" in str(payload.get("scope_id") or ""),
+        }
+    elif payload.get("source") == "harness":
+        provenance = source_metadata.get("scheduled_provenance") or {}
+        spec = provenance.get("platform_specific") or {}
+        owner = (spec.get("message_metadata") or {}).get("delegated_memory_owner")
+    else:
+        owner = None
+    if not isinstance(owner, dict) or not owner.get("user_id"):
+        return result
+    # Resource Owner is not itself a Memory identity. In particular a caller
+    # cannot borrow another remote user's admitted Delivery by naming its Session.
+    if owner.get("platform") == "avibe":
+        remote = result.get("resource_user_context")
+        expected = f"remote:{remote.get('sub')}" if isinstance(remote, dict) and remote.get("sub") else "local"
+        if owner["user_id"] != expected:
+            return result
+    result["delegated_memory_owner"] = dict(owner)
+    return result
+
+
 def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Return a Delivery payload without server-owned identity metadata."""
 

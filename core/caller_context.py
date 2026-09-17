@@ -408,14 +408,20 @@ def caller_context_from_platform_payload(
         )
         workspace_id = _origin_workspace_id(platform, payload)
 
-    is_remote = platform == "avibe" and user_id.startswith("remote:")
-    resource_user_context: Optional[dict[str, Any]] = None
     message_metadata = payload.get("message_metadata")
+    owner = message_metadata.get("delegated_memory_owner") if isinstance(message_metadata, Mapping) else None
+    authorization_user_id = (
+        _clean(owner.get("user_id"))
+        if isinstance(owner, Mapping) and owner.get("platform") == platform
+        else user_id
+    )
+    is_remote = platform == "avibe" and authorization_user_id.startswith("remote:")
+    resource_user_context: Optional[dict[str, Any]] = None
     if is_remote and isinstance(message_metadata, Mapping):
         raw_resource_context = message_metadata.get(_RESOURCE_USER_CONTEXT_METADATA_KEY)
         if isinstance(raw_resource_context, Mapping):
             subject = _clean(raw_resource_context.get("sub"))
-            if subject and user_id == f"remote:{subject}":
+            if subject and authorization_user_id == f"remote:{subject}":
                 resource_user_context = dict(raw_resource_context)
 
     return CallerContext(

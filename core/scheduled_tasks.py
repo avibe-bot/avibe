@@ -1618,6 +1618,11 @@ class ScheduledTaskStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
+        from storage.message_deliveries import metadata_with_delegated_memory_owner
+
+        metadata = metadata_with_delegated_memory_owner(
+            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
+        )
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1633,7 +1638,7 @@ class ScheduledTaskStore:
             cron=cron,
             run_at=run_at,
             timezone=timezone_name,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=metadata,
             shell_command=shell_command,
             command=command,
             timeout_seconds=timeout_seconds,
@@ -1763,6 +1768,11 @@ class ScheduledTaskStore:
         task.metadata = metadata_with_resource_user_context(
             metadata if metadata is not None else task.metadata,
             user_context,
+        )
+        from storage.message_deliveries import metadata_with_delegated_memory_owner
+
+        task.metadata = metadata_with_delegated_memory_owner(
+            task.metadata, session_id=session_id
         )
         task.updated_at = _utc_now_iso()
         if not self._write_task(
@@ -10842,6 +10852,10 @@ class ScheduledTaskService:
             platform_specific={
                 "platform": platform,
                 "is_dm": target.is_dm,
+                "message_metadata": {
+                    key: value for key, value in (metadata or {}).items()
+                    if key in {"delegated_memory_owner", "resource_user_context"}
+                },
                 "turn_source": "scheduled",
                 "agent_session_id": session_id,
                 "session_key_external": target.to_key(),

@@ -2479,6 +2479,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
     prompt_controller.configure_memory_cli_session = (
         Controller.configure_memory_cli_session.__get__(prompt_controller)
     )
+    prompt_controller.memory_read_scope_for_cli_session = Controller.memory_read_scope_for_cli_session.__get__(prompt_controller)
     prompt_controller.memory_scope_for_cli_session = (
         Controller.memory_scope_for_cli_session.__get__(prompt_controller)
     )
