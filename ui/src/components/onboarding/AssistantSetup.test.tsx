@@ -90,6 +90,34 @@ describe('assistant installation presentation', () => {
       codex: expect.objectContaining({ enabled: false }),
     }) });
   });
+  it('keeps Back disabled through provider config reload and path detection', async () => {
+    let finishConfig!: (value: unknown) => void;
+    let finishDetection!: (value: unknown) => void;
+    mock.api.getConfig.mockImplementation(() => new Promise((resolve) => { finishConfig = resolve; }));
+    mock.api.detectCli.mockImplementation(() => new Promise((resolve) => { finishDetection = resolve; }));
+    const back = vi.fn();
+    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onBack={back} />));
+    fireEvent.click(row('Claude Code').getByRole('button', { name: en.agentDetection.configureProvider }));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    const backButton = screen.getByRole('button', { name: 'Back' });
+    expect(backButton.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(backButton);
+    expect(back).not.toHaveBeenCalled();
+    fireEvent.click(row('Claude Code').getByRole('checkbox'));
+    await act(async () => finishConfig({ agents: { claude: { enabled: true, cli_path: '/isolated/新的路径/claude' } } }));
+    expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/新的路径/claude');
+    expect(backButton.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(backButton);
+    expect(back).not.toHaveBeenCalled();
+    await act(async () => finishDetection({ found: true, path: '/isolated/新的路径/claude' }));
+    expect(backButton.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(backButton);
+    expect(back).toHaveBeenCalledWith({ agents: expect.objectContaining({
+      claude: expect.objectContaining({ cli_path: '/isolated/新的路径/claude', status: 'ok', enabled: false }),
+      codex: data().agents.codex,
+      opencode: data().agents.opencode,
+    }) });
+  });
   it('renders connected controls only from explicit presentation state', () => {
     const configure = vi.fn();
     render(wrap(<AssistantRow backend="claude" status="ok" installing={false} detecting={false} lifecycle={<span>Installed</span>}

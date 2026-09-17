@@ -536,7 +536,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           {t('common.continue')}<ArrowRight size={16} />
         </Button>
         {opencodeNeedsPermission && <p className="text-center text-xs text-gold-ink">{t('agentDetection.permissionGateHint')}</p>}
-        {onBack && <Button type="button" variant="ghost" size="sm" onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+        {onBack && <Button type="button" variant="ghost" size="sm" disabled={syncing} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
       </div>
     </div>
   );
