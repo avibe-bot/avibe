@@ -171,3 +171,15 @@ scenarios:
     kind: boundary
     layer: contract
     test: tests/test_memory_delegated_reads.py::test_public_definition_projection_preserves_sqlite_runtime_owner
+  - id: MEMORY-SEARCH-027
+    name: Task and Watch execution Runs hide delegated owners in public output but retain runtime identity
+    status: covered
+    kind: boundary
+    layer: scenario
+    test: tests/test_cli_definition_read_projection.py::test_definition_to_run_public_projection_keeps_raw_execution_owner
+  - id: MEMORY-SEARCH-028
+    name: OpenCode initial binding failure retries with Session proof and preserves Task and Watch admission
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_agent_steering.py::test_opencode_coordinator_error_aborts_through_steering_owner

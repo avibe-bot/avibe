@@ -586,16 +586,32 @@ def current_delivery_memory_owner(session_id: str) -> dict[str, Any] | None:
     return dict(owner) if isinstance(owner, dict) and owner.get("user_id") else None
 
 
+def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
+    """Project the two known owner locations without changing stored metadata."""
+    result = dict(metadata) if isinstance(metadata, dict) else {}
+    result.pop("delegated_memory_owner", None)
+    provenance = result.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
+    if isinstance(nested, dict):
+        public_nested = dict(nested)
+        public_nested.pop("delegated_memory_owner", None)
+        result["scheduled_provenance"] = {
+            **provenance, "platform_specific": {**spec, "message_metadata": public_nested},
+        }
+    return result
+
+
 def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     """Hide execution identity in both queued and accepted public messages."""
     def without_private_fields(value: dict[str, Any]) -> dict[str, Any]:
         return {
             key: item for key, item in value.items()
-            if key not in {"resource_user_context", "delegated_memory_owner"}
+            if key != "resource_user_context"
             and not str(key).startswith(("_web_push_", "_memory_"))
         }
 
-    result = without_private_fields(metadata)
+    result = without_private_fields(metadata_without_delegated_owner(metadata))
     provenance = result.get("scheduled_provenance")
     spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
     nested = spec.get("message_metadata") if isinstance(spec, dict) else None

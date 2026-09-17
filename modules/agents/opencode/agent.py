@@ -1521,6 +1521,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     getattr(getattr(self, "controller", None), "config", None)
                 ),
             )
+            binding_extra_env = {**caller_context_env, **managed_skills_env}
             binding_token = secrets.token_hex(16)
             binding_payload = request.context.platform_specific or {}
             binding_bound = False
@@ -1531,7 +1532,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     binding_payload,
                     base_env=os.environ,
                     working_dir=request.working_path,
-                    extra_env={**caller_context_env, **managed_skills_env},
+                    extra_env=binding_extra_env,
                     binding_token=binding_token,
                     **_binding_path_kwargs(caller_context_binding_path),
                     # The creation origin travels with the identity: an OpenCode shell
@@ -1555,7 +1556,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     caller_context_binding_path,
                     payload=binding_payload,
                     working_directory=request.working_path,
-                    extra_env=managed_skills_env,
+                    extra_env=binding_extra_env,
                     initially_bound=bool(binding_bound),
                     message=request.context,
                     fallback_platform=platform,

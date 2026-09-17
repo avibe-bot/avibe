@@ -9127,11 +9127,10 @@ class SQLiteBackgroundTaskStore:
                 # strength of never having looked.
                 row["process_alive"] = None if runtime is None else bool(runtime.get("running"))
         if not self._include_private_metadata:
+            from storage.message_deliveries import metadata_without_delegated_owner
+
             for row in rows:
-                row["metadata"] = {
-                    key: value for key, value in (row.get("metadata") or {}).items()
-                    if key != "delegated_memory_owner"
-                }
+                row["metadata"] = metadata_without_delegated_owner(row.get("metadata"))
         return rows
 
     @staticmethod
@@ -9300,6 +9299,11 @@ class SQLiteBackgroundTaskStore:
                         continue
                     for field, blank in blanks[site.source]().items():
                         run.setdefault(field, blank)
+        if not self._include_private_metadata:
+            from storage.message_deliveries import metadata_without_delegated_owner
+
+            for run in runs:
+                run["metadata"] = metadata_without_delegated_owner(run.get("metadata"))
         return runs
 
     @staticmethod

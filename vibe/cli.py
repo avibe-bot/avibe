@@ -2569,8 +2569,9 @@ def _task_payload(task, *, brief: bool = False):
             "enabled": task.enabled,
         }
     payload = task.to_dict()
-    payload["metadata"] = dict(payload.get("metadata") or {})
-    payload["metadata"].pop("delegated_memory_owner", None)
+    from storage.message_deliveries import metadata_without_delegated_owner
+
+    payload["metadata"] = metadata_without_delegated_owner(payload.get("metadata"))
     payload.update(derived)
     return payload
 
@@ -3657,8 +3658,9 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
             "last_error": watch.last_error,
         }
     payload = watch.to_dict()
-    payload["metadata"] = dict(payload.get("metadata") or {})
-    payload["metadata"].pop("delegated_memory_owner", None)
+    from storage.message_deliveries import metadata_without_delegated_owner
+
+    payload["metadata"] = metadata_without_delegated_owner(payload.get("metadata"))
     payload.update(derived)
     return payload
 
@@ -3762,6 +3764,8 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 
 
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
+    from storage.message_deliveries import metadata_without_delegated_owner
+
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
     activity_at = normalized.get("last_activity_at") or normalized.get("started_at")
@@ -3789,6 +3793,7 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "callback_status": normalized.get("callback_status"),
             "callback_run_id": normalized.get("callback_run_id"),
         }
+    normalized["metadata"] = metadata_without_delegated_owner(normalized.get("metadata"))
     return normalized
 
 

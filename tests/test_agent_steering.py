@@ -32,6 +32,15 @@ from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 
+from tests.test_memory_delegated_reads import (
+    _create_definition,
+    delegated_owner_transport,  # noqa: F401 -- fixture with real internal accessor
+)
+from tests.test_session_delivery_fsm import (
+    _context, _seed_session,
+    _fsm_schema_template, managers,  # noqa: F401 -- hermetic durable delivery fixtures
+)
+
 
 STEER_TEXT = "补充：**不要改写**\n```python\nprint('λ')\n```"
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
@@ -959,8 +968,22 @@ async def test_opencode_replacement_waits_for_in_flight_steering_write() -> None
 
 @pytest.mark.anyio
 async def test_opencode_coordinator_error_aborts_through_steering_owner(
-    monkeypatch, native_input,
+    monkeypatch, native_input, managers, delegated_owner_transport, tmp_path,
 ) -> None:
+    """MEMORY-SEARCH-028: failed initial bind retries before delegated definitions."""
+    from core.session_turns import DeliveryRequest
+
+    manager, _fresh, engine, _other, _starts = managers
+    _seed_session(engine, "avibe-session")
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    await manager.deliver(
+        DeliveryRequest(session_id="avibe-session", priority="p3", content="delegate", author_id="local"),
+        context=_context("avibe-session"),
+    )
+    attempts = 0
+    retry_succeeded = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr("modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS", 0)
     metadata, prefix = native_input
     primary = _primary_request(backend="opencode")
     primary.input_metadata = metadata
@@ -1091,10 +1114,20 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     binding_paths: list[str] = []
 
     def bind_caller_context(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("initial binding write failed")
         from core.caller_context import verify_caller_session_proof
 
         env = kwargs["extra_env"]
         assert verify_caller_session_proof(env["AVIBE_SESSION_ID"], env["AVIBE_CALLER_SESSION_PROOF"])
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        for kind in ("scheduled", "watch"):
+            definition = _create_definition(kind, tmp_path / f"retry-{kind}.json", session_id="avibe-session")
+            assert definition.metadata["delegated_memory_owner"]["user_id"] == "local"
+        loop.call_soon_threadsafe(retry_succeeded.set)
         binding_tokens.append(kwargs["binding_token"])
         binding_paths.append(kwargs["path"])
         return True
@@ -1119,6 +1152,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     process_task = asyncio.create_task(agent._process_message(primary))
     agent._active_requests[primary.base_session_id] = process_task
     await poll_started.wait()
+    await asyncio.wait_for(retry_succeeded.wait(), timeout=5)
     state = agent._steering_states[primary.base_session_id]
     assert state.awaiting_user_text == prefix + primary.message
     assert state.awaiting_prompt_accepted is True
@@ -1145,6 +1179,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     assert receipt.outcome is SteerOutcome.ACCEPTED
     assert events == ["primary", "steer", "abort"]
+    assert attempts == 2
     assert len(binding_tokens) == 1
     assert binding_paths == ["/old-avibe-home/runtime/opencode_caller_context.json"]
     assert unbound == [

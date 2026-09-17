@@ -26,7 +26,10 @@ from tests.test_session_delivery_fsm import (
 from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
 
-@pytest.fixture(autouse=True)
+pytestmark = pytest.mark.usefixtures("delegated_owner_transport")
+
+
+@pytest.fixture
 def delegated_owner_transport(monkeypatch, tmp_path):
     """Real client serialization + ASGI endpoint + verifier, no admitted flag."""
     from core.caller_context import caller_env_for_platform_payload
@@ -78,13 +81,13 @@ async def _search(controller, *, project="default", status=200):
         return call["cli_scope"]
 
 
-def _create_definition(kind, path, *, owner_metadata=None):
-    metadata = owner_metadata or {"created_by": {"caller": {"session_id": "ses_fsm", "user_id": "FORGED"}}}
+def _create_definition(kind, path, *, owner_metadata=None, session_id="ses_fsm"):
+    metadata = owner_metadata or {"created_by": {"caller": {"session_id": session_id, "user_id": "FORGED"}}}
     if kind == "scheduled":
         store = ScheduledTaskStore(path)
         definition = store.add_task(
-            session_key="avibe::channel::ses_fsm",
-            session_id="ses_fsm",
+            session_key=f"avibe::channel::{session_id}",
+            session_id=session_id,
             prompt="find fixture",
             schedule_type="at",
             timezone_name="UTC",
@@ -95,8 +98,8 @@ def _create_definition(kind, path, *, owner_metadata=None):
     store = ManagedWatchStore(path)
     definition = store.add_watch(
         name="fixture watch",
-        session_key="avibe::channel::ses_fsm",
-        session_id="ses_fsm",
+        session_key=f"avibe::channel::{session_id}",
+        session_id=session_id,
         command=["true"],
         shell_command=None,
         prefix="find fixture",

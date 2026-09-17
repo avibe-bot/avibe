@@ -243,12 +243,20 @@ def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> No
 
 def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "opencode_caller_context_env": {"AVIBE_SESSION_ID": "ses_wb"},
+    }
     agent, _, _, _ = _build_agent({"oc-1": poll})
     attempts = 0
     unbound: list[str] = []
 
     def bind(*_args, **_kwargs):
         nonlocal attempts
+        from core.caller_context import verify_caller_session_proof
+
+        assert verify_caller_session_proof("ses_wb", _kwargs["extra_env"]["AVIBE_CALLER_SESSION_PROOF"])
+        assert "AVIBE_CALLER_SESSION_PROOF" not in poll.processing_indicator["opencode_caller_context_env"]
+
         attempts += 1
         if attempts < 4:
             raise OSError("temporary binding failure")

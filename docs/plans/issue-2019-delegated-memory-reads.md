@@ -143,3 +143,50 @@ Owner acceptance: delegate a task that needs a known non-sensitive Memory fixtur
   retain their existing public resource-context shape; only the new owner marker
   is hidden there. Message/Delivery projections retain their prior private-field
   filtering and additionally hide the owner at both known locations.
+
+### Second-review class closure (orchestrator decision, 2026-09-17)
+
+The public-projection class recurred at `606de20`: the first correction missed
+Run output even though definitions copy their metadata into executions. This is
+an incomplete consumer inventory, not a defect requiring another ownership model.
+One narrow projection normalizes optional non-object metadata and removes only
+`delegated_memory_owner` at the root and the known scheduled provenance path.
+Message/Delivery retain their existing other-private-field filtering; Harness
+records retain their legacy resource-context output. Internal reads remain raw.
+
+| Record | Producer / runtime consumer | Public boundary |
+| --- | --- | --- |
+| Task | definition store -> scheduled enqueue -> runtime reload | display-only `_enrich_definitions`; CLI fallback |
+| Watch | definition store -> hook request -> runtime reload | display-only `_enrich_definitions`; CLI fallback |
+| Run | task enqueue / watch hook -> request store execution | display-only `_enrich_runs`; full CLI `_run_payload` and audited direct outputs |
+| queued Delivery | scheduled submission -> durable turn recovery | `public_delivery_payload` |
+| accepted Message | native acceptance -> exact Delivery FK lookup | `_row_to_payload` public metadata projection |
+
+The OpenCode initial bind and ordinary retry must share one merged caller/skills
+environment snapshot. Restored initial/retry already share the refreshed host
+proof. No proof, token, authorization, or persistence mechanism is added.
+The circuit breaker paused edits after the repeated class; the orchestrator
+approved this finite closure. Any third findings-bearing head after the proof
+change stops edits/push for another complete inventory, even for a new class.
+
+CLI bypass audit: `cmd_task_run`, hook-send, and asynchronous Agent Run replies
+build explicit field lists without metadata. Synchronous Agent Run and run-cancel
+outputs use `_run_payload`; run lists use its brief field list. There is no
+separate `cmd_watch_run` command. Harness status projects Task/Watch/Run through
+explicit field lists in `core/services/harness_status.py`, with no metadata.
+The run lifecycle store and raw `_run_from_row` must not redact upstream.
+
+Finite evidence enumeration: delegated-read tests cover public Delivery/Message
+and SQLite Task/Watch reload; definition-to-run tests exercise real scheduled
+enqueue and watch hook, full Run API/CLI output, and request-store reload.
+Nonempty list/string plus empty list metadata stays readable without rewriting
+stored JSON. Existing OpenCode process tests fail the initial bind once, let its
+ordinary retry carry the proof, then create both Task and Watch through the real
+verified accessor. Restored retry tests check a fresh proof stays out of snapshots.
+
+Second-review focused validation: 377 passed (363 existing cases, 14 new PR
+cases in this selection); changed Python Ruff and diff checks pass. This selection
+covers the five families, malformed optional metadata, public Run output, native
+binding retry/restore, CLI Task/Watch, and existing Harness run/status projections.
+Scenario IDs `MEMORY-SEARCH-027/028` identify Run-copy and binding-retry evidence.
+Run lifecycle SSE events also use a fixed field list without metadata.
