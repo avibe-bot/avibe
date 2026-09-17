@@ -13,7 +13,10 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
-import { BackendIcon, EyebrowBadge, WizardCard } from '../visual';
+import { BackendIcon } from '../visual';
+import { AssistantRow } from '../onboarding/AssistantRow';
+import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
+import '../onboarding/onboarding.css';
 import type { BackendId } from '../visual';
 import { BackendLifecycleChip } from '../settings/BackendLifecycleChip';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
@@ -30,7 +33,7 @@ import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 interface AgentDetectionProps {
   data: any;
   onNext: (data: any) => void;
-  onBack?: () => void;
+  onBack?: (data?: { agents: Record<string, AgentState> }) => void;
   isPage?: boolean;
   onSave?: (data: { agents: Record<string, AgentState> }) => Promise<void> | void;
 }
@@ -83,29 +86,53 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({});
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<string | null>(null);
-  // True while a provider-modal close is reloading config into ``agents``; the
-  // promise lets handlePrimaryAction wait for and fold in that reload.
+  // One provider modal/reconciliation at a time; Configure and navigation stay
+  // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
-  const syncRef = useRef<Promise<Record<string, AgentState> | null> | null>(null);
+  const [detectingAgents, setDetectingAgents] = useState<Record<string, boolean>>({});
+  const [detectionErrors, setDetectionErrors] = useState<Record<string, string>>({});
+  const pendingInstalls = useRef(new Set<string>());
+  const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
 
   useEffect(() => {
-    detectAll();
+    if (isPage || !data.__onboardingDetected) void detectAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const detect = async (name: string, binary?: string) => {
-    const result = await api.detectCli(binary || name);
-    setAgents((prev) => ({
-      ...prev,
-      [name]: {
-        ...prev[name],
-        cli_path: result.path || prev[name].cli_path,
-        status: result.found ? 'ok' : 'missing',
-      },
-    }));
+    const token = (detectionTokens.current[name] || 0) + 1;
+    detectionTokens.current[name] = token;
+    setDetectingAgents((prev) => ({ ...prev, [name]: true }));
+    setDetectionErrors((prev) => ({ ...prev, [name]: '' }));
+    try {
+      const result = await api.detectCli(binary || name);
+      if (detectionTokens.current[name] !== token) return;
+      if (result.found) {
+        setInstallResults((prev) => {
+          if (!prev[name] || prev[name].ok) return prev;
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        });
+      }
+      setAgents((prev) => ({
+        ...prev,
+        [name]: {
+          ...prev[name],
+          cli_path: result.path || prev[name].cli_path,
+          status: result.found ? 'ok' : 'missing',
+        },
+      }));
+    } catch (error) {
+      if (detectionTokens.current[name] !== token) return;
+      setDetectionErrors((prev) => ({ ...prev, [name]: String(error) }));
+      setAgents((prev) => ({ ...prev, [name]: { ...prev[name], status: 'unknown' } }));
+    } finally {
+      if (detectionTokens.current[name] === token) setDetectingAgents((prev) => ({ ...prev, [name]: false }));
+    }
   };
 
   const detectAll = async () => {
@@ -116,10 +143,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // made inside it (enabled / cli_path via useBackendRuntime) flow back into the
   // wizard's local ``agents`` state — otherwise handlePrimaryAction would save a
   // stale snapshot and clobber them. Then re-detect to refresh the status pill.
-  const syncBackendFromConfig = async (name: string): Promise<Record<string, AgentState> | null> => {
+  const syncBackendFromConfig = async (name: string) => {
     setSyncing(true);
     let cliPath = agents[name]?.cli_path;
-    let synced: Record<string, AgentState> | null = null;
     try {
       const config = await api.getConfig();
       const saved = config?.agents?.[name];
@@ -138,9 +164,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         // ``enabled`` is owned by the live card toggle, never this async sync's
         // snapshot: closing the provider modal kicks off this sync, but the user
         // may flip the toggle before it resolves. Apply the *live* enable state
-        // at both consumers — ``prev`` here, and the live ``agents`` in
-        // handlePrimaryAction — so a just-flipped toggle is never reverted.
-        synced = { [name]: merged };
+        // here so a just-flipped toggle is never reverted. Navigation consumes
+        // the live row after detection, never this pre-detection snapshot.
         setAgents((prev) => ({
           ...prev,
           [name]: { ...prev[name], ...merged, enabled: prev[name].enabled },
@@ -152,7 +177,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       setSyncing(false);
     }
-    return synced;
   };
 
   const toggle = (name: string, enabled: boolean) => {
@@ -163,7 +187,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   };
 
   const installAgent = async (name: string) => {
-    if (isAnyInstalling) return;
+    if (pendingInstalls.current.has(name) || (isPage && isAnyInstalling)) return;
+    pendingInstalls.current.add(name);
 
     setInstallingAgents((prev) => ({ ...prev, [name]: true }));
     setInstallResults((prev) => ({ ...prev, [name]: { ok: false, message: '', output: null } }));
@@ -191,6 +216,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         [name]: { ok: false, message: String(e), output: null },
       }));
     } finally {
+      pendingInstalls.current.delete(name);
       setInstallingAgents((prev) => ({ ...prev, [name]: false }));
     }
   };
@@ -216,31 +242,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     Object.values(agents).some((agent) => agent.enabled) && !opencodeNeedsPermission;
 
   const handlePrimaryAction = async () => {
-    // Wait for an in-flight provider-modal sync and fold its result into the
-    // snapshot we save, so a quick close-then-continue can't persist a stale
-    // ``agents`` object that reverts edits made inside the modal.
-    let mergedAgents = agents;
-    if (syncRef.current) {
-      try {
-        const synced = await syncRef.current;
-        if (synced) {
-          // Fold provider edits from the modal into the saved snapshot, but keep
-          // ``enabled`` from the live ``agents`` state — a toggle flipped after
-          // the sync started must win over the sync's stale snapshot.
-          mergedAgents = { ...agents };
-          for (const [backendName, syncedAgent] of Object.entries(synced)) {
-            mergedAgents[backendName] = {
-              ...syncedAgent,
-              enabled: agents[backendName]?.enabled ?? syncedAgent.enabled,
-            };
-          }
-        }
-      } catch {
-        // ignore — fall back to the current snapshot
-      }
-      syncRef.current = null;
-    }
-    const nextData = { agents: mergedAgents };
+    const nextData = { agents };
     if (isPage && onSave) {
       await onSave(nextData);
       return;
@@ -248,10 +250,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     onNext(nextData);
   };
 
-  const enabledCount = Object.values(agents).filter((a) => a.enabled && a.status === 'ok').length;
 
   // Page mode keeps the existing settings shell — render the inner content only
-  const Inner = (
+  const Inner = isPage ? (
     <>
       {/* Setup-wizard migration trigger (spec §5-03): offer to import pre-existing
           native CLI configs into the Hub. Wizard-only — the Settings → Backends
@@ -342,6 +343,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                         variant="secondary"
                         size="sm"
                         onClick={() => setProviderModal(name)}
+                        disabled={syncing}
                       >
                         <Sliders className="size-3.5" />
                         {t('agentDetection.configureProvider')}
@@ -409,7 +411,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           );
         })}
       </div>
+    </>
+  ) : null;
 
+  const providerDialog = (<>
       {/* Wizard-mode provider config modal — reuses the same component tree as
           the Settings route. Page mode navigates to the route instead (see the
           Link above), so the dialog is wizard-only. */}
@@ -422,8 +427,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               setProviderModal(null);
               // Re-read config + re-detect so runtime edits (enabled / cli_path /
               // provider defaults) and the status pill reflect whatever changed
-              // inside the modal. Keep the promise so Continue can await it.
-              if (name) syncRef.current = syncBackendFromConfig(name);
+              // inside the modal before Configure or navigation is available.
+              if (name) void syncBackendFromConfig(name);
               // The Configure-provider modal embeds its OWN useOpencodePermission
               // instance, so a permission write inside it doesn't touch this
               // wizard's gate/callout state. Re-read opencode.json so the gate
@@ -448,8 +453,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           </DialogContent>
         </Dialog>
       )}
-    </>
-  );
+  </>);
 
   if (isPage) {
     return (
@@ -465,62 +469,57 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }
 
   return (
-    <div className="flex w-full justify-center">
-      <WizardCard className="gap-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-2">
-            <EyebrowBadge tone="mint">{t('agentDetection.eyebrow')}</EyebrowBadge>
-            <h2 className="text-[28px] font-bold leading-tight tracking-[-0.4px] text-foreground">
-              {t('agentDetection.title')}
-            </h2>
-            <p className="max-w-[560px] text-[14px] leading-[1.55] text-muted">
-              {t('agentDetection.subtitle')}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
-              {enabledCount} active
-            </span>
-          </div>
+    <div className="onboarding-setup">
+      <header className="onboarding-heading">
+        <h2>{t('onboarding.setup.title')}</h2>
+        <p>{t('onboarding.setup.subtitle')}</p>
+      </header>
+      {modelHubEnabled === true && <MigrationBanner />}
+      <div className="onboarding-assistants">
+        <div className="onboarding-assistants-header">
+          <h3>{t('onboarding.setup.assistants')}</h3>
+          <Button type="button" variant="ghost" size="sm" onClick={() => void detectAll()}
+            disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
+            <RefreshCw size={14} />{t('agentDetection.rescan')}
+          </Button>
         </div>
-
-        {Inner}
-
-        <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
-          {onBack ? (
-            <Button
-              type="button"
-              variant="secondary"
-              size="default"
-              onClick={onBack}
-              className="font-semibold"
-            >
-              <ArrowLeft size={14} strokeWidth={2.25} />
-              {t('common.back')}
-            </Button>
-          ) : (
-            <span />
-          )}
-          <div className="flex flex-1 flex-col items-end gap-1.5 sm:flex-none">
-            {opencodeNeedsPermission && (
-              <p className="text-right text-[12px] text-gold-ink">
-                {t('agentDetection.permissionGateHint')}
-              </p>
-            )}
-            <Button
-              type="button"
-              variant="brand"
-              size="default"
-              onClick={() => void handlePrimaryAction()}
-              disabled={!canContinue || syncing}
-              className="w-full sm:w-auto"
-            >
-              {t('common.continue')}
-              <ArrowRight size={14} strokeWidth={2.25} />
-            </Button>
-          </div>
-        </div>
-      </WizardCard>
+        {ASSISTANT_ORDER.map((name) => {
+          const agent = agents[name];
+          const result = installResults[name];
+          const error = detectionErrors[name] ? { message: detectionErrors[name] }
+            : result && !result.ok && result.message ? result : undefined;
+          return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
+            installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
+            onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
+            onConfigure={() => setProviderModal(name)}
+            configuringDisabled={syncing}
+            enabledControl={<label className="flex items-center gap-2 text-xs text-muted">
+              <input type="checkbox" className="size-3.5 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                checked={agent.enabled} onChange={(event) => toggle(name, event.target.checked)} />
+              {t('onboarding.setup.enabled')}
+            </label>}
+            lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
+              readyLabel={t('onboarding.setup.installed')}
+              onChanged={async (info) => {
+                const installedPath = info?.installedPath || agent.cli_path;
+                setAgents((previous) => ({ ...previous, [name]: { ...previous[name], cli_path: installedPath } }));
+                await detect(name, installedPath);
+              }} />}
+          />;
+        })}
+      </div>
+      <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
+        permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
+        onSetup={() => void permission.setupPermission()} className="w-full" />
+      {providerDialog}
+      <div className="onboarding-setup-footer">
+        <Button type="button" variant="brand" className="h-11 min-w-36" onClick={() => void handlePrimaryAction()}
+          disabled={!canContinue || syncing}>
+          {t('common.continue')}<ArrowRight size={16} />
+        </Button>
+        {opencodeNeedsPermission && <p className="text-center text-xs text-gold-ink">{t('agentDetection.permissionGateHint')}</p>}
+        {onBack && <Button type="button" variant="ghost" size="sm" disabled={syncing} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+      </div>
     </div>
   );
 };

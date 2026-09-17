@@ -30,6 +30,8 @@ interface BackendLifecycleChipProps {
   name: string;
   enabled: boolean;
   cliStatus: CliStatus;
+  /** Setup describes executable availability separately from connection readiness. */
+  readyLabel?: string;
   onChanged?: (info?: BackendChipChange) => void | Promise<void>;
 }
 
@@ -94,6 +96,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   enabled,
   cliStatus,
   onChanged,
+  readyLabel,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -208,7 +211,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       case 'disabled':
         return t('backendLifecycle.statusDisabled');
       case 'ready':
-        return t('backendLifecycle.statusReady');
+        return readyLabel || t('backendLifecycle.statusReady');
       case 'updating':
         return t('backendLifecycle.statusUpdating');
       case 'update':
