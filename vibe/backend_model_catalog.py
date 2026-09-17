@@ -16,18 +16,20 @@ import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
 from core.command_runner import run_supervised_command
-from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe.claude_model_catalog import (
     DEFAULT_CLAUDE_MODEL_ALIASES,
     get_catalog_path as get_claude_catalog_path,
     load_catalog_models,
 )
 from vibe.codex_config import get_codex_home
+
+if TYPE_CHECKING:
+    from storage.lock import MigrationFileLock
 
 
 logger = logging.getLogger(__name__)
@@ -191,6 +193,9 @@ class CodexHubCatalog:
 
 
 def _codex_hub_catalog_lock(directory: Path, *, timeout_seconds: float = 30.0) -> MigrationFileLock:
+    # Lightweight catalog/handler imports must not initialize SQLite storage.
+    from storage.lock import MigrationFileLock
+
     return MigrationFileLock(directory / ".catalog.lock", timeout_seconds=timeout_seconds)
 
 
@@ -274,6 +279,8 @@ def _prune_codex_hub_catalogs_locked(directory: Path) -> None:
 
 def prune_codex_hub_catalogs(directory: Path) -> None:
     """Best-effort reclamation at publication and reference-release boundaries."""
+    from storage.lock import MigrationLockTimeout
+
     try:
         if not directory.is_dir():
             return

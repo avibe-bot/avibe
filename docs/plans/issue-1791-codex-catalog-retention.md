@@ -21,6 +21,8 @@ consumer test removes the catalog after initialization and observes
   only a fallback; captured exception tracebacks cannot delay ordinary release.
 - A short cross-process publication lock covers creating/reusing the immutable
   path, acquiring its pin and sweeping. Identical bytes preserve the inode.
+  Its storage import is deferred to those operations, preserving storage-free
+  catalog and session-handler imports (`MEMORY-INDEP-009`).
 - POSIX uses shared file locks. Windows open handles deny deletion. The native
   child inherits the pin, including when its Avibe parent exits first.
 - The pinned catalog path is the final app-server override, so backend extra
@@ -41,7 +43,10 @@ No database, daemon, shared lifecycle rewrite or production-state cleanup.
 Validation covers unchanged/changed content, startup and active pins,
 invalidation, failed/cancelled launch, actual exit, export and cleanup failures,
 cross-process races, and the actual native consumer in isolated homes with
-loopback-only egress.
+loopback-only egress. The inheritance probe chooses a consumer catalog that
+cannot occupy the single unpinned spare; disabling only child inheritance
+deletes it and makes `thread/start` fail, while inheritance preserves both.
+After actual child exit, the next publication reclaims that generation.
 
 The native inheritance and configuration-reread evidence is for Codex 0.154.0 on
 macOS. Custom launcher wrappers must preserve inherited handles for protection
@@ -55,6 +60,6 @@ that bypass Avibe's pin-acquisition protocol.
 - [x] Read current issue, default branch and consumer lifecycle.
 - [x] Reproduce post-initialize catalog reread with native Codex 0.154.0.
 - [x] Implement and test ownership, retention and failure boundaries.
-- [x] Complete focused suites and changed-file Ruff: 513 passed, 8 opt-in native
-  prompt tests skipped; two additional native catalog tests passed on 0.154.0.
+- [x] Complete focused suites and changed-file Ruff: 539 passed, 8 opt-in native
+  prompt tests skipped; three additional native catalog cases passed on 0.154.0.
 - Exact-head Codex review and GitHub CI are tracked in the implementation PR.

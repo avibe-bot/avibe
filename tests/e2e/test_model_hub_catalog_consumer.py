@@ -9,6 +9,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,12 @@ from modules.agents.model_hub import (
 )
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
-from vibe.backend_model_catalog import _codex_hub_catalog_bytes, _publish_codex_hub_catalog
+from vibe.backend_model_catalog import (
+    CodexHubCatalog,
+    _codex_hub_catalog_bytes,
+    _codex_hub_catalog_path,
+    _publish_codex_hub_catalog,
+)
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -183,11 +189,23 @@ def test_codex_reloads_catalog_after_initialize(codex_catalog_runtime):
     asyncio.run(probe())
 
 
-def test_codex_inherits_catalog_pin(codex_catalog_runtime):
-    """MH-PROTOCOL-004: the child keeps its catalog after all parent pins close."""
+@pytest.mark.parametrize("inherit", [True, False])
+def test_codex_inherits_catalog_pin(codex_catalog_runtime, monkeypatch, inherit):
+    """MH-PROTOCOL-004: only a child pin, not the history spare, saves its catalog."""
     binary, runtime, raw_catalog = codex_catalog_runtime
-    catalog = _publish_codex_hub_catalog(raw_catalog)
+    # Preserve native model behavior while producing distinct valid catalogs.
+    # Choose the consumer's path after sorting, so it cannot win the history
+    # spare by chance, regardless of which catalog this Codex version bundles.
+    variants = []
+    for index in range(5):
+        payload = json.loads(raw_catalog)
+        payload["models"][0]["display_name"] = f"Retention fixture {index}"
+        variants.append(json.dumps(payload).encode())
+    variants.sort(key=lambda raw: _codex_hub_catalog_path(_codex_hub_catalog_bytes(raw)).name)
+    catalog = _publish_codex_hub_catalog(variants[-1])
     path = catalog.path
+    if not inherit:
+        monkeypatch.setattr(CodexHubCatalog, "inherited_subprocess_kwargs", lambda self: nullcontext({}))
 
     async def probe():
         transport = CodexTransport(
@@ -202,17 +220,32 @@ def test_codex_inherits_catalog_pin(codex_catalog_runtime):
             # Simulate loss of the parent's descriptor without killing pytest.
             catalog.close()
             transport._model_hub_catalog.close()
-            for index in range(4):
-                with _publish_codex_hub_catalog(raw_catalog, [{"id": f"successor-{index}"}]):
-                    pass
-            assert path.is_file()
-            thread = await transport.send_request(
-                "thread/start",
-                {"cwd": str(runtime.home), "ephemeral": True},
-            )
-            assert thread["thread"]["id"]
+            for raw in variants[:-1]:
+                with _publish_codex_hub_catalog(raw) as successor:
+                    assert successor.path.name < path.name
+            assert path.is_file() is inherit
+            if inherit:
+                thread = await transport.send_request(
+                    "thread/start",
+                    {"cwd": str(runtime.home), "ephemeral": True},
+                )
+                assert thread["thread"]["id"]
+            else:
+                with pytest.raises(CodexRPCError, match="failed to load configuration"):
+                    await transport.send_request(
+                        "thread/start",
+                        {"cwd": str(runtime.home), "ephemeral": True},
+                    )
         finally:
+            catalog.close()
             await transport.stop()
+        assert transport._process.returncode is not None
+        # Simulated parent loss already closed every parent pin. The next
+        # publication must reclaim the child's catalog once it really exits.
+        with _publish_codex_hub_catalog(variants[0]):
+            pass
+        assert not path.exists()
+        assert len(list(path.parent.glob("standard-responses-*.json"))) == 1
 
     asyncio.run(probe())
 
