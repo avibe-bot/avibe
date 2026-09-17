@@ -555,8 +555,10 @@ async def test_quiesce_deadline_leaves_blocking_cleanup_fenced_in_background(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crashed", [False, True])
 async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
     tmp_path: Path,
+    crashed: bool,
 ) -> None:
     entered = asyncio.Event()
     stop_calls = 0
@@ -605,12 +607,17 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
         _ref(1), "raw-session-1", deque(["digest-1"]), 0.0, 0.0
     )
 
+    if crashed:
+        writer.pause_intake(unavailable=True)
     assert await writer.quiesce(timeout_seconds=1.0)
 
     assert stop_calls == 1
     assert recoveries == [False]
     assert writer.dropped_count() == 0
     assert writer.failure_observations()[0].state == "unknown"
+    assert writer.failure_observations()[0].error_code == (
+        "memory_sidecar_unavailable" if crashed else "memory_processing_interrupted"
+    )
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
@@ -618,8 +625,10 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crashed", [False, True])
 async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
     tmp_path: Path,
+    crashed: bool,
 ) -> None:
     flush_entered = asyncio.Event()
     reap_entered = asyncio.Event()
@@ -649,6 +658,8 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
     assert writer.offer_barrier("raw-session-0") == "queued"
     await flush_entered.wait()
 
+    if crashed:
+        writer.pause_intake(unavailable=True)
     closing = asyncio.create_task(writer.close())
     await reap_entered.wait()
 
@@ -660,6 +671,9 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
     assert recoveries == [False]
+    assert writer.failure_observations()[0].error_code == (
+        "memory_sidecar_unavailable" if crashed else "memory_processing_interrupted"
+    )
 
 
 @pytest.mark.asyncio

@@ -2170,6 +2170,7 @@
     "memory_runtime_install_requires_disabled_memory": "记忆运行时正在使用中。请先在「设置 → 记忆」中关闭记忆，再修复。",
     "memory_reconcile_failed": "Avibe 无法应用记忆设置。请查看运行时日志了解失败步骤。",
     "memory_sidecar_unavailable": "记忆 sidecar 当前不可访问。",
+    "memory_processing_interrupted": "记忆处理被中断，无法确认是否已完成。",
     "memory_provider_timeout": "记忆请求超时。",
     "memory_provider_response_invalid": "记忆返回了无效的响应。",
     "memory_capability_unavailable": "记忆模型暂时不可用。请在已配置的模型服务恢复后重试。",

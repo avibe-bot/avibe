@@ -553,7 +553,7 @@ class BestEffortMemoryWriter:
                 result = await self._provider.add(capture)
             except asyncio.CancelledError:
                 await self._ambiguous_outcome(
-                    "memory_provider_timeout",
+                    "memory_sidecar_unavailable" if self._unavailable else "memory_processing_interrupted",
                     recover=False, attempts=attempt,
                 )
                 await self._cleanup_item(item)
@@ -713,7 +713,7 @@ class BestEffortMemoryWriter:
                 except asyncio.CancelledError:
                     self._pending.pop(key, None)
                     await self._ambiguous_outcome(
-                        "memory_provider_timeout",
+                        "memory_sidecar_unavailable" if self._unavailable else "memory_processing_interrupted",
                         recover=False, operation="flush", attempts=attempt,
                     )
                     raise

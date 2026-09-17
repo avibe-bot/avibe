@@ -97,3 +97,9 @@ records whether provider invocation began; only unavailable, never-submitted
 captures count as disposal. Provider replacement closes the coalescing incident.
 Native rejection codes remain diagnostic-only; persisted `last_error` retains
 its released generic code. No workflow or storage state is added.
+
+Review of `d3d7e15` found cancellation mislabeled as a transport timeout. The
+orchestrator audited both operation cancellation branches: an already-unavailable
+writer reports sidecar unavailability; other cancellation reports processing
+interruption. Actual transport timeouts retain their adapter-owned classification.
+The change is diagnostic-only and does not modify stop/reap or replay behavior.
