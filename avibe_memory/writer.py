@@ -168,7 +168,7 @@ class BestEffortMemoryWriter:
 
     def _record_failure(
         self, kind: MemoryFailureKind, error: str, *,
-        state: str, operation: str, request_id: str | None = None,
+        state: str, operation: str, request_id: str | None = None, attempts: int = 0,
     ) -> None:
         occurred_at = self._now()
         if occurred_at.tzinfo is None:
@@ -176,7 +176,7 @@ class BestEffortMemoryWriter:
         entry = MemoryFailureLogEntry(
             id=uuid4().hex, kind=kind,
             occurred_at=occurred_at.astimezone(timezone.utc).isoformat(timespec="milliseconds"),
-            error_code=error, state=state, operation=operation, request_id=request_id,
+            error_code=error, state=state, operation=operation, request_id=request_id, attempts=attempts,
         )
         self._failures.append(entry)
         # Stable, content-free evidence also survives a controller restart in
@@ -549,30 +549,30 @@ class BestEffortMemoryWriter:
             except asyncio.CancelledError:
                 await self._ambiguous_outcome(
                     "memory_provider_timeout",
-                    recover=False,
+                    recover=False, attempts=attempt,
                 )
                 await self._cleanup_item(item)
                 raise
             except MemoryProviderSystemFailure as failure:
                 if failure.ambiguous:
-                    await self._ambiguous_outcome(failure.error)
+                    await self._ambiguous_outcome(failure.error, attempts=attempt)
                     await self._cleanup_item(item)
                     return
                 if attempt < MAX_ATTEMPTS:
                     continue
-                await self._terminal_failure(item, failure.error)
+                await self._terminal_failure(item, failure.error, attempts=attempt)
                 return
             except MemoryProviderFailure as failure:
                 if failure.ambiguous:
-                    await self._ambiguous_outcome(failure.error)
+                    await self._ambiguous_outcome(failure.error, attempts=attempt)
                     await self._cleanup_item(item)
                     return
                 if failure.retryable and attempt < MAX_ATTEMPTS:
                     continue
-                await self._terminal_failure(item, failure.error)
+                await self._terminal_failure(item, failure.error, attempts=attempt)
                 return
             except Exception:
-                await self._ambiguous_outcome("memory_provider_response_invalid")
+                await self._ambiguous_outcome("memory_provider_response_invalid", attempts=attempt)
                 await self._cleanup_item(item)
                 return
             finally:
@@ -602,10 +602,10 @@ class BestEffortMemoryWriter:
                     continue
                 await self._terminal_failure(
                     item, "memory_processing_failed", request_id=result.request_id,
-                    unknown=result.server_fault,
+                    unknown=result.server_fault, attempts=attempt,
                 )
                 return
-            await self._ambiguous_outcome("memory_provider_response_invalid")
+            await self._ambiguous_outcome("memory_provider_response_invalid", attempts=attempt)
             await self._cleanup_item(item)
             return
 
@@ -637,7 +637,7 @@ class BestEffortMemoryWriter:
         await self._cleanup_item(item)
 
     async def _terminal_failure(
-        self, item: _CaptureItem, error: str, *, request_id: str | None = None,
+        self, item: _CaptureItem, error: str, *, attempts: int, request_id: str | None = None,
         unknown: bool = False,
     ) -> None:
         if not self._enabled():
@@ -645,7 +645,7 @@ class BestEffortMemoryWriter:
             return
         self._record_failure(
             "result_unknown" if unknown else "delivery_abandoned", error,
-            state="unknown" if unknown else "failed", operation="add", request_id=request_id,
+            state="unknown" if unknown else "failed", operation="add", request_id=request_id, attempts=attempts,
         )
         try:
             await run_blocking(self._store.set_last_error, error)
@@ -707,20 +707,20 @@ class BestEffortMemoryWriter:
                     self._pending.pop(key, None)
                     await self._ambiguous_outcome(
                         "memory_provider_timeout",
-                        recover=False, operation="flush",
+                        recover=False, operation="flush", attempts=attempt,
                     )
                     raise
                 except MemoryProviderFailure as failure:
                     if failure.ambiguous:
                         self._pending.pop(key, None)
-                        await self._ambiguous_outcome(failure.error, operation="flush")
+                        await self._ambiguous_outcome(failure.error, operation="flush", attempts=attempt)
                         return
                     if failure.retryable and attempt < MAX_ATTEMPTS:
                         continue
                     result = FlushRejected(None, failure.error, True)
                 except Exception:
                     self._pending.pop(key, None)
-                    await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush")
+                    await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush", attempts=attempt)
                     return
                 finally:
                     self._active_provider_calls = max(0, self._active_provider_calls - 1)
@@ -731,21 +731,21 @@ class BestEffortMemoryWriter:
                 self._pending.pop(key, None)
                 await self._ambiguous_outcome(
                     "memory_provider_timeout" if result.reason == "timeout" else "memory_sidecar_unavailable",
-                    operation="flush",
+                    operation="flush", attempts=attempt,
                 )
                 return
             if isinstance(result, FlushSucceeded) and (
                 result.status not in {"extracted", "no_extraction"}
                 or not _valid_receipt(result.request_id)
             ):
-                await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush")
+                await self._ambiguous_outcome("memory_provider_response_invalid", operation="flush", attempts=attempt)
                 return
             if isinstance(result, (FlushRejected, FlushRetryable)):
                 unknown = isinstance(result, FlushRejected) and result.server_fault
                 self._record_failure(
                     "result_unknown" if unknown else "distillation_rejected",
                     "memory_processing_failed", state="unknown" if unknown else "failed",
-                    operation="flush",
+                    operation="flush", attempts=attempt,
                     request_id=result.request_id if isinstance(result, FlushRejected) else None,
                 )
             if isinstance(result, (FlushSucceeded, FlushRejected, FlushRetryable)):
@@ -791,11 +791,11 @@ class BestEffortMemoryWriter:
             return
 
     async def _ambiguous_outcome(
-        self, error: str, *, recover: bool = True, operation: str = "add",
+        self, error: str, *, attempts: int, recover: bool = True, operation: str = "add",
     ) -> None:
         if not self._enabled():
             return
-        self._record_failure("result_unknown", error, state="unknown", operation=operation)
+        self._record_failure("result_unknown", error, state="unknown", operation=operation, attempts=attempts)
         self._unavailable = True
         self._intake_paused = True
         if self._pending:

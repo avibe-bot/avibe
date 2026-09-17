@@ -1230,3 +1230,33 @@ async def test_failure_evidence_is_bounded_and_server_errors_do_not_claim_no_wri
         writer._record_failure("result_unknown", "memory_provider_timeout", state="unknown", operation="add")
     assert len(writer.failure_observations()) == 50
     await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["add", "flush"])
+@pytest.mark.parametrize("attempts", [1, MAX_ATTEMPTS])
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_submitted_anomalies_report_actual_provider_attempts(tmp_path, operation, attempts, unknown):
+    calls = 0
+
+    async def fail(*_args):
+        nonlocal calls
+        calls += 1
+        raise MemoryProviderFailure(
+            "memory_provider_timeout", retryable=calls < attempts,
+            ambiguous=unknown and calls == attempts,
+        )
+
+    provider = FakeMemoryProvider()
+    setattr(provider, operation, fail)
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda _: True)
+    if operation == "add":
+        _reserve_and_offer(writer, 0)
+        await writer.wait_idle_for_tests()
+    else:
+        ref = _ref()
+        writer._pending[ref.serialize()] = _PendingSession(ref, "raw-session-0", deque(["digest"]), 0, 0)
+        await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
+    assert calls == attempts
+    assert writer.failure_observations()[0].attempts == calls
+    await writer.close()

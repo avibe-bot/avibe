@@ -4774,7 +4774,7 @@
       },
       "reason": {
         "busy": "Source data is busy",
-        "memory_failure_history_unavailable": "Capture failure history is not retained",
+        "memory_failure_history_unavailable": "Only recent failures from this service process are available; complete failure history is not retained.",
         "native_memcells_unavailable": "Native messages cannot be read",
         "native_runs_unavailable": "Native runs cannot be read",
         "native_semantic_unavailable": "Linked memory files cannot be read",
@@ -4847,7 +4847,10 @@
         "dead": "Dead",
         "degraded": "Degraded",
         "manualRequired": "Manual review required",
-        "rejected": "Rejected"
+        "rejected": "Rejected",
+        "unknown": "Result unknown",
+        "failed": "Failed",
+        "notSubmitted": "Not submitted"
       },
       "anomalyOperation": {
         "add": "Add",
@@ -4861,6 +4864,7 @@
         "occurredAt": "Occurred at",
         "errorCode": "Error code",
         "attempts": "Attempts",
+        "affectedCount": "Affected items",
         "generation": "Data version",
         "requestId": "Request ID"
       },

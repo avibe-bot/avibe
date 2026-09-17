@@ -2015,6 +2015,7 @@ export type MemoryStatus = {
 export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
 
 export type MemoryFailureLogEntry = {
+  affected_count?: number;
   id: string;
   kind: string;
   state: string;

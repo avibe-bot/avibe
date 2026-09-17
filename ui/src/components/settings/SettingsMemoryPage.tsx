@@ -77,7 +77,8 @@ export const SettingsMemoryPage: React.FC = () => {
   const settings = settingsRead.data;
   const runtimeState = statusRead.data?.state;
   const processingRecord = processingRecordRead.data;
-  const anomalySourceReason = processingRecord?.anomalies.source.status === 'unavailable'
+  const anomalySourceReason = (processingRecord?.anomalies.source.status === 'unavailable'
+    || processingRecord?.anomalies.source.status === 'partial')
     ? processingRecord.anomalies.source.reason
     : null;
   const anomalySourceMessage = anomalySourceReason
