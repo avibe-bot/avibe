@@ -4,6 +4,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ToastProvider } from '../context/ToastProvider';
 import { LanguageSwitcher } from './LanguageSwitcher';
 
 const api = vi.hoisted(() => ({ getConfig: vi.fn(), mutateConfig: vi.fn() }));
@@ -24,6 +25,15 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n }),
 }));
 
+// The real provider, not a stub: a failed instance save is reported through it,
+// and every surface that mounts this switcher sits inside one (App nests
+// ToastProvider above the router, which covers the wizard chrome too).
+const renderSwitcher = () => render(
+  <ToastProvider>
+    <LanguageSwitcher />
+  </ToastProvider>,
+);
+
 beforeEach(() => {
   authorization.capabilities.can_manage_instance = true;
   i18n.language = 'en';
@@ -41,7 +51,7 @@ describe('LanguageSwitcher role-aware persistence', () => {
   it('keeps a member browser preference without reading or writing the instance default', async () => {
     authorization.capabilities.can_manage_instance = false;
     const user = userEvent.setup();
-    render(<LanguageSwitcher />);
+    renderSwitcher();
 
     await user.click(screen.getByRole('button', { name: 'language.en' }));
     await user.click(screen.getByRole('option', { name: 'language.zh' }));
@@ -53,7 +63,7 @@ describe('LanguageSwitcher role-aware persistence', () => {
 
   it('persists an owner language change to the instance config', async () => {
     const user = userEvent.setup();
-    render(<LanguageSwitcher />);
+    renderSwitcher();
 
     await user.click(screen.getByRole('button', { name: 'language.en' }));
     await user.click(screen.getByRole('option', { name: 'language.zh' }));

@@ -30,7 +30,7 @@ import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '..
 import { useIsDesktop } from '../lib/useIsDesktop';
 import {
   isOwnerOnlyPath,
-  settingsLandingPath,
+  SETTINGS_LANDING_PATH,
 } from '../lib/adminNavigation';
 import {
   closeSettingsOverlay,
@@ -102,7 +102,7 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
   return (
     <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
       <div className="flex items-end justify-between gap-1">
-        {left.map((item) => <MobileNavLink key={item.to} item={item} />)}
+        {left.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
         <div className="flex flex-1 justify-center">
           {center.onClick ? (
             <Button
@@ -126,7 +126,7 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
             </Button>
           )}
         </div>
-        {right.map((item) => <MobileNavLink key={item.to} item={item} />)}
+        {right.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
       </div>
     </nav>
   );
@@ -390,88 +390,61 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
+      {/* Sidebar Y1TiVV — 248 wide, 20/16 padding, top group and bottom cluster
+          pushed apart. The brand row, navigation and projects are one unit inside
+          WorkbenchSidebar; this frame owns only the column and the bottom. */}
       {!chromeless && (
-      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
-        <div className="flex h-full flex-col">
-          {/* Brand band — flush to the top edge, sharing the chat header's
-              px-4 py-2.5 row height so the logo centerline lines up with the
-              chat title bar. No bottom border (it read as out of place under
-              the logo). Logo is size-8 to match the header's row height. */}
-          <Link
-            to="/"
-            className="group flex shrink-0 items-center gap-2.5 px-4 py-2.5 transition-colors hover:bg-foreground/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/60"
-          >
-            <img
-              src={logoImg}
-              alt="avibe logo"
-              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
-            />
-            <div className="min-w-0 leading-tight">
-              <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
-              <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
-            </div>
-          </Link>
+      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[248px] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex">
+        <div className="flex min-h-0 flex-1 flex-col">
+          {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
+        </div>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-3">
-            {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
+        {/* Bottom cluster (design VDs23): Apps + Settings as two equal buttons,
+            then version on the left and the live service status on the right.
+            AppsLauncher keeps its layout slot here while its interactive surface
+            floats above app windows. */}
+        <div className="relative flex shrink-0 flex-col gap-2.5">
+          <div className="flex h-[39px] items-stretch gap-2">
+            {canUseApps && <AppsLauncher />}
+            {settingsOpen ? (
+              <button
+                type="button"
+                data-settings-toggle="true"
+                onClick={() => {
+                  if (settingsOverlayOrigin) closeSettingsOverlay(navigate, settingsOverlayOrigin);
+                  else navigate('/');
+                }}
+                title={t('appShell.openControlPanel')}
+                className="group flex flex-1 items-center justify-center gap-2 rounded-[10px] border border-mint/40 bg-mint/[0.08] text-[13px] font-semibold text-foreground transition-colors"
+              >
+                <Settings className="size-4 shrink-0 text-mint-ink" />
+                <span className="truncate">{t('appShell.openControlPanel')}</span>
+              </button>
+            ) : (
+              <Link
+                data-settings-toggle="true"
+                to={SETTINGS_LANDING_PATH}
+                title={t('appShell.openControlPanel')}
+                className="group flex flex-1 items-center justify-center gap-2 rounded-[10px] border border-border-strong bg-foreground/[0.03] text-[13px] text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+              >
+                <Settings className="size-4 shrink-0" />
+                <span className="truncate">{t('appShell.openControlPanel')}</span>
+              </Link>
+            )}
           </div>
 
-          {/* Bottom (design.pen NbPMq): Apps + Settings, then run state + version.
-              Preferences now live with the rest of Settings. AppsLauncher keeps its layout slot
-              here while its interactive surface floats above app windows. The
-              outer container no longer owns padding (the brand band is flush to
-              the top edge), so this cluster carries its own px-4 + bottom pad. */}
-          <div className="relative flex flex-col gap-3 px-4 pb-4">
-            <div className="flex items-stretch gap-2">
-              {canUseApps && <AppsLauncher />}
-              {settingsOpen ? (
-                <button
-                  type="button"
-                  data-settings-toggle="true"
-                  onClick={() => {
-                    if (settingsOverlayOrigin) closeSettingsOverlay(navigate, settingsOverlayOrigin);
-                    else navigate('/');
-                  }}
-                  title={t('appShell.openControlPanel')}
-                  aria-label={t('appShell.openControlPanel')}
-                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint/[0.08] text-foreground transition-colors"
-                >
-                  <Settings className="size-[18px] text-mint-ink" />
-                </button>
-              ) : (
-                <Link
-                  data-settings-toggle="true"
-                  to={isDesktop
-                    ? settingsLandingPath(capabilities.can_manage_instance)
-                    : '/settings'}
-                  title={t('appShell.openControlPanel')}
-                  aria-label={t('appShell.openControlPanel')}
-                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
-                >
-                  <Settings className="size-[18px] text-muted group-hover:text-foreground" />
-                </Link>
-              )}
-            </div>
-
-            {config?.runtime?.hostname && (
-              <div className="truncate font-mono text-[10px] text-muted">
-                {config.runtime.hostname}
-              </div>
-            )}
-
-            {/* Row 2 (design bVke5) — run-state dot + label on the LEFT, version on the RIGHT. */}
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
-                <span
-                  className={clsx(
-                    'size-2 shrink-0 rounded-full',
-                    isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
-                  )}
-                />
-                {isRunning ? t('common.running') : t('common.stopped')}
-              </span>
-              {capabilities.can_manage_instance && <VersionBadge openUpward />}
-            </div>
+          {/* Version row AYIIj — version on the LEFT, run state on the RIGHT. */}
+          <div className="flex items-center justify-between gap-2 px-1 py-0.5">
+            {capabilities.can_manage_instance ? <VersionBadge openUpward /> : <span />}
+            <span className="flex items-center gap-1.5 text-[10px] text-muted">
+              {isRunning ? t('common.running') : t('common.stopped')}
+              <span
+                className={clsx(
+                  'size-[9px] shrink-0 rounded-full',
+                  isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
+                )}
+              />
+            </span>
           </div>
         </div>
       </aside>
@@ -514,8 +487,8 @@ export const AppShell: React.FC = () => {
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
             : isFullScreenMobile
-              ? 'min-h-0 flex-1 overflow-hidden md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
-            : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+              ? 'min-h-0 flex-1 overflow-hidden md:ml-[248px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
+            : 'flex-1 min-h-0 overflow-y-auto md:ml-[248px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
           !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
           !chromeless && (isSettings ? 'page-glow-settings' : 'page-glow-console')
         )}

@@ -34,6 +34,7 @@ import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
 import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
 import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
+import { SettingsGeneralPage } from './components/settings/SettingsGeneralPage';
 import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
 import { SettingsLayout } from './components/settings/SettingsLayout';
 import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
@@ -675,6 +676,7 @@ const PwaRouteMemory = () => {
 const settingsRoute = () => (
   <Route path="/settings" element={<SettingsLayout />}>
     <Route index element={null} />
+    <Route path="general" element={<SettingsGeneralPage />} />
     <Route path="appearance" element={<Navigate to="/settings/replies" replace />} />
     <Route path="account" element={<Navigate to="/settings/replies" replace />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />

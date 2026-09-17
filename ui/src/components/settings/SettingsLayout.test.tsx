@@ -84,6 +84,7 @@ const renderLayout = (entry: SettingsTestEntry) => render(
   <MemoryRouter initialEntries={[entry]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
+        <Route path="general" element={<div>general-body</div>} />
         <Route path="backends" element={<div>backends-body</div>} />
         <Route path="backends/claude" element={<div>claude-body</div>} />
         <Route path="models" element={<div>models-body</div>} />
@@ -93,6 +94,7 @@ const renderLayout = (entry: SettingsTestEntry) => render(
         <Route path="platforms" element={<div>platforms-body</div>} />
         <Route path="platforms/users" element={<div>users-body</div>} />
         <Route path="platforms/groups" element={<div>groups-body</div>} />
+        <Route path="remote-access" element={<div>remote-access-body</div>} />
       </Route>
       <Route path="/chat/:sessionId" element={<div>chat-body</div>} />
     </Routes>
@@ -160,7 +162,12 @@ describe('SettingsLayout', () => {
 
     expect(routePane?.className).toContain('overflow-y-auto');
     expect(navigation.className).not.toContain('overflow-y-auto');
-    expect(navigation.firstElementChild?.className).toContain('overflow-y-auto');
+    // The return row is pinned above the scrolling section list, so the way out
+    // of Settings never scrolls away from the top of the rail.
+    const returnRow = navigation.firstElementChild;
+    expect(returnRow?.getAttribute('aria-label')).toBe('settings.backToApp');
+    expect(returnRow?.className).not.toContain('overflow-y-auto');
+    expect(navigation.querySelector('.overflow-y-auto')).toBeTruthy();
     expect(shell?.className).toContain('h-full');
     expect(shell?.className).toContain('min-h-0');
     expect(shell?.className).toContain('overflow-hidden');
@@ -178,6 +185,22 @@ describe('SettingsLayout', () => {
       expect(modelHubFrame?.className).toContain('min-h-full');
       expect(modelHubFrame?.className).not.toContain('mx-auto');
       expect(modelHubFrame?.className).not.toContain('max-w-[1180px]');
+    },
+  );
+
+  // The source draws General as content that simply fills whatever the rail
+  // leaves, so the shared reading column would re-introduce a fixed width the
+  // design does not have. It opts out the way Model Hub already does — without
+  // Model Hub's `min-h-full`, which is a full-height pane, not a width.
+  it.each(['/settings/general', '/settings/general/'])(
+    'lets General fill the route pane at %s',
+    (path) => {
+      renderLayout(path);
+
+      const generalFrame = screen.getByText('general-body').parentElement;
+      expect(generalFrame?.className).not.toContain('mx-auto');
+      expect(generalFrame?.className).not.toContain('max-w-[1180px]');
+      expect(generalFrame?.className).not.toContain('min-h-full');
     },
   );
 
@@ -228,8 +251,8 @@ describe('SettingsLayout', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
     });
-    expect(screen.getByRole('link', { name: 'nav.channels' }).className).toContain('bg-mint/[0.09]');
-    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).className).not.toContain('bg-mint/[0.09]');
+    expect(screen.getByRole('link', { name: 'nav.channels' }).className).toContain('bg-mint-soft');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).className).not.toContain('bg-mint-soft');
     expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).getAttribute('aria-current')).toBeNull();
   });
 
@@ -294,11 +317,16 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('keeps language, theme, and account preferences in the Settings rail', () => {
+  it('moves language and appearance into General and keeps the account menu in the rail', () => {
     renderLayout('/settings/replies');
 
-    expect(screen.getByTestId('language-switcher').getAttribute('data-open-upward')).toBe('true');
-    expect(screen.getByTestId('theme-toggle')).toBeTruthy();
+    // Language and appearance are a Settings SECTION now, reachable and
+    // linkable like every other one — not two icons wedged into the rail
+    // footer where nothing else about the interface lives.
+    expect(screen.queryByTestId('language-switcher')).toBeNull();
+    expect(screen.queryByTestId('theme-toggle')).toBeNull();
+    expect(screen.getByRole('link', { name: 'settings.sections.general' }).getAttribute('href'))
+      .toBe('/settings/general');
     expect(screen.getByTestId('account-menu').getAttribute('data-open-upward')).toBe('true');
   });
 
@@ -315,16 +343,58 @@ describe('SettingsLayout', () => {
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
-  it('selects the landing section when a mobile root viewport becomes desktop', async () => {
+  it('opens General from /settings even after a remembered Backends visit', async () => {
+    // Ordinary Settings is a destination, not a resume: whatever the last visit
+    // was, the landing is the section every role can read.
+    window.localStorage.setItem('avibe.settings.last-path', '/settings/backends');
+    media.matches = true;
     renderLayout('/settings');
 
-    expect(screen.queryByText('replies-body')).toBeNull();
+    expect(await screen.findByText('general-body')).toBeTruthy();
+    expect(screen.queryByText('backends-body')).toBeNull();
+  });
+
+  it.each([
+    ['/settings/backends', 'backends-body'],
+    ['/settings/platforms', 'platforms-body'],
+    ['/settings/remote-access', 'remote-access-body'],
+  ])('keeps the explicit deep link %s authoritative over the landing page', (path, body) => {
+    media.matches = true;
+    window.localStorage.setItem('avibe.settings.last-path', '/settings/service');
+    renderLayout(path);
+
+    expect(screen.getByText(body)).toBeTruthy();
+    expect(screen.queryByText('general-body')).toBeNull();
+  });
+
+  it('keeps the narrow root as the explicit section list a detail page can return to', async () => {
+    const user = userEvent.setup();
+    media.matches = false;
+    renderLayout('/settings');
+
+    // This root is the phone's section-NAVIGATION screen, not its ordinary way
+    // in: the dock chip goes straight to General at every width (see
+    // MobileDockDrawer). Redirecting the root as well would leave General's back
+    // row pointing at a screen that bounces the user back to General.
+    const general = screen.getByRole('link', { name: 'settings.sections.general' });
+    expect(general.getAttribute('href')).toBe('/settings/general');
+    expect(screen.queryByText('general-body')).toBeNull();
+
+    await user.click(general);
+    expect(await screen.findByText('general-body')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.backToSections' }).getAttribute('href')).toBe('/settings');
+  });
+
+  it('selects General when a mobile root viewport becomes desktop', async () => {
+    renderLayout('/settings');
+
+    expect(screen.queryByText('general-body')).toBeNull();
     act(() => {
       media.matches = true;
       media.listeners.forEach((listener) => listener({ matches: true } as MediaQueryListEvent));
     });
 
-    await waitFor(() => expect(screen.getByText('replies-body')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('general-body')).toBeTruthy());
   });
 
   it('refreshes Memory visibility after its settings change', async () => {

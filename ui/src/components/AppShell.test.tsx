@@ -303,7 +303,7 @@ describe('AppShell persistent Workbench chrome', () => {
 
     expect(await screen.findByTestId('workbench')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href')).toBe(
-      '/settings/replies',
+      '/settings/general',
     );
     expect(screen.queryByTestId('language-switcher')).toBeNull();
     expect(screen.queryByTestId('theme-toggle')).toBeNull();
@@ -320,7 +320,7 @@ describe('AppShell persistent Workbench chrome', () => {
           <Route element={<AppShell />}>
             <Route index element={<div data-testid="workbench" />} />
             <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
-            <Route path="settings/replies" element={<div data-testid="settings" />} />
+            <Route path="settings/general" element={<div data-testid="settings" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -328,7 +328,7 @@ describe('AppShell persistent Workbench chrome', () => {
 
     expect(await screen.findByTestId('chat')).toBeTruthy();
     let settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
-    expect(settingsToggle.getAttribute('href')).toBe('/settings/replies');
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/general');
     await user.click(settingsToggle);
 
     expect(await screen.findByTestId('settings')).toBeTruthy();

@@ -213,6 +213,15 @@
   --shadow-glow-cta-cyan: 0 0 var(--brand-glow-blur) -4px rgba(63, 224, 229, 0.6);
   --shadow-glow-cta-violet: 0 0 var(--brand-glow-blur) -4px rgba(124, 91, 255, 0.6);
   --shadow-glow-cta-gold: 0 0 var(--brand-glow-blur) -4px rgba(255, 200, 87, 0.6);
+
+  /* The approved Workbench sidebar draws its selected nav row with a halo at the
+     sized scale's own `sm` geometry and alpha -- 16/-4 at 0.44 -- but the design
+     table gives it #10B98170 in Light beside #5BFFA070 in Dark, so the hue has to
+     follow the palette. A written-out RGB cannot: the sized rungs stay on the dark
+     neon precisely because their channels are spelled out. Mixing the live accent
+     is what `wire` already does for the same reason, which is why this is a role
+     named for its use rather than a fifth rung on the scale. */
+  --shadow-glow-nav-mint: 0 0 16px -4px color-mix(in srgb, var(--mint) 44%, transparent);
 }
 
 :root,
@@ -263,6 +272,26 @@
   --border-strong: rgba(255, 255, 255, 0.14);
   --input: rgba(255, 255, 255, 0.10);
   --ring: rgba(91, 255, 160, 0.6);
+
+  /* Workbench shell surfaces from the approved design table, written as the exact
+     8-digit hex the table states so no alpha is lost to a rounded decimal. The
+     sidebar fill and the nav row states are their own tokens rather than reuses
+     because two of them are not the value the nearest existing token holds: in
+     Light the sidebar is #FCFCFE against a #ffffff --surface, and --nav-selected-bg
+     is #10B98114 against --mint-soft's #10B98124. They happen to coincide in Dark,
+     which is exactly why collapsing them there would look correct and render wrong
+     in the other theme. */
+  --sidebar-background: #0e0e18;
+  --nav-selected-bg: #5bffa029;
+  --nav-selected-border: #5bffa059;
+  --nav-hover-bg: #1a1a26;
+  /* The well behind the brand mark, and the hairline around the decorative theme
+     preview artwork in General Settings. --desktop-overlay-shadow is the shared
+     shadow colour for surfaces that float above the shell (the settings/connection
+     dialogs); it is a colour token, not a geometry one. */
+  --logo-well-background: #ffffff04;
+  --illustration-card-border: #ffffff1c;
+  --desktop-overlay-shadow: #00000088;
 
   --mint: #5bffa0;
   --route-manual: #8bb4ff;
@@ -404,6 +433,16 @@
        surface those values read 2.2-4.2:1, under WCAG AA (4.5:1), and stay
        there by the owner decision of 2026-08-14 above. The washes below mix
        from the fill, which is why they carry the fill's hex. */
+    /* Mirrors the dark block's note: the sidebar fill and the selected nav wash
+       are the two that genuinely differ from --surface and --mint-soft here. */
+    --sidebar-background: #fcfcfe;
+    --nav-selected-bg: #10b98114;
+    --nav-selected-border: #10b98160;
+    --nav-hover-bg: #f5f5f6;
+    --logo-well-background: #eef1f780;
+    --illustration-card-border: #08081212;
+    --desktop-overlay-shadow: #0a0a1424;
+
     --mint: #10b981;
     --route-manual: #245bcd;
     --mint-soft: rgba(16, 185, 129, 0.14);
@@ -516,6 +555,15 @@
   --input: rgba(8, 8, 18, 0.12);
   /* Mirrors the @media light block above; see the note there. */
   --ring: rgba(16, 185, 129, 0.5);
+
+  /* Mirrors the @media light block above; see the note in the dark block. */
+  --sidebar-background: #fcfcfe;
+  --nav-selected-bg: #10b98114;
+  --nav-selected-border: #10b98160;
+  --nav-hover-bg: #f5f5f6;
+  --logo-well-background: #eef1f780;
+  --illustration-card-border: #08081212;
+  --desktop-overlay-shadow: #0a0a1424;
 
   --mint: #10b981;
   --route-manual: #245bcd;

@@ -27,13 +27,101 @@ Use meaningful consuming tests: suggestions don't submit and preserve editabilit
 
 No primary checkout/runtime/service/production stores/Incus changes. Test-owned fixtures and processes only; no local Avibe restart. Pre-push concrete diff/head/tests/visuals go to PM for independent spot-check. Then non-draft PR to master, Closes #2012, explicit #2011 dependency where applicable. No manual Codex trigger; cyhhao automatically triggers. Verify full exact-head review/all lint runs/zero unresolved threads and deliver final report before Watch cleanup. No merge without owner instruction.
 
+## Frozen cross-lane interface
+
+No API-name decision is pending. PM inspected #2011's actual type, method and route at its base head
+f86a3dc683606456e491c71aa964ba468ca328de on 2026-09-18 02:45 and froze:
+
+- `BackendConnectionState`, exported from `ui/src/context/ApiContext.tsx`
+- `useApi().getBackendConnection(name: 'claude' | 'codex' | 'opencode'): Promise<BackendConnectionState>`
+- `GET /api/backend/{backend}/connection`, fields unchanged from the contract above
+
+The producer now exists as PR #2032 at b664dd95d5f05f991c51ff8b3add1811520dff0e and is **not merged**; its
+first review round is repairing install/apply and manual-code expiry, and the canonical interface and the
+completion event are unchanged by that repair. This lane neither duplicates the type/method nor writes a
+second fetch wrapper to compile against unmerged code.
+
+**The seam is one function body.** `ui/src/components/workbench/backendReadiness.ts` holds
+`useBackendReadiness(backend)`, which returns `null` today, and `shouldShowReadyBanner(...)`, which is
+complete and unit-tested. Wiring after #2032 merges means probing `backend` through the frozen method and
+returning `{ backend, ready }`; the predicate already refuses anything that is pending, failed, or answers
+for a backend other than the one the home would run. Production readiness therefore stays null until real
+ok + ready + backend evidence exists — a rendered banner is never claimed from a screenshot.
+
+## Implementation record
+
+- **Shell** — `AppShell` sidebar at 248 on `--sidebar-background`, brand row (mark, title, `workbench.eyebrow`)
+  with Search and Inbox as siblings, always-expanded capability navigation via one `SidebarNavRow` carrying the
+  three source states on tokens, real project/session tree or true empty state, Apps/Settings footer, version and
+  live service badge. Nav-state tokens (`--nav-selected-bg`/`-border`, `--nav-hover-bg`, `--sidebar-background`,
+  `--logo-well-background`, `--illustration-card-border`, `--desktop-overlay-shadow`) and the
+  `--shadow-glow-nav-mint` role are additive; no existing token value or public API changed.
+- **Home** — three suggestion cards seed and focus the draft through the existing Composer handle and never send;
+  the shared Composer keeps its attachment, `AgentRoutePicker` and direct `DirectoryBrowser` behavior; project
+  find/create/draft/cancel/empty-send and the permission rules are the existing ones. The column is fluid.
+- **General** — `/settings/general` is the ordinary Settings landing and the returnable one. Language uses the
+  existing shared selection path and autosaves; appearance is three explicit choices through the existing
+  `ThemeProvider` (`mode`/`setMode`), so System follows the OS while Light/Dark persist. No Save button.
+- **Primitive** — `SettingsPanel` gained a `preference` variant (surface-2, one 22px pad, radius 12, no divider);
+  the `panel` variant is untouched.
+
+## Deviations from the approved source
+
+Each is stated rather than silently closed:
+
+1. **Settings keeps the 248 workbench sidebar.** The source draws Settings full-bleed beside its own 196 rail, so
+   its 924 content column cannot be reproduced exactly on Web. This is pre-existing shell structure, not a choice
+   made here; the rail is 196 and the content beside it is fluid, which is what the source actually fixes.
+2. **Heading is `SettingsPageShell`'s 28/700, not the source's 27/600.** Changing only General would desync it from
+   every sibling page; changing all of them is the retheme this lane is forbidden to do.
+3. **The `a38Xy` "⌘," reminder is omitted** — the design index itself marks it macOS-menu specific.
+4. **No "⌘N" hint on the New chat row.** `DEFAULT_ACTION_SHORTCUTS` binds only voice input and Show Page
+   annotation, and the browser owns ⌘N; a visible hint for an unbound key is a false affordance.
+5. **The System miniature is drawn as a diagonal split.** The source renders System pixel-identically to Dark,
+   which the index records as a source defect; binding it to the resolved theme instead would make it identical to
+   whichever of the other two is live. Both halves use the source's own swatches.
+6. **The home canvas carries the pre-existing `--gradient-console` wash** where the board frame is flat
+   `$--background`. The wash is the console page family's, shared with Agents/Skills/Harness/Vaults/Inbox;
+   removing it on one route would split the family and removing it everywhere is a retheme.
+7. **No attach/voice control on the first-task home.** `mediaEnabled` is `Boolean(sessionId)` and the home has no
+   session yet; a pre-session upload would need an API that does not exist.
+8. **Traffic lights, titlebar, window border and outer radius are absent**, per the index's own out-of-scope list.
+9. **Narrow layout has no native baseline** (the index confirms no narrow/mobile frame exists). The phone
+   decisions made here: sidebar drops to the existing mobile shell, suggestion cards stack, and a preference
+   card's control drops under its label instead of squeezing the description.
+10. **Models and Groups rows are absent from the captures only** because the fixture leaves those features off;
+    the rail renders them from real state.
+
+## Verification evidence
+
+- `ui/e2e/workbench-general/` — a hermetic browser harness that loads the **real app** on a loopback dev server
+  pointed at a dead backend port. Every request is answered locally, allowed as a font read, or aborted and
+  recorded; `expect(denied).toEqual([])` is the proof that no write verb and no other off-origin call occurred.
+  Fixture data is deliberately non-ASCII (`中文项目`, `/Users/max/工作区/中文项目`).
+- `geometry.spec.ts` (5) measures rather than infers: sidebar 248 at 1200 and 1600 with the content taking the
+  full extra 400 (952 → 1352); settings rail 196 with the General card fluid past the shared cap (692 @1200 →
+  1412 @1920); every other Settings page still 1180 at 1920; and the card anatomy — radius 12, pad 22, row gap 20,
+  `--surface-2` fill, 190×40 selector at radius 9, selected choice at 2px `--mint` with equal-width siblings,
+  14 gutter, 88 preview at radius 6.
+- `capture.spec.ts` (18) writes the comparison batch to the stable path
+  `ui/e2e/.artifacts/workbench-general/shots/` — both surfaces × EN/ZH × Light/Dark × desktop/narrow, plus System
+  mode under both OS answers. Playwright's `outputDir` is a sibling (`run/`) precisely because it is emptied on
+  every run, including a filtered one.
+- Defects the batch actually caught and fixed: a comment block that had leaked into the Composer's JSX and was
+  rendering as visible text; the preference card drawn at radius 16 where the source says 12; the theme
+  miniature at radius 8 where the source says 6; a truncated brand subtitle at 248; a React duplicate-key warning
+  on the mobile tab bar; and the narrow language row squeezing its description to one word.
+- Gates, all green after the final edits: vitest 4348/4348, `typecheck:tests`, `lint` (baseline, no drift),
+  `validate:theme`, `validate:catalog`, `build`, and the 23 browser tests above.
+
 ## Progress
 
 - [x] Owner parallel start, latest master and isolated workspace verified.
-- [ ] Native design packet and existing route/state ownership inventory.
-- [ ] Independent shell, home/Composer, General implementation.
-- [ ] Producer #2011 contract integration and cross-lane consumer verification.
-- [ ] Focused/browser verification and PM pre-push spot-check.
+- [x] Native design packet and existing route/state ownership inventory.
+- [x] Independent shell, home/Composer, General implementation.
+- [ ] Producer #2011 contract integration and cross-lane consumer verification — blocked on #2032 merging; the
+      seam is frozen and isolated to `useBackendReadiness`.
+- [x] Focused/browser verification; PM pre-push spot-check pending.
 - [ ] Non-draft PR, exact-head Codex/CI and zero unresolved threads.
 - [ ] Owner acceptance and separately authorized merge.
 

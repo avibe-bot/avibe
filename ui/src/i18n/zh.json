@@ -279,6 +279,7 @@
       "system": "系统"
     },
     "sections": {
+      "general": "常规",
       "backends": "后端",
       "models": "模型",
       "memory": "记忆",
@@ -294,9 +295,23 @@
     },
     "navigationLabel": "设置分区",
     "backToWorkbench": "返回工作台",
+    "backToApp": "返回应用",
     "backToSections": "全部设置",
     "backToSection": "返回{{section}}",
     "close": "关闭设置",
+    "general": {
+      "title": "常规",
+      "subtitle": "选择界面语言与外观",
+      "languageTitle": "语言",
+      "languageDescription": "Avibe 界面的显示语言",
+      "appearanceTitle": "外观",
+      "appearanceDescription": "跟随系统，或选择浅色、深色主题",
+      "appearanceSystem": "跟随系统",
+      "appearanceLight": "浅色",
+      "appearanceDark": "深色",
+      "autosaved": "修改会自动保存",
+      "languageSaveFailed": "语言已在本机切换，但未能保存到此实例"
+    },
     "shortcuts": {
       "title": "快捷键",
       "subtitle": "设置你在聊天和 Show Page 中最常用的键盘操作。",
@@ -2501,22 +2516,30 @@
     "eyebrow": "工作台",
     "placeholderTitle": "你的 AI 工作台正在搭建",
     "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
-    "canvas": {
-      "heroTitle": "今天想搭点什么?",
-      "heroBody": "在下面输入想做的事,Agent 会按你的描述执行。你也可以从下面的建议开始。",
+    "home": {
+      "heroTitle": "你想做什么？",
+      "heroBody": "从一个真实任务开始，助手可以规划、研究和构建",
       "suggestions": {
-        "newProject": "打开项目",
-        "newProjectHint": "选个目录开个项目,会话默认会落在里面",
-        "openAgents": "管理 Agents",
-        "openAgentsHint": "添加或调整可选的 Agent",
-        "openHarness": "建后台任务",
-        "openHarnessHint": "让 Agent 帮你写 cron / watch"
+        "exploreTitle": "探索项目",
+        "exploreBody": "了解工作区中的文件",
+        "exploreDraft": "请帮我梳理这个项目的结构和主要模块",
+        "researchTitle": "研究一个问题",
+        "researchBody": "把一个主题整理成实用简报",
+        "researchDraft": "帮我研究这个主题，整理成一份简短实用的简报",
+        "planTitle": "制定计划",
+        "planBody": "把目标拆成可执行的下一步",
+        "planDraft": "帮我把这个目标拆成具体、可执行的步骤"
       },
-      "inputPlaceholder": "和 Agent 聊点什么…",
-      "noProjectForChat": "还没有项目 — 先新建一个,再来这里聊"
+      "inputPlaceholder": "给你的助手安排任务…",
+      "chooseWorkspace": "选择工作区",
+      "workspaceAria": "工作区：{{path}}",
+      "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
+      "ready": "{{backend}} 已连接，可以开始工作",
+      "readyDismiss": "关闭",
+      "continueOnPhone": "在手机 APP 上继续",
+      "connectChatApps": "聊天应用可在<settings>设置</settings>中连接"
     },
     "openControlPanel": "进入控制面板",
-    "capabilitiesLabel": "能力",
     "projectsLabel": "项目",
     "addProject": "打开项目",
     "addSession": "在该项目新建会话",
@@ -2553,7 +2576,7 @@
       "noReclaim": "此会话没有关联的定时任务或 Watch。",
       "confirm": "永久归档"
     },
-    "projectsEmpty": "还没有项目 — 添加一个就能开始会话。",
+    "projectsEmpty": "添加项目，开始工作",
     "projectsLoading": "加载项目中…",
     "projectsLoadError": "项目加载失败。",
     "sessionsLoading": "加载会话中…",
@@ -2578,6 +2601,7 @@
     },
     "nav": {
       "inbox": "收件箱",
+      "newChat": "新建会话",
       "agents": "Agents",
       "skills": "Skills",
       "harness": "Harness",

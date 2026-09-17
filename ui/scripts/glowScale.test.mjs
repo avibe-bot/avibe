@@ -89,6 +89,17 @@ const OFF_RULE = {
       light: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
     },
   },
+  // The sidebar's selected nav row keeps the general rule's geometry and alpha --
+  // spread = -blur/4 and 0.44 -- and departs on one field only: the design table
+  // gives it #10B98170 in Light beside #5BFFA070 in Dark, so its hue is mixed from
+  // the live accent instead of spelled out. `holds` therefore pins the two fields
+  // the general rule would have pinned, in the one spelling that can carry them
+  // through a palette; only the hue is excused, and its blur is asserted from
+  // ROLE_BLUR like every other role's.
+  nav: {
+    why: 'the approved sidebar selection halo: the scale\'s own 16/-4 and 0.44, themed through var(--mint) for #10B98170 in light and #5BFFA070 in dark',
+    holds: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
+  },
 };
 
 // What each role's blur IS, rather than which blurs the scale happens to
@@ -104,7 +115,7 @@ const OFF_RULE = {
 // excused entirely: "themed" was being read as "unasserted", so the owner's two
 // numbers were the only blurs in this file that nothing checked.
 const ROLE_BLUR = {
-  dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48,
+  dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48, nav: 16,
   cta: { dark: 16, light: 20 },
   onboarding: { dark: 28, light: 16 },
 };
