@@ -267,6 +267,7 @@ older waiter cannot be reconstructed.
 Explicit `--catch-up` and PR cursor replay reset the observed run inventory to
 the initial current response, just as `--seed-state` does. Catch-up reports
 current completed CI; explicit PR replay baselines unrelated CI silently.
+Permitted fresh manual initialization also adopts the current inventory.
 Subsequent polls retain newly observed runs normally. Do not use these reset
 modes when re-arming an existing Watch.
 

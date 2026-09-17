@@ -4579,7 +4579,7 @@ def test_explicit_pr_replay_does_not_replay_unrelated_completed_ci(with_comment)
     assert ("review_comment #501" in stdout.getvalue()) == with_comment
 
 
-@pytest.mark.parametrize("mode", ["catch-up", "pr-replay", "monitor"])
+@pytest.mark.parametrize("mode", ["catch-up", "pr-replay", "catch-up-pr-replay", "monitor"])
 @pytest.mark.parametrize("inventory_present", [False, True])
 @pytest.mark.parametrize("stale_kind", ["missing-run", "higher-attempt"])
 @pytest.mark.parametrize("initial_terminal", [False, True])
@@ -4604,12 +4604,13 @@ def test_explicit_replay_resets_ci_inventory_but_ordinary_resume_retains_it(
     flags = {
         "catch-up": ("--catch-up",),
         "pr-replay": ("--since-review-comment-id", "0"),
+        "catch-up-pr-replay": ("--catch-up", "--since-review-comment-id", "0"),
         "monitor": (),
     }[mode]
     rc, first_output, payload = _ci_cycle(module, path, [state], extra_args=flags)
     assert rc == 0
     assert "review_comment #501" in first_output
-    assert ("GitHub Actions success" in first_output) == (mode == "catch-up" and initial_terminal)
+    assert ("GitHub Actions success" in first_output) == ("--catch-up" in flags and initial_terminal)
     expected_inventory = module._observe_actions(
         module.normalize_selected_runs({"CI": stale}) if mode == "monitor" else {},
         module.normalize_selected_runs({"CI": [current]}),
@@ -4677,6 +4678,56 @@ def test_explicit_replay_with_empty_ci_baselines_quietly_then_tracks_new_observa
     rc, output, _ = _ci_cycle(module, path, [complete])
     assert rc == 0
     assert "GitHub Actions success" in output
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("inventory_present", [False, True])
+@pytest.mark.parametrize("stale_kind", ["missing-run", "higher-attempt"])
+def test_partial_manual_initialization_resets_observation_with_its_ci_baseline(
+    tmp_path, inventory_present, stale_kind,
+):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    current = _ci_run()
+    stale = _ci_run(8, conclusion="failure") if stale_kind == "missing-run" else _ci_run(attempt=9)
+    _seed_ci_state(module, path, stale, owner=None)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    del saved["review_cursor"]
+    if inventory_present:
+        saved[module.ACTIONS_OBSERVED_KEY] = saved["actions"]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    state = _ci_state(current, comment=True)
+    stdout = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", return_value=(state, 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "monotonic", side_effect=[0, 2]),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature",
+             "--workflow", "CI", "--state-file", str(path), "--timeout", "1"],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        assert module.main() == 124
+    assert stdout.getvalue() == ""
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = module.normalize_selected_runs({"CI": [current]})
+    assert saved["actions"] == expected
+    assert saved[module.ACTIONS_OBSERVED_KEY] == expected
+    rc, output, _ = _ci_cycle(module, path, [state])
+    assert rc == 124
+    assert output == ""
+    complete = _ci_state(_ci_run(attempt=2), comment=True)
+    rc, output, _ = _ci_cycle(module, path, [complete])
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    assert "review_comment #501" not in output
     rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
     assert rc == 124
     assert output == ""

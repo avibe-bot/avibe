@@ -48,8 +48,9 @@ observed inventory remains compatible with version-1 cursors.
 
 The notification baseline and observed inventory must share the caller's
 initialization policy. Ordinary monitoring retains saved current-head run IDs
-and attempt high-water marks. Explicit seed, catch-up, and PR cursor replay
-instead initialize the inventory from the first current observation; inheriting
+and attempt high-water marks. Explicit seed, catch-up, PR cursor replay, and
+permitted fresh initialization of a partial manual cursor file instead
+initialize the inventory from the first current observation; inheriting
 a missing run or higher attempt from the old inventory can otherwise prevent
 all future CI verdicts after a deliberate reset.
 
@@ -61,7 +62,10 @@ that boundary still constrain every complete gate and survive acknowledgement
 and ordinary restart.
 
 The smallest complete repair is this initialization-policy alignment, not a
-change to the delivery owner or missing-run policy. Pending replay/acknowledgement
+change to the delivery owner or missing-run policy. Only a valid ordinary
+resume inherits saved inventory; partial manual cursors already establish a
+fresh baseline, while managed unseeded starts remain rejected.
+Pending replay/acknowledgement
 and malformed-state validation still precede initialization; an explicit replay
 must neither discard an undelivered report nor bypass corrupt-state diagnostics.
 Validate saved optional inventory and legacy baseline fallback, missing rows and
