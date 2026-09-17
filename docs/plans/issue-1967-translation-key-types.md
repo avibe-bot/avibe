@@ -117,3 +117,11 @@ Open runtime boundary consumers: existing `serverText` and `fileBrowserErrorMess
 ### Delivery state
 
 No Codex findings-bearing heads yet. No merge/deployment/runtime restart authorized. UI runtime verification is unit/render and build-based; cross-platform manual/Incus verification is not required for this type-contract change and has not been performed.
+
+### Integration with the security dependency update
+
+PR #2029 was opened at `ef31a1bf27d4b48a603ad1c42f7f42cce8743ed4` while master advanced. Integrated merged #2026 (`9852e25f464659fc63acebf0447a8047906d2d99`) locally using a non-destructive merge, producing `7c8dbabca284e3b8c7575a742bf8decf29081edd`. The new remote head is held until the initial Codex review is terminal.
+
+Installed the merged lockfile with `npm ci`; its SHA-256 is `f406596208e6bc5cf7b69c829dae9f14f3b4fab55dec6fe65b8316a6d74a5a6a`. With these exact dependencies, test typechecking, lint and production build pass; all 308 UI test files / 4,173 tests pass, including #2026's added security/script tests. Rechecked tsc file membership. Final diff against this master still contains no dependency/lockfile/bundle changes.
+
+The remote has a restricted fetch refspec: explicit `refs/heads/master:refs/remotes/origin/master` was used to update the tracking ref before integration. No shared config or primary checkout changed. Open #2028 overlaps only the package script location and the platform-array const annotation; #2027 had no code overlap at inspection. Neither open peer was cherry-picked.
