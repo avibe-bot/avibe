@@ -66,6 +66,11 @@ DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 // Route-sized modal: the transparent backdrop preserves visual context while Radix owns focus,
 // outside interaction, and accessibility isolation for the foreground surface.
+//
+// The `md:left-[240px]` default is the historical offset every existing caller
+// inherits; a caller whose shell differs overrides it with its own `md:left-[…]`
+// (tailwind-merge keeps the caller's). The primitive cannot see the shell, so
+// the default is a starting point, not an authority on the sidebar's width.
 export const DialogSurfaceContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>

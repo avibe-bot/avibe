@@ -180,8 +180,8 @@ export const Workbench: React.FC = () => {
     // Desktop: the discovery block is centred in whatever height is left and the
     // composer sits at the bottom (design rhythm — not a fixed block plus a fixed
     // gap). Mobile DOESN'T get the tall centred column: it fights the iOS
-    // keyboard, where top-aligned normal flow lets the focused composer scroll
-    // into view the way an ordinary in-flow input does.
+    // keyboard. There the block flows from the top and the composer pins itself
+    // to the bottom of the scroll area instead (see below).
     //
     // The column is fluid. 856 in the source is what a 1200 staging window minus
     // the 248 sidebar and its padding happens to leave — no max width is
@@ -218,7 +218,24 @@ export const Workbench: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex flex-col gap-4 pb-2">
+      {/* On a phone the page is taller than the screen (hero + three stacked
+          cards + this block), so at rest its last ~80px sit under the fixed tab
+          bar — and that is exactly where the composer's Agent, workspace and
+          Send controls are: measured at 390x844, Send's centre hit-tests to the
+          nav, so the button is dead until the user happens to scroll. Pinning
+          this block to the bottom of the scroll area, one nav clearance above
+          the bar, keeps the primary control reachable at any viewport height
+          instead of trimming the rhythm above it to fit one phone. It stays a
+          sticky child of the scrolling column rather than a fixed bar, so iOS
+          keyboard panning still moves it with the page. Desktop is untouched:
+          the column already fills the viewport and nothing overlaps it. */}
+      <div className="flex flex-col gap-4 pb-2 max-md:sticky max-md:bottom-[var(--mobile-nav-clearance)] max-md:z-10 max-md:bg-background max-md:pt-3">
+        {/* A card that scrolls behind an opaque block reads as cut in half. The
+            short fade above it says "passing behind", which is what happens. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 -top-4 h-4 bg-gradient-to-t from-background to-transparent md:hidden"
+        />
         <Composer
           ref={composerRef}
           onSend={send}

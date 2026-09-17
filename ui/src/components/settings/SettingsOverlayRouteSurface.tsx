@@ -74,6 +74,13 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
+              // The overlay covers the work area and stops at the shell sidebar,
+              // which is what keeps the origin project/session visible behind it.
+              // This overrides the primitive's historical 240 default with
+              // AppShell's actual `w-[248px]`; it is asserted against the
+              // sidebar's measured edge rather than restated as a shared token,
+              // so the two cannot drift apart unnoticed.
+              className="md:left-[248px]"
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;

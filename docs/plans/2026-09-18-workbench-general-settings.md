@@ -69,28 +69,46 @@ ok + ready + backend evidence exists — a rendered banner is never claimed from
 
 Each is stated rather than silently closed:
 
-1. **Settings keeps the 248 workbench sidebar.** The source draws Settings full-bleed beside its own 196 rail, so
-   its 924 content column cannot be reproduced exactly on Web. This is pre-existing shell structure, not a choice
-   made here; the rail is 196 and the content beside it is fluid, which is what the source actually fixes.
-2. **Heading is `SettingsPageShell`'s 28/700, not the source's 27/600.** Changing only General would desync it from
-   every sibling page; changing all of them is the retheme this lane is forbidden to do.
+1. **Settings keeps the 248 workbench sidebar** — assessed and accepted, not inherited. The source board is a
+   native window, which is why Web also drops its titlebar and traffic lights; on Web, Settings is a route in the
+   one shell, and the overlay path deliberately keeps the sidebar visible so the origin project, session and draft
+   stay in view. Hiding it only on the direct route would give one URL two chromes and jump the layout on close.
+   What the source actually fixes is the frame beside the rail, and that is reproduced exactly: 1004 at a 1448
+   window, asserted in `geometry.spec.ts`. The visual observer confirmed no cropping or crowding; PM accepted this
+   as a bounded Web adaptation on 2026-09-18 05:13.
+2. ~~Heading is `SettingsPageShell`'s 28/700.~~ **Resolved.** `SettingsPageShell` gained an opt-in
+   `titleScale="landing"` (27/600 over a 13 muted line, source `Ozmrf`) consumed only by `SettingsGeneralPage`;
+   the fifteen sibling sections keep the 28/700 they shipped with, which is asserted from both sides.
 3. **The `a38Xy` "⌘," reminder is omitted** — the design index itself marks it macOS-menu specific.
 4. **No "⌘N" hint on the New chat row.** `DEFAULT_ACTION_SHORTCUTS` binds only voice input and Show Page
    annotation, and the browser owns ⌘N; a visible hint for an unbound key is a false affordance.
 5. **The System miniature is drawn as a diagonal split.** The source renders System pixel-identically to Dark,
    which the index records as a source defect; binding it to the resolved theme instead would make it identical to
    whichever of the other two is live. Both halves use the source's own swatches.
-6. **The home canvas carries the pre-existing `--gradient-console` wash** where the board frame is flat
-   `$--background`. The wash is the console page family's, shared with Agents/Skills/Harness/Vaults/Inbox;
-   removing it on one route would split the family and removing it everywhere is a retheme.
+6. ~~The home canvas carries the `--gradient-console` wash.~~ **Resolved.** `/` alone is drawn on flat
+   `bg-background`; the wash stays with the rest of the console family (Agents, Skills, Harness, Vaults, Inbox,
+   chat). Both halves are asserted — `background-image: none` on the home, a `radial-gradient` still on `/agents`.
 7. **No attach/voice control on the first-task home.** `mediaEnabled` is `Boolean(sessionId)` and the home has no
    session yet; a pre-session upload would need an API that does not exist.
 8. **Traffic lights, titlebar, window border and outer radius are absent**, per the index's own out-of-scope list.
 9. **Narrow layout has no native baseline** (the index confirms no narrow/mobile frame exists). The phone
-   decisions made here: sidebar drops to the existing mobile shell, suggestion cards stack, and a preference
-   card's control drops under its label instead of squeezing the description.
+   decisions made here: sidebar drops to the existing mobile shell, suggestion cards stack, a preference card's
+   control drops under its label instead of squeezing the description, and the composer block pins itself to the
+   bottom of the scroll area one nav clearance above the tab bar (see 11).
 10. **Models and Groups rows are absent from the captures only** because the fixture leaves those features off;
-    the rail renders them from real state.
+    the rail renders them from real state. The same applies to attach/mic on the first-task home (7) — neither is
+    a missing control to be drawn in for a screenshot match.
+11. **The phone composer is pinned, not in flow.** Measured at 390×844, the home is ~108px taller than its scroll
+    area, so at rest the block that ends the page — the composer's Agent, workspace and Send row — sat under the
+    fixed tab bar: `elementFromPoint` over Send returned the nav, i.e. a dead primary button, reachable only by a
+    scroll the user has no reason to make. The alternative, trimming the rhythm above it until one phone fits,
+    breaks on the next shorter phone. `--mobile-nav-clearance` now names the bar's reservation once, the shell
+    pads its scroll area by it and the composer block offsets by it, and a short fade marks the boundary the cards
+    scroll behind. Desktop is untouched.
+12. **Settings rail labels wrap instead of truncating.** At the source's 196 rail, English cut both "Messaging
+    Platforms" and "Platform Connections" to "Platform…", which are neighbouring rows leading to different pages.
+    Two lines at 12.5px still fit the row height the rail already had, so no row moves and the rail keeps its
+    width; measured as `scrollWidth === clientWidth` for every rendered rail label.
 
 ## Verification evidence
 
@@ -98,11 +116,15 @@ Each is stated rather than silently closed:
   pointed at a dead backend port. Every request is answered locally, allowed as a font read, or aborted and
   recorded; `expect(denied).toEqual([])` is the proof that no write verb and no other off-origin call occurred.
   Fixture data is deliberately non-ASCII (`中文项目`, `/Users/max/工作区/中文项目`).
-- `geometry.spec.ts` (5) measures rather than infers: sidebar 248 at 1200 and 1600 with the content taking the
+- `geometry.spec.ts` (12) measures rather than infers: sidebar 248 at 1200 and 1600 with the content taking the
   full extra 400 (952 → 1352); settings rail 196 with the General card fluid past the shared cap (692 @1200 →
-  1412 @1920); every other Settings page still 1180 at 1920; and the card anatomy — radius 12, pad 22, row gap 20,
-  `--surface-2` fill, 190×40 selector at radius 9, selected choice at 2px `--mint` with equal-width siblings,
-  14 gutter, 88 preview at radius 6.
+  1412 @1920); every other Settings page still 1180 at 1920; the Settings content frame exactly 1004 at 1448; the
+  card anatomy — radius 12, pad 22, row gap 20, `--surface-2` fill, 190×40 selector at radius 9, selected choice
+  at 2px `--mint` with equal-width siblings, 14 gutter, 88 preview at radius 6; the landing heading 27/600 against
+  a sibling section's 28/700; the home flat while `/agents` keeps its wash; the Settings overlay opening at the
+  sidebar's own measured edge and restoring the route, draft and workspace selection on close; every rail label
+  unclipped at 196; and the phone composer clear of the tab bar in EN and ZH, at rest, focused with text, and at
+  390×667 — asserted by what `elementFromPoint` returns over Send, which visibility alone cannot answer.
 - `capture.spec.ts` (18) writes the comparison batch to the stable path
   `ui/e2e/.artifacts/workbench-general/shots/` — both surfaces × EN/ZH × Light/Dark × desktop/narrow, plus System
   mode under both OS answers. Playwright's `outputDir` is a sibling (`run/`) precisely because it is emptied on
@@ -111,8 +133,13 @@ Each is stated rather than silently closed:
   rendering as visible text; the preference card drawn at radius 16 where the source says 12; the theme
   miniature at radius 8 where the source says 6; a truncated brand subtitle at 248; a React duplicate-key warning
   on the mobile tab bar; and the narrow language row squeezing its description to one word.
-- Gates, all green after the final edits: vitest 4348/4348, `typecheck:tests`, `lint` (baseline, no drift),
-  `validate:theme`, `validate:catalog`, `build`, and the 23 browser tests above.
+- Defects the observer's 18-image review caught and this lane fixed: the desktop overlay seam (the shared dialog
+  primitive's historical 240 against the shell's 248), the General heading scale, the home background family, the
+  phone composer under the tab bar, and the English rail truncation.
+- Gates, all green after the final edits: vitest 4352/4352, `typecheck:tests`, `lint` (baseline, no drift),
+  `validate:theme`, `validate:catalog`, `build`, and the 30 browser tests above. One `travellingTokens` case
+  failed once in an early full run and has not reproduced in either full run since, including the final one; it
+  is recorded rather than explained away.
 
 ## Progress
 

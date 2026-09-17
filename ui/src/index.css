@@ -25,6 +25,16 @@
   }
 }
 
+/* How much bottom room the fixed mobile tab bar needs: its own height, the
+   home-indicator inset, and a small gap. The shell's scroll area pads by it so
+   the last row can always be scrolled clear, and a control pinned to the bottom
+   of that scroll area offsets by it so it rests just above the bar. Two
+   consumers, one number — the pair drifting apart is what leaves a button under
+   the bar. */
+:root {
+  --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

@@ -139,7 +139,13 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
       )}
     >
       <Icon className={clsx('size-3.5 shrink-0', active ? 'text-mint-ink' : 'text-muted')} />
-      <span className="truncate md:hidden lg:block">{t(item.labelKey)}</span>
+      {/* The rail is a fixed 196 and a section name is not optional detail: an
+          ellipsis here hides which of two neighbouring pages a row leads to
+          ("Messaging Platforms" / "Platform Connections" both cut to "Platform…"
+          in English). Wrapping keeps every label readable in any language, and
+          two lines at this size still fit the row's min height, so nothing moves
+          for the labels that already fitted. */}
+      <span className="min-w-0 leading-[1.3] break-words md:hidden lg:block">{t(item.labelKey)}</span>
     </NavLink>
   );
 };
@@ -169,7 +175,7 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
         )}
       >
         <Icon className={clsx('size-3.5 shrink-0', childActive ? 'text-mint-ink' : 'text-muted')} />
-        <span className="min-w-0 flex-1 truncate text-left md:hidden lg:block">{t(item.labelKey)}</span>
+        <span className="min-w-0 flex-1 leading-[1.3] break-words text-left md:hidden lg:block">{t(item.labelKey)}</span>
         <ChevronDown
           className={clsx(
             'size-3.5 shrink-0 text-muted transition-transform md:hidden lg:block',

@@ -100,6 +100,7 @@ export const SettingsGeneralPage: React.FC = () => {
       title={t('settings.general.title')}
       subtitle={t('settings.general.subtitle')}
       activeTab="general"
+      titleScale="landing"
     >
       <div className="flex flex-col gap-6">
         {/* Language le5QU — label and selector are one row, no divider. */}

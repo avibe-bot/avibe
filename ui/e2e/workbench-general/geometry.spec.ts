@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { DESKTOP, NARROW, WIDE, open, serveProduct } from './support';
+import { DESKTOP, NARROW, ORIGIN, WIDE, open, serveProduct } from './support';
 
 /**
  * The packet's geometry claims, measured in a browser rather than inferred from
@@ -11,16 +11,51 @@ import { DESKTOP, NARROW, WIDE, open, serveProduct } from './support';
  */
 
 const SIDEBAR = 'aside.fixed';
+const SHELL_SCROLL = 'main#app-shell-scroll';
 const SHELL_CONTENT = 'main#app-shell-scroll > div';
 const SETTINGS_RAIL = 'nav[aria-label="Settings sections"]';
+const SETTINGS_PAGE = 'nav[aria-label="Settings sections"] + section';
 const SETTINGS_CONTENT = 'nav[aria-label="Settings sections"] + section > div';
 const APPEARANCE_CARD = 'section.bg-surface-2:has([role="radiogroup"])';
+// The composer's own workspace chip, not the sidebar tree row: it is the
+// selection the overlay has to hand back, and its label carries the fixture's
+// non-ASCII path.
+const WORKSPACE_CHIP = 'Workspace: /Users/max/工作区/中文项目';
+const MOBILE_NAV = 'nav.fixed.bottom-0';
 const ULTRA = { width: 1920, height: 1000 };
+// A phone one iPhone-generation shorter. The composer has to clear the tab bar
+// because of where it is anchored, not because 844 happens to leave room.
+const NARROW_SHORT = { width: 390, height: 667 };
 
 const widthOf = async (page: import('@playwright/test').Page, selector: string) => {
   const box = await page.locator(selector).first().boundingBox();
   expect(box, `${selector} should be laid out`).not.toBeNull();
   return box!.width;
+};
+
+/**
+ * What the user's finger would actually land on. `toBeVisible()` cannot answer
+ * this: an element covered by a fixed bar is still visible, still has a box, and
+ * still fails every tap.
+ */
+const topmostOver = async (
+  page: import('@playwright/test').Page,
+  locator: import('@playwright/test').Locator,
+) => {
+  const box = await locator.boundingBox();
+  expect(box, 'control should be laid out').not.toBeNull();
+  return page.evaluate(({ x, y }) => {
+    const node = document.elementFromPoint(x, y);
+    if (!node) return 'nothing';
+    const control = node.closest('button, a');
+    return control?.getAttribute('aria-label') ?? control?.textContent?.trim() ?? node.tagName;
+  }, { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 });
+};
+
+const bottomOf = async (locator: import('@playwright/test').Locator) => {
+  const box = await locator.boundingBox();
+  expect(box, 'element should be laid out').not.toBeNull();
+  return box!.y + box!.height;
 };
 
 test.describe('workbench home geometry', () => {
@@ -56,6 +91,128 @@ test.describe('workbench home geometry', () => {
     await expect(page.locator(SIDEBAR)).toBeHidden();
     expect(await widthOf(page, SHELL_CONTENT)).toBe(NARROW.width);
   });
+
+  /**
+   * The phone home is taller than the screen, so whatever ends the page sits
+   * under the fixed tab bar until someone scrolls. What ends the page is the
+   * composer's own action row — Agent, workspace, Send — so the defect is a
+   * dead primary button on first paint, not a cropped screenshot. Both
+   * languages, because the row's left side is translated text whose width moves.
+   */
+  const PHONE_COMPOSER: { lang: 'en' | 'zh'; placeholder: string; send: string; lastRow: string }[] = [
+    { lang: 'en', placeholder: 'Describe a task or ask a question...', send: 'Send', lastRow: 'Continue on your phone' },
+    { lang: 'zh', placeholder: '给你的助手安排任务…', send: '发送', lastRow: '在手机 APP 上继续' },
+  ];
+
+  for (const { lang, placeholder, send, lastRow } of PHONE_COMPOSER) {
+    test(`keeps the composer's controls off the tab bar on a phone (${lang})`, async ({ page }) => {
+      const denied = await serveProduct(page, lang);
+      await page.setViewportSize(NARROW);
+      await open(page, '/', { lang });
+
+      const composer = page.getByPlaceholder(placeholder);
+      const sendButton = page.getByRole('button', { name: send });
+      const nav = page.locator(MOBILE_NAV);
+      await expect(composer).toBeVisible();
+      await expect(nav).toBeVisible();
+
+      // The premise: this page really does overflow, so clearing the bar is the
+      // anchoring and not a lucky fit. If this ever stops being true the rest of
+      // the test would pass for the wrong reason.
+      const overflow = await page.locator(SHELL_SCROLL).evaluate((node) => ({
+        top: node.scrollTop,
+        hidden: node.scrollHeight - node.clientHeight,
+      }));
+      expect(overflow.top).toBe(0);
+      expect(overflow.hidden).toBeGreaterThan(0);
+
+      // Nothing in the block may reach under the bar — asserted on the block's
+      // last row, which is below the action row.
+      const navTop = (await nav.boundingBox())!.y;
+      expect(await bottomOf(page.getByRole('link', { name: lastRow }))).toBeLessThanOrEqual(navTop);
+      // …and the primary control specifically: what a tap would hit, at rest.
+      expect(await topmostOver(page, sendButton)).toBe(send);
+
+      // Typing is when it matters, and a focused textarea is also when the page
+      // could scroll under the user. It must not have to.
+      await composer.click();
+      await composer.fill('给手机上的我写一句话');
+      await expect(composer).toBeFocused();
+      expect(await page.locator(SHELL_SCROLL).evaluate((node) => node.scrollTop)).toBe(0);
+      expect(await topmostOver(page, sendButton)).toBe(send);
+      // Playwright's own actionability check, which is the product's tap path.
+      await sendButton.click({ trial: true });
+
+      // A shorter phone has less room above, never less clearance below.
+      await page.setViewportSize(NARROW_SHORT);
+      await page.waitForFunction(() => window.innerHeight === 667);
+      expect(await topmostOver(page, sendButton)).toBe(send);
+      expect(await bottomOf(page.getByRole('link', { name: lastRow })))
+        .toBeLessThanOrEqual((await nav.boundingBox())!.y);
+
+      expect(denied).toEqual([]);
+    });
+  }
+});
+
+test.describe('settings overlay geometry', () => {
+  test('opens at the sidebar edge and gives the home back its draft on close', async ({ page }) => {
+    const denied = await serveProduct(page);
+
+    await page.setViewportSize(DESKTOP);
+    await open(page, '/');
+
+    // A draft and a project selection are what the overlay exists to preserve,
+    // so the assertion starts by creating both. Non-ASCII on purpose.
+    const draft = '给中文项目写一份说明';
+    const composer = page.getByPlaceholder('Describe a task or ask a question...');
+    await composer.fill(draft);
+    await expect(composer).toHaveValue(draft);
+    await expect(page.getByLabel(WORKSPACE_CHIP)).toBeVisible();
+
+    await page.locator('aside [data-settings-toggle="true"]').click();
+    await expect(page).toHaveURL(/\/settings\/general$/);
+
+    const overlay = page.locator('[data-settings-overlay="true"]');
+    await expect(overlay).toBeVisible();
+
+    // The overlay covers the work area and stops exactly at the sidebar's own
+    // edge — measured off the sidebar rather than compared to a literal, so the
+    // two cannot drift apart the way a second hard-coded width did.
+    const sidebar = await page.locator(SIDEBAR).boundingBox();
+    const surface = await overlay.boundingBox();
+    expect(sidebar!.x).toBe(0);
+    expect(surface!.x).toBe(sidebar!.x + sidebar!.width);
+    expect(surface!.width).toBe(DESKTOP.width - sidebar!.width);
+    // Covering the sidebar would be the same defect from the other side.
+    await expect(page.locator(SIDEBAR)).toBeVisible();
+
+    await page.locator('aside [data-settings-toggle="true"]').click();
+    await expect(page).toHaveURL(`${ORIGIN}/`);
+    await expect(overlay).toHaveCount(0);
+    await expect(page.getByPlaceholder('Describe a task or ask a question...')).toHaveValue(draft);
+    await expect(page.getByLabel(WORKSPACE_CHIP)).toBeVisible();
+
+    expect(denied).toEqual([]);
+  });
+});
+
+test.describe('page background family', () => {
+  test('draws the home flat and leaves the console wash on its siblings', async ({ page }) => {
+    await serveProduct(page);
+    await page.setViewportSize(DESKTOP);
+
+    // Board 04 stages the home on flat $--background.
+    await open(page, '/');
+    await expect(page.locator(SIDEBAR)).toBeVisible();
+    expect(await page.locator(SHELL_SCROLL).evaluate((n) => getComputedStyle(n).backgroundImage)).toBe('none');
+
+    // …and the rest of the console family keeps the aurora it already had, which
+    // is the half of this decision a capture of the home alone cannot show.
+    await open(page, '/agents');
+    expect(await page.locator(SHELL_SCROLL).evaluate((n) => getComputedStyle(n).backgroundImage))
+      .toContain('radial-gradient');
+  });
 });
 
 test.describe('general settings geometry', () => {
@@ -84,6 +241,76 @@ test.describe('general settings geometry', () => {
     // eslint-disable-next-line no-console
     console.log(`general card: ${cardAtStaging} @1200, ${cardAtUltra} @1920`);
     expect(denied).toEqual([]);
+  });
+
+  test('gives the landing its own heading block and leaves the sections alone', async ({ page }) => {
+    await serveProduct(page);
+    await page.setViewportSize(DESKTOP);
+
+    const headingOf = async (path: string) => {
+      await open(page, path);
+      const heading = page.locator(`${SETTINGS_PAGE} h1`).first();
+      await expect(heading).toBeVisible();
+      return heading.evaluate((node) => {
+        const style = getComputedStyle(node);
+        return { size: style.fontSize, weight: style.fontWeight };
+      });
+    };
+
+    // Ozmrf draws the landing at 27/600; every section keeps the 28/700 it
+    // already shipped with, which is why the variant is opt-in.
+    expect(await headingOf('/settings/general')).toEqual({ size: '27px', weight: '600' });
+    expect(await headingOf('/settings/shortcuts')).toEqual({ size: '28px', weight: '700' });
+  });
+
+  // Assessed rather than inherited: the shell sidebar stays on a direct Settings
+  // route, where the source board draws a standalone window with none. The board
+  // is a native window (the same reason Web drops its titlebar and traffic
+  // lights); on Web, Settings is a route in the one shell, and the overlay path
+  // deliberately keeps the sidebar visible so the origin work stays in view.
+  // Hiding it only on the direct route would give one URL two chromes and jump
+  // the layout on close. What the source actually fixes is the frame beside the
+  // rail, and that is reproduced exactly at a real window width.
+  test('reaches the source content frame at a real desktop width', async ({ page }) => {
+    await serveProduct(page);
+    await page.setViewportSize({ width: 1448, height: 900 });
+    await open(page, '/settings/general');
+    await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
+
+    // dqfES — the source's Settings content frame.
+    expect(await widthOf(page, SETTINGS_PAGE)).toBe(1004);
+    expect(await widthOf(page, SIDEBAR)).toBe(248);
+  });
+
+  // A rail label is the only thing that says where a row goes, and English has
+  // two neighbours that both ended in "Platform…" at 196. The rail width is the
+  // source's, so the labels wrap instead.
+  test('shows every rail label in full without widening the rail', async ({ page }) => {
+    await serveProduct(page);
+    await page.setViewportSize(DESKTOP);
+    await open(page, '/settings/platforms');
+    await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
+
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
+
+    // Measured, not eyeballed: a wrapped label's scrollWidth equals its
+    // clientWidth; a clipped one exceeds it.
+    const clipped = await page
+      .locator(`${SETTINGS_RAIL} a[href^="/settings"] span, ${SETTINGS_RAIL} button[aria-expanded] span`)
+      .evaluateAll((nodes) => nodes
+        .filter((node) => node.getClientRects().length > 0 && node.scrollWidth > node.clientWidth)
+        .map((node) => node.textContent?.trim() ?? ''));
+    expect(clipped).toEqual([]);
+
+    const rail = page.locator(SETTINGS_RAIL);
+    await expect(rail.getByRole('button', { name: 'Messaging Platforms' })).toBeVisible();
+    await expect(rail.getByRole('link', { name: 'Platform Connections' })).toBeVisible();
+
+    // Two lines at this size still fit the row height the rail already had, so
+    // the rows that never wrapped do not move.
+    const rows = await rail.locator('a[href^="/settings"]').evaluateAll((nodes) =>
+      nodes.map((node) => Math.round(node.getBoundingClientRect().height)));
+    expect(new Set(rows).size).toBe(1);
   });
 
   test('leaves the shared reading column on every other settings page', async ({ page }) => {

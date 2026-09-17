@@ -189,7 +189,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
     const id = `win-${++idSeq.current}`;
     const z = ++zSeq.current;
     const bounds: WindowBounds = {
-      // Cascade starts clear of the 240px sidebar so a new window doesn't open over it
+      // Cascade starts clear of the 248px sidebar so a new window doesn't open over it
       // (the layer now spans the full viewport); it can still be dragged/maximized over it.
       x: 264 + i * CASCADE_STEP,
       y: 32 + i * CASCADE_STEP,

@@ -362,6 +362,10 @@ export const AppShell: React.FC = () => {
   const isShowPageApp = surfaceLocation.pathname.startsWith('/apps/show/');
   const isBuiltinApp = isStandaloneAppRoutePath(surfaceLocation.pathname);
   const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
+  // `/` is the Workbench canvas root and the only route board 04 draws. It reads
+  // the surface location, so Settings opened over the home keeps the home's own
+  // background behind the overlay.
+  const isWorkbenchHome = surfaceLocation.pathname === '/';
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
@@ -489,8 +493,18 @@ export const AppShell: React.FC = () => {
             : isFullScreenMobile
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[248px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[248px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
-          !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
-          !chromeless && (isSettings ? 'page-glow-settings' : 'page-glow-console')
+          !chromeless && (showBottomNav ? 'pb-[var(--mobile-nav-clearance)]' : 'pb-0'),
+          // Board 04 draws the Workbench home on flat $--background. The console
+          // aurora stays with the rest of its page family (Agents, Skills,
+          // Harness, Vaults, Inbox, chat), so this is scoped to `/` alone and
+          // repaints nothing else. `bg-background` rather than no class at all:
+          // the flatness is the decision, and a computed `background-image: none`
+          // is what a test can hold it to.
+          !chromeless && (
+            isSettings ? 'page-glow-settings'
+              : isWorkbenchHome ? 'bg-background'
+                : 'page-glow-console'
+          )
         )}
       >
         <div className={clsx(
