@@ -17,7 +17,6 @@ interface WelcomeProps {
 export function Welcome({ data, onNext }: WelcomeProps) {
   const { t } = useTranslation();
   const api = useApi();
-  const [paused, setPaused] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busy = useRef(false);
@@ -46,9 +45,9 @@ export function Welcome({ data, onNext }: WelcomeProps) {
         <h1>{t('onboarding.welcome.title')}</h1>
         <p>{t('onboarding.welcome.subtitle')}</p>
       </header>
-      <CollaborationStory paused={paused} onPausedChange={setPaused} />
-      <AccessTiles paused={paused} />
-      <Button type="button" variant="brand" className="group h-11 min-w-36" onClick={() => void start()} disabled={pending}>
+      <CollaborationStory />
+      <AccessTiles />
+      <Button type="button" variant="brand" className="group onboarding-primary-action" onClick={() => void start()} disabled={pending}>
         {t(pending ? 'onboarding.welcome.detecting' : error ? 'common.retry' : 'onboarding.welcome.getStarted')}
         {pending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />}
       </Button>

@@ -22,7 +22,7 @@ import {
   collectWizardEnabledPlatformDelta,
   type WizardEnabledPlatformDelta,
 } from '../lib/wizardConfigMutations';
-import { BrandLogo, WizardChrome } from './visual';
+import { WizardChrome } from './visual';
 import { LanguageSwitcher } from './LanguageSwitcher';
 
 export const Wizard: React.FC = () => {
@@ -245,8 +245,9 @@ export const Wizard: React.FC = () => {
   if (isWelcome || stepId === 'agents') {
     return (
       <div className="onboarding-shell">
+        {/* The 2026-09-17 design drops the brand mark from the guidance screens
+            ("这些引导页的logo都去掉"); the language switcher keeps the bar. */}
         <header>
-          <div className="flex items-center gap-2.5"><BrandLogo size={32} /><span className="text-sm font-semibold">Avibe</span></div>
           <LanguageSwitcher />
         </header>
         <main className="onboarding-shell-content">

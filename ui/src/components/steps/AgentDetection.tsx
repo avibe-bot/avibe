@@ -478,7 +478,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       <div className="onboarding-assistants">
         <div className="onboarding-assistants-header">
           <h3>{t('onboarding.setup.assistants')}</h3>
-          <Button type="button" variant="ghost" size="sm" onClick={() => void detectAll()}
+          {/* n4ATm draws this as an outlined control on its own surface, not a bare
+              text button: `secondary` is that pair, and `xs` its 12px/12px metrics. */}
+          <Button type="button" variant="secondary" size="xs" onClick={() => void detectAll()}
             disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
             <RefreshCw size={14} />{t('agentDetection.rescan')}
           </Button>
@@ -513,9 +515,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         onSetup={() => void permission.setupPermission()} className="w-full" />
       {providerDialog}
       <div className="onboarding-setup-footer">
-        <Button type="button" variant="brand" className="h-11 min-w-36" onClick={() => void handlePrimaryAction()}
+        <Button type="button" variant="brand" className="group onboarding-primary-action" onClick={() => void handlePrimaryAction()}
           disabled={!canContinue || syncing}>
-          {t('common.continue')}<ArrowRight size={16} />
+          {t('common.continue')}
+          <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
         </Button>
         {opencodeNeedsPermission && <p className="text-center text-xs text-gold-ink">{t('agentDetection.permissionGateHint')}</p>}
         {onBack && <Button type="button" variant="ghost" size="sm" disabled={syncing} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}

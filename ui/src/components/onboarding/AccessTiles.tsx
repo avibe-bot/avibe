@@ -1,17 +1,19 @@
 import { useEffect, useState } from 'react';
-import { useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { PlatformIcon } from '../visual';
+import { useOnboardingMotion } from './motion';
 
 const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'];
 
-export function AccessTiles({ paused }: { paused: boolean }) {
+export function AccessTiles() {
   const { t } = useTranslation();
-  const reducedMotion = useReducedMotion() === true;
+  const { running } = useOnboardingMotion();
   const [pointerInside, setPointerInside] = useState(false);
   const [focusInside, setFocusInside] = useState(false);
   const [emphasis, setEmphasis] = useState<number | null>(null);
-  const automatic = !paused && !reducedMotion && !pointerInside && !focusInside;
+  // Same running state as the story, so a hidden tab or a reduced-motion preference
+  // stops both; pointer and keyboard interaction still yield the emphasis to the user.
+  const automatic = running && !pointerInside && !focusInside;
   useEffect(() => {
     if (!automatic) return;
     const timer = window.setInterval(() => {
