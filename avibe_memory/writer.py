@@ -184,8 +184,8 @@ class BestEffortMemoryWriter:
         # Stable, content-free evidence also survives a controller restart in
         # the ordinary service log. Never include captures or exception bodies.
         logger.warning(
-            "Memory write observation id=%s kind=%s operation=%s state=%s error=%s",
-            entry.id, kind, operation, state, error,
+            "Memory write observation id=%s kind=%s operation=%s state=%s",
+            entry.id, kind, operation, state,
         )
 
     def _record_unsubmitted_drop(self) -> None:
@@ -704,7 +704,7 @@ class BestEffortMemoryWriter:
                 continue
             result: FlushResult | None = None
             for attempt in range(1, MAX_ATTEMPTS + 1):
-                if not self._enabled():
+                if not self._enabled() or self._unavailable:
                     self._pending.pop(key, None)
                     return
                 self._active_provider_calls += 1
@@ -743,7 +743,11 @@ class BestEffortMemoryWriter:
             if isinstance(result, FlushUnknown):
                 self._pending.pop(key, None)
                 await self._ambiguous_outcome(
-                    "memory_provider_timeout" if result.reason == "timeout" else "memory_sidecar_unavailable",
+                    {
+                        "timeout": "memory_provider_timeout",
+                        "transport": "memory_sidecar_unavailable",
+                        "invalid_response": "memory_provider_response_invalid",
+                    }[result.reason],
                     operation="flush", attempts=attempt,
                 )
                 return

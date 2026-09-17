@@ -416,7 +416,7 @@ class EverOSPort:
                 request_id is None
                 or status not in {"extracted", "no_extraction"}
             ):
-                return FlushUnknown(reason="transport")
+                return FlushUnknown(reason="invalid_response")
             return FlushSucceeded(request_id=request_id, status=status)
         error = envelope.get("error") if envelope is not None else None
         error_code = error.get("code") if isinstance(error, dict) else None

@@ -634,7 +634,7 @@ def test_flush_treats_unusable_2xx_body_as_unknown_without_replaying_write(caplo
         ack, result = asyncio.run(run())
 
     assert ack == AddAck(request_id=None, status=None)
-    assert result == FlushUnknown(reason="transport")
+    assert result == FlushUnknown(reason="invalid_response")
     assert requests == ["/api/v2/memory/add", "/api/v2/memory/flush"]
     assert "add returned 2xx with an unusable response body" in caplog.text
     assert "flush returned 2xx with an unusable response body" in caplog.text
@@ -658,7 +658,7 @@ def test_flush_treats_unsupported_2xx_status_as_unknown(caplog) -> None:
         ack, result = asyncio.run(run())
 
     assert ack == AddAck(request_id=None, status=None)
-    assert result == FlushUnknown(reason="transport")
+    assert result == FlushUnknown(reason="invalid_response")
     assert "add returned an unsupported status value" in caplog.text
     assert "flush returned an unsupported status value" in caplog.text
 
@@ -674,7 +674,7 @@ def test_flush_rejects_invalid_success_receipt(request_id: str) -> None:
     with _sidecar_transport(handler):
         result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
 
-    assert result == FlushUnknown(reason="transport")
+    assert result == FlushUnknown(reason="invalid_response")
 
 
 @pytest.mark.parametrize(

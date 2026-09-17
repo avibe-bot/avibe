@@ -37,7 +37,7 @@ class FlushRejected:
 
 @dataclass(frozen=True)
 class FlushUnknown:
-    reason: Literal["timeout", "transport"]
+    reason: Literal["timeout", "transport", "invalid_response"]
 
 
 @dataclass(frozen=True)

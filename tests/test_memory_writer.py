@@ -1331,8 +1331,8 @@ async def test_separate_recoveries_do_not_coalesce_drop_observations(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["add", "flush"])
-@pytest.mark.parametrize("code", ["UNSUPPORTED_FORMAT", None])
-async def test_rejection_observation_preserves_provider_code(tmp_path, operation, code):
+@pytest.mark.parametrize("code", ["UNSUPPORTED_FORMAT", "secret-canary\nforged-log-line", None])
+async def test_rejection_observation_preserves_provider_code(tmp_path, operation, code, caplog):
     from avibe_memory.observations import FlushRejected
     provider = FakeMemoryProvider(
         add_results=deque([AddRejected("synthetic", code, False)]),
@@ -1348,4 +1348,47 @@ async def test_rejection_observation_preserves_provider_code(tmp_path, operation
         writer._pending[ref.serialize()] = _PendingSession(ref, "raw-session-0", deque(["digest"]), 0, 0)
         await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
     assert writer.failure_observations()[0].error_code == (code or "memory_processing_failed")
+    if code:
+        assert code not in caplog.text
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["retryable", "exception", "success"])
+async def test_flush_crash_fences_all_subsequent_calls(tmp_path, outcome):
+    calls = []
+
+    async def flush(ref):
+        calls.append(ref)
+        writer.pause_intake(unavailable=True)
+        if outcome == "exception":
+            raise MemoryProviderFailure("memory_sidecar_unavailable", retryable=True)
+        return FlushRetryable() if outcome == "retryable" else FlushSucceeded("receipt", "extracted")
+
+    provider = FakeMemoryProvider()
+    provider.flush = flush
+    writer = _writer(tmp_path, provider)
+    for ref in [_ref(0), _ref(1)]:
+        writer._pending[ref.serialize()] = _PendingSession(ref, "shared", deque(["digest"]), 0, 0)
+    await writer._flush_barrier(_BarrierItem(raw_session_id="shared"))
+    assert calls == [_ref(0)]
+    await writer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason,error", [
+    ("timeout", "memory_provider_timeout"),
+    ("transport", "memory_sidecar_unavailable"),
+    ("invalid_response", "memory_provider_response_invalid"),
+])
+async def test_flush_unknown_preserves_cause_without_retry(tmp_path, reason, error):
+    from avibe_memory.observations import FlushUnknown
+    provider = FakeMemoryProvider(flush_results=deque([FlushUnknown(reason)]))
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda _: True)
+    ref = _ref()
+    writer._pending[ref.serialize()] = _PendingSession(ref, "shared", deque(["digest"]), 0, 0)
+    await writer._flush_barrier(_BarrierItem(raw_session_id="shared"))
+    entry = writer.failure_observations()[0]
+    assert (entry.error_code, entry.state, entry.attempts) == (error, "unknown", 1)
+    assert not writer._pending
     await writer.close()

@@ -103,3 +103,13 @@ orchestrator audited both operation cancellation branches: an already-unavailabl
 writer reports sidecar unavailability; other cancellation reports processing
 interruption. Actual transport timeouts retain their adapter-owned classification.
 The change is diagnostic-only and does not modify stop/reap or replay behavior.
+
+Review of `9a9e8ff` found three remaining members of the boundary/diagnostic
+class: flush retries and later sessions ignored the crash fence, invalid flush
+responses were labeled transport failures, and opaque rejection codes entered
+service logs. The orchestrator retained the existing model: check availability
+before every flush attempt, carry one invalid-response reason in the shared
+result contract, and log only internal observation classification. Opaque codes
+remain in bounded process-local observations only. Regression coverage includes
+all flush continuation outcomes and both rejection operations with a secret/newline
+canary; no new recovery state or sanitization framework is needed.
