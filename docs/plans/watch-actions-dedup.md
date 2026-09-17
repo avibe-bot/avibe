@@ -115,6 +115,14 @@ ordinary Watch re-arming, which must never reseed.
 
 - Missing or regressed Actions observations do not establish a fresh terminal
   gate. A deleted known run can require investigation; absence is not success.
+- Existing PR settle limitation, not fixed here: a later nonempty PR snapshot
+  containing event B but omitting previously detected event A can replace the
+  earlier candidate and report only B. The unchanged base has the same behavior;
+  six hermetic comparisons (startup/loop, each with PR-only, stable CI, or
+  withdrawn CI) produced the same output and staged PR snapshot before and
+  after this change. Quiet-poll fallback and report/snapshot binding do not turn
+  bounded snapshot coalescing into an append-only activity log. Extending that
+  contract is separate from fixing introduced CI notification regressions.
 - This fixes a reproduced notification defect. Historical raw polling responses
   were not retained, so it does not claim to prove every earlier duplicate's
   remote API cause.
