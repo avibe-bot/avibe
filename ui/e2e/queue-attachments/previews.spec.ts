@@ -53,6 +53,7 @@ const ORDER = [
   'q-wrap',
   'q-longname',
   'q-longbroken',
+  'q-three',
 ];
 const rowIndex = (id: string) => ORDER.indexOf(id);
 
@@ -298,6 +299,126 @@ test('the disclosure keeps keyboard focus through expand and collapse', async ({
   await expect(sheet).toHaveCount(0);
   await expect(control).toBeFocused();
   await expect(control).toHaveAttribute('aria-label', collapsedLabel);
+});
+
+// Crossing `sm` is the other way the disclosure used to lose focus, and the one
+// only a real browser can show: capacity lived in CSS, so one logical control was
+// two elements and the crossing turned whichever held focus into `display:none`.
+// A resize here is a real resize — the media query fires, and `activeElement` is
+// read from the browser rather than inferred.
+const NARROW = { width: 390, height: 780 };
+const WIDE = { width: 1024, height: 780 };
+const rowText = (page: Page, id: string) => row(page, id).locator('div[role="button"]');
+
+test('the sm boundary switches capacity at exactly 640px', async ({ page }) => {
+  await page.setViewportSize({ width: 639, height: 780 });
+  await expect(previews(page, 'q-mixed')).toHaveCount(NARROW_CAPACITY);
+  await expect(moreButton(page, 'q-mixed')).toHaveAttribute('aria-label', 'Show 3 more attachments');
+  // Two attachments fit either way, so neither width offers a control that would
+  // disclose nothing.
+  await expect(moreButton(page, 'q-token')).toHaveCount(0);
+
+  await page.setViewportSize({ width: 640, height: 780 });
+  await expect(previews(page, 'q-mixed')).toHaveCount(DESKTOP_CAPACITY);
+  await expect(moreButton(page, 'q-mixed')).toHaveAttribute('aria-label', 'Show 2 more attachments');
+  await expect(moreButton(page, 'q-token')).toHaveCount(0);
+});
+
+test('the disclosure keeps focus, as one element, across a real resize', async ({ page }) => {
+  await page.setViewportSize(NARROW);
+  const control = moreButton(page, 'q-mixed');
+  await control.focus();
+  await expect(control).toHaveAttribute('aria-label', 'Show 3 more attachments');
+  // Stamped on the live node: if the crossing swapped in a different element the
+  // stamp goes with the old one, and the assertion below has nothing to match.
+  await control.evaluate((el) => el.setAttribute('data-focus-probe', 'kept'));
+
+  await page.setViewportSize(WIDE);
+
+  await expect(page.locator('[data-focus-probe="kept"]')).toBeFocused();
+  await expect(control).toHaveAttribute('aria-label', 'Show 2 more attachments');
+  await expect(moreButton(page, 'q-mixed')).toHaveCount(1);
+
+  await page.setViewportSize(NARROW);
+
+  await expect(page.locator('[data-focus-probe="kept"]')).toBeFocused();
+  await expect(control).toHaveAttribute('aria-label', 'Show 3 more attachments');
+});
+
+// The reported sequence, end to end.
+test('collapsing with nothing left to hide hands focus to the row text', async ({ page }) => {
+  await page.setViewportSize(NARROW);
+  const control = moreButton(page, 'q-three');
+  const sheet = row(page, 'q-three').locator('[data-queue-attachments="disclosed"]');
+
+  await control.focus();
+  await page.keyboard.press('Enter');
+  await expect(sheet).toHaveCount(1);
+  await expect(control).toBeFocused();
+
+  // Widening leaves the control meaningful — it still says "collapse" — so it
+  // keeps both its identity and its focus.
+  await page.setViewportSize(WIDE);
+  await expect(control).toBeFocused();
+  await expect(control).toHaveAttribute('aria-label', 'Collapse attachments');
+
+  await page.keyboard.press('Enter');
+
+  // Three attachments all fit at this width, so the control is now genuinely
+  // meaningless. It goes, and focus goes somewhere a keyboard user can continue
+  // from — not to the document.
+  await expect(sheet).toHaveCount(0);
+  await expect(moreButton(page, 'q-three')).toHaveCount(0);
+  await expect(rowText(page, 'q-three')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.locator('body')).not.toBeFocused();
+});
+
+test('widening past the last hidden attachment hands focus to the row text', async ({ page }) => {
+  await page.setViewportSize(NARROW);
+  const control = moreButton(page, 'q-three');
+  await expect(control).toHaveAttribute('aria-label', 'Show 1 more attachments');
+  await control.focus();
+
+  await page.setViewportSize(WIDE);
+
+  await expect(previews(page, 'q-three')).toHaveCount(3);
+  await expect(moreButton(page, 'q-three')).toHaveCount(0);
+  await expect(rowText(page, 'q-three')).toBeFocused();
+});
+
+test('narrowing past the third preview hands focus to the row text', async ({ page }) => {
+  await page.setViewportSize(WIDE);
+  await previews(page, 'q-mixed').nth(2).focus();
+
+  await page.setViewportSize(NARROW);
+
+  await expect(previews(page, 'q-mixed')).toHaveCount(NARROW_CAPACITY);
+  await expect(rowText(page, 'q-mixed')).toBeFocused();
+});
+
+test('a surviving preview keeps its own focus through a resize', async ({ page }) => {
+  await page.setViewportSize(WIDE);
+  const first = previews(page, 'q-mixed').first();
+  await first.focus();
+
+  await page.setViewportSize(NARROW);
+
+  await expect(first).toBeFocused();
+});
+
+// The transfer is conditional on this group having held focus. Someone part-way
+// through the row's own actions is not dragged back to its text because an
+// attachment control happened to disappear.
+test('a resize leaves focus outside the attachment group alone', async ({ page }) => {
+  await page.setViewportSize(NARROW);
+  const remove = row(page, 'q-three').getByRole('button', { name: 'Remove from queue' });
+  await remove.focus();
+
+  await page.setViewportSize(WIDE);
+
+  await expect(moreButton(page, 'q-three')).toHaveCount(0);
+  await expect(remove).toBeFocused();
 });
 
 test('a third-party file is an explicit external link, never fetched for us', async ({ page }) => {

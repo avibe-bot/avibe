@@ -164,8 +164,7 @@ const Disclosure: React.FC<{
   count: number;
   expanded: boolean;
   onToggle: () => void;
-  className?: string;
-}> = ({ count, expanded, onToggle, className }) => {
+}> = ({ count, expanded, onToggle }) => {
   const { t } = useTranslation();
   const label = expanded
     ? t('chat.queue.attachments.collapse')
@@ -178,7 +177,7 @@ const Disclosure: React.FC<{
       aria-label={label}
       title={label}
       data-queue-attachment-more="true"
-      className={clsx(TARGET, className)}
+      className={TARGET}
     >
       <span className={clsx(PILL, 'border-border-strong bg-muted-soft font-mono text-[10px] font-bold')}>
         {!expanded && t('chat.queue.attachments.more', { count })}
@@ -188,57 +187,105 @@ const Disclosure: React.FC<{
   );
 };
 
+// How many attachments fit on the collapsed line: three at a desktop width, two
+// below `sm`.
+//
+// This is one number, read once, rather than two mirrored sets of classes. The
+// CSS version made a *layout* own focus: one logical disclosure existed as two
+// elements (`sm:hidden` / `hidden sm:flex`) and the third slot as a
+// `hidden sm:flex` wrapper, so crossing the breakpoint turned whichever one held
+// focus into `display:none`. The browser blurs such an element and CSS cannot
+// hand focus to its replacement, so focus fell to the document — the same defect
+// as unmounting a focused button, reached by a different route.
+//
+// This is a media-query *change* listener, not element measurement: it fires
+// twice per breakpoint crossing for the whole page, reads no geometry, and does
+// not grow with the number of rows in the strip.
+const WIDE_QUERY = '(min-width: 640px)'; // the `sm` token
+const INLINE_CAPACITY = { narrow: 2, wide: 3 };
+
+const readWide = () =>
+  typeof window !== 'undefined' && Boolean(window.matchMedia?.(WIDE_QUERY).matches);
+
 // The inline group, between the row's text and its actions.
 //
-// Capacity is chosen in CSS, not in JS: three attachments at a desktop width and
-// two below `sm`, with a `+N` per breakpoint so the number always matches what is
-// actually hidden. A resize listener would have to re-measure every row inside a
-// scrolling strip, and would make the server-rendered markup a third state that
-// matches neither width.
+// Exactly one disclosure button exists per row, and it is the same DOM element
+// for as long as a disclosure action is available at all — across expand,
+// collapse and breakpoint changes alike. When it stops being available, focus is
+// handed to `onFocusEscape` rather than left on a hidden node or dropped.
 export const QueuedAttachmentGroup: React.FC<{
   attachments: MessageAttachment[];
   expanded: boolean;
   onToggle: () => void;
-}> = ({ attachments, expanded, onToggle }) => {
+  /**
+   * Where focus goes when this group loses the element that was holding it — the
+   * row's own text control. Only ever called when focus was inside this group
+   * immediately before the change that removed it.
+   */
+  onFocusEscape?: () => void;
+}> = ({ attachments, expanded, onToggle, onFocusEscape }) => {
+  const root = React.useRef<HTMLDivElement>(null);
+  // Set immediately before a change that may remove the focused node, read once
+  // the new DOM is committed. Nothing else sets it, so a group that did not own
+  // focus can never take it from whoever does.
+  const held = React.useRef(false);
+  const hold = React.useCallback(() => {
+    const active = document.activeElement;
+    held.current = Boolean(active && root.current?.contains(active));
+  }, []);
+
+  // `hold()` runs inside the listener, while the DOM that is about to change is
+  // still the one on screen. That is the only moment at which "who has focus
+  // right now" is still answerable — by the time React has committed, a removed
+  // element has already taken focus to the document with it.
+  const [wide, setWide] = React.useState(readWide);
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(WIDE_QUERY);
+    // Reconcile anything that moved between the first render and this effect.
+    // No focus bookkeeping: nothing was removed under a user yet.
+    setWide(media.matches);
+    const onChange = (event: MediaQueryListEvent) => {
+      hold();
+      setWide(event.matches);
+    };
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, [hold]);
+  const capacity = wide ? INLINE_CAPACITY.wide : INLINE_CAPACITY.narrow;
+
+  React.useLayoutEffect(() => {
+    if (!held.current) return;
+    held.current = false;
+    // The element survived the change, so the browser kept focus on it and there
+    // is nothing to move.
+    if (root.current?.contains(document.activeElement)) return;
+    onFocusEscape?.();
+  });
+
   const total = attachments.length;
+  const hiddenCount = Math.max(0, total - capacity);
   if (total === 0) return null;
   return (
     <div
+      ref={root}
       className="flex shrink-0 items-center gap-1"
       data-queue-attachments={expanded ? 'expanded' : 'inline'}
     >
       {/* Disclosing replaces the inline previews rather than adding to them: the
           sheet below lists every attachment exactly once, in source order. */}
-      {!expanded && (
-        <>
-          {attachments.slice(0, 2).map((att, i) => (
-            <Item key={i} att={att} />
-          ))}
-          {total > 2 && (
-            // The third slot is desktop-only, and `hidden` is display:none — so at a
-            // narrow width it leaves the tab order with its thumbnail, and exactly
-            // one of the two `+N` buttons below is reachable at any one width.
-            <div className="hidden shrink-0 sm:flex">
-              <Item att={attachments[2]} />
-            </div>
-          )}
-        </>
-      )}
-      {/* Both disclosure buttons hold their place across the toggle. A keyboard
-          user who presses `+N` is standing on one of them, and unmounting it
-          would drop focus to the document instead of leaving it on the same
-          control — now labelled "collapse". Keeping them mounted also means a
-          row disclosed at a narrow width still offers its way back after the
-          window widens. */}
-      {total > 2 && (
-        <Disclosure count={total - 2} expanded={expanded} onToggle={onToggle} className="sm:hidden" />
-      )}
-      {(expanded || total > 3) && (
+      {!expanded && attachments.slice(0, capacity).map((att, i) => <Item key={i} att={att} />)}
+      {/* Rendered whenever there is something to disclose or something disclosed,
+          always in this position, so the button a keyboard user is standing on
+          keeps its identity through the toggle and through a resize. */}
+      {(expanded || hiddenCount > 0) && (
         <Disclosure
-          count={total - 3}
+          count={hiddenCount}
           expanded={expanded}
-          onToggle={onToggle}
-          className="hidden sm:flex"
+          onToggle={() => {
+            hold();
+            onToggle();
+          }}
         />
       )}
     </div>

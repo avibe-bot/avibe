@@ -10,10 +10,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // ``ChatPage`` reaches the composer's mention editor at import time, which reads
 // ``matchMedia`` on the module's first evaluation — before any test body runs.
+// A mounted queue row also subscribes to the `sm` breakpoint, so the stub has to
+// answer the whole `MediaQueryList` surface, not only ``matches``.
 vi.hoisted(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
-    value: vi.fn().mockReturnValue({ matches: false }),
+    value: vi.fn().mockReturnValue({
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }),
   });
 });
 

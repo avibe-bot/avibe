@@ -233,6 +233,125 @@ genuine wrap where one line cannot hold the name.
 Full UI unit suite 4575 passed / 323 files; `npm run lint` with no baseline drift;
 `typecheck:tests` and `npm run build` clean.
 
+## Review round 3 — circuit breaker, head 9776b729
+
+### Ledger
+
+Codex reviews on PR #2045, counted by each review's own commit / originalCommit
+rather than the mutable `ReviewComment.commit`:
+
+| head | Codex evidence | findings |
+| --- | --- | --- |
+| `f1e97c0c09` | review 5253087669 | 3 — normalization, disclosure focus, URL trust |
+| `43475ccaba` | issue comment 5736966752 | 0 — clean pass |
+| `9776b729fc` | review 5253281275 | 1 — disclosure focus again (4051258561) |
+
+Threads: 4 total, single page. Three resolved (two flagged outdated by the file
+rename, not withdrawn); `PRRT_kwDOPbFPYs6j6qYW` unresolved and carrying the new
+finding.
+
+The focus class therefore appears on two findings-bearing heads. The intervening
+clean pass does not reset the count — that head simply was not read for this
+state. The breaker tripped, the lane stopped before any further edit, and the
+orchestrator discharged it with the bounded decision recorded below. A future
+repeated-class finding must stop again; this is not a waiver.
+
+### Root cause of the whole class
+
+Focus ownership was attached to a *layout's* DOM node instead of to one logical
+disclosure action. Capacity was chosen in CSS, so one logical control existed as
+two elements — `sm:hidden` and `hidden sm:flex` — and the third inline slot
+existed as a `hidden sm:flex` wrapper. Two consequences, both reproduced in a
+browser on an isolated archive of `9776b729` with exactly three attachments:
+
+- Crossing the breakpoint turns the focused element into `display:none`. The
+  browser blurs it and CSS cannot hand focus to the replacement: 390px expanded
+  with focus on *Collapse attachments*, widened to 1024px, gives
+  `document.activeElement === BODY`.
+- The desktop control's mount condition was still `expanded || total > 3`, so at
+  exactly three attachments collapsing from it unmounted it — the original
+  `f1e97c0c` defect, alive in one region.
+
+Round 1 fixed "unmounted on toggle" and asserted `activeElement` across expand and
+collapse at each capacity, but its desktop case used `total = 5`, where the mount
+condition is true regardless of `expanded`. The assertion passed for a reason that
+does not generalise. jsdom has no media queries, so the breakpoint half was
+invisible to every unit test by construction; it needs the browser suite, and the
+browser suite asserted focus across both toggles but never across a viewport
+change. The contract also named no focus destination for a control that
+legitimately ceases to exist.
+
+This is a local rendering/lifecycle defect. It is not a data-model or queue
+redesign.
+
+### Focus fallback contract
+
+- One stable interactive disclosure button per row, its count and accessible name
+  matching the current inline capacity. The same DOM element is retained whenever
+  expand/collapse or a breakpoint change leaves a disclosure action available. Two
+  focusable controls handing off between them is not an acceptable shape.
+- When this control holds focus and a user action or a capacity change makes it
+  unnecessary — `total = 3`, wide and collapsed — focus moves to the row's
+  existing text control before the button is removed. The row text is the stable
+  in-row inspection anchor. Focus never goes to Remove/Send and never falls to
+  `document.body`; no empty `+0` control and no invisible focused element.
+- The adjacent case in the same class is closed the same way: if narrowing drops
+  the focused third inline attachment, focus moves to that same row-text anchor.
+- Surviving attachment and disclosure nodes keep focus. Expanding or collapsing
+  never duplicates an attachment. Focus that belongs to something outside this
+  group is never moved. The original message removal/flush lifecycle is outside
+  this local control policy.
+
+### Scope decision
+
+Allowed: `QueuedAttachments.tsx`, `QueueRow`'s text ref in `ChatPage.tsx`, the
+focused tests and browser fixture, this document, and a small local capacity hook.
+A `matchMedia('(min-width: 640px)')` **change** listener is explicitly approved as
+the one authoritative capacity projection; the earlier in-code note rejecting a
+resize listener conflated that with element measurement and per-pixel resize
+handling, and is not a contract constraint. Still excluded: `ResizeObserver`,
+layout remeasurement, any generalized focus framework, new dependencies, backend
+or storage changes, and any other UI redesign. Capacity stays 2/3, and the compact
+geometry, `+N` count, keyboard/touch behavior and i18n keys are unchanged.
+
+### What round 3 built
+
+Capacity became one number instead of two mirrored sets of classes. A
+`matchMedia('(min-width: 640px)')` change listener holds `2` or `3` in state, and
+that number drives both how many previews the collapsed line renders and whether
+the disclosure has anything left to disclose. The disclosure is a single element
+in a fixed child position, so React keeps the same DOM node — and therefore the
+browser keeps focus on it — across expand, collapse and breakpoint changes alike.
+The listener is not element measurement: it fires twice per crossing for the whole
+page, reads no geometry, and does not scale with the number of queued rows.
+
+Focus ownership is captured inside that listener (and inside the toggle handler),
+because that is the last moment at which "who has focus right now" is still
+answerable: once React has committed, a removed element has already taken focus to
+the document with it. A `useLayoutEffect` then checks whether focus survived
+inside the group; only if it did not does it call `onFocusEscape`, which
+`QueueRow` wires to `.focus()` on its existing row-text control. The flag is set
+nowhere else, so a group that never owned focus cannot take it from whoever does.
+
+`QueueRow` gained a ref on the row-text element it already rendered. No new
+control, no new state, no focus framework.
+
+### Round 3 evidence
+
+- 46 focused unit tests, including a controllable `matchMedia` mock that emits a
+  real `change` event — jsdom has no media queries, which is why the CSS-driven
+  half of this defect was invisible to every earlier unit test by construction.
+  Eight of them cross the `sm` boundary in both directions.
+- 48 browser tests across desktop (1280) and mobile (390), covering 639/640 exactly,
+  a `data-focus-probe` stamp that proves the disclosure is the *same node* after a
+  real resize, `activeElement` and Tab-continuation assertions for each case where a
+  control ceases to exist, and the pre-existing geometry, hit-target and viewer tests.
+- Both new guard families were mutation-proved: removing the focus transfer fails
+  exactly the three row-text-anchor tests; forcing node replacement with a keyed
+  remount fails exactly the two identity tests plus the reported sequence. The
+  tests hold the invariant, not the mechanism.
+- Lint (baseline, no drift), `tsc -b`, e2e tsconfig and `vite build` all clean.
+
 ## Status
 
 - [x] Owner instruction and compact design recovered.

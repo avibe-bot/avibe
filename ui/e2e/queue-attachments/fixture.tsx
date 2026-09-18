@@ -86,6 +86,15 @@ const QUEUE: WorkbenchMessage[] = [
   // The same unreadable-name problem arriving the other way: an image that fails
   // to load hands its click to the very same viewer.
   queued('q-longbroken', '', [media('med_broken_long', LONG_IMAGE)]),
+  // Exactly the count at which the disclosure is needed on one side of the `sm`
+  // boundary and meaningless on the other: three hides one below 640px and hides
+  // nothing above it. That is where a control legitimately ceases to exist, so it
+  // is where focus has to be handed somewhere deliberate.
+  queued('q-three', '', [
+    media('med_1', 'first.png'),
+    media('med_2', 'second.png'),
+    media('med_3', 'third.png'),
+  ]),
 ];
 
 // The transcript gallery deliberately CONTAINS the queued image, so the spec can

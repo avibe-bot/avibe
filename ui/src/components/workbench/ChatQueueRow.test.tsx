@@ -1,19 +1,50 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ``ChatPage`` reaches the composer's mention editor at import time, which reads
 // ``matchMedia`` on the module's first evaluation — before any test body runs.
-vi.hoisted(() => {
+//
+// The attachment group reads the `sm` breakpoint through the same API, so this
+// mock is a real one for that query: a test picks a width by setting it, and
+// crosses the breakpoint by dispatching the `change` event a browser dispatches.
+// jsdom has no media queries of its own, which is exactly why the CSS version of
+// this component had a focus defect no unit test could see.
+const breakpoint = vi.hoisted(() => {
+  const WIDE = '(min-width: 640px)';
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const state = { wide: false };
+  const media = {
+    get matches() {
+      return state.wide;
+    },
+    addEventListener: (_: string, fn: (event: MediaQueryListEvent) => void) => listeners.add(fn),
+    removeEventListener: (_: string, fn: (event: MediaQueryListEvent) => void) => listeners.delete(fn),
+  };
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
-    value: vi.fn().mockReturnValue({ matches: false }),
+    value: vi.fn((query: string) =>
+      query === WIDE ? media : { matches: false, addEventListener: () => {}, removeEventListener: () => {} },
+    ),
   });
+  return {
+    state,
+    emit: () => listeners.forEach((fn) => fn({ matches: state.wide } as MediaQueryListEvent)),
+  };
 });
+
+const viewport = {
+  /** Before a render: picks the width. After one: crosses the breakpoint. */
+  set(wide: boolean) {
+    if (breakpoint.state.wide === wide) return;
+    breakpoint.state.wide = wide;
+    act(() => breakpoint.emit());
+  },
+};
 
 import en from '../../i18n/en.json';
 import type { WorkbenchMessage } from '../../context/ApiContext';
@@ -54,6 +85,9 @@ const renderQueued = (item: WorkbenchMessage) =>
   wrap(<QueueRow item={item} onRemove={() => undefined} onRecall={() => undefined} />);
 
 afterEach(cleanup);
+beforeEach(() => {
+  breakpoint.state.wide = false;
+});
 
 // A live row under both viewers, so what an attachment click actually asks for
 // is observable — the two handles are the whole boundary between the queue and
@@ -380,21 +414,33 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
     expect(openFile).toHaveBeenCalledWith({ url: '/api/media/med_1', name: 'console-log.png' });
   });
 
-  it('caps the inline run per width and counts exactly what each width hides', () => {
+  // Capacity is one number now, so each width renders exactly the slots it has
+  // room for and exactly one disclosure — rather than both widths' markup with
+  // one of each pair hidden, which put unreachable controls in the tab order and
+  // let a resize blur whichever one held focus.
+  it.each([
+    ['narrow', false, 2, 'Show 3 more attachments'],
+    ['wide', true, 3, 'Show 2 more attachments'],
+  ])('shows the %s inline run and counts exactly what it hides', (_width, wide, inline, label) => {
+    viewport.set(wide as boolean);
     mountQueued(item(five));
 
-    // Two unconditional, the third desktop-only: `hidden` is display:none, so at
-    // a narrow width that slot leaves the tab order with its picture.
-    expect(thumbs()).toHaveLength(3);
-    expect(thumbs()[2].parentElement?.className).toContain('hidden');
-    expect(thumbs()[2].parentElement?.className).toContain('sm:flex');
-    // One `+N` per width, each stating the number that width actually hides.
-    expect(more().map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Show 3 more attachments',
-      'Show 2 more attachments',
-    ]);
-    expect(more()[0].className).toContain('sm:hidden');
-    expect(more()[1].className).toContain('hidden');
+    expect(thumbs()).toHaveLength(inline as number);
+    expect(more()).toHaveLength(1);
+    expect(more()[0].getAttribute('aria-label')).toBe(label);
+  });
+
+  // Nothing hidden, nothing disclosed: a `+0` control would be a focusable
+  // element that promises something it cannot deliver.
+  it.each([
+    ['narrow', false, 2],
+    ['wide', true, 3],
+  ])('offers no disclosure when the %s run already holds everything', (_width, wide, count) => {
+    viewport.set(wide as boolean);
+    mountQueued(item(five.slice(0, count as number)));
+
+    expect(thumbs()).toHaveLength(count as number);
+    expect(more()).toHaveLength(0);
   });
 
   it('discloses the rest and collapses again without expanding the row text', () => {
@@ -414,14 +460,12 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
     expect(row().className).toContain('flex-wrap');
     expect(text.getAttribute('aria-expanded')).toBe('false');
     // The inline previews are gone — the sheet is the one place the files are
-    // listed, so nothing is shown twice — and both width-specific controls stay
-    // put, each now offering the way back.
+    // listed, so nothing is shown twice — and the one control stays put, now
+    // offering the way back.
     expect(thumbs()).toHaveLength(5);
     expect(document.querySelector('[data-queue-attachments="inline"]')).toBeNull();
-    expect(more().map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Collapse attachments',
-      'Collapse attachments',
-    ]);
+    expect(more()).toHaveLength(1);
+    expect(more()[0].getAttribute('aria-label')).toBe('Collapse attachments');
     expect(more()[0].getAttribute('aria-expanded')).toBe('true');
 
     fireEvent.click(more()[0]);
@@ -432,14 +476,13 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
   // Unmounting the button under the user's finger is not a cosmetic problem: the
   // browser drops focus to the document, so the next Tab restarts from the top
   // of the page and the control they just used cannot be pressed again.
-  // Both capacities, because each width has its own control and a fix that only
-  // held the narrow one would leave the desktop user exactly where they started.
   it.each([
-    [0, 'Show 3 more attachments'],
-    [1, 'Show 2 more attachments'],
-  ])('leaves focus on the disclosure control it was activated from (%i)', (index, collapsedLabel) => {
+    ['narrow', false, 'Show 3 more attachments'],
+    ['wide', true, 'Show 2 more attachments'],
+  ])('leaves focus on the disclosure it was activated from (%s)', (_width, wide, collapsedLabel) => {
+    viewport.set(wide as boolean);
     mountQueued(item(five));
-    const control = more()[index as number];
+    const control = more()[0];
     control.focus();
 
     fireEvent.click(control);
@@ -499,5 +542,128 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
     expect(chips()[0].tagName).toBe('SPAN');
     expect(chips()[0].textContent).toContain('orphan.bin');
     expect(row().textContent).toContain('orphan.bin and 1 more');
+  });
+
+  // Crossing `sm` is the second way focus used to be lost, and the one no unit
+  // test could see while capacity lived in CSS: the element holding focus became
+  // `display:none`, and CSS cannot hand focus to whatever replaces it. Every case
+  // below is a boundary crossing, and each has exactly one right answer — the
+  // same element keeps focus, or the row's text takes it. Never the document.
+  describe('across the sm breakpoint', () => {
+    const text = () => row().querySelector('div[role="button"]') as HTMLElement;
+    const three = five.slice(0, 3);
+
+    it('keeps one element, and its focus, while a disclosure is still needed', () => {
+      mountQueued(item(five));
+      const control = more()[0];
+      control.focus();
+
+      viewport.set(true);
+
+      // Same node, not a same-looking replacement — that distinction is the
+      // whole fix, and it is what keeps the browser's focus where it was.
+      expect(more()).toHaveLength(1);
+      expect(more()[0]).toBe(control);
+      expect(document.activeElement).toBe(control);
+      // …and it now states the number this width actually hides.
+      expect(control.getAttribute('aria-label')).toBe('Show 2 more attachments');
+    });
+
+    it('carries focus back the other way too', () => {
+      viewport.set(true);
+      mountQueued(item(five));
+      const control = more()[0];
+      control.focus();
+
+      viewport.set(false);
+
+      expect(more()[0]).toBe(control);
+      expect(document.activeElement).toBe(control);
+      expect(control.getAttribute('aria-label')).toBe('Show 3 more attachments');
+    });
+
+    // The reported case, end to end: three attachments, expanded narrow, widened,
+    // then collapsed. The control is meaningful right up to the collapse, and
+    // meaningless the instant after it.
+    it('hands focus to the row text when collapsing leaves nothing to disclose', () => {
+      mountQueued(item(three));
+      const control = more()[0];
+      control.focus();
+
+      fireEvent.click(control);
+      expect(document.activeElement).toBe(control);
+
+      viewport.set(true);
+      expect(more()[0]).toBe(control);
+      expect(document.activeElement).toBe(control);
+
+      fireEvent.click(control);
+
+      expect(more()).toHaveLength(0);
+      expect(document.body.contains(control)).toBe(false);
+      expect(document.activeElement).toBe(text());
+    });
+
+    it('hands focus to the row text when widening makes the +1 unnecessary', () => {
+      mountQueued(item(three));
+      expect(more()[0].getAttribute('aria-label')).toBe('Show 1 more attachments');
+      more()[0].focus();
+
+      viewport.set(true);
+
+      expect(thumbs()).toHaveLength(3);
+      expect(more()).toHaveLength(0);
+      expect(document.activeElement).toBe(text());
+    });
+
+    it('hands focus to the row text when narrowing drops the third preview', () => {
+      viewport.set(true);
+      mountQueued(item(five));
+      thumbs()[2].focus();
+
+      viewport.set(false);
+
+      expect(thumbs()).toHaveLength(2);
+      expect(document.activeElement).toBe(text());
+    });
+
+    it('leaves a surviving preview holding its own focus', () => {
+      viewport.set(true);
+      mountQueued(item(five));
+      const first = thumbs()[0];
+      first.focus();
+
+      viewport.set(false);
+
+      expect(document.activeElement).toBe(first);
+    });
+
+    // The transfer is conditional on this group having had focus in the first
+    // place. A user part-way through the row's own actions must not be dragged
+    // back to its text because an attachment control happened to disappear.
+    it('never takes focus from a control that is not its own', () => {
+      mountQueued(item(three));
+      const remove = screen.getByLabelText('Remove from queue');
+      remove.focus();
+
+      viewport.set(true);
+
+      expect(more()).toHaveLength(0);
+      expect(document.activeElement).toBe(remove);
+    });
+
+    // A mouse user has not focused the button, so collapsing it away must not
+    // move focus either — there was none in the group to move.
+    it('moves nothing when the disclosure is clicked without focus', () => {
+      mountQueued(item(three));
+      viewport.set(true);
+      expect(more()).toHaveLength(0);
+
+      viewport.set(false);
+      fireEvent.click(more()[0]);
+      fireEvent.click(more()[0]);
+
+      expect(document.activeElement).toBe(document.body);
+    });
   });
 });

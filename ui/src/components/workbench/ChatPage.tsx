@@ -2983,6 +2983,14 @@ export const QueueRow: React.FC<{
 }> = ({ item, onRemove, onRecall }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  // The row's own focusable anchor. An attachment control that stops existing —
+  // the disclosure once there is nothing left to disclose, or the third inline
+  // preview once the window is too narrow for it — hands focus here rather than
+  // letting the browser drop it to the document. It is the right destination
+  // because it is the row's stable inspection control: still on the same row,
+  // still about the same queued message, and harmless to activate by accident,
+  // which Remove and Send are not.
+  const textRef = useRef<HTMLDivElement>(null);
   // A plain selectable element (not a <button>) so desktop users can drag-select
   // the text; a click still toggles expand/collapse — unless the click ended a
   // text selection, in which case we leave the selection alone.
@@ -3052,6 +3060,7 @@ export const QueueRow: React.FC<{
       )}
     >
       <div
+        ref={textRef}
         role="button"
         tabIndex={0}
         onClick={toggle}
@@ -3105,6 +3114,7 @@ export const QueueRow: React.FC<{
         attachments={attachments}
         expanded={attachmentsOpen}
         onToggle={() => setAttachmentsOpen((v) => !v)}
+        onFocusEscape={() => textRef.current?.focus()}
       />
       {attachmentsOpen && <QueuedAttachmentSheet attachments={attachments} />}
       {canRecall && (
