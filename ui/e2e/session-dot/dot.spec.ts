@@ -229,7 +229,19 @@ test.describe('desktop row alignment', () => {
     await expect(rowOf(page, RUNNING).getByRole('button', { name: 'Session actions' })).toBeAttached();
     await expect(rowOf(page, READONLY_RUNNING).getByRole('button', { name: 'Session actions' })).toHaveCount(0);
 
-    // Inline rename replaces the row: the dot has to stay put while typing.
+    // Selecting a read-only row has to hold the indent too — it has no action
+    // rail, so it is the row where a right-hand compensation would show up.
+    await rowButton(page, READONLY_RUNNING).click();
+    await expect(rowOf(page, READONLY_RUNNING)).not.toHaveCSS('border-left-color', 'rgba(0, 0, 0, 0)');
+    const readOnlySelected = await geometry(page, READONLY_RUNNING);
+    expect(readOnlySelected.dotCentreX, 'a selected read-only dot must not shift').toBeCloseTo(readOnly.dotCentreX, 1);
+    expect(readOnlySelected.nameLeft).toBeCloseTo(readOnly.nameLeft, 1);
+    expect(readOnlySelected.dotCentreX).toBeCloseTo(writable.dotCentreX, 1);
+
+    // Inline rename replaces the row, accent and all, so the strict case is a
+    // SELECTED row: the dot has to stay put while the user types.
+    await rowButton(page, RUNNING).click();
+    await expect(rowOf(page, RUNNING)).not.toHaveCSS('border-left-color', 'rgba(0, 0, 0, 0)');
     const dotBefore = await boxOf(dotOf(rowButton(page, RUNNING)), 'dot before rename');
     await rowOf(page, RUNNING).click({ button: 'right' });
     await page.getByRole('group', { name: 'Session actions' }).getByRole('button', { name: 'Rename' }).click();

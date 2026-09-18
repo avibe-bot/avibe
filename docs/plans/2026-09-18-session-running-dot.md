@@ -87,11 +87,45 @@ Capture desktop/mobile and reduced-motion evidence in the PR. If product-level
 verification is unavailable, state the remaining check rather than claiming it.
 Never restart the user's local Avibe service or mutate real sessions for tests.
 
+## Implementation result
+
+The alignment hypothesis was confirmed by measurement, not by reading the JSX.
+In the baseline bundle `.pl-[24px]` is emitted before `.pl-[26px]`. Utilities of
+equal specificity are resolved by their order in the generated stylesheet, not by
+the order of the class string, so the selected row's `pl-[24px]` compensation for
+its `border-l-2` never applied: selected content sat at 2px + 26px while its
+siblings sat at 26px. That is the 2px rightward shift the owner reported.
+
+The fix moves both invariants into `sessionRowLayout.ts`, which already owns this
+row's shared geometry. Every desktop row now carries `border-l-2 pl-[24px]`
+unconditionally and selection changes only the border *colour*, so a row can
+never emit two competing `pl-*` utilities and no compensating offset exists to go
+stale. The selected background, the left accent, and the absolutely positioned
+action rail are unchanged; the rail is positioned against the padding box, so the
+always-present border does not move it.
+
+Motion is the stock Tailwind `animate-pulse`
+(`pulse 2s cubic-bezier(.4,0,.6,1) infinite`, `@keyframes pulse{50%{opacity:.5}}`),
+which is already the contract's gentle two-second cycle that never fully
+disappears, so `index.css` needed no new keyframes. `motion-reduce:animate-none`
+is emitted later, inside the reduced-motion media query, and therefore wins.
+Both surfaces import the one motion constant so they cannot drift apart.
+
+Evidence: `ui/e2e/session-dot/` drives the real sidebar, the real mobile list and
+the real provider against test-owned mocked data in an isolated browser profile.
+It measures rather than mirrors classes — it pauses the live CSS animation, walks
+`currentTime` across four cycles and reads computed opacity (1 / 0.5 / 1 / 0.5 / 1
+at 0/1000/2000/3000/4000 ms, never below 0.5), observes an untouched wall-clock
+change, and compares bounding boxes of selected and unselected sibling rows. It
+flips status through the product's own `session.status` event. Reverting the two
+product class changes fails 10 of its 11 cases, the alignment case reporting the
+exact 2px difference.
+
 ## Checklist
 
 - [x] Inspect current code and freeze the change contract.
 - [x] Create and read back [issue #2035](https://github.com/avibe-bot/avibe/issues/2035).
-- [ ] Implement in the assigned isolated worktree.
-- [ ] Verify status transitions, reduced motion, and the UI build.
+- [x] Implement in the assigned isolated worktree.
+- [x] Verify status transitions, reduced motion, and the UI build.
 - [ ] Open the PR and complete Codex review plus required CI.
 - [ ] Deliver the PR and validation evidence to the orchestrator; do not merge.
