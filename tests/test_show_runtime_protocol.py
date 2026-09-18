@@ -263,7 +263,8 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
         async def request(self, _method, _url, *, headers, content):
             return httpx.Response(200, content=b"ready")
 
-    def client_factory(*, timeout):
+    def client_factory(*, timeout, trust_env):
+        assert trust_env is False
         captured_timeouts.append(timeout)
         return _AppClient()
 

@@ -678,7 +678,10 @@ def _is_show_api_mutation() -> bool:
 
 
 def _ensure_csrf_cookie(response: Response) -> Response:
-    if getattr(request._request.state, "show_server_api_registration", None) is not None:
+    if (
+        getattr(request._request.state, "show_server_api_pending", False)
+        or getattr(request._request.state, "show_server_api_registration", None) is not None
+    ):
         return response
     if _is_current_immutable_static_asset_request():
         return response
@@ -2958,6 +2961,7 @@ async def resolve_public_show_server_api():
         resolve_server_api, incoming.scope.get("raw_path", b""), incoming.method,
         incoming.scope.get("query_string", b""),
     )
+    incoming.state.show_server_api_pending = False
     return None
 
 
@@ -3199,6 +3203,12 @@ def _resolve_log_sources() -> list[dict[str, Any]]:
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Global exception handler - ensures all errors return JSON."""
+    if (
+        getattr(request._request.state, "show_server_api_pending", False)
+        or getattr(request._request.state, "show_server_api_registration", None) is not None
+    ):
+        logger.warning("Show server API admission failed (%s)", type(e).__name__)
+        return _show_server_api_result(503)
     from vibe.authorization import InstanceAuthorizationError
 
     if isinstance(e, InstanceAuthorizationError):
@@ -15993,28 +16003,46 @@ async def _serve_show_server_api(starlette_request: FastAPIRequest, registration
 
 @app.post("/p/{share_id}/{asset_path:path}", include_in_schema=False)
 async def public_show_post(starlette_request: FastAPIRequest, share_id: str, asset_path: str):
-    from core.show_api import TOTAL_TIMEOUT_SECONDS
+    from core.show_api import TOTAL_TIMEOUT_SECONDS, is_server_api_path
 
-    starlette_request.state.show_server_api_candidate = True
-    started = time.monotonic()
+    candidate = is_server_api_path(
+        starlette_request.scope.get("raw_path", b""), "POST", starlette_request.scope.get("query_string", b""),
+    )
+    starlette_request.state.show_server_api_candidate = candidate
+    starlette_request.state.show_server_api_pending = candidate
+    browser_admitted = asyncio.Event()
 
     async def handler():
         registration = getattr(starlette_request.state, "show_server_api_registration", None)
         if registration is not None:
-            try:
-                return await asyncio.wait_for(
-                    _serve_show_server_api(starlette_request, registration),
-                    timeout=max(0, TOTAL_TIMEOUT_SECONDS - (time.monotonic() - started)),
-                )
-            except asyncio.TimeoutError:
-                return _show_server_api_result(504)
+            return await _serve_show_server_api(starlette_request, registration)
+        browser_admitted.set()
         # Preserve legacy JSON validation for non-opted-in browser POSTs, after
-        # the normal Origin/CSRF/visibility hooks have made their decisions.
+        # the normal request protection hooks have made their decisions.
         request._body_present = bool(await starlette_request.body())
         await request.load_json()
         return await serve_public_show_page(share_id, asset_path)
 
-    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
+    dispatch = app.dispatch_native_request(starlette_request, handler, parse_json=False)
+    if not candidate:
+        return await dispatch
+    # Bound the entire admission, including the first storage lookup and all
+    # preceding hooks. Once normal browser admission is established, preserve
+    # that route's existing configured timeout instead of imposing ingress's.
+    dispatch_task = asyncio.create_task(dispatch)
+    browser_task = asyncio.create_task(browser_admitted.wait())
+    try:
+        done, _ = await asyncio.wait(
+            (dispatch_task, browser_task), timeout=TOTAL_TIMEOUT_SECONDS, return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            return _show_server_api_result(504)
+        return await dispatch_task
+    finally:
+        for task in (dispatch_task, browser_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(dispatch_task, browser_task, return_exceptions=True)
 
 
 @app.route(

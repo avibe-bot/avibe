@@ -131,21 +131,31 @@ def _declarations(workspace: Path) -> list[dict]:
     return payload["server_to_server"]
 
 
+def is_server_api_path(raw_path: bytes, method: str, query: bytes = b"") -> bool:
+    """Identify only a possible declaration path, without granting admission."""
+    if method != "POST" or query or len(raw_path) > 512:
+        return False
+    match = _PUBLIC_PATH.fullmatch(raw_path)
+    return match is not None and _ROUTE.fullmatch(match[2].decode("ascii")) is not None
+
+
 def resolve_server_api(raw_path: bytes, method: str, query: bytes = b"") -> ServerAPIRegistration | None:
     """Resolve admission from current page state and files, with no lifecycle writes."""
-    if method != "POST" or query or len(raw_path) > 512:
+    if not is_server_api_path(raw_path, method, query):
         return None
     match = _PUBLIC_PATH.fullmatch(raw_path)
-    if match is None:
-        return None
     share_id, route_path = (part.decode("ascii") for part in match.groups())
-    if not _ROUTE.fullmatch(route_path):
-        return None
-    store = ShowPageStore()
     try:
-        page = store.get_by_share_id(share_id)
-    finally:
-        store.close()
+        store = ShowPageStore(read_only=True)
+        try:
+            page = store.get_by_share_id(share_id)
+        finally:
+            store.close()
+    except Exception as exc:
+        # Datastore failures are not an absent registration. Do not fall through
+        # to browser admission or expose exception detail through the UI handler.
+        logger.warning("Show server API datastore unavailable (%s)", type(exc).__name__)
+        raise ServerAPIRequestError(503) from exc
     if page is None or page.share_id != share_id or page.visibility != "public":
         return None
     try:

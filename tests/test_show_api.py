@@ -357,3 +357,209 @@ async def test_handler_responses_are_secret_free_and_never_redirect(ingress, mon
     assert response.json() == ({"ok": True} if status == 202 else {"error": "show_server_api_rejected"})
     assert "location" not in response.headers and "set-cookie" not in response.headers
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("failure_site", ["init", "lookup", "close"])
+async def test_admission_datastore_failures_never_escape_public_boundary(ingress, monkeypatch, failure_site):
+    manager = fake_manager(monkeypatch)
+    closed = []
+
+    class FailedStore:
+        def __init__(self, *, read_only):
+            assert read_only
+            if failure_site == "init":
+                raise OSError("fixture private constructor database path and credential")
+
+        def get_by_share_id(self, share_id):
+            if failure_site == "lookup":
+                raise OSError("fixture private lookup database path and credential")
+            return ingress.page
+
+        def close(self):
+            closed.append(True)
+            if failure_site == "close":
+                raise OSError("fixture private close database path and credential")
+
+    monkeypatch.setattr(show_api, "ShowPageStore", FailedStore)
+    response = await post(ingress)
+    assert response.status_code == 503
+    assert response.json() == {"error": "show_server_api_rejected"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert len(closed) == (0 if failure_site == "init" else 1)
+    manager.request.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_site", ["resolver", "earlier_hook"])
+async def test_total_deadline_interrupts_initial_admission(ingress, monkeypatch, failure_site):
+    import threading
+    import time
+
+    manager = fake_manager(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original = show_api.resolve_server_api
+
+    def stalled(*args, **kwargs):
+        entered.set()
+        try:
+            assert release.wait(2), "test failed to release storage worker"
+            return original(*args, **kwargs) if failure_site == "resolver" else None
+        finally:
+            finished.set()
+
+    if failure_site == "resolver":
+        monkeypatch.setattr(show_api, "resolve_server_api", stalled)
+    else:
+        monkeypatch.setattr(ui_server.app, "_before_request_handlers", [stalled, *ui_server.app._before_request_handlers])
+    monkeypatch.setattr(show_api, "TOTAL_TIMEOUT_SECONDS", 0.05)
+    started = time.monotonic()
+    try:
+        response = await post(ingress)
+        assert entered.is_set()
+        assert response.status_code == 504
+        assert response.headers["cache-control"] == "no-store"
+        assert "set-cookie" not in response.headers
+        assert time.monotonic() - started < 0.75
+        manager.request.assert_not_called()
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 2)
+    await asyncio.sleep(0)
+    manager.request.assert_not_called()
+
+
+async def test_earlier_admission_error_has_generic_receipt(ingress, monkeypatch):
+    def failed_hook():
+        raise RuntimeError("fixture private diagnostic")
+    monkeypatch.setattr(ui_server.app, "_before_request_handlers", [failed_hook, *ui_server.app._before_request_handlers])
+    response = await post(ingress)
+    assert response.status_code == 503
+    assert response.json() == {"error": "show_server_api_rejected"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+
+
+async def test_unregistered_browser_keeps_its_existing_handler_deadline(ingress, monkeypatch):
+    (ingress.workspace / show_api.MANIFEST_NAME).unlink()
+    monkeypatch.setattr(show_api, "TOTAL_TIMEOUT_SECONDS", 0.05)
+    manager = fake_manager(monkeypatch)
+    async def browser_handler(*args, **kwargs):
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, content=b"browser result")
+    manager.request.side_effect = browser_handler
+    response = await post(ingress, headers={"Origin": "https://alex.avibe.bot"})
+    assert response.status_code == 200 and response.content == b"browser result"
+
+
+@pytest.mark.parametrize("status", [503, 504])
+def test_admission_receipt_does_not_require_dispatch_context(status):
+    response = ui_server._show_server_api_result(status)
+    assert response.status_code == status
+    assert json.loads(response.body) == {"error": "show_server_api_rejected"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+
+
+def test_read_only_store_reuses_wal_rows_without_migration_lock(ingress, monkeypatch, hold_migration_lock_elsewhere):
+    from core import show_pages
+    from storage import migrations
+    from storage.lock import migration_lock_path_for
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("read-only admission cannot initialize or migrate")
+
+    monkeypatch.setattr(show_pages, "ensure_sqlite_state", forbidden)
+    monkeypatch.setattr(migrations, "run_migrations", forbidden)
+    with hold_migration_lock_elsewhere(migration_lock_path_for(paths.get_sqlite_state_path())):
+        assert resolve(ingress).session_id == ingress.page.session_id
+        # Explicit paths must also skip the separate run_migrations branch.
+        store = ShowPageStore(paths.get_sqlite_state_path(), read_only=True)
+        try:
+            assert store.get_by_share_id(ingress.page.share_id) == ingress.page
+            with store.engine.connect() as connection:
+                assert connection.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+                assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+                assert store.engine.hide_parameters
+                with pytest.raises(Exception, match="readonly"):
+                    connection.exec_driver_sql("CREATE TABLE forbidden_write (id integer)")
+        finally:
+            store.close()
+
+
+@pytest.mark.parametrize("kind", ["missing", "missing-parent", "directory", "schema", "corrupt"])
+async def test_unavailable_read_only_store_returns_controlled_receipt(ingress, monkeypatch, tmp_path, kind):
+    import sqlite3
+
+    db_path = tmp_path / "absent-parent" / "state.sqlite" if kind == "missing-parent" else tmp_path / "isolated.sqlite"
+    if kind == "directory":
+        db_path.mkdir()
+    elif kind == "schema":
+        with sqlite3.connect(db_path) as db:
+            db.execute("CREATE TABLE unrelated (id integer)")
+    elif kind == "corrupt":
+        db_path.write_bytes(b"fixture invalid database")
+    real_store = ShowPageStore
+    monkeypatch.setattr(show_api, "ShowPageStore", lambda *, read_only: real_store(db_path, read_only=read_only))
+    manager = fake_manager(monkeypatch)
+    response = await post(ingress)
+    assert response.status_code == 503
+    assert response.json() == {"error": "show_server_api_rejected"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    manager.request.assert_not_called()
+    if kind in {"missing", "missing-parent"}:
+        assert not db_path.exists()
+    if kind == "missing-parent":
+        assert not db_path.parent.exists()
+
+
+def test_read_only_factory_never_recreates_deleted_database(tmp_path):
+    import sqlite3
+    from storage.db import create_sqlite_engine
+
+    db_path = tmp_path / "deleted.sqlite"
+    with sqlite3.connect(db_path) as db:
+        db.execute("CREATE TABLE marker (id integer)")
+    engine = create_sqlite_engine(db_path, read_only=True)
+    db_path.unlink()  # after factory construction, before actual SQLite connect
+    try:
+        with pytest.raises(Exception, match="unable to open"):
+            with engine.connect():
+                pytest.fail("read-only open recreated deleted state")
+        assert not db_path.exists()
+    finally:
+        engine.dispose()
+
+
+def test_read_only_uri_preserves_encoded_path_and_journal_mode(tmp_path):
+    import sqlite3
+    from storage.db import create_sqlite_engine
+
+    db_path = tmp_path / "中文 space ? mode=rw#%.sqlite"
+    with sqlite3.connect(db_path) as db:
+        db.execute("CREATE TABLE marker (value text)")
+        db.execute("INSERT INTO marker VALUES ('exact path')")
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    engine = create_sqlite_engine(db_path, read_only=True)
+    try:
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("SELECT value FROM marker").scalar() == "exact path"
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar() == "delete"
+    finally:
+        engine.dispose()
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
+
+def test_default_store_still_initializes_and_writes(tmp_path):
+    db_path = tmp_path / "ordinary" / "state.sqlite"
+    assert not db_path.exists()
+    store = ShowPageStore(db_path)
+    try:
+        page = store.ensure("sesdefault")
+        assert store.get(page.session_id) == page
+        assert db_path.is_file()
+    finally:
+        store.close()

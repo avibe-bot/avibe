@@ -89,6 +89,21 @@ async def test_real_ui_runtime_signed_handler_inbox(tmp_path, monkeypatch):
     monkeypatch.setenv("SHOW_API_FIXTURE_ROOT", str(tmp_path))
     monkeypatch.setenv("SHOW_API_FIXTURE_INBOX", str(inbox))
     monkeypatch.setenv("AVIBE_ALLOW_DEV_STATE_MIGRATION", "1")
+    proxy_requests = []
+
+    async def proxy_trap(reader, writer):
+        proxy_requests.append(await reader.read(65536))
+        writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    proxy = await asyncio.start_server(proxy_trap, "127.0.0.1", 0)
+    proxy_url = f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, proxy_url)
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
     node = shutil.which("node")
     assert node
     manager = show_runtime.ShowRuntimeManager(
@@ -142,9 +157,12 @@ async def test_real_ui_runtime_signed_handler_inbox(tmp_path, monkeypatch):
             revoked = await client.post(ingress.path, headers=headers, content=body)
             assert revoked.status_code == 403
         assert (paths.get_vibe_remote_dir() / "vault/fixture-write").read_text() == "synthetic"
+        assert proxy_requests == [], "Runtime loopback traffic must ignore environment proxies"
     finally:
         server.should_exit = True
         if task is not None:
             await asyncio.wait_for(task, 10)
         listener.close()
         manager.stop()
+        proxy.close()
+        await proxy.wait_closed()

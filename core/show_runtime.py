@@ -1246,7 +1246,7 @@ class ShowRuntimeManager:
     ) -> httpx.Response:
         """Own transport failures and publish their recovery evidence."""
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(phase_timeout_seconds, connect=5.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(phase_timeout_seconds, connect=5.0), trust_env=False) as client:
                 async def bounded_response() -> httpx.Response:
                     bounded_headers = {**headers, "accept-encoding": "identity"}
                     async with client.stream(method, f"{base_url}{path}", headers=bounded_headers, content=body) as response:
@@ -1518,7 +1518,7 @@ class ShowRuntimeManager:
 
     async def _probe_capabilities_payload(self, base_url: str) -> dict[str, Any] | object | None:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5), trust_env=False) as client:
                 response = await client.get(f"{base_url}/capabilities")
         except (httpx.TimeoutException, httpx.TransportError):
             return None
@@ -1569,7 +1569,7 @@ class ShowRuntimeManager:
 
     async def _healthy(self, base_url: str) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5), trust_env=False) as client:
                 response = await client.get(f"{base_url}/health")
             return response.status_code == 200
         except Exception:

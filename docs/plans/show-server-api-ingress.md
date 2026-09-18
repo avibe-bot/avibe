@@ -49,7 +49,9 @@ Same external inbox + sole remotePM seszbebbz6fwq. One managed forever Harness d
 - new `core/show_api.py`
 - `core/show_runtime.py`: PM-approved extension on 2026-09-18 to the existing request and transport options only; see implementation mechanics below
 - `core/show_pages.py` only where required to reuse page/workspace lifecycle
+- `storage/db.py`: PM-approved shared factory `read_only=False` option on 2026-09-18; no migration/importer/lock changes
 - `tests/test_ui_show_pages.py`, `tests/test_ui_server_mutation_protection.py`, new `tests/test_show_api.py`, new `tests/test_show_api_integration.py`
+- `tests/test_show_runtime_protocol.py`: PM-approved strict client factory adaptation to assert the local transport's `trust_env=False`, preserving existing timeout assertions
 - `scripts/check_show_router.mjs` only for reusing its pinned real Runtime integration path
 - `skills/use-show-pages/SKILL.md`, optional new `skills/use-show-pages/references/server-api.md` if it keeps entry concise
 - this `docs/plans/show-server-api-ingress.md`
@@ -80,8 +82,15 @@ Prepare a pinned installable artifact and rollback/state-preservation/health pla
   Raw URI aliases and queries do not acquire admission. Manifest parsing rejects
   duplicate keys; invalid optional declarations disable admission.
 - Body limits are 1 MiB hard maximum, 10 seconds for upload and 30 seconds for
-  the complete registered operation, including capability negotiation and
-  response streaming. Requests allow at most 64 header fields / 16 KiB in total,
+  the complete admission and registered operation, including the first storage
+  lookup, earlier request hooks, capability negotiation and response streaming.
+  A syntactic candidate never grants admission: the current declaration still
+  controls the exception. Once an unregistered browser request passes its normal
+  admission hooks, its established handler timeout is preserved. Datastore
+  construction, lookup and close failures produce fixed 503/no-store receipts
+  without exception details or browser cookies. Request cancellation prevents
+  subsequent forwarding; it does not forcibly terminate a synchronous worker.
+  Requests allow at most 64 header fields / 16 KiB in total,
   with 16 declared metadata names of at most 64 characters and values of at most
   2048 bytes. Names are case-insensitive `x-` metadata under a fixed exclusion
   policy for credentials, hop/proxy/internal protocol and browser identity.
@@ -98,6 +107,26 @@ Prepare a pinned installable artifact and rollback/state-preservation/health pla
   before capability probes or lifecycle operations. The existing transport owns
   streaming and process-fenced failure invalidation; oversized/encoded handler
   responses close their stream without invalidating a healthy Runtime.
+- The first reviewed head `44666dc8594fb3e13e83bb35970e58a5c36279b5` had three
+  findings in two root-cause classes: incomplete pre-handler public boundaries
+  (deadline and datastore error containment), and environment-owned loopback
+  egress. PM approved closing these classes together. All three Runtime HTTPX
+  clients (transport, capabilities and health) now set `trust_env=False`.
+  Artifact downloads and other external HTTP clients retain their own policy.
+- The resolver uses `ShowPageStore(read_only=True)` through the existing shared
+  SQLite factory's keyword-only `read_only=False` option. PM approved this narrow
+  follow-through after inspecting the cold-store migration lock: `mode=ro` opens
+  an existing database without directory/file creation, migration/bootstrap or
+  journal-mode changes. It preserves hidden SQL parameters and a 5-second busy
+  wait. Missing/unreadable/corrupt/schema-incomplete state fails with the fixed
+  public 503 boundary; healthy absent declarations still fall back normally.
+  Default stores and cached engines retain their existing lifecycle. SQLite WAL
+  and SHM bookkeeping may still occur; this is not an immutable-file guarantee.
+  Authorized startup owns initialization. Pre-existing UI config/startup hooks
+  are not redesigned, and timeout does not claim to kill synchronous workers.
+  Tests hold a real migration lock while resolving, prohibit both bootstrap
+  entrypoints, delete a database between engine creation and connection, and
+  verify URI encoding, unchanged journal mode and ordinary default Store writes.
 - Bounded Runtime response materialization recalculates content length and
   removes transfer/encoding framing. The ingress exposes only a generic no-store
   receipt and accepted 2xx/4xx/5xx status, never handler output, redirect headers,
@@ -110,9 +139,13 @@ Prepare a pinned installable artifact and rollback/state-preservation/health pla
   row, SHARED identity and revocation. HOME/XDG/config and representative child
   Vault-path writes are test-owned; credentials are synthetic. The existing
   `check_show_router.mjs` invokes this test using its already-built pinned
-  Runtime, so mocks are not the only CI boundary evidence.
-- Local validation: 594 existing Show/mutation tests passed. Focused new
-  registration/admission/transport tests and the pinned real integration passed;
+  Runtime, so mocks are not the only CI boundary evidence. The real chain also
+  sets upper/lower HTTP/HTTPS/ALL proxy variables to a test-owned poison proxy
+  with empty upper/lower NO_PROXY. Health, capabilities and exact signed payload
+  delivery succeed; the proxy receives no traffic.
+- Local validation after the first correction: 706 focused tests passed
+  (78 new boundary, 30 Runtime protocol, 594 Show/mutation, four legacy guards),
+  plus 69 selected Store/access tests and the pinned real integration;
   final PR/CI evidence is recorded in the delivery report. No service deployment,
   signing key commissioning, hook registration or external delivery is claimed.
 
