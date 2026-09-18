@@ -1,11 +1,11 @@
 # Local Incus Regression (Explicit Opt-In)
 
-This runbook preserves the existing local Incus tooling for contributors who
-explicitly choose it. It is not the default for Avibe regression or acceptance;
-see [the current regression guide](README.md). Do not use it to recreate the
-owner's retired local regression environment for routine acceptance or as a
-fallback when the designated cloud target is unavailable. The commands below
-manage Incus environments, not the cloud acceptance URL.
+This runbook preserves the existing local Incus tooling for contributors whose
+task or workspace explicitly selects an existing local environment. See [the
+current regression guide](README.md) for target selection. The commands below
+manage local Incus environments and must not be used to recreate an owner's
+retired environment, interrupt another developer's selected environment, or
+serve as a shared deployment sink for unrelated branches.
 
 ## Runtime Model
 
@@ -28,10 +28,11 @@ mapping is recorded under `.runtime/incus-regression/worktrees.json` in the
 primary checkout.
 
 On macOS, run the Incus daemon in a local Linux VM and use the local machine as
-the operator/client. This opt-in workflow uses local Incus only. Remote Incus
+the operator/client. This selected workflow uses local Incus only. Remote Incus
 hosts, remote tenant instances, demos, or customer/user environments require
-their own explicit authorization; selecting the shared cloud acceptance URL
-does not grant it.
+their own explicit authorization. Existing selected environments remain valid;
+do not migrate their work to another target merely because a different
+workflow uses cloud acceptance.
 
 ## Safety Boundaries
 
@@ -106,7 +107,8 @@ and you can configure channels later from the Web UI.
 
 ## Usage
 
-Once local testing is explicitly selected, the compatibility entry point is:
+Once an existing local environment is explicitly selected, the compatibility
+entry point is:
 
 ```bash
 ./scripts/run_regression.sh
@@ -181,10 +183,11 @@ python3 scripts/incus_regression.py reconcile
 python3 scripts/incus_regression.py reconcile --yes
 ```
 
-Delete worktree environments promptly after the worktree is merged, abandoned,
-or removed. While an explicitly selected local `master` environment is in use,
-keep it running and preserve its product state across normal source updates.
-This does not require retaining an environment the owner has chosen to retire.
+Delete temporary worktree environments only through the owner-authorized
+lifecycle for that environment. While an explicitly selected local `master`
+environment is in use, preserve its product state across normal source updates
+and coordinate updates with its current use. This does not require retaining
+an environment its owner has chosen to retire.
 
 `reconcile` answers "what is actually still here?". It enumerates worktree
 environments from Incus rather than from the runner's metadata, so an

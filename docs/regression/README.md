@@ -1,29 +1,31 @@
 # Regression and Acceptance
 
-Use [the shared cloud acceptance instance](https://avibe-cloud-e2e-app.avibe.bot)
-for Avibe regression and acceptance, including `回归测试`. This is the owner's
-2026-09-18 decision and supersedes the former workstation-local Incus/Lima
-default, including older delivery-skill suggestions to update local `master`.
-Current environment selection belongs to this guide and the owner's decision;
-older task plans and historical test records do not override it.
+Choose the regression target from the explicit task instruction or the
+established developer, workspace, or task choice, then preserve that selection
+through the workflow. This guide is the shared entry point for regression and
+acceptance; an older task plan or historical test record does not silently
+override the current selection.
 
-For example, after a messaging fix, verify the affected journey on this
-instance and its intended test channels. Do not run `scripts/run_regression.sh`
-to prepare that acceptance check: it manages local Incus, not this cloud target.
+If the task has no established target, resolve that ambiguity before a
+dependent operation. A shared acceptance instance is persistent and may be in
+use by one owner's workflow. It is not a common deployment sink for unrelated
+branches or tasks: preserve its current state, coordinate updates with its
+current use, and keep parallel work on its selected isolated target.
+
+Selecting a target does not itself request deployment, restart, reset, or a
+destructive test. The target owner must separately authorize mutation, and any
+instance-specific access or deployment procedure must already be established.
+Do not infer credentials or commands from a hostname. HTTP reachability and
+service health alone do not prove an E2E result.
 
 ## Scope and State
 
-The cloud target is a shared, persistent acceptance instance, not a disposable
-test fixture. Preserve accumulated product configuration, credentials, pairing,
-agent homes, Harness/session state, and Show workspaces unless a reset is
-explicitly requested. Select scenarios that fit this shared-state boundary;
-destructive/reset scenarios need separate authorization and an isolation plan.
-
-This target selection does not itself request a deployment, restart, or test
-run. It does not authorize access to other tenants, demos, production systems,
-or arbitrary cloud instances. Do not use or recreate the retired local
-Incus/Lima regression environment for routine acceptance, including when cloud
-access is blocked.
+For a shared persistent target, preserve accumulated product configuration,
+credentials, pairing, agent homes, Harness/session state, and Show workspaces
+unless a reset is explicitly requested. Select scenarios that fit this
+shared-state boundary; destructive/reset scenarios need separate authorization
+and an isolation plan. Do not access other tenants, demos, production systems,
+or arbitrary cloud instances.
 
 Hermetic local unit, contract, and browser-fixture tests remain appropriate.
 Keep their entire write path in test-owned state; do not point fixture or
@@ -34,9 +36,9 @@ routine verification; it may host the agent doing the work.
 ## Access and Deployment
 
 This repository does not establish an instance-specific login, credential, or
-deployment procedure for the designated cloud target. A reachable URL alone
-does not establish authenticated access, the running revision, or a deployment
-mechanism. Use an established procedure for this exact instance when available;
+deployment procedure for every possible target. A reachable URL alone does not
+establish authenticated access, the running revision, or a deployment
+mechanism. Use an established procedure for the selected target when available;
 otherwise report the missing access or deployment procedure as a blocker before
 performing dependent work. Do not infer SSH access, Incus `--remote` arguments,
 credentials, or a deployment command from the hostname.
@@ -72,8 +74,9 @@ For multi-step auth/setup journeys, update
 
 ## Explicit Local Incus Testing
 
-The existing runner remains available to contributors who explicitly choose
-local Incus testing. [The local Incus runbook](local-incus.md) preserves setup,
-commands, lifecycle, metadata, and safety contracts. This is opt-in tooling,
-not the default acceptance path; historical local test records remain valid
-records of the environments used at the time.
+The existing runner remains available to contributors whose task or workspace
+explicitly selects an existing local Incus environment. [The local Incus
+runbook](local-incus.md) preserves setup, commands, lifecycle, metadata, and
+safety contracts. It is a selected developer workflow, not a universal target
+or a reason to recreate a retired environment; historical local test records
+remain valid records of the environments used at the time.

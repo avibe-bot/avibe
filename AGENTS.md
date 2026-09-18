@@ -13,7 +13,7 @@ Current product shape:
 - V2 config-driven service with a Web UI setup wizard and settings pages
 - multi-platform message transport with shared core orchestration
 - multi-backend agent routing across OpenCode, Claude Code, and Codex
-- shared cloud regression and acceptance environment for real cross-platform verification
+- regression and acceptance workflows for real cross-platform verification
 
 ## 2. Design Philosophy and Architecture
 
@@ -98,24 +98,25 @@ Hard rule:
 
 ### Regression and Acceptance
 
-Owner decision, 2026-09-18: use
-[the shared cloud acceptance instance](https://avibe-cloud-e2e-app.avibe.bot)
-for Avibe regression and acceptance, including requests for `回归测试`.
-This supersedes older local-Incus defaults in delivery skills and task plans;
-historical evidence does not select the environment for new acceptance runs.
+When a task requests regression or acceptance, use the target selected by the
+explicit task instruction or by the established developer, workspace, or task
+choice. Preserve that selection across the work. If the target is ambiguous,
+resolve it before performing dependent work rather than silently routing the
+task to a shared environment.
 
-- Do not use or recreate the retired local Incus/Lima regression environment
-  for routine acceptance. A missing or inaccessible cloud target is a blocker,
-  not a reason to provision a local replacement.
-- Preserve accumulated state. The designated instance is shared and persistent;
-  its selection alone authorizes neither deployment nor reset/destructive tests,
-  and grants no access to other cloud, tenant, demo, or production environments.
-- Follow [the regression guide](docs/regression/README.md) for scope, access and
-  deployment limitations, and acceptance evidence. HTTP reachability or service
-  health alone is not an E2E pass.
-- The Incus runner remains available for explicitly requested local testing;
-  see [the opt-in local runbook](docs/regression/local-incus.md). Its commands
-  do not operate the designated cloud target.
+- A shared acceptance target is persistent and may serve one owner's workflow;
+  selecting it does not authorize deployment, restart, reset, destructive tests,
+  or access to other cloud, tenant, demo, or production environments.
+- Parallel branches and tasks keep their selected isolated environments. Do not
+  overwrite another lane's deployed revision or state. Coordinate updates to a
+  shared target with its current use; do not add a new locking mechanism here.
+- Follow [the regression guide](docs/regression/README.md) for target selection,
+  access, deployment limitations, and acceptance evidence. HTTP reachability or
+  service health alone is not an E2E pass.
+- Local Incus remains supported for an existing explicitly selected developer
+  workflow; see [the local runbook](docs/regression/local-incus.md). Do not
+  recreate a retired environment or interrupt another developer's selected
+  test environment.
 
 ## 4. Configuration and Routing Model
 

@@ -15,9 +15,9 @@ default branch even after a conflict-free Git merge.
 
 An untracked contract creates a related failure: another lane cannot obtain it
 from the base branch, and the file may later block the primary checkout's
-fast-forward. In the opt-in local Incus workflow, regression synchronizes the
+fast-forward. In a selected local Incus workflow, regression synchronizes the
 invoking checkout, so a blocked checkout can also become a stale deployment
-source.
+source. A different developer's selected environment remains their own target.
 
 ## Review activity is not a verdict
 

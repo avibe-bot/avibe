@@ -1,11 +1,12 @@
 # Memory IM attachment five-platform acceptance
 
 > **Safety boundary:** Select the current acceptance environment through
-> [the regression guide](README.md): the designated shared cloud instance is
-> the default. Preserve its accumulated product state. Updating the instance
-> requires owner authorization and an established deployment procedure;
-> selecting the target alone does not request an update. Do not reset state or
-> substitute a local Incus environment for this acceptance check.
+> [the regression guide](README.md), using the explicit task or established
+> developer/workspace choice. Preserve the selected target's product state.
+> Updating it requires owner authorization and an established deployment
+> procedure; selecting the target alone does not request an update. Do not
+> reset state or silently substitute another environment for this acceptance
+> check.
 
 ## Evidence boundary
 
