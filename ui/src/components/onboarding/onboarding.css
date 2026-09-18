@@ -39,6 +39,10 @@
   --ob-tile-hover: #ffffff0a;
   --ob-well: #ffffff04;
   --ob-tile-label: #d3d7e2;
+  /* The import notice, drawn as its own mint-tinted plate rather than a variant of
+     the assistant row: it is an offer, not part of the list it sits under. */
+  --ob-notice-bg: #172f27;
+  --ob-notice-border: #30473e;
 
   /* One content width for the header, the story and the assistant rows. 1104 is the
      setup frame's own container (i3vw9 lays it out at x=48 of a 1200 frame); the owner
@@ -53,6 +57,12 @@
   --ob-header-h: 45px;
   /* The design's own side padding, so the cap is reached at exactly its 1200 frame. */
   --ob-gutter: 48px;
+  /* The intro stage measured from its own parts: the diagram at its authored
+     proportion, the step's 24 gap, and the 160 access block (17 padding, a 20-line
+     lead with 14 under it, two 42 tile rows with an 8 gutter, 17 padding). 525.2 at
+     the cap. Bands that pin the diagram substitute their own height for the first
+     term; nothing else about the stack changes above 600. */
+  --ob-stage-h: calc(min(100cqw, var(--ob-content-w)) * 272 / 880 + 184px);
 
   background: var(--background);
   color: var(--foreground);
@@ -100,6 +110,8 @@
     --ob-tile-hover: #0808120a;
     --ob-well: #eef1f780;
     --ob-tile-label: #0a0a14;
+    --ob-notice-bg: #edf7f1;
+    --ob-notice-border: #cedfd5;
   }
 }
 [data-theme="light"] .onboarding-shell {
@@ -130,6 +142,8 @@
   --ob-tile-hover: #0808120a;
   --ob-well: #eef1f780;
   --ob-tile-label: #0a0a14;
+  --ob-notice-bg: #edf7f1;
+  --ob-notice-border: #cedfd5;
 }
 
 .onboarding-shell > header {
@@ -150,6 +164,10 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
+  /* Makes the content box measurable in `cqw`, which is how `--ob-stage-h` turns
+     the diagram's own proportion into a height a step without a diagram can
+     match. A percentage cannot: `min-height: %` resolves against height. */
+  container-type: inline-size;
 }
 /* Owner amendment, 2026-09-18: both steps share the same top anchor.
    Normal flow scrolls on short windows; only the lower composition changes. */
@@ -162,6 +180,26 @@
   margin: 0 auto;
   gap: 24px;
 }
+/* The block between the heading and the action, in both steps. Its floor is the
+   intro's own natural height — the diagram plus the step gap plus the access block —
+   so the connection step, whose content is shorter, is padded to exactly the same
+   height instead of both being given a number to keep in sync by hand. That is what
+   puts "Get started" and "Enter Workbench" on identical coordinates: same heading
+   above, same stage height, same action width below.
+   Phones are left out on purpose (see the 599 band): there the two steps' contents
+   diverge enough that matching them would be dead space at the bottom of a screen
+   that already scrolls, and there is no side-by-side reading to preserve. */
+.onboarding-stage {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+@media (min-width: 600px) {
+  .onboarding-stage { min-height: var(--ob-stage-h); }
+}
+
 .onboarding-heading { text-align: center; width: 100%; }
 .onboarding-heading h1, .onboarding-heading h2 { min-height: 46px; }
 .onboarding-heading p { min-height: 22px; }
@@ -382,13 +420,21 @@
 .onboarding-pulse-core { stroke: var(--ob-pulse); stroke-width: 1.6; }
 .onboarding-pulse-halo { stroke: var(--ob-pulse-glow); stroke-width: 4; }
 
+/* The caption rides the return wire rather than the container floor: the wire's
+   horizontal run is at y=262 of the 272 viewBox, so this is the same fraction of
+   whatever height the diagram currently has. Centring on that line (rather than
+   sitting under it) is what makes the capsule read as a label cut into the wire,
+   and it holds at every band because both numbers come from the same box.
+   The fill is the page at 90% so the wire stays faintly legible through it
+   instead of being erased — a mask, not a patch. */
 .onboarding-story-caption {
   position: absolute;
-  bottom: -1px;
+  top: calc(100% * 262 / 272);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   padding: 0 12px;
-  background: var(--background);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--background) 90%, transparent);
   color: var(--ob-caption);
   font-size: 10px;
   line-height: 18px;
@@ -444,18 +490,42 @@
 
 /* ---- Primary action ------------------------------------------------------ */
 
+/* Both steps put their action under the middle column of the diagram above: 240 of
+   the collaboration's 880, which the centred content box turns into the Codex card's
+   own width and position. Expressing it as that fraction — not a fixed 301px — is
+   what keeps the intro's "Get started" and the connection step's "Enter Workbench"
+   on the same coordinates at every width, since both live in the same capped box.
+   The 144 floor still applies once the fraction falls under a comfortable target. */
+.onboarding-action-w {
+  width: calc(100% * 240 / 880);
+  max-width: 100%;
+  min-width: 144px;
+  height: 44px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 22px;
+  gap: 10px;
+}
+
 /* The reference draws this CTA as a flat mint fill — design.pen has no glow on any
    button, and `brand` carries one at rest. The fill, the label pairing and the hover
    stay the variant's; only the halo goes, which is presentation and nothing else. */
 .onboarding-primary-action {
   box-shadow: none;
-  border-radius: 10px;
-  font-size: 13px;
-  font-weight: 600;
-  min-width: 144px;
-  height: 44px;
-  padding: 0 22px;
-  gap: 10px;
+}
+
+/* The way back is the same object as the way forward, one row down — same box, no
+   fill. Hover stays transparent: a plate lighting up under a secondary control reads
+   as a second CTA competing with the one above it, so the label's contrast carries
+   the affordance alone. One rule for both themes, since `--muted` → `--foreground` is
+   a real contrast step in each; the focus ring is untouched and still draws. */
+.onboarding-back-action {
+  color: var(--muted);
+}
+.onboarding-back-action:hover, .onboarding-back-action:focus-visible {
+  background: transparent;
+  color: var(--foreground);
 }
 
 /* ---- Assistant setup ----------------------------------------------------- */
@@ -501,6 +571,61 @@
 .onboarding-assistant-error summary { margin-top: 8px; cursor: pointer; }
 .onboarding-setup-footer { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 
+/* ---- Import notice ------------------------------------------------------- */
+
+/* An offer, not a row of the list above it: its own mint plate, one line tall, flat.
+   The step's gap is 24 and the design asks for 20 on both sides, so the 4 comes off
+   here rather than by giving this one child a bespoke gap the flex container cannot
+   express. Nothing below it moves when it is dismissed — the stage already holds the
+   height (see `--ob-stage-h`), so no placeholder is needed to keep the footer still. */
+.onboarding-import-notice {
+  margin-block: -4px;
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border: 1px solid var(--ob-notice-border);
+  border-radius: 10px;
+  background: var(--ob-notice-bg);
+  box-shadow: none;
+}
+.onboarding-import-notice-icon { flex-shrink: 0; color: var(--mint-ink); }
+.onboarding-import-notice-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--foreground);
+}
+.onboarding-import-notice-actions { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+.onboarding-import-notice-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mint-ink);
+  white-space: nowrap;
+  transition: opacity 150ms;
+}
+.onboarding-import-notice-link:hover { opacity: 0.8; }
+.onboarding-import-notice-help { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.onboarding-import-notice-help:hover, .onboarding-import-notice-help:focus-visible { color: var(--foreground); }
+.onboarding-import-notice-dismiss {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-right: -4px;
+  border-radius: 6px;
+  color: var(--muted);
+  transition: color 150ms, background 150ms;
+}
+.onboarding-import-notice-dismiss:hover, .onboarding-import-notice-dismiss:focus-visible {
+  color: var(--foreground);
+  background: var(--ob-tile-hover);
+}
+
 /* ---- Bands --------------------------------------------------------------- */
 
 /* Below the design width the collaboration keeps its proportions and only loses
@@ -510,7 +635,7 @@
   .onboarding-shell { --ob-gutter: 24px; }
 }
 @media (max-width: 959px) {
-  .onboarding-shell { --ob-diagram-h: 250px; }
+  .onboarding-shell { --ob-diagram-h: 250px; --ob-stage-h: calc(var(--ob-diagram-h) + 184px); }
   /* Below the proportional bands the card is sized by hand, so the interior returns to
      its authored rhythm instead of following the diagram's width. */
   .onboarding-collaboration-cards { --ob-u: 1px; }
@@ -608,6 +733,25 @@
   .onboarding-assistant-identity { flex-basis: calc(100% - 48px); }
   .onboarding-assistant-identity p { white-space: normal; }
   .onboarding-assistant-status, .onboarding-assistant-actions { margin-left: 0; flex-wrap: wrap; }
+  /* A 27% action inside a phone's content box is a 155px target sitting alone in the
+     middle of the screen. The Codex column it was aligned to is stacked away here, so
+     the fraction has nothing left to point at and the action takes the width instead. */
+  .onboarding-action-w { width: 100%; }
+  /* Four things do not fit on one 44px line at this width. The sentence and its
+     dismiss keep the first row — a person must be able to read the offer and refuse
+     it without scanning further — and the two actions take the second. Placement is
+     explicit so it does not depend on the order the component happens to render in. */
+  .onboarding-import-notice {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    row-gap: 8px;
+    padding: 10px 12px;
+  }
+  .onboarding-import-notice-icon { grid-area: 1 / 1; }
+  .onboarding-import-notice-text { grid-area: 1 / 2; }
+  .onboarding-import-notice-dismiss { grid-area: 1 / 3; }
+  .onboarding-import-notice-actions { grid-area: 2 / 1 / 2 / -1; flex-wrap: wrap; }
 }
 /* The narrowest supported width still shows every label; English needs a third line. */
 @media (max-width: 374px) {

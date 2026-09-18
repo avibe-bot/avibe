@@ -21,12 +21,34 @@ import {
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
+import { providerLabel, providerVendorId } from '../providers/providerIdentity';
 import { modelsApi } from './modelsApi';
 import { serverText } from './serverCopy';
+import { VendorGlyph } from './vendorGlyph';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
 import type { AgentBackend, MigrationItem, MigrationAction } from './types';
 
 const BACKEND_ORDER: AgentBackend[] = ['claude', 'codex', 'opencode'];
+
+// Where a row's credential was read from, named only as far as the payload can
+// honestly support. An OpenCode key may come from the config file or from
+// auth.json and `backend` + `kind` cannot tell the two apart, so all three say
+// "<assistant> configuration" rather than claiming a specific store.
+const SOURCE_KEY: Record<AgentBackend, TranslationKey> = {
+  claude: 'settings.models.migration.source.claude',
+  codex: 'settings.models.migration.source.codex',
+  opencode: 'settings.models.migration.source.opencode',
+};
+
+/** The provider a row belongs to, or `null` when the server sent no metadata —
+ *  in which case the row falls back to `masked_detail` rather than guessing an
+ *  identity from the backend that happened to hold the key. */
+function migrationProvider(item: MigrationItem): string | null {
+  const vendor = item.vendor?.trim() ?? '';
+  const name = item.display_name?.trim() ?? '';
+  if (!vendor && !name) return null;
+  return providerLabel(vendor, name) || null;
+}
 
 function migrationVisual(item: MigrationItem): { Icon: React.ComponentType<{ size?: number; className?: string }>; accent: Accent } {
   if (item.kind === 'oauth_native') {
@@ -53,12 +75,19 @@ const ActionBadge: React.FC<{ action: MigrationAction }> = ({ action }) => {
   );
 };
 
-const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void }> = ({ item, onToggle }) => {
+const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void; selectable: boolean }> = ({ item, onToggle, selectable }) => {
   const { t } = useTranslation();
   const { Icon, accent } = migrationVisual(item);
   const note = serverText(t, item.notes_key);
-  // reauth needs the interactive browser flow, so it can't be bulk-applied here.
-  const selectable = item.proposed_action !== 'reauth';
+  const provider = migrationProvider(item);
+  const vendor = item.vendor?.trim();
+  // The masked key and the source it came from are the two things that tell two
+  // rows of the same provider apart. Without provider metadata there is nothing
+  // to put above them, so the composed detail stays the title as before.
+  const title = provider ?? item.masked_detail;
+  const maskedKey = provider ? (item.masked_credential?.trim() || item.masked_detail) : '';
+  const origin = t(SOURCE_KEY[item.backend]);
+  const detail = [maskedKey, origin].filter(Boolean).join(' · ');
   return (
     // The action badge is nowrap and shrink-0 (up to ~151px), so beside the
     // detail column it pushed this row's min-content to 374px — wider than the
@@ -72,12 +101,15 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void }> = ({ item
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <Checkbox checked={item.selected} onCheckedChange={onToggle} disabled={!selectable} label={item.masked_detail} />
+        <Checkbox checked={item.selected} onCheckedChange={onToggle} disabled={!selectable} label={detail ? `${title} · ${detail}` : title} />
         <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
-          <Icon size={18} className={ACCENT_ICON[accent]} />
+          {vendor
+            ? <VendorGlyph vendor={providerVendorId(vendor)} className={cn('h-[14px] w-auto shrink-0 aspect-[10/7]', ACCENT_ICON[accent])} />
+            : <Icon size={18} className={ACCENT_ICON[accent]} />}
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-[14px] font-semibold text-foreground">{item.masked_detail}</span>
+          <span className="truncate text-[14px] font-semibold text-foreground">{title}</span>
+          {detail && <span className="truncate text-[12px] text-muted">{detail}</span>}
           {/* `notes_key` is runtime-declared and optional, so an entry this
               bundle doesn't carry drops the line instead of printing the key. */}
           {note && <span className="truncate text-[12px] text-muted">{note}</span>}
@@ -90,12 +122,21 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void }> = ({ item
   );
 };
 
+// The broad settings migration: everything the scan returned, minus the reauth
+// rows that need the interactive browser flow and so cannot be bulk-applied.
+const DEFAULT_ELIGIBLE = (item: MigrationItem) => item.proposed_action !== 'reauth';
+
 export const MigrationDialog: React.FC<{
   open: boolean;
   onClose: () => void;
   /** Fired after a successful apply so callers can refresh sources/agents. */
   onApplied?: (applied: number) => void;
-}> = ({ open, onClose, onApplied }) => {
+  /** Narrows the dialog to one entry's candidates — the rows shown, the rows
+   *  selectable and the ids submitted all come from this one predicate, so a
+   *  caller's count can never describe a different set than the dialog applies.
+   *  Defaults to the broad settings migration. */
+  eligible?: (item: MigrationItem) => boolean;
+}> = ({ open, onClose, onApplied, eligible }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -137,10 +178,12 @@ export const MigrationDialog: React.FC<{
   const toggle = (id: string) =>
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, selected: !i.selected } : i)));
 
-  // reauth rows can't be bulk-applied (they need the interactive OAuth flow),
-  // and their checkbox is disabled — so exclude them from both the count and
-  // the submitted ids, even if a scan returned one pre-selected.
-  const appliable = items.filter((i) => i.selected && i.proposed_action !== 'reauth');
+  // One predicate decides what this dialog shows, what a person can tick, and
+  // what gets submitted — a row that fails it is never counted and never sent,
+  // even if the scan returned it pre-selected.
+  const isEligible = eligible ?? DEFAULT_ELIGIBLE;
+  const candidates = eligible ? items.filter(isEligible) : items;
+  const appliable = candidates.filter((i) => i.selected && isEligible(i));
   const selectedCount = appliable.length;
 
   const apply = async () => {
@@ -162,7 +205,7 @@ export const MigrationDialog: React.FC<{
 
   const grouped = BACKEND_ORDER.map((backend) => ({
     backend,
-    rows: items.filter((i) => i.backend === backend),
+    rows: candidates.filter((i) => i.backend === backend),
   })).filter((g) => g.rows.length > 0);
 
   return (
@@ -190,7 +233,7 @@ export const MigrationDialog: React.FC<{
                   {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
                 </span>
                 {group.rows.map((item) => (
-                  <ItemRow key={item.id} item={item} onToggle={() => toggle(item.id)} />
+                  <ItemRow key={item.id} item={item} selectable={isEligible(item)} onToggle={() => toggle(item.id)} />
                 ))}
               </div>
             ))}

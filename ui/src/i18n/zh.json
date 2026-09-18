@@ -1678,6 +1678,11 @@
           "keepNativeSanctioned": "保留在 Agent 自己的凭据库（受官方认可）",
           "keepNativeReauthHint": "保留给 Agent 管理；需要模型网关管理时另行添加订阅",
           "fromOpencode": "来自 opencode 配置"
+        },
+        "source": {
+          "claude": "Claude Code 配置",
+          "codex": "Codex 配置",
+          "opencode": "OpenCode 配置"
         }
       },
       "backends": {
@@ -1907,12 +1912,17 @@
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
       },
-      "migrationBanner": {
-        "title": "发现可导入模型网关的 Agent 配置",
-        "body_one": "检测到 {{count}} 项登录 / API Key 可导入模型网关。",
-        "body_other": "检测到 {{count}} 项登录 / API Key 可导入模型网关。",
-        "import": "导入模型网关",
-        "dismiss": "忽略"
+      "importNotice": {
+        "found_one": "发现 {{count}} 个可导入模型网关的 API Key",
+        "found_other": "发现 {{count}} 个可导入模型网关的 API Key",
+        "review": "查看并导入",
+        "help": "什么是模型网关？",
+        "helpBody": "模型网关集中管理 API Key 和模型连接，为 AI 助手提供统一的模型入口。导入只会复制你选中的 API Key，原有配置会保留。",
+        "dismiss": "关闭导入提示",
+        "imported_one": "已导入 {{count}} 个 API Key 到模型网关",
+        "imported_other": "已导入 {{count}} 个 API Key 到模型网关",
+        "importedRemaining_one": "已导入 {{imported}} 个 · 还有 {{count}} 个可导入",
+        "importedRemaining_other": "已导入 {{imported}} 个 · 还有 {{count}} 个可导入"
       }
     }
   },
@@ -5346,8 +5356,9 @@
       "entryReady": "已连接，可以开始工作",
       "entryStopped": "连接已保存，进入工作台即可启动服务",
       "entryFailed": "无法确认可用助手，请刷新后重试",
-      "addSubscription": "添加订阅",
+      "addSubscription": "添加订阅 / 登录",
       "addKey": "添加 API Key",
+      "moreProviders": "更多服务商",
       "refresh": "刷新连接",
       "enableFirst": "请先启用此助手以连接",
       "checkSettings": "检查设置",

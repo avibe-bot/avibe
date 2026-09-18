@@ -45,9 +45,13 @@ export function Welcome({ data, onNext }: WelcomeProps) {
         <h1>{t('onboarding.welcome.title')}</h1>
         <p>{t('onboarding.welcome.subtitle')}</p>
       </header>
-      <CollaborationStory />
-      <AccessTiles />
-      <Button type="button" variant="brand" className="group onboarding-primary-action" onClick={() => void start()} disabled={pending}>
+      {/* The stage both steps share, so this button and the setup step's land on the
+          same coordinates — see `.onboarding-stage` in onboarding.css. */}
+      <div className="onboarding-stage">
+        <CollaborationStory />
+        <AccessTiles />
+      </div>
+      <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void start()} disabled={pending}>
         {t(pending ? 'onboarding.welcome.detecting' : error ? 'common.retry' : 'onboarding.welcome.getStarted')}
         {pending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />}
       </Button>

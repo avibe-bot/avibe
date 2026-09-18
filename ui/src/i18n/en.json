@@ -1678,6 +1678,11 @@
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
           "keepNativeReauthHint": "Kept native; add a separate gateway-held subscription explicitly",
           "fromOpencode": "From the opencode config"
+        },
+        "source": {
+          "claude": "Claude Code configuration",
+          "codex": "Codex configuration",
+          "opencode": "OpenCode configuration"
         }
       },
       "backends": {
@@ -1907,12 +1912,17 @@
         "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
       },
-      "migrationBanner": {
-        "title": "Native configs ready to import",
-        "body_one": "Found {{count}} native sign-in or API key you can move into the gateway.",
-        "body_other": "Found {{count}} native sign-ins or API keys you can move into the gateway.",
-        "import": "Import to gateway",
-        "dismiss": "Dismiss"
+      "importNotice": {
+        "found_one": "Found {{count}} API key to import into Model Gateway",
+        "found_other": "Found {{count}} API keys to import into Model Gateway",
+        "review": "Review and import",
+        "help": "What is Model Gateway?",
+        "helpBody": "Model Gateway keeps your API keys and model connections in one place, so every AI assistant has a single way in. Importing only copies the keys you select; your existing configuration is left as it is.",
+        "dismiss": "Dismiss import notice",
+        "imported_one": "Imported {{count}} API key into Model Gateway",
+        "imported_other": "Imported {{count}} API keys into Model Gateway",
+        "importedRemaining_one": "Imported {{imported}} · {{count}} API key still available",
+        "importedRemaining_other": "Imported {{imported}} · {{count}} API keys still available"
       }
     }
   },
@@ -5346,8 +5356,9 @@
       "entryReady": "Connected. You can start working.",
       "entryStopped": "Connection saved. Enter workspace to start the service.",
       "entryFailed": "A ready assistant could not be confirmed. Refresh and try again.",
-      "addSubscription": "Add subscription",
+      "addSubscription": "Add subscription / sign in",
       "addKey": "Add API Key",
+      "moreProviders": "More providers",
       "refresh": "Refresh connection",
       "enableFirst": "Enable this assistant to connect it.",
       "checkSettings": "Review settings",
