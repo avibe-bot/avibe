@@ -132,6 +132,7 @@ vi.mock('react-i18next', () => ({
 beforeEach(() => {
   viewport.isDesktop = false;
   clearMobileProjectsListSnapshot();
+  instanceAuth.remote = true;
   instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
@@ -151,8 +152,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('AppShell setup recovery', () => {
-  it('shows the remote-owner recovery card instead of the wizard', async () => {
+describe('AppShell setup access', () => {
+  it.each([
+    { remote: false, instanceKind: 'personal' as const },
+    { remote: true, instanceKind: 'personal' as const },
+    { remote: true, instanceKind: 'organization' as const },
+  ])('renders the wizard for $instanceKind access (remote: $remote)', async (context) => {
+    Object.assign(instanceAuth, context);
     render(
       <MemoryRouter initialEntries={['/setup']}>
         <Routes>
@@ -163,9 +169,8 @@ describe('AppShell setup recovery', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/settings/service');
-    expect(screen.queryByTestId('wizard')).toBeNull();
+    expect(await screen.findByTestId('wizard')).toBeTruthy();
+    expect(screen.queryByTestId('workbench-sidebar')).toBeNull();
   });
 });
 

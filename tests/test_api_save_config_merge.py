@@ -1110,10 +1110,20 @@ def test_settings_platforms_apply_uses_parent_platform_identity():
 def test_settings_platforms_persists_discord_guild_scope_before_auto_enable():
     source = Path("ui/src/components/settings/SettingsPlatformsPage.tsx").read_text(encoding="utf-8")
 
-    assert "const savePlatformSettings = async (platform: string, nextData: any)" in source
-    assert "platform === 'discord'" in source
-    assert "await api.saveSettings({" in source
-    assert "await savePlatformSettings(platform, nextData);" in source
+    helper = Path("ui/src/components/settings/shared/savePlatformSettings.ts").read_text(encoding="utf-8")
+    assert "import { savePlatformSettings } from './shared/savePlatformSettings';" in source
+    # Follow the shared auxiliary save owner; the Wizard's Discord form consumer
+    # and AUTH-SETUP-120 exercise actual selection, failure/retry and persistence.
+    assert "canManageAccessMembers && platform === 'discord' && Array.isArray(guilds)" in helper
+    assert "guilds.length > 0 || data.discordGuildAllowlistTouched === true" in helper
+    assert "await api.saveSettings({" in helper
+    assert "}, 'discord');" in helper
+    apply_handler = source[source.index("const handleApplyPlatform = async"):]
+    auxiliary_save = apply_handler.index(
+        "await savePlatformSettings(api, platform, nextData, canManageAccessMembers);"
+    )
+    enable = apply_handler.index("updateEnabledPlatforms({ add: [platform] })")
+    assert auxiliary_save < enable
 
 
 def test_platform_runnable_config_keeps_wechat_token_optional():

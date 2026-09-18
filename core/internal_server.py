@@ -1035,6 +1035,17 @@ def create_app(
             logger.exception("internal Agent Activity cache invalidation failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.get("/internal/backend-application/{backend}")
+    async def _backend_application(backend: str) -> Any:
+        from modules.agents.catalog import AGENT_BACKENDS
+
+        if backend not in AGENT_BACKENDS:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "unsupported_backend"})
+        coordinator = getattr(controller, "backend_restart_coordinator", None)
+        if coordinator is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "backend_runtime_unavailable"})
+        return {"ok": True, "controller_pid": os.getpid(), **coordinator.snapshot(backend)}
+
     @app.post("/internal/reconcile-agent-backends")
     async def _reconcile_agent_backends(request: Request) -> Any:
         """Hot-apply persisted Agent backend config on the controller loop."""

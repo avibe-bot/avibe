@@ -51,21 +51,6 @@ export function isSetupCheckBypassed(path: string): boolean {
   return SETUP_CHECK_BYPASS_PATHS.has(path);
 }
 
-export type RemoteContext = {
-  remote: boolean;
-};
-type RemoteSetupSession = RemoteContext & {
-  authenticated?: boolean;
-  capabilities?: { can_manage_instance?: boolean };
-};
-
-/** Remote runtime principals skip the local setup wizard and use shell recovery. */
-export function shouldBypassSetupForRemoteOwner(session: RemoteSetupSession | null | undefined): boolean {
-  return !!session?.remote && session.authenticated === true && (
-    session.capabilities?.can_manage_instance === true
-  );
-}
-
 export async function checkRemoteAuthForPath<Session extends RemoteSession>(
   path: string,
   getSession: () => Promise<Session>,

@@ -136,7 +136,13 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if (!autoStartLogin || !canManageAccessMembers) return;", source)
 
         settings_source = Path("ui/src/components/settings/SettingsPlatformsPage.tsx").read_text(encoding="utf-8")
-        self.assertIn("autoStartLogin={false}", settings_source)
+        self.assertIn("import { PlatformConfigEmbed } from './PlatformConfigEmbed'", settings_source)
+        self.assertIn("<PlatformConfigEmbed", settings_source)
+        embedded_source = Path("ui/src/components/settings/PlatformConfigEmbed.tsx").read_text(encoding="utf-8")
+        self.assertIn("<WeChatConfig", embedded_source)
+        self.assertIn("autoStartLogin={false}", embedded_source)
+        recovery_source = Path("ui/src/components/onboarding/SetupPlatformRecovery.tsx").read_text(encoding="utf-8")
+        self.assertIn("<PlatformConfigEmbed", recovery_source)
 
     async def test_poll_status_refresh_preserves_local_token_list(self):
         manager = WeChatAuthManager()

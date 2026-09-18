@@ -33,6 +33,7 @@ interface BackendLifecycleChipProps {
   /** Setup describes executable availability separately from connection readiness. */
   readyLabel?: string;
   onChanged?: (info?: BackendChipChange) => void | Promise<void>;
+  onOperationChange?: (pending: boolean) => void;
 }
 
 // Map lifecycle visual states to canonical Badge variants from the design
@@ -96,6 +97,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   enabled,
   cliStatus,
   onChanged,
+  onOperationChange,
   readyLabel,
 }) => {
   const { t } = useTranslation();
@@ -173,6 +175,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const handleUpgrade = async () => {
     setOperation('upgrading');
+    onOperationChange?.(true);
     try {
       const result = await api.installAgent(name);
       if (result.ok) {
@@ -186,12 +189,14 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
+      onOperationChange?.(false);
       if (isMountedRef.current) setOperation('idle');
     }
   };
 
   const handleRestart = async () => {
     setOperation('restarting');
+    onOperationChange?.(true);
     try {
       const result = await api.restartBackend(name);
       showToast(
@@ -202,6 +207,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
+      onOperationChange?.(false);
       if (isMountedRef.current) setOperation('idle');
     }
   };

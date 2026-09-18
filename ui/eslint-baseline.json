@@ -17,7 +17,7 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/Wizard.tsx": {
-      "@typescript-eslint/no-explicit-any": 8
+      "@typescript-eslint/no-explicit-any": 1
     },
     "src/components/settings/SettingsBackendsPage.tsx": {
       "@typescript-eslint/no-explicit-any": 1
@@ -27,16 +27,10 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/SettingsPlatformsPage.tsx": {
-      "@typescript-eslint/no-explicit-any": 9
+      "@typescript-eslint/no-explicit-any": 6
     },
     "src/components/settings/SettingsServicePage.tsx": {
       "@typescript-eslint/no-explicit-any": 4
-    },
-    "src/components/settings/providers/ClaudeProviderConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 1
-    },
-    "src/components/settings/providers/CodexProviderConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 1
     },
     "src/components/settings/shared/useBackendRuntime.ts": {
       "@typescript-eslint/no-explicit-any": 1

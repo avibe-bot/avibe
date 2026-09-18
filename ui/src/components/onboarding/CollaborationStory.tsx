@@ -174,7 +174,7 @@ export function CollaborationStory() {
                 </div>
                 <Skeleton backend={backend} done={done} written={reducedMotion ? WORK_LINES : frame.written[index]} />
                 <div className="onboarding-story-identity">
-                  <BackendIcon backend={backend} size={28} variant="glyph" aria-hidden="true" />
+                  <BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" />
                   <strong>{t(`onboarding.story.${backend}.name`)}</strong>
                   <span>{t(`onboarding.story.${backend}.role`)}</span>
                 </div>

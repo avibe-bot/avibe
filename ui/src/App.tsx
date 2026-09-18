@@ -62,7 +62,6 @@ import {
     REMOTE_AUTH_STATE_EVENT,
     reportRemoteAuthorizationState,
     type RemoteAuthorizationState,
-    shouldBypassSetupForRemoteOwner,
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
@@ -402,10 +401,6 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                     ? setupState.needs_setup === false
                     : hasConfiguredPlatformCredentials(config);
                 if (!config || !config.mode || !setupReady) {
-                    if (shouldBypassSetupForRemoteOwner(session)) {
-                        setGuardStatus('ready');
-                        return;
-                    }
                     setGuardStatus('needs-setup');
                     return;
                 }

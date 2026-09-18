@@ -1694,6 +1694,8 @@ def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_ba
 
 
 def test_sync_start_oauth_web_keeps_background_tasks_on_persistent_loop(monkeypatch):
+    from core.agent_auth_service import WebAuthFlow
+
     async def _start_web_setup(backend, *, force_reset=True, provider_id=None):
         async def _mark_completed():
             await asyncio.sleep(0.01)
@@ -1703,7 +1705,7 @@ def test_sync_start_oauth_web_keeps_background_tasks_on_persistent_loop(monkeypa
         flow.waiter_task = task
         return flow
 
-    flow = SimpleNamespace(
+    flow = WebAuthFlow(
         flow_id="flow-sync",
         backend="codex",
         state="awaiting_code",

@@ -50,10 +50,12 @@ export async function serveProduct(page: Page) {
   await page.route('**/*', async (route: Route) => {
     const request = route.request();
     const method = request.method();
-    if (request.url().startsWith(ORIGIN) && (method === 'GET' || method === 'HEAD')) return route.fallback();
+    if (request.url().startsWith(ORIGIN) && (method === 'GET' || method === 'HEAD') && !new URL(request.url()).pathname.startsWith('/api/')) return route.fallback();
     denied.push(`${method} ${request.url()}`);
     return route.abort();
   });
+  await page.route('**/status', (route) => route.fulfill({ json: { state: 'running' } }));
+  await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: { ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2), installed: true, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false } }));
   await page.route('**/api/config', (route) => route.fulfill({ json: CONFIG }));
   await page.route('**/api/platforms', (route) => route.fulfill({ json: CATALOG }));
   await page.route('**/api/settings**', (route) => route.fulfill({ json: { channels: {} } }));

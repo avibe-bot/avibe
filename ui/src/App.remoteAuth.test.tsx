@@ -1,11 +1,13 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { useLayoutEffect } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import { AuthGuard } from './App';
+import { Summary } from './components/steps/Summary';
 import { useInstanceAuthorization } from './context/InstanceAuthorizationContext';
 import { DENIED_INSTANCE_CAPABILITIES, OWNER_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
 import { isOwnerOnlyPath } from './lib/adminNavigation';
@@ -27,11 +29,15 @@ vi.hoisted(() => {
 const api = vi.hoisted(() => ({
   getAuthSession: vi.fn(),
   getConfig: vi.fn(),
+  mutateConfig: vi.fn(),
 }));
+const status = vi.hoisted(() => ({ control: vi.fn() }));
 
 vi.mock('./context/ApiContext', () => ({
   useApi: () => api,
 }));
+vi.mock('./context/StatusContext', () => ({ useStatus: () => status }));
+vi.mock('./context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -196,5 +202,118 @@ describe('AuthGuard setup-bypass authorization', () => {
 
     expect(await screen.findByText('diagnostics-page')).toBeTruthy();
     expect(screen.queryByText('workbench-home')).toBeNull();
+  });
+});
+
+describe('AuthGuard setup access parity (AUTH-SETUP-405)', () => {
+  const managers = [
+    { remote: false, instance_kind: 'personal', instance_role: 'owner' },
+    { remote: true, instance_kind: 'personal', instance_role: 'owner' },
+    { remote: true, instance_kind: 'organization', instance_role: 'owner' },
+    { remote: true, instance_kind: 'organization', instance_role: 'member' },
+  ] as const;
+
+  const connect = (context: typeof managers[number], needsSetup: boolean) => {
+    api.getAuthSession.mockResolvedValue({
+      ...context,
+      authenticated: true,
+      email: 'owner@example.com',
+      capabilities: {
+        ...OWNER_INSTANCE_CAPABILITIES,
+        is_instance_owner: context.instance_role === 'owner',
+        can_manage_access_members: context.instance_role === 'owner',
+      },
+      authorization_state: 'current',
+    });
+    api.getConfig.mockResolvedValue({
+      mode: 'self_host',
+      setup_state: { needs_setup: needsSetup },
+    });
+  };
+
+  const renderSetupRoutes = (path: string) => render(
+    <MemoryRouter initialEntries={[path]}>
+      <AuthGuard>
+        <Routes>
+          <Route path="/" element={<div>workbench-home</div>} />
+          <Route path="/setup" element={
+            <Summary
+              data={{ platforms: { enabled: [] } }}
+              onNext={() => undefined}
+              onBack={() => undefined}
+              isFirst={false}
+              isLast
+            />
+          } />
+        </Routes>
+      </AuthGuard>
+    </MemoryRouter>,
+  );
+
+  it.each(managers)(
+    'completes setup and returns home for $instance_kind $instance_role (remote: $remote)',
+    async (context) => {
+      connect(context, true);
+      api.mutateConfig.mockImplementation(async () => {
+        api.getConfig.mockResolvedValue({
+          mode: 'self_host',
+          setup_state: { needs_setup: false },
+        });
+        return { setup_completed: true, platforms: { enabled: [] } };
+      });
+      status.control.mockResolvedValue(undefined);
+      const user = userEvent.setup();
+      renderSetupRoutes('/');
+
+      await user.click(await screen.findByRole('button', { name: 'summary.finishAndStart' }));
+
+      expect(api.mutateConfig).toHaveBeenCalledWith(expect.arrayContaining([
+        { kind: 'set', path: ['setup_completed'], value: true },
+      ]));
+      expect(status.control).toHaveBeenCalledWith('start');
+      expect(await screen.findByText('workbench-home', {}, { timeout: 2_000 })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'summary.finishAndStart' })).toBeNull();
+    },
+  );
+
+  it.each(managers)('keeps completed $instance_kind $instance_role at home (remote: $remote)', async (context) => {
+    connect(context, false);
+    renderSetupRoutes('/');
+    expect(await screen.findByText('workbench-home')).toBeTruthy();
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(managers)('allows explicit setup for configured $instance_kind $instance_role (remote: $remote)', async (context) => {
+    connect(context, false);
+    renderSetupRoutes('/setup');
+    expect(await screen.findByRole('button', { name: 'summary.finishAndStart' })).toBeTruthy();
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(['editor', 'viewer'])('does not force a remote %s to complete instance setup', async (role) => {
+    api.getAuthSession.mockResolvedValue({
+      remote: true,
+      authenticated: true,
+      instance_kind: 'organization',
+      instance_role: role,
+      authorization_state: 'current',
+      capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_read_instance: true },
+    });
+    renderSetupRoutes('/');
+    expect(await screen.findByText('workbench-home')).toBeTruthy();
+    expect(api.getConfig).not.toHaveBeenCalled();
+  });
+
+  it('keeps a revoked remote session out of setup', async () => {
+    api.getAuthSession.mockResolvedValue({
+      remote: true,
+      authenticated: true,
+      instance_kind: 'organization',
+      authorization_state: 'revoked',
+    });
+    renderSetupRoutes('/setup');
+    expect(await screen.findByText('remoteAuthorization.revoked.body')).toBeTruthy();
+    expect(api.getConfig).not.toHaveBeenCalled();
+    expect(api.mutateConfig).not.toHaveBeenCalled();
   });
 });

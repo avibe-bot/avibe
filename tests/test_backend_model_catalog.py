@@ -181,8 +181,8 @@ def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
         ).encode()
     )
 
-    assert path.name.startswith("standard-responses-")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert path.path.name.startswith("standard-responses-")
+    payload = json.loads(path.path.read_text(encoding="utf-8"))
     assert payload["client_version"] == "0.149.1"
     assert payload["models"][0] == {
         "slug": "gpt-5.6-luna",
@@ -663,9 +663,9 @@ def test_codex_hub_catalog_preparation_exports_current_binary(monkeypatch, tmp_p
 
     exported = backend_model_catalog.prepare_codex_hub_catalog("codex")
 
-    assert exported.name.startswith("standard-responses-")
+    assert exported.path.name.startswith("standard-responses-")
     assert calls == [("codex", None)]
-    assert json.loads(exported.read_text(encoding="utf-8"))["models"][0]["use_responses_lite"] is False
+    assert json.loads(exported.path.read_text(encoding="utf-8"))["models"][0]["use_responses_lite"] is False
 
 
 def test_codex_hub_catalog_failure_cannot_select_a_previous_generation(monkeypatch, tmp_path):
@@ -681,8 +681,8 @@ def test_codex_hub_catalog_failure_cannot_select_a_previous_generation(monkeypat
     with pytest.raises(RuntimeError, match="export failed"):
         backend_model_catalog.prepare_codex_hub_catalog("/opt/codex")
 
-    assert previous.exists()
-    assert list(previous.parent.glob("standard-responses-*.json")) == [previous]
+    assert previous.path.exists()
+    assert list(previous.path.parent.glob("standard-responses-*.json")) == [previous.path]
 
 
 def test_codex_hub_catalog_generations_are_content_addressed(monkeypatch, tmp_path):
@@ -692,9 +692,9 @@ def test_codex_hub_catalog_generations_are_content_addressed(monkeypatch, tmp_pa
     first = backend_model_catalog._publish_codex_hub_catalog(b'{"models":[{"slug":"gpt-first"}]}')
     second = backend_model_catalog._publish_codex_hub_catalog(b'{"models":[{"slug":"gpt-second"}]}')
 
-    assert first != second
-    assert json.loads(first.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-first"
-    assert json.loads(second.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-second"
+    assert first.path != second.path
+    assert json.loads(first.path.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-first"
+    assert json.loads(second.path.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-second"
 
 
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():

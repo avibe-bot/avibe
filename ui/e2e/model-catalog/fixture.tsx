@@ -12,6 +12,7 @@ import { modelsApi } from '../../src/components/settings/models/modelsApi';
 import type { AgentBackend, AgentSupply, BackendModel, BackendModelsPut } from '../../src/components/settings/models/types';
 import { GatewayFixture } from './gatewayFixture';
 import { RouteFixture } from './routeFixture';
+import { TokenScopeFixture } from './tokenScopeFixture';
 
 const params = new URLSearchParams(location.search);
 const backend = params.get('backend') as AgentBackend;
@@ -46,6 +47,7 @@ export function Fixture() {
   const [open, setOpen] = useState(false);
   const [, setRevision] = useState(0);
   return <I18nextProvider i18n={language}>
+    {params.has('tokens') && <TokenScopeFixture />}
     <button type="button" onClick={() => setOpen(true)}>Manage models</button>
     <output data-testid="saved">{JSON.stringify({ saved, writes })}</output>
     {open && <BackendModelCatalogDialog open backend={backend} canReadSources sourceNames={{}}

@@ -102,12 +102,24 @@ vibe
 
 This starts the local service and opens the Web UI setup wizard. If a browser does not open automatically, check the terminal output for the local URL.
 
-In the wizard, help the user choose:
+In the wizard, help the user install or detect Claude Code, Codex, or OpenCode,
+then connect one assistant with a subscription or API key. Existing valid
+credentials count; starting another login preserves them until the new login
+commits. Settings → Backends uses the same connection and recovery controls.
+OpenCode retains its explicit **Allow tool calls** action.
 
-1. Chat platform: Slack, Discord, Telegram, WeChat, or Lark / Feishu.
-2. Agent backend: Claude Code, OpenCode, or Codex.
-3. Project working directory.
-4. Channel or chat scopes that should be enabled.
+Select **Enter workspace** explicitly. A stopped service starts at this point;
+the wizard confirms application and an available Agent before completing setup.
+Pending application, uncertain keychain auth, or a failed start stays recoverable
+on this screen. For OpenCode, if the Agent's provider is unconnected or its exact
+model is absent from that provider's merged native/custom catalog, choose a
+compatible model in the inline recovery and apply it explicitly. The wizard never chooses a model or changes an existing usable default silently.
+
+IM is optional for a fresh installation. Configure Slack, Discord, Telegram,
+WeChat, or Lark / Feishu later in Settings. Existing enabled but incomplete IM
+configuration opens an explicit **Repair saved messaging configuration** action
+using the existing platform form. Repair only its reported missing credentials;
+setup does not disable adapters or erase their configuration to bypass validation.
 
 Platform docs:
 
@@ -129,7 +141,8 @@ This guides the user through avibe.bot sign-in, pairing, and a secure tunnel. Us
 
 ## Step 6: Smoke Test
 
-After setup, ask the user to send a short message in the enabled chat:
+After setup, open the Web workspace, select an available Agent, and ask the user
+to send a short message in a new conversation:
 
 ```text
 Say hello and tell me which project directory you are running in.
@@ -141,13 +154,17 @@ Then verify:
 vibe status
 ```
 
-If messages do not arrive, run:
+If the Web response does not arrive, inspect the selected Agent, backend
+connection and application status in Settings, then run:
 
 ```bash
 vibe doctor
 ```
 
-Check platform-specific docs for missing permissions, disabled bot privacy settings, or unselected channels.
+Only if an IM platform was explicitly configured, repeat the message in an enabled
+IM chat. For IM delivery failures, check the platform-specific docs for missing
+permissions, bot privacy settings, or unselected channels. A Web-only installation
+does not need an IM chat to complete this smoke test.
 
 ## Common Fixes
 

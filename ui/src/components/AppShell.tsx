@@ -14,7 +14,6 @@ import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { WindowManagerProvider } from '../context/WindowManagerProvider';
 import { DockProvider } from '../context/DockProvider';
 import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
@@ -173,10 +172,7 @@ export const AppShell: React.FC = () => {
   // fetch on a phone. A demand gate keyed on mounting is only honest if mounting
   // implies visible, so the mount site has to carry the viewport too.
   const isDesktop = useIsDesktop();
-  const {
-    capabilities,
-    remote,
-  } = useInstanceAuthorization();
+  const { capabilities } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const navigate = useNavigate();
@@ -275,45 +271,6 @@ export const AppShell: React.FC = () => {
     url.searchParams.set(APP_TAB_PARAM, '1');
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }, [chromeless, location.pathname, location.search]);
-
-  if (
-    location.pathname === '/setup' &&
-    remote &&
-    capabilities.can_manage_instance
-  ) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-background p-4 text-foreground">
-        <Card className="w-full max-w-md">
-          <CardHeader>
-            <CardTitle>{t('setup.remoteOwner.title')}</CardTitle>
-            <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* This copy deliberately names no address. Composing one here from
-                `ui.setup_host` / `ui.setup_port` was wrong twice (port, then
-                address family), and delegating to
-                `remote_access.origin_service_for_pairing` was wrong too: that
-                function answers which origin `cloudflared` should dial, which
-                only equals "which address opens this UI" while the cloud tunnel
-                is enabled, because that is the only case where the bind is
-                widened to a wildcard. This card renders before setup is
-                finished — usually with the tunnel off — where the projected
-                `127.0.0.1` is unreachable for every non-loopback `setup_host`.
-                No address means none to get wrong. See issue #1965 for the
-                pre-existing pairing bug that analysis uncovered. */}
-            <p className="text-sm leading-relaxed text-muted">
-              {t('setup.remoteOwner.hint')}
-            </p>
-            <Button asChild>
-              <Link to="/settings/service">
-                {t('setup.remoteOwner.action')}
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
-      </main>
-    );
-  }
 
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
