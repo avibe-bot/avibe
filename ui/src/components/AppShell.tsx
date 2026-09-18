@@ -28,6 +28,7 @@ import logoImg from '../assets/logo.png';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
+import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
 import {
   isOwnerOnlyPath,
   SETTINGS_LANDING_PATH,
@@ -217,9 +218,10 @@ export const AppShell: React.FC = () => {
     if (!capabilities.can_manage_instance) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
-      if (c.language && c.language !== i18n.language) {
-        void i18n.changeLanguage(c.language);
-      }
+      // Through the language operation, not straight at i18n: a language change
+      // gives this effect a new `api` and so a second read, which must not undo
+      // the pick that caused it — nor may a first read that answers late.
+      adoptPersistedLanguage(i18n, c.language);
     }).catch(() => {});
   }, [api, capabilities.can_manage_instance, i18n]);
 

@@ -62,6 +62,20 @@ ok + ready + backend evidence exists — a rendered banner is never claimed from
 - **General** — `/settings/general` is the ordinary Settings landing and the returnable one. Language uses the
   existing shared selection path and autosaves; appearance is three explicit choices through the existing
   `ThemeProvider` (`mode`/`setMode`), so System follows the OS while Light/Dark persist. No Save button.
+- **Language operation** — one instance-wide value, so its ordering belongs to the i18n instance rather than to
+  whichever control is mounted: a private `WeakMap` in `useLanguageSelection.ts` holds the queue, the newest pick
+  and the failure a Retry may still act on, while a mounted control lends it the api and the toast for as long as
+  it is on screen. Leaving Settings mid-save no longer lets the next pick race the first, and a Retry whose
+  control is gone is inert — the pick stands locally, only the write is not re-attempted on a departed control's
+  authority. `AppShell` adopts the persisted language through the same operation, so neither a read that answers
+  late nor the second read a language change itself causes can undo the pick that caused it. The key is the
+  instance, not the object a component holds: `useTranslation` returns a fresh copy of the instance on every
+  language change, keeping the original as `__original`, so the held object is replaced by the very operation
+  being ordered — as `ApiContext`'s value already is, being memoized on `t`. Authority is asked twice and the two
+  answers are not interchangeable: whether a pick is an instance decision at all is settled by the control the user
+  made it through, so a member's local-only pick stays local even if they are granted instance rights before an
+  earlier save settles, and a write that is still ours to send reads the authority current when it runs rather than
+  the one remembered from when it was queued. A request already on the wire is not recalled.
 - **Primitive** — `SettingsPanel` gained a `preference` variant (surface-2, one 22px pad, radius 12, no divider);
   the `panel` variant is untouched.
 
