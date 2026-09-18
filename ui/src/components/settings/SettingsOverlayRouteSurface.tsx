@@ -85,22 +85,26 @@ export const SettingsOverlayRouteSurface = ({
               data-settings-overlay="true"
               // The overlay covers the work area and stops at the shell sidebar,
               // which is what keeps the origin project/session visible behind it.
-              // This overrides the primitive's historical 240 default with
-              // AppShell's actual `w-[248px]`; it is asserted against the
-              // sidebar's measured edge rather than restated as a shared token,
-              // so the two cannot drift apart unnoticed.
+              // This overrides the primitive's historical 240 default with the
+              // sidebar's own live width: the dialog is portaled outside the
+              // shell's subtree, so that document-level custom property is what
+              // keeps the two edges together while the sidebar is being dragged.
               //
               // Below md the surface is the whole viewport, so the primitive's
               // left border would draw a hairline down the screen edge and make
               // Settings-from-home look different from a direct Settings link.
               // There is no sidebar to divide from until the offset applies.
-              className="border-l-0 md:left-[248px] md:border-l"
+              className="border-l-0 md:left-[var(--app-sidebar-w)] md:border-l"
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;
                 if (
                   target instanceof Element
-                  && target.closest('[data-settings-toggle="true"]')
+                  // The toggle closes the overlay itself, and the sidebar's
+                  // resize edge is not a dismissal at all: it moves this
+                  // surface's own left edge, so grabbing it must not close what
+                  // the drag is laying out.
+                  && target.closest('[data-settings-toggle="true"], [data-sidebar-resizer="true"]')
                 ) {
                   event.preventDefault();
                 }

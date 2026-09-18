@@ -2510,7 +2510,8 @@
     "accountMenuLabel": "Account ({{email}})",
     "signedInAs": "Signed in as",
     "signOut": "Sign out",
-    "signingOut": "Signing out…"
+    "signingOut": "Signing out…",
+    "resizeSidebar": "Resize sidebar"
   },
   "workbench": {
     "eyebrow": "Workbench",
