@@ -1653,9 +1653,11 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
   const counts = inventory.counts;
   const onboarded = counts.private + counts.published;
 
+  // The summary is a card, matching the agent detail panel's rounded-2xl +
+  // strong-border shell, rather than a full-bleed band with only edge rules.
   return (
-    <section className={clsx('border-y border-border bg-surface-2/60 py-4', className)}>
-      <div className="flex flex-col gap-4 px-1 sm:px-4">
+    <section className={clsx('rounded-2xl border border-border-strong bg-surface-2/60 p-4', className)}>
+      <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="flex min-w-0 flex-1 items-start gap-3">
             <span className="grid size-9 shrink-0 place-items-center rounded-md border border-mint/30 bg-mint-soft text-mint-ink">

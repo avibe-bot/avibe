@@ -214,6 +214,35 @@ describe('AgentsPage load requests follow the rank that can serve them', () => {
   });
 });
 
+describe('Organization access summary presentation', () => {
+  it('renders the summary as a self-contained card', async () => {
+    const listVibeAgents = vi.fn().mockResolvedValue(listResult(brief('claude', '')));
+    const getVibeAgentOnboarding = vi.fn().mockResolvedValue({
+      ok: true,
+      available: true,
+      organization_id: 'org-1',
+      agents: [],
+      counts: { total: 1, system: 0, custom: 1, not_onboarded: 1, private: 0, published: 0, conflicts: 0 },
+    });
+    const api = makeApi(listVibeAgents, undefined, getVibeAgentOnboarding);
+    const view = renderPage(api, {
+      remote: true,
+      instanceKind: 'organization',
+      instanceRole: 'owner',
+      capabilities: OWNER_INSTANCE_CAPABILITIES,
+    });
+
+    const title = await screen.findByText('agents.onboarding.title');
+    const card = title.closest('section');
+    // A card is enclosed on every side: a radius plus one full border. The
+    // full-bleed band it replaced had edge rules only, which `border-y` states.
+    expect(card?.className).toContain('rounded-2xl');
+    expect(card?.className).toContain('border-border-strong');
+    expect(card?.className).not.toContain('border-y');
+    view.unmount();
+  });
+});
+
 describe('AgentsPage reconnect reconciliation', () => {
   it('refreshes definitions from the server on the gap edge without bridge-status duplication', async () => {
     const stale = brief('stale-agent', 'before the gap');
