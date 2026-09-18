@@ -136,8 +136,18 @@ class NativeMigrationItem:
     secret: Optional[str] = field(default=None, repr=False)
     account_label: Optional[str] = None
     manual_models: tuple[NativeManualModel, ...] = ()
+    # Already-masked credential text, produced by the same `mask_credential` the
+    # producer used for `masked_detail`. Carried as its own field so a client can
+    # render provider and key as separate elements without re-parsing the
+    # composed detail string; never holds plaintext.
+    masked_credential: Optional[str] = None
 
     def to_payload(self) -> dict[str, object]:
+        # Presentation metadata is additive: `vendor` and `display_name` let a
+        # client name and draw the provider instead of inferring identity from
+        # `backend` (which cannot tell an OpenCode config key from an auth.json
+        # one). Every pre-existing key keeps its exact value so the broader
+        # settings migration surface is untouched.
         return {
             "id": self.id,
             "backend": self.backend,
@@ -146,6 +156,9 @@ class NativeMigrationItem:
             "proposed_action": self.proposed_action,
             "selected": self.selected,
             "notes_key": self.notes_key,
+            "vendor": self.vendor,
+            "display_name": self.display_name,
+            "masked_credential": self.masked_credential,
         }
 
 
@@ -221,6 +234,7 @@ def _claude_items(
                 display_name="Anthropic",
                 base_url=base_url,
                 secret=api_key,
+                masked_credential=detail,
             )
         )
 
@@ -248,6 +262,7 @@ def _claude_items(
                 protocol="anthropic",
                 display_name="Anthropic",
                 base_url=base_url,
+                masked_credential=detail,
             )
         )
 
@@ -335,6 +350,7 @@ def _codex_items(
                 display_name="OpenAI",
                 base_url=base_url,
                 secret=api_key,
+                masked_credential=detail,
             )
         )
 
@@ -530,7 +546,8 @@ def _opencode_items(
                 *(f"{model.id}\0{model.display_name or ''}" for model in manual_models),
             ),
         )
-        detail = f"{provider_id} · {mask_credential(secret)}"
+        masked_secret = mask_credential(secret)
+        detail = f"{provider_id} · {masked_secret}"
         items.append(
             NativeMigrationItem(
                 id=item_id,
@@ -547,6 +564,7 @@ def _opencode_items(
                 base_url=base_url,
                 secret=secret,
                 manual_models=manual_models,
+                masked_credential=masked_secret,
             )
         )
     return items

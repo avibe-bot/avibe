@@ -23,7 +23,10 @@
             "description": "Claude and Codex native OAuth logins remain in the sanctioned CLI store via keep_native; subscription OAuth tokens are never copied by this file-import surface. Hub-held subscriptions are established only by the explicit OAuth add flow. controlled_import remains reserved for a future engine-owned import capability. API keys and Base URLs use import."
           },
           "selected": { "type": "boolean" },
-          "notes_key": { "type": ["string", "null"], "description": "i18n key for the row's secondary line" }
+          "notes_key": { "type": ["string", "null"], "description": "i18n key for the row's secondary line" },
+          "vendor": { "type": "string", "description": "Additive presentation metadata (ratified 2026-09-19). The provider this credential belongs to — an OpenCode row carries its native provider id. Optional: a client that does not receive it falls back to masked_detail and a generic icon, and never infers provider identity from `backend`." },
+          "display_name": { "type": "string", "description": "Additive presentation metadata. The server's own label for the provider. Not guaranteed friendly — OpenCode currently emits the provider id — so a client maps known vendors to brand names and falls back to this label, then to the slug." },
+          "masked_credential": { "type": ["string", "null"], "description": "Additive presentation metadata. The masked credential alone, produced by the same masking the composed masked_detail used, so a client can render provider and key separately without re-parsing that string. Never a plaintext secret; null on rows that have no credential of their own." }
         }
       }
     }
