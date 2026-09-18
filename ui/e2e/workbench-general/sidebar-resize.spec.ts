@@ -73,6 +73,7 @@ const edgeStyle = (page: Page) => page.locator(SEPARATOR).evaluate((node) => {
     borderRightWidth: style.borderRightWidth,
     backgroundColor: style.backgroundColor,
     cursor: style.cursor,
+    touchAction: style.touchAction,
     width: style.width,
     // A handle, grip, dot or centered ornament would have to be one of these.
     children: node.childElementCount,
@@ -243,6 +244,76 @@ test.describe('sidebar resizing', () => {
     expect(narrowed.width).toBe(DESKTOP.width - MIN);
 
     expect(denied).toEqual([]);
+  });
+
+  /**
+   * A touchscreen can report this breakpoint too — a tablet in landscape, a
+   * convertible laptop — and there the browser, not the page, decides whether a
+   * finger on this strip is a drag or its own pan. Pointer capture does not
+   * enter that negotiation: touch-action does, and losing it means Chromium
+   * cancels the pointer part-way through the gesture. So this drives real touch
+   * input through CDP rather than asserting the utility class that asks for it.
+   */
+  test.describe('with a finger', () => {
+    test.use({ hasTouch: true });
+
+    test('resizes from a touch drag the browser does not take over', async ({ page }) => {
+      const denied = await serveProduct(page);
+      await page.setViewportSize(DESKTOP);
+      await open(page, '/');
+      await expect(page.locator(SIDEBAR)).toBeVisible();
+
+      // What the browser was given for the decision.
+      expect(await edgeStyle(page)).toMatchObject({ touchAction: 'none' });
+
+      // What it then did with the gesture: a cancelled pointer is exactly how a
+      // pan taking the finger over shows up at the element.
+      await page.locator(SEPARATOR).evaluate((node) => {
+        const seen: string[] = [];
+        (window as unknown as { __edgePointerLog: string[] }).__edgePointerLog = seen;
+        for (const type of ['pointerdown', 'pointermove', 'pointercancel', 'pointerup']) {
+          node.addEventListener(type, (event) => seen.push(event.type));
+        }
+      });
+
+      const strip = await boxOf(page.locator(SEPARATOR), 'separator');
+      const from = { x: strip.x + strip.width / 2, y: strip.y + strip.height / 2 };
+      const cdp = await page.context().newCDPSession(page);
+      const point = (x: number, y: number) => (
+        [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 1 }]
+      );
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: point(from.x, from.y),
+      });
+      // Stepped, and with a vertical component, so the travel crosses Chromium's
+      // slop threshold the way a finger does — a single jump would not be
+      // recognised as a pan either, and would prove nothing about the default.
+      const steps = 10;
+      for (let step = 1; step <= steps; step += 1) {
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: point(from.x + (120 * step) / steps, from.y + (40 * step) / steps),
+        });
+      }
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await cdp.detach();
+
+      expect(await layout(page)).toEqual({ sidebar: MIN + 120, contentLeft: MIN + 120 });
+      const log = await page.evaluate(
+        () => (window as unknown as { __edgePointerLog: string[] }).__edgePointerLog,
+      );
+      expect(log).toContain('pointermove');
+      expect(log).not.toContain('pointercancel');
+
+      // And the finger let go of the page as cleanly as the mouse does.
+      expect(await page.evaluate(() => [
+        document.body.style.userSelect,
+        document.body.style.cursor,
+      ])).toEqual(['', '']);
+
+      expect(denied).toEqual([]);
+    });
   });
 
   test('leaves a phone with no edge to drag', async ({ page }) => {

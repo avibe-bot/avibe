@@ -134,8 +134,12 @@ export const SidebarResizer = () => {
       onPointerCancel={endGesture}
       onLostPointerCapture={endGesture}
       onKeyDown={onKeyDown}
+      // `touch-none` is load-bearing wherever a touchscreen reports the desktop
+      // breakpoint — a tablet in landscape, a convertible laptop. Pointer capture
+      // does not win the browser's touch-action negotiation, so with the default
+      // the native pan claims the finger and cancels the drag part-way.
       className={clsx(
-        'absolute inset-y-0 -right-px z-10 w-2 cursor-col-resize border-r border-transparent outline-none transition-colors',
+        'absolute inset-y-0 -right-px z-10 w-2 cursor-col-resize touch-none border-r border-transparent outline-none transition-colors',
         'hover:border-cyan focus-visible:border-cyan',
         dragging && 'border-cyan',
       )}
