@@ -2622,9 +2622,9 @@ def _task_payload(task, *, brief: bool = False):
             "enabled": task.enabled,
         }
     payload = task.to_dict()
-    from storage.message_deliveries import metadata_without_delegated_owner
+    from storage.message_deliveries import public_message_metadata
 
-    payload["metadata"] = metadata_without_delegated_owner(payload.get("metadata"))
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
     payload.update(derived)
     return payload
 
@@ -3907,9 +3907,9 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
             "last_error": watch.last_error,
         }
     payload = watch.to_dict()
-    from storage.message_deliveries import metadata_without_delegated_owner
+    from storage.message_deliveries import public_message_metadata
 
-    payload["metadata"] = metadata_without_delegated_owner(payload.get("metadata"))
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
     payload.update(derived)
     return payload
 
@@ -4013,7 +4013,7 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 
 
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
-    from storage.message_deliveries import metadata_without_delegated_owner
+    from storage.message_deliveries import public_message_metadata
 
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
@@ -4042,7 +4042,7 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "callback_status": normalized.get("callback_status"),
             "callback_run_id": normalized.get("callback_run_id"),
         }
-    normalized["metadata"] = metadata_without_delegated_owner(normalized.get("metadata"))
+    normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
     return normalized
 
 
@@ -5126,7 +5126,6 @@ def cmd_task_update(args):
             metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
         elif getattr(args, "clear_agent", False):
             metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
-        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
 
         message_changed = any(
             getattr(args, name, None) is not None
@@ -5161,6 +5160,11 @@ def cmd_task_update(args):
             session_policy,
             stored_session_id=task.session_id,
             create_session=bool(getattr(args, "create_session", False)),
+        )
+        # ...and therefore whether a Session can still own the Agent choice.
+        follows_session_agent = _follows_session_agent_after_update(
+            metadata,
+            session_policy=session_policy,
         )
         command_target = _CommandTarget()
         if retains_existing_session:
@@ -5254,12 +5258,17 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         agent_resolution = _AgentTargetResolution(None, False)
+        # Every branch below either rebinds this or leaves the definition's Agent to
+        # someone else; the reservation writer reads it either way, and without a
+        # value the follow-the-Session branch raised UnboundLocalError there.
+        agent = None
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
             # belongs to its bound Session, and the pin wins over the Session row at
             # dispatch -- so an unrelated ``--name`` edit would silently move every
-            # future fire onto a different Agent.
+            # future fire onto a different Agent. The reservation below still resolves
+            # and admits the Agent it gives the Session it creates.
             pass
         elif agent_name is None and session_policy != "existing":
             agent_resolution = _resolve_agent_target(
@@ -6319,6 +6328,36 @@ def _update_retains_existing_session(
         and bool(stored_session_id)
         and not create_session
     )
+
+
+def _follows_session_agent_after_update(
+    metadata: dict[str, Any],
+    *,
+    session_policy: str,
+) -> bool:
+    """Whether Agent authority still belongs to a Session, under this edit's policy.
+
+    "Follow the bound Session's Agent" is authority held by a Session the definition
+    has: ``--clear-agent`` hands it to the one it is bound to, and the reset rebind
+    stamps it on a ``create_once`` definition pointed at a Session it just made. The
+    marker then stops the edit from resolving an Agent, because there is nothing to
+    decide -- the row the definition speaks in already answers, and re-resolving
+    would pin today's default over it (HFR-245).
+
+    ``create_per_run`` has no such row: every fire makes a throwaway Session from the
+    definition itself, so the marker outlives what it described. Left standing it
+    kept the edit from resolving an Agent while each future fire still picked one --
+    the Scope's default, admitted for nobody, because the placement guard below was
+    handed no Agent to ask about. It is cleared here, before that Agent is resolved
+    and admitted, rather than after the row is saved.
+    """
+
+    if not metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY):
+        return False
+    if session_policy != "create_per_run":
+        return True
+    metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+    return False
 
 
 def _reject_inert_create_once_cwd_update(
@@ -11310,7 +11349,6 @@ def cmd_watch_update(args):
             metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
         elif getattr(args, "clear_agent", False):
             metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
-        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
         cwd = (
             None
             if getattr(args, "clear_cwd", False)
@@ -11353,6 +11391,11 @@ def cmd_watch_update(args):
             stored_session_id=session_id,
             create_session=bool(getattr(args, "create_session", False)),
         )
+        # ...and therefore whether a Session can still own the Agent choice.
+        follows_session_agent = _follows_session_agent_after_update(
+            metadata,
+            session_policy=session_policy,
+        )
         command_target = _CommandTarget()
         if not creates_future_session:
             # The effective target, named or inherited -- see ``vibe task update``.
@@ -11383,12 +11426,16 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
         agent_resolution = _AgentTargetResolution(None, False)
+        # See ``vibe task update``: the reservation writer reads this on the
+        # follow-the-Session branch too, where nothing else binds it.
+        agent = None
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
             # belongs to its bound Session, and the pin wins over the Session row at
             # dispatch -- so an unrelated ``--name`` edit would silently move every
-            # future watch hook onto a different Agent.
+            # future watch hook onto a different Agent. The reservation below still
+            # resolves and admits the Agent it gives the Session it creates.
             pass
         elif agent_name is None and session_policy != "existing":
             agent_resolution = _resolve_agent_target(

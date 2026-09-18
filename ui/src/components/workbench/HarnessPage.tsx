@@ -425,6 +425,12 @@ export const HarnessPage: React.FC = () => {
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
+      // A definition row changed somewhere else -- another surface, the CLI, or
+      // the scheduler retiring a schedule. The list this page shows IS that row,
+      // so it refetches; the Agent catalog is unaffected by a definition edit.
+      onDefinitionsUpdated: () => {
+        void refresh();
+      },
       onRunsUpdated: () => {
         void refresh();
         void refreshAgents();

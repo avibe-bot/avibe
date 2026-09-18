@@ -8,6 +8,13 @@ Baseline: `4019b704c99afe16223d475fccd9e1cb94a109d7` (includes Member PR #2030).
 Branch: `fix/editor-permission-parity`. Audit head: `885786909`.
 Implementation lane: `sesv7agy2ckwh`. Orchestrator: `sesnps2m743r5`.
 
+Three further defects were first discovered by review of the first pushed head
+(`83cc8909fc`), not by the original audit pass. They are **not** new roots: one
+completes class A at its consumer, and two are class C at boundaries the class
+already owns. They are recorded below as subordinate sections, under the same
+standard as A–D and with their first-discovery head kept, so the root ledger
+still holds four classes.
+
 ## Outcome
 
 The reported defect — an authorized Editor cannot press Run on the Agents page —
@@ -17,8 +24,10 @@ repeats: two more surfaces mix the same two things. Repairing only the button
 would have left those, and would not have touched the more serious half of the
 audit, which is a separate structural defect below HTTP.
 
-The audit confirmed four backend root-cause groups. Three are kind-handling or
-admission mistakes local to one consumer. The fourth is structural:
+The audit confirmed four backend root-cause groups, and review of the first
+pushed head found three more defects inside two of them rather than any new
+root. Of the four, three are kind-handling or admission mistakes local to one
+consumer. The fourth is structural:
 
 > **Ordinary product operations were missing an initiating user.** Role
 > enforcement lived at the HTTP surface, and everything reached below it acted
@@ -33,6 +42,9 @@ admission mistakes local to one consumer. The fourth is structural:
 | B | A signed Personal Editor cannot list or request owner-created secrets that an Organization Editor can | Qualify Personal use on the signed instance kind, the way `agent` already did |
 | C | Unauthorized Harness Run, callback, reservation, fork and direct CLI writes execute as local Owner operations, and deferred work (Vault request, dispatching Show event, Run callback) resumes under the daemon's authority rather than its author's | One invocation-scoped authority at the CLI entry point, a role floor for every parser leaf, reservation/fork checks that read it, and a recorded authority on every deferred row that is hidden from every outward projection |
 | D | An email-authorized Organization Project chat returns HTTP 202 and is then rejected by the final Delivery guard | Carry the normalized signed email in the durable snapshot that Project ACLs compare |
+| A, at the consumer | The Harness page an Editor may read still goes stale: `definitions.updated` is admitted and delivered, and no browser consumer listens for it | Register the listener beside the `runs.updated` one, invalidating the same read cache |
+| C, at the outward projection | The authority recorded for a deferred consumer is readable from an ordinary Harness definition or run read | Project Harness metadata outward through the `public_message_metadata` sanitizer these surfaces already had |
+| C, at the effective target | An Organization Editor can point per-run work at an Agent they may not use, by clearing the Agent and then switching the definition to a new Session per run | Decide the follow-the-Session marker from the *final* session policy, then resolve and admit the Agent every future fire will select |
 
 Three UI findings sit alongside that table and are **not** instances of class C.
 None of them loses an initiating user, and none loosens a server policy — each is
@@ -99,13 +111,19 @@ Three consuming gaps, one cause:
    argparse and dispatch, and every parser leaf carries a role floor in
    `_CLI_COMMAND_FLOORS`. A missing key is `owner`, so a new command cannot ship
    unclassified. A below-floor command is refused before any effect is written.
-   A declared-remote caller whose provenance is missing, malformed or no longer
-   valid on this installation becomes anonymous remote — never local Owner. The
-   environment crosses process boundaries and outlives the pairing it was minted
-   under, so the claims alone are not provenance: they are validated against the
-   configured instance and its durable ready binding, the same way every other
-   deferred consumer validates a stored snapshot. A rejected remote caller does
-   not become the machine's owner just because its claims went stale.
+   An invocation that declares no remote caller and carries no snapshot is the
+   historical local entry point and still resolves to the local Owner. A caller
+   that *declares* itself remote, and whose snapshot is missing, malformed,
+   inconsistent with this installation or no longer valid against the current
+   ready binding, becomes anonymous remote — never local Owner. The environment
+   crosses process boundaries and outlives the pairing it was minted under, so
+   the claims alone are not provenance: they are checked against the configured
+   instance and its durable ready binding, the same way every other deferred
+   consumer checks a stored snapshot. That is a consistency check, not
+   authentication — no signature is verified and the JSON itself is not
+   authenticated — so a rejected remote caller does not become the machine's
+   owner just because its claims went stale, and a well-formed claim does not
+   become host-verifiable just because it is consistent.
 
    The same boundary applies leaving the process. Avibe hands a caller's identity
    to a subprocess it runs *on that caller's behalf* — an Agent turn, a backend,
@@ -241,6 +259,61 @@ the way `_matching_binding_role` compares it, and writes it *after* dropping any
 caller-supplied copy — so untrusted metadata can neither mint nor override it.
 A historical record without an email is not given one.
 
+### A, completed at the consumer — an admitted signal nothing listened for
+
+First discovered by review of `83cc8909fc`; the same admission root as A, one
+step further along the same delivery path. A admitted `definitions.updated` at
+the tier that may read it, and the stream delivered it. Nothing in the browser
+listened for that name. `runs.updated` had a handler and `definitions.updated`
+did not, so a Task or Watch created, paused or retired anywhere else left the
+Harness page stale until an unrelated run happened to fire. Admission without a
+consumer is the same stale page the class was opened for, so the listener is now
+registered beside the one that
+already worked, invalidating the same read cache. Covered by a test that drives
+the real stream — a named frame reduced to `{"type": ..., "data": {}}`, through
+the provider's own listener, with no runs event and no reconnect.
+
+### C, at the outward projection — the recorded authority was readable
+
+First discovered by review of `83cc8909fc`; class C's own rule applied at a
+boundary that had been missed. C records the initiating caller on the durable
+row, and every Vault and Show projection of that row hides it. The Harness
+projections did not: the CLI
+Task/Watch/Run payloads and the `include_private_metadata=False` store handed
+back the whole metadata dictionary, so the snapshot written for a deferred
+consumer — subject, email, organization identifiers — was readable from an
+ordinary definition read. They now project through `public_message_metadata`,
+the sanitizer these surfaces already had. The durable original is untouched: no
+schema change, no migration, no backfill, and internal consumers that need the
+delegated owner still read it through the unchanged internal path.
+
+### C, at the effective target — decided before the policy that defines it
+
+First discovered by review of `83cc8909fc`: the same effective-target rule class
+C introduced, on the one transition where the marker had already decided the
+answer before the policy that defines it existed.
+`--clear-agent` hands the Agent choice to the Session a definition is bound to
+and marks the row `binding_follows_session`; a later edit then deliberately
+resolves no Agent, because the bound row already answers and re-resolving would
+pin today's default over it. `create_per_run` has no such row — every fire makes
+a throwaway Session from the definition itself — so on that transition the
+marker outlived what it described: the edit skipped Agent resolution while each
+future fire still selected the Scope's default, and the placement guard, handed
+no Agent, had nothing to admit. An Organization Editor could therefore point
+per-run work at an Agent they may not use. The marker is now cleared from the
+*final* session policy, before the Agent is resolved and admitted, rather than
+after the row is saved. The adjacent transitions keep their behavior on purpose:
+a retained bound Session and a `create_once` replacement both already resolve and
+check an Agent — through the turn guard and through `reserve_agent_session`'s
+`require_reservation_access` respectively — so nothing there is re-authorized.
+
+Repairing this also closed a crash that pre-dates this PR on the same code
+branch: at baseline `4019b704c` the reservation writer reads
+`agent.id if agent else None` while the follow-the-Session branch above binds
+nothing, so `--clear-agent` followed by `--create-session` raised
+`UnboundLocalError`. `agent` is initialized once, where every branch can be read
+together. Stated from the baseline source; no baseline test covers that pair.
+
 ## Surface inventory and retained boundaries
 
 `V/E/M/O` are central Viewer/Editor/Member/Owner minima, not substitutes for the
@@ -297,7 +370,10 @@ Registered in `tests/scenarios/permissions/catalog.yaml`, with
 PERMISSIONS-016 is extended rather than duplicated: an Editor now receives the
 instance-scoped invalidations as bare frames, and its `related_tests` carry the
 consumer half — the Vault refresh hook, the Vault page's pending requests and
-the Harness page all refetch from a frame with no body.
+the Harness page all refetch from a frame with no body. A's consumer completion
+is the same scenario's missing half: one of those `related_tests` now drives the
+Harness page from a bare `definitions.updated` frame specifically, with no runs event
+and no reconnect, so admission and consumption are asserted for the same name.
 
 PERMISSIONS-024 and PERMISSIONS-027 also cover the pre-effect target checks:
 a Vault request that names an unreachable Session, and a dispatching Show event
@@ -364,6 +440,26 @@ Executed:
   must leave nothing behind — while Member, Owner and local callers still open
   that thread. Its saved-control case asserts `pause`/`resume` only: that control
   does not restamp the definition's authority
+- C's effective-target gap is held by the same case family, across the whole
+  marker transition rather than at its end: per-run work whose Agent was cleared
+  is refused `agent_access_forbidden` on an Organization instance with the row —
+  marker included — and the Session count unchanged, and admitted on a Personal one
+  where it keeps the Agent it resolved. The adjacent transitions are asserted
+  *not* to have moved: a retained bound Session and a `create_once` replacement
+  both still leave the Agent to the Session and keep the marker. The direction
+  was proved by counterfactual, not by assertion alone — with the marker read
+  from the previous policy the Organization case is admitted, and with the fix
+  in place it is refused
+- C's outward projection is held at the read the consumers actually use: the CLI
+  Task, Watch and Run payloads and the `include_private_metadata=False` store
+  return metadata with no recorded authority, while the same row read internally
+  still carries it
+- PM's own round-1 probe was re-run on the repaired tree with its assertions moved
+  onto the repaired behavior rather than its old exit codes: the counterexample it
+  measured (Organization, exit 0, marker retained, no Agent admitted) is now exit 1
+  `agent_access_forbidden` with a byte-identical row, Personal still succeeds with
+  the marker cleared and the default Agent pinned, and the outward projection
+  carries no authority while the durable row still does
 - saved Task **execution** was consumed independently by PM, not by that case:
   a Member-created Task targeting a standalone Session is admitted when a signed
   Editor runs it, the stored Run and the definition both keep the original Member
@@ -407,13 +503,32 @@ schema change or deployment was used anywhere in this work.
 - **Callback rerouting is unchanged.** A parent's callback is still marked
   `sent` when a child is durably created; a later deferred permission denial is
   a child outcome and is not rerouted or re-authorized to make delivery succeed.
+- **The caller environment is a trusted-origin channel, and what this handles is
+  a malformed one.** Avibe writes the carrier when it launches a command on a
+  caller's behalf, and the CLI entry point reads it once. An invocation that
+  carries nothing at all is the historical local entry point and still resolves
+  to the local Owner; no absent-byte case becomes a remote one. What was repaired
+  is what happens to an invocation that **declares** a remote caller: a snapshot
+  that is missing, malformed, inconsistent with this installation or no longer
+  valid against the current ready binding stays an anonymous remote context and
+  fails closed, never the local Owner, and the floor is evaluated against that
+  context. The binding check establishes consistency with this installation and
+  its current pairing — it does **not** authenticate the JSON and verifies no
+  signature, so nothing here makes the claims host-verifiable. That is the whole
+  claim. It is **not** protection against someone who can already
+  edit that environment or the state database directly — a principal with the
+  host has the host, sandboxing is a different boundary (issue 1389), and no
+  confinement, host signature, token issuance or second role model is proposed
+  here. Nothing in this PR should be read as raising the trust of the channel
+  itself.
 - **The raw caller snapshot forwarded by seven CLI commands was investigated and
-  closed as not a defect.** `task add`/`update`, `watch add`/`update`,
-  `agent run`, `data query` and `data skill-usage` hand their own env snapshot to
-  the services they call. That snapshot is attacker-controlled bytes, but each of
-  those commands sits behind an `editor` floor evaluated against the *validated*
-  invocation authority, and none of the ten deliberately ungated commands forwards
-  one — so an unusable snapshot is already an anonymous remote context that never
-  reaches them. Proved by execution rather than by reading: a stale snapshot aimed
-  at a forwarding command is refused `instance_access_forbidden` with the record
+  closed as not a defect**, under exactly that boundary. `task add`/`update`,
+  `watch add`/`update`, `agent run`, `data query` and `data skill-usage` hand
+  their own env snapshot to the services they call. Each of those commands sits
+  behind an `editor` floor evaluated against the invocation authority the entry
+  point resolved — the declared-remote context, or the local one when nothing was
+  declared — and none of the ten deliberately ungated commands forwards one, so
+  an unusable snapshot is already an anonymous remote context that never reaches
+  them. Proved by execution rather than by reading: a stale snapshot aimed at a
+  forwarding command is refused `instance_access_forbidden` with the record
   unchanged (PERMISSIONS-026). No second validation hop was added.

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -54,6 +55,13 @@ ORG_EDITOR_EMAIL = "editor@example.com"
 # only honoured while it still belongs to this installation, so a context that
 # will be read back through the execution guard has to carry it.
 PAIRED_INSTANCE_ID = "inst_123"
+# A context with no issued-at claim gets an expiry counted from the moment the
+# snapshot is written, so the row and a freshly recomputed expectation disagree
+# whenever a second ticks between them -- the assertion below compares two
+# timestamps taken at different times, not two authorities. Stamping one issued-at
+# for the whole module makes both sides derive the same expiry while keeping the
+# context current, so what is compared is the identity it was meant to be about.
+CLAIMS_ISSUED_AT = int(time.time())
 
 
 def _remote(role: str = "editor", *, instance_kind: str = "personal") -> AuthorizationContext:
@@ -67,6 +75,7 @@ def _remote(role: str = "editor", *, instance_kind: str = "personal") -> Authori
         organization_id="org-1",
         organization_member_id="org-member",
         organization_role="member",
+        claims_issued_at=CLAIMS_ISSUED_AT,
         is_remote=True,
     )
 

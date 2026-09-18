@@ -5118,7 +5118,7 @@
     },
     "roles": {
       "owner": "所有者",
-      "member": "成员",
+      "member": "管理者",
       "editor": "编辑者",
       "viewer": "查看者"
     },

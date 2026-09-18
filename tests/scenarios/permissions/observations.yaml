@@ -59,6 +59,7 @@ observations:
       - retain Editor and Viewer restrictions and true signed principal identity
       - preserve shared inbox read markers and existing Show publication policy
       - validate actual signed HTTP storage and SSE consumers rather than capability predicates alone
+      - give every instance-scoped signal the role gate admits an actual page consumer, so a bare refetch frame wakes the view it was admitted for instead of being delivered to nobody
 
       - include released Member deferred snapshots in binding migration without reopening unattributed or later work
       - serialize migration provenance reads row decisions and marker seal with the existing SQLite writer reservation
@@ -84,6 +85,7 @@ observations:
       - record the initiating authority on deferred rows at the producer and read it back at the consumer
       - admit the effective target before producing deferred work, so a refusal costs no Run definition or Session row rather than surfacing at dispatch where nobody is waiting
       - let the edit decide which target is effective, so a definition that replaces its Session is admitted for the destination it chooses and never for the one it abandons
+      - read the follow-the-Session marker from the edit's final session policy, and resolve and admit the Agent every future fire will select before work becomes per-run
       - treat a target whose Session has not been opened yet as the placement it is rather than as no target, without giving a blank or unusable target any authorization meaning
       - keep saved automation control on the authority the definition already carries instead of restamping it to whoever pressed run or pause
       - keep every outward projection of a deferred row free of the recorded authority

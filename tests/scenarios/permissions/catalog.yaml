@@ -170,6 +170,8 @@ scenarios:
       - ui/src/lib/useVaultRequestRefresh.test.ts::stops polling once the bridge is healthy and refetches on the event alone
       - ui/src/components/workbench/VaultsPage.test.tsx::refetches pending requests from the signal alone
       - ui/src/components/workbench/HarnessPage.events.test.tsx::reloads the Harness view from the signal alone
+      - ui/src/components/workbench/HarnessPage.definitionsStream.test.tsx::refetches the Harness view from the named signal alone
+      - ui/src/components/workbench/HarnessPage.definitionsStream.test.tsx::keeps waking on runs.updated and stops when the page unmounts
 
   - id: PERMISSIONS-017
     name: Broader notification visibility preserves subject identity
@@ -292,4 +294,4 @@ scenarios:
     test: tests/scenarios/permissions/test_effective_target_preflight.py
     given: A signed caller names a Session it may not drive, by Session id, by legacy scope key whose thread exists or has never been opened, or by defaulting to its own, or repoints a stored definition at a destination it may or may not use
     when: A Run, a callback route, and a Task or Watch definition are produced or retargeted through the real CLI
-    then: Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, a target whose Session does not exist yet is admitted as the placement it is rather than skipped for having no row, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority
+    then: Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, a target whose Session does not exist yet is admitted as the placement it is rather than skipped for having no row, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, work that becomes per-run admits the Agent each future fire will select with its follow-the-Session marker read from the edit's final policy, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority

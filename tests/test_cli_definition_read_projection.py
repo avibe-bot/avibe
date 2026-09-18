@@ -408,14 +408,14 @@ def test_public_definition_routes_hide_owner_without_changing_runtime_metadata()
                 response = client.get(f"/api/harness/{plural}{query}")
                 assert response.status_code == 200
                 row = next(item for item in response.get_json()[plural] if item["id"] == identifier)
-                assert "delegated_memory_owner" not in row["metadata"]
+                assert not private.keys() & row["metadata"].keys()
             for enabled in (False, True):
                 response = client.patch(
                     f"/api/harness/{plural}/{identifier}", json={"enabled": enabled},
                     headers=csrf_headers(client),
                 )
                 assert response.status_code == 200
-                assert "delegated_memory_owner" not in response.get_json()[field]["metadata"]
+                assert not private.keys() & response.get_json()[field]["metadata"].keys()
                 assert all(read(identifier)["metadata"][key] == value for key, value in private.items())
     finally:
         store.close()
@@ -454,7 +454,7 @@ def test_definition_to_run_public_projection_keeps_raw_execution_owner(capsys):
             for output in (shown, listed, cli_run):
                 public = output["metadata"]
                 assert "delegated_memory_owner" not in public
-                assert public["resource_user_context"] == metadata["resource_user_context"]
+                assert "resource_user_context" not in public
                 assert public["scheduled_provenance"]["platform_specific"]["message_metadata"] == {"visible": "retained"}
             reloaded = TaskExecutionStore().get_run(run.id)
             assert reloaded["metadata"]["delegated_memory_owner"] == owner

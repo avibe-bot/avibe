@@ -31,7 +31,7 @@ from sqlalchemy import func, select
 from config import paths
 from config.v2_config import V2Config
 from core.caller_context import CALLER_CONTEXT_ENV_NAMES, CallerContext
-from core.scheduled_tasks import ScheduledTaskStore
+from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY, ScheduledTaskStore
 from core.vibe_agents import VibeAgentStore
 from core.watches import ManagedWatchStore
 from storage import project_access_service, projects_service, resource_access_service
@@ -285,6 +285,20 @@ def _watch_argv(session_flag, value, *, name="w"):
     ]
 
 
+def _placed_argv(kind_of_work, placement, scope_id, *, name="p"):
+    """Create work whose Sessions are placed in ``scope_id``, not bound to one.
+
+    A watch's own command follows ``--``, so its placement flags have to precede
+    that terminator -- appended after it they are silently the command's arguments,
+    and the definition falls back to the caller's own Session.
+    """
+
+    flags = [placement, "--scope-id", scope_id]
+    if kind_of_work == "task":
+        return ["task", "add", "--name", name, "--cron", "0 9 * * *", "--message", "hello", *flags]
+    return ["watch", "add", "--name", name, "--message", "hello", *flags, "--", "true"]
+
+
 def test_permissions_028_the_open_project_binds_the_signed_editor():
     """The fixture's positive control is the caller the Project actually names."""
 
@@ -509,13 +523,8 @@ def test_permissions_028_a_permitted_destination_still_takes_the_work(
     """PERMISSIONS-028: the placement gate refuses a destination, not the shape of one."""
 
     state = targets
-    argv = (
-        ["task", "add", "--name", "p", "--cron", "0 9 * * *", "--message", "hello"]
-        if kind_of_work == "task"
-        else ["watch", "add", "--name", "p", "--message", "hello", "--", "true"]
-    )
     code, payload = run_cli(
-        [*argv, placement, "--scope-id", state.open_project["scope_id"]],
+        _placed_argv(kind_of_work, placement, state.open_project["scope_id"]),
         kind=state.kind,
         # A real Session for the caller env: ``watch add`` reads it for delivery,
         # and an invented id fails there long before the gate under test.
@@ -524,6 +533,9 @@ def test_permissions_028_a_permitted_destination_still_takes_the_work(
     assert code == 0, payload
     rows = state.task_rows() if kind_of_work == "task" else state.watch_rows()
     assert len(rows) == 1
+    assert next(iter(rows.values()))["session_policy"] == (
+        "create_once" if placement == "--create-session" else "create_per_run"
+    )
 
 
 @pytest.mark.parametrize("role", ["editor", "member", None])
@@ -641,6 +653,262 @@ def test_permissions_028_a_replacement_cannot_land_where_the_caller_cannot_chat(
     else:
         # Same Personal-instance bypass as every other Project negative here.
         assert code == 0, payload
+
+
+@pytest.mark.parametrize("kind_of_work", ["task", "watch"])
+def test_permissions_028_per_run_work_admits_the_agent_every_fire_will_use(
+    targets, run_cli, kind_of_work
+):
+    """PERMISSIONS-028: a definition that follows no Session picks its own Agent.
+
+    ``--clear-agent`` records that the bound Session owns the Agent choice, and the
+    edit that reads that marker deliberately resolves nothing -- re-resolving would
+    pin today's default over the Session (HFR-245). Converting the same definition
+    to one Session per run leaves no Session to own anything, so the marker survived
+    describing a row that no longer exists: the placement below was handed no Agent,
+    admitted the Scope alone, and every future fire then created its Session on the
+    Scope's default Agent, which nobody had been asked about.
+    """
+
+    state = targets
+    seeded = (
+        _message_task_argv("--session-id", state.sessions["open"], name="follow")
+        if kind_of_work == "task"
+        else _watch_argv("--session-id", state.sessions["open"], name="follow")
+    )
+    assert run_cli(seeded, role=None)[0] == 0
+    definition_id = next(iter(state.task_rows() if kind_of_work == "task" else state.watch_rows()))
+    assert run_cli([kind_of_work, "update", definition_id, "--clear-agent"], kind=state.kind)[0] == 0
+
+    # The Agent those fires would pick is now one this caller may not use. Nothing
+    # about the definition changed: it is the destination that did.
+    state.unusable_agent()
+    rows = state.task_rows() if kind_of_work == "task" else state.watch_rows()
+    assert rows[definition_id]["metadata"][BINDING_FOLLOWS_SESSION_METADATA_KEY] is True
+    before = state.counts()
+
+    code, payload = run_cli(
+        [
+            kind_of_work,
+            "update",
+            definition_id,
+            "--create-session-per-run",
+            "--scope-id",
+            state.open_project["scope_id"],
+        ],
+        kind=state.kind,
+    )
+
+    if state.kind == "organization":
+        assert code == 1
+        assert payload["code"] == "agent_access_forbidden"
+        # Including the marker: a refused edit leaves the definition as it was.
+        assert (state.task_rows() if kind_of_work == "task" else state.watch_rows()) == rows
+        assert state.counts() == before
+    else:
+        assert code == 0, payload
+
+
+@pytest.mark.parametrize("kind_of_work", ["task", "watch"])
+def test_permissions_028_an_admitted_per_run_target_keeps_the_agent_it_resolved(
+    targets, run_cli, kind_of_work
+):
+    """PERMISSIONS-028: the same conversion, admitted, records what it admitted.
+
+    The Agent is resolved before the placement question so the answer is about the
+    Agent the fires will run as -- and the definition is then saved carrying it,
+    rather than an obsolete "ask my Session" that no longer names one.
+    """
+
+    state = targets
+    seeded = (
+        _message_task_argv("--session-id", state.sessions["open"], name="follow")
+        if kind_of_work == "task"
+        else _watch_argv("--session-id", state.sessions["open"], name="follow")
+    )
+    assert run_cli(seeded, role=None)[0] == 0
+    definition_id = next(iter(state.task_rows() if kind_of_work == "task" else state.watch_rows()))
+    assert run_cli([kind_of_work, "update", definition_id, "--clear-agent"], kind=state.kind)[0] == 0
+
+    code, payload = run_cli(
+        [
+            kind_of_work,
+            "update",
+            definition_id,
+            "--create-session-per-run",
+            "--scope-id",
+            state.open_project["scope_id"],
+        ],
+        kind=state.kind,
+    )
+    assert code == 0, payload
+
+    after = (state.task_rows() if kind_of_work == "task" else state.watch_rows())[definition_id]
+    assert after["session_policy"] == "create_per_run"
+    assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in after["metadata"]
+    assert after["agent_name"] == state.agent.name
+
+
+@pytest.mark.parametrize("kind_of_work", ["task", "watch"])
+def test_permissions_028_a_bound_session_still_keeps_the_agents_authority(
+    targets, run_cli, kind_of_work
+):
+    """PERMISSIONS-028: the marker is dropped where it is obsolete, and nowhere else.
+
+    HFR-245/256: a definition bound to a Session must come back from an unrelated
+    edit still following it, or the next ``--name`` silently moves every fire onto
+    today's default Agent. That is the state the case above ends, so it is asserted
+    here in the shape that keeps it.
+    """
+
+    state = targets
+    seeded = (
+        _message_task_argv("--session-id", state.sessions["open"], name="follow")
+        if kind_of_work == "task"
+        else _watch_argv("--session-id", state.sessions["open"], name="follow")
+    )
+    assert run_cli(seeded, role=None)[0] == 0
+    definition_id = next(iter(state.task_rows() if kind_of_work == "task" else state.watch_rows()))
+
+    assert run_cli([kind_of_work, "update", definition_id, "--clear-agent"], kind=state.kind)[0] == 0
+    cleared = (state.task_rows() if kind_of_work == "task" else state.watch_rows())[definition_id]
+    assert cleared["agent_name"] is None
+    assert cleared["metadata"][BINDING_FOLLOWS_SESSION_METADATA_KEY] is True
+
+    assert run_cli([kind_of_work, "update", definition_id, "--name", "renamed"], kind=state.kind)[0] == 0
+    renamed = (state.task_rows() if kind_of_work == "task" else state.watch_rows())[definition_id]
+    assert renamed["agent_name"] is None
+    assert renamed["metadata"][BINDING_FOLLOWS_SESSION_METADATA_KEY] is True
+    assert renamed["session_id"] == cleared["session_id"]
+
+
+@pytest.mark.parametrize("kind_of_work", ["task", "watch"])
+def test_permissions_028_a_reserved_replacement_still_follows_the_session_it_makes(
+    targets, run_cli, kind_of_work
+):
+    """PERMISSIONS-028: one reusable Session is a row, so it can still own the Agent.
+
+    This is the boundary of the case above: ``--create-session`` reserves the
+    Session during the edit -- the same shape the reset rebind stamps the marker on
+    -- and the reservation writer resolves and admits the Agent it gives that
+    Session. Nothing here is unasked, so the definition keeps following the Session
+    it now has instead of being re-pinned.
+
+    That reservation had never actually run on this branch: the follow-the-Session
+    path left ``agent`` unbound and the writer read it, so the combination failed
+    with an internal error rather than either answer.
+    """
+
+    state = targets
+    seeded = (
+        _message_task_argv("--session-id", state.sessions["open"], name="follow")
+        if kind_of_work == "task"
+        else _watch_argv("--session-id", state.sessions["open"], name="follow")
+    )
+    assert run_cli(seeded, role=None)[0] == 0
+    definition_id = next(iter(state.task_rows() if kind_of_work == "task" else state.watch_rows()))
+    assert run_cli([kind_of_work, "update", definition_id, "--clear-agent"], kind=state.kind)[0] == 0
+    cleared = (state.task_rows() if kind_of_work == "task" else state.watch_rows())[definition_id]
+
+    code, payload = run_cli(
+        [
+            kind_of_work,
+            "update",
+            definition_id,
+            "--create-session",
+            "--scope-id",
+            state.open_project["scope_id"],
+        ],
+        kind=state.kind,
+    )
+    assert code == 0, payload
+
+    after = (state.task_rows() if kind_of_work == "task" else state.watch_rows())[definition_id]
+    assert after["session_policy"] == "create_once"
+    assert after["session_id"] not in (None, "", cleared["session_id"])
+    assert after["agent_name"] is None
+    assert after["metadata"][BINDING_FOLLOWS_SESSION_METADATA_KEY] is True
+
+
+@pytest.mark.parametrize("kind_of_work", ["task", "watch"])
+def test_permissions_028_clearing_the_agent_on_per_run_work_resolves_one(
+    targets, run_cli, kind_of_work
+):
+    """PERMISSIONS-028: the same question, reached from the other side.
+
+    A definition that already creates one Session per run has no Session to hand
+    Agent authority back to, so ``--clear-agent`` on it is the request the marker
+    cannot serve. It resolves the Agent the fires will use and is admitted for it,
+    instead of saving a definition with no Agent and no Session to ask.
+
+    The rename rides along because clearing alone changes nothing once the Agent is
+    resolved back -- the edit is refused as empty, which is true but says nothing
+    about the gate under test.
+    """
+
+    state = targets
+    seeded, seeded_payload = run_cli(
+        _placed_argv(
+            kind_of_work,
+            "--create-session-per-run",
+            state.open_project["scope_id"],
+            name="perrun",
+        ),
+        kind=state.kind,
+        caller_session=state.sessions["open"],
+    )
+    assert seeded == 0, seeded_payload
+    definition_id = next(iter(state.task_rows() if kind_of_work == "task" else state.watch_rows()))
+
+    state.unusable_agent()
+    rows = state.task_rows() if kind_of_work == "task" else state.watch_rows()
+    assert rows[definition_id]["session_policy"] == "create_per_run"
+    before = state.counts()
+
+    code, payload = run_cli(
+        [kind_of_work, "update", definition_id, "--clear-agent", "--name", "renamed"],
+        kind=state.kind,
+    )
+
+    if state.kind == "organization":
+        assert code == 1
+        assert payload["code"] == "agent_access_forbidden"
+        assert (state.task_rows() if kind_of_work == "task" else state.watch_rows()) == rows
+        assert state.counts() == before
+    else:
+        assert code == 0, payload
+        after = (state.task_rows() if kind_of_work == "task" else state.watch_rows())[definition_id]
+        assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in after["metadata"]
+        assert after["agent_name"] == state.agent.name
+
+
+@pytest.mark.parametrize("role", ["member", "owner", None])
+def test_permissions_028_the_callers_that_could_still_retarget_per_run_work(
+    targets, run_cli, role
+):
+    """PERMISSIONS-028: Member, Owner and a local caller keep converting definitions."""
+
+    state = targets
+    assert run_cli(_message_task_argv("--session-id", state.sessions["open"], name="follow"), role=None)[0] == 0
+    task_id = next(iter(state.task_rows()))
+    assert run_cli(["task", "update", task_id, "--clear-agent"], role=role, kind=state.kind)[0] == 0
+
+    code, payload = run_cli(
+        [
+            "task",
+            "update",
+            task_id,
+            "--create-session-per-run",
+            "--scope-id",
+            state.open_project["scope_id"],
+        ],
+        role=role,
+        kind=state.kind,
+    )
+    assert code == 0, payload
+    after = state.task_rows()[task_id]
+    assert after["agent_name"] == state.agent.name
+    assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in after["metadata"]
 
 
 @pytest.mark.parametrize("command", ["hook_send", "task_add", "watch_add"])

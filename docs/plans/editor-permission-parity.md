@@ -128,15 +128,19 @@ this PR.
   remote one masks it and restores it on exit.
 - **A declared-remote caller with missing or malformed provenance fails closed.**
   It becomes an anonymous remote context. It never degrades to local Owner
-  because the data it should have carried is absent.
-- **Claims are validated against the current binding, not merely parsed.** The
-  carrier is an environment that crosses process boundaries and outlives the
-  pairing it was minted under, so a well-formed claim is not yet provenance: it
-  is accepted only for the instance this installation is configured for and only
-  while that instance holds a durable ready binding — the same validation every
-  other deferred consumer applies to a stored snapshot. A claim for another
-  instance, or one whose binding is gone, is stale rather than privileged: it
-  becomes anonymous remote, never local Owner.
+  because the data it should have carried is absent. An invocation that declares
+  nothing and carries nothing is a different case: that is the historical local
+  entry point and keeps resolving to the local Owner.
+- **Claims are checked for consistency with the current binding, not merely
+  parsed — and not authenticated.** The carrier is an environment that crosses
+  process boundaries and outlives the pairing it was minted under, so a
+  well-formed claim is not yet provenance: it is accepted only for the instance
+  this installation is configured for and only while that instance holds a
+  durable ready binding — the same check every other deferred consumer applies to
+  a stored snapshot. That is a consistency check and nothing more: no signature
+  is verified and the JSON is not authenticated. A claim for another instance, or
+  one whose binding is gone, is stale rather than privileged: it becomes
+  anonymous remote, never local Owner.
 - **A process Avibe owns does not inherit the caller.** The identity hop exists
   for a subprocess run *on a caller's behalf*. The service, the UI server, the
   connector, the restart supervisor and a deferred activation outlive the call
@@ -170,7 +174,15 @@ this PR.
   edit decides which applies: keeping a binding — named again or simply left alone
   — reauthorizes it, while replacing it is judged on the destination and never on
   the Session the edit is removing, because old-target authority is not a source
-  requirement for creating a new one (this is not a fork). A `create_per_run`
+  requirement for creating a new one (this is not a fork). Which of those applies
+  is read from the edit's **final** session policy, not from the policy the row
+  arrived with. `--clear-agent` leaves the Agent choice to the Session a definition
+  is bound to and marks the row accordingly; an edit that turns the same definition
+  per-run clears that marker, because a per-run definition has no bound Session to
+  hold that authority, and it does so before resolving and admitting the Agent every
+  future fire will select. A retained binding and a `create_once` replacement keep
+  the marker: both already resolve and check an Agent elsewhere, so neither is
+  re-authorized here. A `create_per_run`
   definition asks the reservation writer's own question through
   `require_session_placement_authority`, since it reserves nothing while the caller
   is present; with no Scope at all it would reserve a standalone Session per fire,
@@ -184,6 +196,31 @@ this PR.
   shape, lifecycle and repair behavior and gain no authorization meaning. Saved
   automation control — `task run`, `pause`, `resume`, `remove` —
   stays outside this gate. No scheduler change and no per-definition Harness ACL.
+- **The caller environment stays a trusted-origin channel.** Avibe writes the
+  carrier when it launches a command on a caller's behalf; the CLI entry point
+  reads it once. An invocation that carries nothing at all is the historical
+  local entry point and still resolves to the local Owner. What this PR fixes is
+  a *malformed* origin on an invocation that **declares** a remote caller: a
+  snapshot that is missing, malformed, inconsistent with this installation, or no
+  longer valid against the current ready binding stays an anonymous remote
+  context and fails closed, never the local Owner. That check establishes
+  consistency with this installation and its current pairing; it does **not**
+  authenticate the JSON and verifies no signature, so the claims are not
+  host-verifiable and must not be described as such. It is not protection against
+  a principal who can already edit that environment or the state database
+  directly, and must not be described as one. No host signature, token issuance,
+  sandboxing, shell/SQL confinement, new expiry or second role model is
+  introduced here.
+- **An admitted instance-scoped signal has a consumer.** Raising
+  `definitions.updated` to the tier that may read it is only half the repair; the
+  page it announces has to listen for that name. The Harness page now refetches
+  from a bare `definitions.updated` frame the same way it already did for
+  `runs.updated`. No new event, no new tier, no polling fallback added.
+- **The recorded authority is internal.** The snapshot a deferred consumer needs
+  is written on the durable row and is absent from every outward projection of it,
+  Harness reads included — CLI Task/Watch/Run payloads and the public Harness
+  store go through the sanitizer those surfaces already had. Internal consumers
+  keep reading the durable original; no schema change, migration or backfill.
 - **Machine-key operations are Owner.** `vault key export` / `vault key import`
   move the machine's key material and stay at the top floor.
 - **A callback keeps the identity that created it.** The resumed turn runs under
@@ -200,6 +237,12 @@ this PR.
   visitor is a 403 rather than a fall through to the local default. The public
   projection drops the email. Page-read ACLs for public and limited pages are
   untouched and stay independent of this write path.
+- **The Chinese label for the `member` instance-access role is 「管理者」.** Owner
+  decision of 2026-09-18, replacing 「成员」 and superseding the four display-copy
+  statements frozen in `docs/plans/instance-access-role-member.md`, which are
+  marked there. This is display copy only: the stored and token value stays
+  `member`, English stays "Member", and organization / group / server membership
+  copy elsewhere is untouched.
 
 ## Evidence and acceptance
 

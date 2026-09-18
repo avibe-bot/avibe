@@ -870,10 +870,11 @@ def test_remote_editor_task_add_persists_authorization_context(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["metadata"]["resource_user_context"][
-        "vibe_instance_role"
-    ] == "editor"
-    assert len(cli.ScheduledTaskStore(store_path).list_tasks()) == 1
+    # Persisted for the deferred run, hidden from the projection it prints.
+    assert "resource_user_context" not in payload["definition"]["metadata"]
+    stored = cli.ScheduledTaskStore(store_path).list_tasks()
+    assert len(stored) == 1
+    assert stored[0].metadata["resource_user_context"]["vibe_instance_role"] == "editor"
 
 
 def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
