@@ -147,7 +147,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
   const sendingRef = useRef(false);
   const [uncertainSessionId, setUncertainSessionId] = useState<string | null>(null);
   const uncertainRef = useRef<string | null>(null);
-  const lifetime = useRef({ mounted: true, active, authorization: 0 });
+  const lifetime = useRef({ mounted: true, active, authorization: 0, generation: 0 });
   lifetime.current.active = active && surfaceActive;
   useEffect(() => {
     const current = lifetime.current;
@@ -215,12 +215,17 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
     };
   }, [active, api]);
 
-  // Clear transient state when the sheet (re)opens so a prior submit / error
-  // doesn't leak into the next open. The home passes active=true (runs once).
+  // A sheet open owns one submission lifetime. Closing discards that lifetime;
+  // late responses cannot lock or navigate a later fresh sheet. Settings only
+  // changes surfaceActive, so its retained home draft keeps the same lifetime.
   useEffect(() => {
-    if (!active) return;
+    lifetime.current.generation += 1;
+    sendingRef.current = false;
+    pendingSessionRef.current = null;
+    uncertainRef.current = null;
     setSending(false);
-    if (!uncertainRef.current) setError(null);
+    setUncertainSessionId(null);
+    setError(null);
   }, [active]);
 
   // selectedId is the explicit pick; fall back to the most-recent project so a
@@ -312,7 +317,9 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
       // Never create from a stale/empty/in-flight state; no target → caller opens New Project.
       if (uncertainRef.current) return null;
       const authorization = lifetime.current.authorization;
-      const stillAuthorized = () => lifetime.current.mounted && lifetime.current.active
+      const generation = lifetime.current.generation;
+      const currentAttempt = () => lifetime.current.mounted && lifetime.current.generation === generation;
+      const stillAuthorized = () => currentAttempt() && lifetime.current.active
         && lifetime.current.authorization === authorization;
       const files = attachments;
       if (!stillAuthorized() || (!trimmed && files.length === 0) || sendingRef.current || !loaded || !target) return null;
@@ -340,6 +347,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
         let pending = pendingSessionRef.current;
         if (!pending || pending.selection !== selection) {
           const session = await createSessionForProject(target.id, overrides);
+          if (!currentAttempt()) return null;
           if (!session) throw new Error(createFailedText);
           pending = { selection, id: session.id, uploads: new Map() };
           pendingSessionRef.current = pending;
@@ -363,6 +371,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
         // lost response or dispatch_pending can already have started a turn;
         // keep the draft and require inspection instead of offering resend.
         const uncertain = () => {
+          if (!currentAttempt()) return;
           uncertainRef.current = pending.id;
           setUncertainSessionId(pending.id);
           setError(errorText?.('newSession.sendUncertain') ?? createFailedText);
@@ -378,27 +387,38 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
           uncertain();
           return null;
         }
+        if (!currentAttempt()) return null;
         if (!response.ok) {
           const body = await response.json().catch(() => null);
+          if (!currentAttempt()) return null;
           const rejected = body?.state === 'retired'
             || ([400, 403, 404, 409, 422].includes(response.status) && body?.dispatch_error !== 'dispatch_pending');
           if (!rejected) {
             uncertain();
             return null;
           }
+          if ([403, 404, 409].includes(response.status)) pendingSessionRef.current = null;
           throw new Error(createFailedText);
         }
         const sessionId = pending.id;
         pendingSessionRef.current = null;
         return { sessionId };
       } catch (error) {
+        if (!currentAttempt()) return null;
+        // Retryable failures retain successful upload progress. A terminal
+        // session boundary requires a new scope while the caller keeps Files.
+        if (error instanceof WorkbenchUploadError && (
+          error.code === 'session_not_found' || [403, 404, 409].includes(error.status ?? 0)
+        )) pendingSessionRef.current = null;
         setError(error instanceof WorkbenchUploadError && errorText
           ? errorText(workbenchUploadErrorTranslationKey(error))
           : createFailedText);
         return null;
       } finally {
-        sendingRef.current = false;
-        setSending(false);
+        if (currentAttempt()) {
+          sendingRef.current = false;
+          setSending(false);
+        }
       }
     },
     [loaded, target, routeForCreate, agents, createSessionForProject, createFailedText, errorText],

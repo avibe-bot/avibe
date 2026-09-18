@@ -19,6 +19,11 @@ remain unchanged.
 There is no generic caller-provided idempotency key on ordinary message POST.
 A lost response or unresolved dispatch therefore retains the draft, blocks
 resubmission and offers the created conversation in another tab for inspection.
+A fresh global new-session sheet open clears the prior submission lifetime and
+starts with an empty draft; an older request cannot alter the new sheet. Terminal
+session errors discard the invalid upload scope before explicit retry, while
+ordinary dispatch/upload failures keep partial progress.
+
 This is an intentional limit: the frontend never guesses whether an uncertain
 turn ran. Abandoned drafts are component-local, not reload-persistent. A failed
 attempt may leave an empty session, using the existing service lifecycle.

@@ -83,3 +83,59 @@ it.each(['network', 'pending'])('uncertain %s admission cannot be resubmitted', 
   await act(async () => { expect(await result.current.send('中文', [attachment])).toBeNull(); });
   expect(mocks.fetch).toHaveBeenCalledTimes(1);
 });
+
+it('a fresh sheet open starts a new submission lifetime after an uncertain send', async () => {
+  const { result, rerender } = renderHook(({ active }) => useNewSession({ active, loadErrorText: 'load failed', createFailedText: 'send failed' }), { initialProps: { active: true } });
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  mocks.fetch.mockRejectedValueOnce(new Error('lost acknowledgment'));
+  await act(async () => { await result.current.send('第一条'); });
+  expect(result.current.uncertainSessionId).toBe('session-1');
+  rerender({ active: false });
+  rerender({ active: true });
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  expect(result.current.uncertainSessionId).toBeNull();
+  await act(async () => { expect(await result.current.send('新的对话')).toEqual({ sessionId: 'session-2' }); });
+  expect(mocks.create).toHaveBeenCalledTimes(2);
+});
+
+it.each(['create', 'message'])('a response from the closed sheet %s cannot alter a new sheet lifetime', async (stage) => {
+  let release!: (value: unknown) => void;
+  const held = new Promise((resolve) => { release = resolve; });
+  if (stage === 'create') mocks.create.mockReturnValueOnce(held);
+  else mocks.fetch.mockReturnValueOnce(held);
+  const { result, rerender } = renderHook(({ active }) => useNewSession({ active, loadErrorText: 'load failed', createFailedText: 'send failed' }), { initialProps: { active: true } });
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  let prior!: ReturnType<typeof result.current.send>;
+  act(() => { prior = result.current.send('旧对话'); });
+  await waitFor(() => expect(stage === 'create' ? mocks.create : mocks.fetch).toHaveBeenCalledTimes(1));
+  rerender({ active: false });
+  rerender({ active: true });
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  await act(async () => {
+    release(stage === 'create' ? { id: 'old-session' } : new Response('{"dispatch_error":"dispatch_pending"}', { status: 504 }));
+    expect(await prior).toBeNull();
+  });
+  expect(result.current.uncertainSessionId).toBeNull();
+  await act(async () => { expect(await result.current.send('新对话')).not.toBeNull(); });
+  expect(mocks.create).toHaveBeenCalledTimes(2);
+});
+
+it.each([403, 404, 409])('terminal message HTTP %s discards only the invalid scope, preserving the original file for retry', async (status) => {
+  const { result } = mount();
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  mocks.fetch.mockResolvedValueOnce(new Response('{"error":"session unavailable"}', { status }));
+  await act(async () => { expect(await result.current.send('重试', [attachment])).toBeNull(); });
+  await act(async () => { expect(await result.current.send('重试', [attachment])).toEqual({ sessionId: 'session-2' }); });
+  expect(mocks.upload).toHaveBeenNthCalledWith(2, 'session-2', attachment.file, attachment.localId);
+});
+
+it('a missing upload session gets a new scope on explicit retry', async () => {
+  const { WorkbenchUploadError } = await import('./workbenchUpload');
+  mocks.upload.mockRejectedValueOnce(new WorkbenchUploadError('session_not_found', 'missing', 404));
+  const { result } = mount();
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  await act(async () => { expect(await result.current.send('', [attachment])).toBeNull(); });
+  expect(mocks.fetch).not.toHaveBeenCalled();
+  await act(async () => { expect(await result.current.send('', [attachment])).toEqual({ sessionId: 'session-2' }); });
+  expect(mocks.upload).toHaveBeenNthCalledWith(2, 'session-2', attachment.file, attachment.localId);
+});

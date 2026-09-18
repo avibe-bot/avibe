@@ -182,3 +182,45 @@ test('directory picker remains keyboard-contained and its footer reachable on a 
   await expect(dialog).toHaveCount(0);
   await expect(input(page)).toBeVisible();
 });
+
+test('global new-session sheet can be reopened after uncertain admission without carrying a send lock or old draft', async ({ page }) => {
+  await page.route('**/*', (route) => new URL(route.request().url()).origin === 'http://127.0.0.1:5217' ? route.continue() : route.abort());
+  await page.goto('/e2e/home-media/fixture.html?surface=sheet');
+  await page.getByRole('button', { name: 'Open new session' }).click();
+  const draft = page.getByPlaceholder(en.newSession.placeholder);
+  await draft.fill('结果未知的第一条');
+  await page.evaluate(() => { window.homeMedia.messageMode = 'unknown'; });
+  await send(page).click();
+  await expect(draft).toHaveValue('结果未知的第一条');
+  await expect(send(page)).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Open new session' }).click();
+  await expect(draft).toHaveValue('');
+  await expect(page.getByRole('link', { name: en.newSession.inspectSession })).toHaveCount(0);
+  await draft.fill('独立的新对话');
+  await page.evaluate(() => { window.homeMedia.messageMode = 'success'; });
+  await send(page).click();
+  await expect(page.getByTestId('conversation')).toContainText('ses-2');
+  expect(await writes(page, '/api/sessions')).toHaveLength(2);
+  expect((await writes(page, '/messages')).map((write) => write.body.text)).toEqual(['结果未知的第一条', '独立的新对话']);
+});
+
+for (const failure of ['upload', 'message'] as const) test(`terminal ${failure} scope is replaced on explicit retry, with the same original file`, async ({ page }) => {
+  await open(page);
+  await attach(page);
+  await page.evaluate((failure) => {
+    window.homeMedia.uploadTerminal = failure === 'upload';
+    window.homeMedia.messageTerminal = failure === 'message' ? 409 : 0;
+  }, failure);
+  await send(page).click();
+  await expect(page.getByText(file.name, { exact: true })).toBeVisible();
+  await expect(send(page)).toBeEnabled();
+  await page.evaluate(() => { window.homeMedia.uploadTerminal = false; window.homeMedia.messageTerminal = 0; });
+  await send(page).click();
+  await expect(page.getByTestId('conversation')).toContainText('ses-2');
+  expect(await writes(page, '/api/sessions')).toHaveLength(2);
+  expect((await writes(page, '/attachments')).map((write) => write.body)).toEqual([
+    expect.objectContaining({ name: file.name, sessionId: 'ses-1', size: file.buffer.length }),
+    expect.objectContaining({ name: file.name, sessionId: 'ses-2', size: file.buffer.length }),
+  ]);
+});

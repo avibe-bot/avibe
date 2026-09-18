@@ -1,4 +1,4 @@
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createHashRouter, RouterProvider, Route, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ApiProvider } from '../../src/context/ApiContext';
@@ -6,6 +6,8 @@ import { WorkbenchProjectsProvider } from '../../src/context/WorkbenchProjectsPr
 import { InstanceAuthorizationContext } from '../../src/context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../src/context/ToastProvider';
 import { SettingsOverlayRouteSurface } from '../../src/components/settings/SettingsOverlayRouteSurface';
+import { NewSessionSheet } from '../../src/components/workbench/NewSessionSheet';
+import { UnsavedChangesProvider } from '../../src/context/UnsavedChangesProvider';
 import { Workbench } from '../../src/components/Workbench';
 import { settingsOverlayNavigationState } from '../../src/lib/settingsOverlay';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
@@ -28,6 +30,8 @@ const uploads = new Map<string, { sessionId: string; token: string }>();
 const control = {
   writes,
   uploadFailures: 0,
+  uploadTerminal: false,
+  messageTerminal: 0,
   messageMode: 'success' as 'success' | 'rejected' | 'unknown' | 'network',
   holdUpload: false,
   releaseUpload: () => {},
@@ -71,6 +75,7 @@ window.fetch = async (input, init) => {
     const sessionId = path.split('/')[3];
     writes.at(-1)!.body = { name: file.name, uploadId, sessionId, size: file.size };
     if (control.holdUpload) await new Promise<void>((resolve) => { control.releaseUpload = resolve; });
+    if (control.uploadTerminal) return reply({ error: { code: 'session_not_found' } }, 404);
     if (control.uploadFailures-- > 0) return reply({ error: { code: 'upload_failed' } }, 503);
     const token = `${sessionId}-${uploadId}`;
     uploads.set(token, { sessionId, token });
@@ -79,6 +84,7 @@ window.fetch = async (input, init) => {
   if (path.endsWith('/messages')) {
     const attachments = (body.content?.attachments ?? []) as Array<{ token: string }>;
     if (attachments.some((attachment) => uploads.get(attachment.token)?.sessionId !== path.split('/')[3])) return reply({ error: 'scope mismatch' }, 400);
+    if (control.messageTerminal) return reply({ error: 'session unavailable' }, control.messageTerminal);
     if (control.messageMode === 'network') throw new TypeError('fixture connection lost after admission');
     if (control.messageMode === 'unknown') return reply({ state: 'reserved', dispatch_error: 'dispatch_pending' }, 504);
     if (control.messageMode === 'rejected') return reply({ state: 'retired', dispatch_error: 'dispatch_failed' }, 502);
@@ -109,18 +115,24 @@ export function Conversation() {
   const location = useLocation();
   return <div data-testid="conversation">{sessionId}<pre data-testid="handoff">{JSON.stringify(location.state)}</pre></div>;
 }
+export function SheetHarness() {
+  const [open, setOpen] = useState(false);
+  return <><button onClick={() => setOpen(true)}>Open new session</button>
+    <NewSessionSheet open={open} onOpen={() => setOpen(true)} onClose={() => setOpen(false)} />
+  </>;
+}
 export function Fixture() {
   return <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'personal', instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}>
-    <ToastProvider><ApiProvider><WorkbenchProjectsProvider>
+    <ToastProvider><ApiProvider><UnsavedChangesProvider><WorkbenchProjectsProvider>
       <main className="mx-auto min-h-dvh max-w-6xl bg-background p-4 text-foreground md:p-8">
         <SettingsOverlayRouteSurface fallbackElement={<div>Missing route</div>}>
-          <Route path="/" element={<><SettingsEntry /><Workbench /></>} />
+          <Route path="/" element={params.get('surface') === 'sheet' ? <SheetHarness /> : <><SettingsEntry /><Workbench /></>} />
           <Route path="/chat/:sessionId" element={<Conversation />} />
           <Route path="/agents" element={<div>Agents destination</div>} />
           <Route path="/settings/general" element={<Settings />} />
         </SettingsOverlayRouteSurface>
       </main>
-    </WorkbenchProjectsProvider></ApiProvider></ToastProvider>
+    </WorkbenchProjectsProvider></UnsavedChangesProvider></ApiProvider></ToastProvider>
   </InstanceAuthorizationContext.Provider>;
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><RouterProvider router={createHashRouter([{ path: '*', element: <Fixture /> }])} /></StrictMode>);

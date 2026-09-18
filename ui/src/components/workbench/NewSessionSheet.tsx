@@ -39,6 +39,10 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
   // when the sheet reopens, instead of losing it.
   const [pendingDraft, setPendingDraft] = useState('');
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const close = () => {
+    setPendingDraft('');
+    onClose();
+  };
 
   // Close the sheet first, THEN open the project dialog: the parent Radix Dialog
   // traps focus/pointer to its own content, so a NewProjectDialog rendered while
@@ -81,7 +85,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(o) => { if (!o && !ns.sending) onClose(); }}>
+      <Dialog open={open} onOpenChange={(o) => { if (!o && !ns.sending) close(); }}>
         <DialogContent className="gap-5" onOpenAutoFocus={(e) => e.preventDefault()}>
           <DialogTitle className="text-lg font-bold">{t('newSession.title')}</DialogTitle>
 
@@ -103,7 +107,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
               align="start"
               triggerClassName="w-full max-w-full"
               modal
-              onNavigateAway={onClose}
+              onNavigateAway={close}
             />
           </div>
 
