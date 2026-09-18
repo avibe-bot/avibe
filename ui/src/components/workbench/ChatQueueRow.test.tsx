@@ -263,6 +263,14 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
     expect(row().textContent).toContain('one.png and 1 more');
   });
 
+  // A newline left behind by a paste, or a stray space, is not something the
+  // author wrote — everywhere else empty text is judged on the trimmed value, and
+  // this line has to agree or the row renders blank where its filename belongs.
+  it.each(['   ', '\n', ' \n '])('treats whitespace-only text as wordless (%j)', (text) => {
+    mountQueued(item([media('one.png', 'med_1'), media('two.png', 'med_2')], { text }));
+    expect(row().textContent?.trim()).toBe('one.png and 1 more');
+  });
+
   it('leaves authored words in charge of the line and still previews the file', () => {
     mountQueued(item([media('shot.png', 'med_1')], { text: 'Compare these two' }));
 

@@ -99,10 +99,19 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
         mobileSheetHeight="tall"
         className="flex h-[80vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0"
       >
-        <div className="flex items-center gap-2 border-b border-border px-4 py-3 pr-12">
-          <FileText className="size-4 shrink-0 text-muted" />
+        {/* ``items-start`` and ``shrink-0``: the title below is allowed to wrap, so the
+            icon and the actions stay on the first line beside it and the header keeps
+            its full height instead of being squeezed by the scrolling body. */}
+        <div className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3 pr-12">
+          <FileText className="mt-px size-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
-            <DialogTitle className="truncate text-[13px] font-semibold text-foreground">{name || t('chat.media.preview')}</DialogTitle>
+            {/* The name wraps rather than truncating. For an unsupported type this
+                title is the only place the filename exists at all — the body can only
+                say it cannot render the file — and a touch user has no hover to fall
+                back on, so an ellipsis here means the complete name is unreadable.
+                ``break-words`` also breaks an unbroken run, which is what a long
+                extension-less name usually is. */}
+            <DialogTitle className="break-words text-[13px] font-semibold leading-snug text-foreground">{name || t('chat.media.preview')}</DialogTitle>
             {metaLine && <div className="font-mono text-[10px] text-muted">{metaLine}</div>}
           </div>
           {text != null && (

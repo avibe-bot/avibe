@@ -30,11 +30,30 @@ const META: Record<string, { name: string; content_type: string; ext: string }> 
   med_5: { name: 'console-log.txt', content_type: 'text/plain', ext: 'txt' },
   med_im1: { name: 'feishu-screenshot.png', content_type: 'image/png', ext: 'png' },
   med_im2: { name: 'trace.log', content_type: 'text/plain', ext: 'log' },
+  med_long: {
+    name: 'q3-2026-customer-onboarding-migration-runbook-final-reviewed-v12.unknown',
+    content_type: 'application/octet-stream',
+    ext: 'unknown',
+  },
 };
+
+const LONG_FILE = 'q3-2026-customer-onboarding-migration-runbook-final-reviewed-v12.unknown';
+const LONG_IMAGE = 'q3-2026-customer-onboarding-migration-runbook-screenshot-final-v12.png';
 
 // The fixture's queue, in order. Addressing rows by position rather than by text
 // is what keeps the image-only rows — which have no text of their own — reachable.
-const ORDER = ['q-text', 'q-image', 'q-mixed', 'q-broken', 'q-file', 'q-remote', 'q-token'];
+const ORDER = [
+  'q-text',
+  'q-image',
+  'q-mixed',
+  'q-broken',
+  'q-file',
+  'q-remote',
+  'q-token',
+  'q-wrap',
+  'q-longname',
+  'q-longbroken',
+];
 const rowIndex = (id: string) => ORDER.indexOf(id);
 
 const DESKTOP_CAPACITY = 3;
@@ -322,6 +341,128 @@ test('an IM inbound attachment previews from its token instead of going inert', 
   await expect(chip).toHaveAttribute('data-queue-attachment', 'file');
   await activate(page, chip);
   await expect(page.getByRole('dialog')).toContainText('trace.log');
+});
+
+// The sheet stacks targets, and a target is taller than the 20px it shows: the
+// shared 24px band is extended 6px above and below so a finger has 36px to land
+// on. Two such bands 4px apart therefore overlap by 8px, and the overlap belongs
+// to whichever one paints last — a tap just under one thumbnail opened the file
+// on the next line. Only a browser can answer this: it is resolved pseudo-element
+// geometry resolved against real hit-testing.
+test('wrapped attachment targets do not reach into the line below', async ({ page }) => {
+  await row(page, 'q-wrap').scrollIntoViewIfNeeded();
+  await moreButton(page, 'q-wrap').click();
+  const sheet = row(page, 'q-wrap').locator('[data-queue-attachments="disclosed"]');
+  await expect(sheet).toHaveCount(1);
+
+  const items = sheet.locator('[data-queue-attachment]');
+  const boxes = await items.evaluateAll((els) =>
+    els.map((el) => {
+      const r = el.getBoundingClientRect();
+      return { label: el.getAttribute('aria-label'), x: r.x, y: r.y, w: r.width, h: r.height };
+    }),
+  );
+
+  // Genuinely wrapped, not a single line dressed up as one.
+  const lines = [...new Set(boxes.map((b) => Math.round(b.y)))].sort((a, b) => a - b);
+  expect(lines.length, `the sheet did not wrap: ${JSON.stringify(lines)}`).toBeGreaterThan(1);
+
+  // Hit-testing, not arithmetic: ask the browser who owns the pixels just outside
+  // each band, the way a finger does.
+  const ownerAt = (x: number, y: number) =>
+    page.evaluate(
+      ([px, py]) =>
+        (document.elementFromPoint(px, py) as HTMLElement | null)
+          ?.closest('[data-queue-attachment]')
+          ?.getAttribute('aria-label') ?? null,
+      [x, y] as const,
+    );
+
+  const first = boxes.filter((b) => Math.round(b.y) === lines[0]);
+  const second = boxes.filter((b) => Math.round(b.y) === lines[1]);
+  for (const below of second.slice(0, 3)) {
+    const above = first.find((b) => below.x < b.x + b.w && b.x < below.x + below.w);
+    expect(above, 'expected a target directly above the wrapped one').toBeTruthy();
+    const x = Math.round(Math.max(below.x, above!.x) + 2);
+
+    // Three pixels under the upper band: its own target, never the one below it.
+    expect(await ownerAt(x, Math.round(above!.y + above!.h) + 3)).toBe(above!.label);
+    // ...and three pixels over the lower band: its own, never the one above.
+    expect(await ownerAt(x, Math.round(below.y) - 3)).toBe(below.label);
+  }
+
+  // The number behind the behaviour above, stated so a future spacing change has
+  // to think about it: 12px between lines is exactly what lets the two 6px
+  // extensions meet without crossing.
+  expect(Math.round(lines[1] - lines[0] - boxes[0].h)).toBe(12);
+});
+
+// The name on an unsupported type exists nowhere else — the body can only say it
+// cannot render the file — so an ellipsis in the title makes it unreadable to a
+// touch user with no hover. Presence in the DOM is not the property; fitting is.
+const titleIsFullyReadable = async (page: Page) => {
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  const title = dialog.locator('h2').first();
+  const measured = await title.evaluate((el) => {
+    const style = getComputedStyle(el);
+    // What this name would need on one line, measured rather than guessed — the
+    // dialog is 768px wide on a desktop and ~220px on a phone, so whether the
+    // name has to wrap at all is a property of the viewport, not of the name.
+    const probe = document.createElement('span');
+    probe.textContent = el.textContent;
+    probe.style.cssText = `position:absolute;visibility:hidden;white-space:nowrap;font:${style.font}`;
+    document.body.appendChild(probe);
+    const intrinsic = probe.getBoundingClientRect().width;
+    probe.remove();
+    return {
+      text: el.textContent ?? '',
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
+      height: el.getBoundingClientRect().height,
+      lineHeight: parseFloat(style.lineHeight),
+      whiteSpace: style.whiteSpace,
+      textOverflow: style.textOverflow,
+      intrinsic,
+    };
+  });
+
+  // Nothing clipped horizontally: every glyph is inside the box it is drawn in.
+  expect(
+    measured.scrollWidth,
+    `title overflows its box: ${measured.scrollWidth} > ${measured.clientWidth}`,
+  ).toBeLessThanOrEqual(measured.clientWidth + 1);
+  // The mechanism that used to hide the tail is gone, at every width.
+  expect(measured.whiteSpace).not.toBe('nowrap');
+  expect(measured.textOverflow).not.toBe('ellipsis');
+  // Where one line cannot hold the name — which is the case on the phone — it is
+  // readable because it wrapped, not because it was short enough.
+  if (measured.intrinsic > measured.clientWidth + 1) {
+    expect(measured.height).toBeGreaterThan(measured.lineHeight * 1.5);
+  }
+  return measured.text;
+};
+
+test('a long unsupported filename is readable in full after a real tap', async ({ page }) => {
+  await row(page, 'q-longname').scrollIntoViewIfNeeded();
+  const chip = previews(page, 'q-longname').first();
+  await expect(chip).toHaveAttribute('aria-label', `${LONG_FILE} · UNKNOWN`);
+
+  await activate(page, chip);
+  expect(await titleIsFullyReadable(page)).toContain(LONG_FILE);
+
+  // The header grew; the body it shares the dialog with is still a usable size.
+  const body = page.getByRole('dialog').locator('.vr-fileview-body');
+  expect((await boxOf(body, 'the viewer body')).height).toBeGreaterThan(120);
+});
+
+test('a failed image with a long name is just as readable', async ({ page }) => {
+  await row(page, 'q-longbroken').scrollIntoViewIfNeeded();
+  const slot = thumbs(page, 'q-longbroken').first();
+  await expect(slot).toHaveAttribute('data-queue-attachment', 'image-unavailable');
+
+  await activate(page, slot);
+  expect(await titleIsFullyReadable(page)).toContain(LONG_IMAGE);
 });
 
 test('inspecting files changes nothing about the queue itself', async ({ page }) => {

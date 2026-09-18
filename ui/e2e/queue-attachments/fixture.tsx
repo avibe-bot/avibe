@@ -48,6 +48,24 @@ const FIVE = [
 // fetch, and not ours to rewrite either — the query is part of the signature.
 const SIGNED = 'https://files.example.com/spec.pdf?sig=abc123&expires=1789';
 
+// Enough attachments that the disclosed sheet genuinely wraps onto several lines
+// at BOTH widths — stacked targets are the only place their vertical extents can
+// collide, and one line can never show that.
+const WRAP = [
+  ...Array.from({ length: 10 }, (_, i) => media(`med_w${i + 1}`, `wrap${String(i + 1).padStart(2, '0')}.png`)),
+  ...Array.from({ length: 10 }, (_, i) => ({
+    url: `/api/media/med_wf${i + 1}`,
+    name: `wrap-attachment-${i + 11}.log`,
+    mime: 'text/plain',
+  })),
+];
+
+// A name no header can fit on one line, on a type no preview can render: the
+// viewer's title is then the only place the filename exists at all, and a touch
+// user has no hover to fall back on.
+const LONG_FILE = 'q3-2026-customer-onboarding-migration-runbook-final-reviewed-v12.unknown';
+const LONG_IMAGE = 'q3-2026-customer-onboarding-migration-runbook-screenshot-final-v12.png';
+
 const QUEUE: WorkbenchMessage[] = [
   queued('q-text', 'A queued message with no files at all'),
   queued('q-image', '', [media('med_1', 'annotation-region.png')]),
@@ -61,6 +79,13 @@ const QUEUE: WorkbenchMessage[] = [
     { token: 'med_im1', name: 'feishu-screenshot.png', mimetype: 'image/png', size: 4096 },
     { token: 'med_im2', name: 'trace.log', mimetype: 'text/plain', size: 12 },
   ]),
+  queued('q-wrap', '', WRAP),
+  queued('q-longname', '', [
+    { url: '/api/media/med_long', name: LONG_FILE, mime: 'application/octet-stream' },
+  ]),
+  // The same unreadable-name problem arriving the other way: an image that fails
+  // to load hands its click to the very same viewer.
+  queued('q-longbroken', '', [media('med_broken_long', LONG_IMAGE)]),
 ];
 
 // The transcript gallery deliberately CONTAINS the queued image, so the spec can

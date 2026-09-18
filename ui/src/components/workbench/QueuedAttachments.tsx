@@ -6,7 +6,7 @@ import { ChevronDown, FileText, Image as ImageIcon, ImageOff } from 'lucide-reac
 import { useFileViewer } from '@/components/ui/file-viewer-context';
 import { useImageViewer } from '@/components/ui/image-viewer-context';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
-import type { QueuedAttachment } from '@/lib/queuedAttachments';
+import type { MessageAttachment } from '@/lib/messageAttachments';
 
 // What a queued message's attachments look like on the one line the queue strip
 // gives them. Design: avibe-docs `design/queued-message-attachments` QMA 01–04;
@@ -26,7 +26,7 @@ import type { QueuedAttachment } from '@/lib/queuedAttachments';
 const useAccessibleName = () => {
   const { t } = useTranslation();
   return React.useCallback(
-    (att: QueuedAttachment, unavailable: boolean) => {
+    (att: MessageAttachment, unavailable: boolean) => {
       const name = att.name || t('chat.queue.attachments.untitled');
       const ext = att.name.includes('.') ? (att.name.split('.').pop() || '').toUpperCase() : '';
       return [name, ext || null, unavailable ? t('chat.queue.attachments.previewUnavailable') : null]
@@ -49,7 +49,7 @@ const TARGET =
 
 const PILL = 'flex h-5 items-center gap-1 rounded-[5px] border px-1';
 
-const Thumb: React.FC<{ att: QueuedAttachment }> = ({ att }) => {
+const Thumb: React.FC<{ att: MessageAttachment }> = ({ att }) => {
   const label = useAccessibleName();
   const imageViewer = useImageViewer();
   const fileViewer = useFileViewer();
@@ -96,7 +96,7 @@ const Thumb: React.FC<{ att: QueuedAttachment }> = ({ att }) => {
   );
 };
 
-const Chip: React.FC<{ att: QueuedAttachment }> = ({ att }) => {
+const Chip: React.FC<{ att: MessageAttachment }> = ({ att }) => {
   const { t } = useTranslation();
   const label = useAccessibleName();
   const fileViewer = useFileViewer();
@@ -157,7 +157,7 @@ const Chip: React.FC<{ att: QueuedAttachment }> = ({ att }) => {
   );
 };
 
-const Item: React.FC<{ att: QueuedAttachment }> = ({ att }) =>
+const Item: React.FC<{ att: MessageAttachment }> = ({ att }) =>
   att.image ? <Thumb att={att} /> : <Chip att={att} />;
 
 const Disclosure: React.FC<{
@@ -196,7 +196,7 @@ const Disclosure: React.FC<{
 // scrolling strip, and would make the server-rendered markup a third state that
 // matches neither width.
 export const QueuedAttachmentGroup: React.FC<{
-  attachments: QueuedAttachment[];
+  attachments: MessageAttachment[];
   expanded: boolean;
   onToggle: () => void;
 }> = ({ attachments, expanded, onToggle }) => {
@@ -248,10 +248,18 @@ export const QueuedAttachmentGroup: React.FC<{
 // The disclosed remainder: the same row wrapped onto a second line, not a second
 // strip — ordering, identity and the row's own actions are untouched, and the
 // queue's existing 128px scroll body absorbs the extra height.
-export const QueuedAttachmentSheet: React.FC<{ attachments: QueuedAttachment[] }> = ({ attachments }) => (
+//
+// The row gap is 12px, not the 4px used between neighbours on one line, and the
+// difference is a hit-testing fact rather than a spacing preference: `TARGET`
+// extends each 24px band by 6px above and below, so two stacked targets claim
+// 12px of vertical space between their bands. Give them 4px and the extensions
+// overlap by 8px — measured at 390px, a tap three pixels below one thumbnail
+// opened the file on the next line. At 12px they meet exactly and never cross,
+// which is the same geometry the disclosure-to-sheet boundary already has.
+export const QueuedAttachmentSheet: React.FC<{ attachments: MessageAttachment[] }> = ({ attachments }) => (
   <div
     data-queue-attachments="disclosed"
-    className="order-last mt-1 flex w-full basis-full flex-wrap items-center gap-1"
+    className="order-last mt-1 flex w-full basis-full flex-wrap items-center gap-x-1 gap-y-3"
   >
     {attachments.map((att, i) => (
       <Item key={i} att={att} />

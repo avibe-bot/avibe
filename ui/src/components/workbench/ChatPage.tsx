@@ -22,7 +22,7 @@ import { isAgentActivityBoundaryMessage, isRetryableFailureNotice, isTerminalAge
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
-import { readQueuedAttachments } from '../../lib/queuedAttachments';
+import { readMessageAttachments } from '../../lib/messageAttachments';
 import {
   isVaultApprovalRequest,
   placeVaultProvisionRequests,
@@ -2637,12 +2637,12 @@ export const ChatPage: React.FC = () => {
         urls.push(u);
       }
     };
+    // ``messages`` is the transcript alone — the queue is separate state — so the
+    // gallery keeps containing delivered images only, and a queued preview stays
+    // the isolated single-image view it opens as.
     for (const m of messages) {
-      const atts = (m.content as { attachments?: Array<Record<string, unknown>> })?.attachments;
-      if (Array.isArray(atts)) {
-        for (const a of atts) {
-          if (a?.kind === 'image' || String(a?.mime || '').startsWith('image/')) push(String(a?.url || ''));
-        }
+      for (const att of readMessageAttachments(m.content)) {
+        if (att.image) push(att.url);
       }
       if (m.text) {
         const re = /!\[[^\]]*\]\((\/api\/media\/[^)\s]+)\)/g;
@@ -3017,14 +3017,21 @@ export const QueueRow: React.FC<{
   // Held separately from ``hasAttachments`` above, which answers a different
   // question (can this row be recalled) and must keep answering it for an
   // attachment this renderer cannot draw.
-  const attachments = readQueuedAttachments(item.content);
+  const attachments = readMessageAttachments(item.content);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   // A queued row whose author wrote no words: the files ARE the message, so the
   // first one names it. This is the same job the screenshot stand-in does, done
   // with the real thing — so the stand-in's generic word is only reached when
   // there is nothing renderable to name.
+  //
+  // "No words" is judged on trimmed text, the way empty text is judged everywhere
+  // else: a lone newline or a space left over from a paste is not a message, and
+  // a row carrying one would otherwise render a blank line where its filename
+  // belongs. The stored text is untouched — this decides what to show, not what
+  // was written.
   const showScreenshotStandIn = standIn?.kind === 'screenshot' && attachments.length === 0;
-  const named = !item.text && standIn?.kind !== 'quote' && attachments.length > 0 ? attachments[0] : null;
+  const wordless = !item.text?.trim();
+  const named = wordless && standIn?.kind !== 'quote' && attachments.length > 0 ? attachments[0] : null;
   const summary =
     named &&
     (attachments.length > 1
@@ -3066,12 +3073,15 @@ export const QueueRow: React.FC<{
               <MessageSquareQuote className="size-[11px] shrink-0" />
               {t(annotationTitleKey(annotationView.direction))}
             </span>
-            {(item.text || standIn?.kind === 'quote' || showScreenshotStandIn || summary) && (
+            {(!wordless || standIn?.kind === 'quote' || showScreenshotStandIn || summary) && (
               <span className="mr-2 text-[11px] text-muted">·</span>
             )}
           </>
         )}
-        {item.text}
+        {/* Same trimmed judgement as ``wordless`` above, so a row whose text is
+            only a stray newline neither draws a separator with nothing after it
+            nor pushes its filename onto a second line once expanded. */}
+        {wordless ? null : item.text}
         {standIn?.kind === 'quote' && (
           // The card's own quote treatment (pin + muted), flattened to the one
           // line the strip has room for.
@@ -4556,27 +4566,27 @@ export const MessageRow = memo(function MessageRow({
 
   // User-uploaded attachments ride in ``content.attachments`` (agent-reply media
   // is rewritten inline into the text instead, handled by the Markdown renderer).
-  const rawAttachments = (message.content as { attachments?: Array<Record<string, unknown>> })?.attachments;
-  const messageAttachments = Array.isArray(rawAttachments) ? rawAttachments : [];
+  // Read through the same boundary the queue strip uses, so an attachment that
+  // was recognisable while queued is still the same file once delivered: an IM
+  // inbound records a media token rather than a URL, and reading ``url`` directly
+  // dropped those rows from the transcript entirely.
+  const messageAttachments = readMessageAttachments(message.content);
   const attachmentsNode = messageAttachments.length > 0 ? (
     <div className="mt-2 flex flex-col gap-2">
       {messageAttachments.map((att, i) => {
-        const url = String(att?.url || '');
-        if (!url) return null;
-        // Only inline-render images served from our own media proxy; a non-proxy
-        // url falls back to a click-through FileCard so it can't auto-fetch a
-        // remote host.
-        const isImage =
-          (att?.kind === 'image' || String(att?.mime || '').startsWith('image/')) && isProxyMediaUrl(url);
+        // Nothing to point at — no URL and no token to mint one from. Existing
+        // behaviour: the transcript says nothing rather than offering a dead card.
+        if (!att.url) return null;
+        // ``att.image`` is already "an image AND served from our own media proxy";
+        // anything else falls back to a click-through FileCard so the row can't
+        // auto-fetch a remote host.
         // Server-supplied pixel size (added at upload time) reserves the box so a
         // freshly-loaded attachment never shifts the transcript.
-        const w = typeof att?.width === 'number' ? att.width : undefined;
-        const h = typeof att?.height === 'number' ? att.height : undefined;
-        return isImage ? (
-          <ChatImage key={i} src={url} alt={typeof att?.name === 'string' ? att.name : ''} width={w} height={h} />
+        return att.image ? (
+          <ChatImage key={i} src={att.url} alt={att.name} width={att.width} height={att.height} />
         ) : (
-          <FileCard key={i} href={url}>
-            {typeof att?.name === 'string' ? att.name : 'file'}
+          <FileCard key={i} href={att.url}>
+            {att.name || 'file'}
           </FileCard>
         );
       })}

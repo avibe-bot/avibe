@@ -46,10 +46,11 @@ One PR against master, closes #2042. Exact-head Codex review, all expected CI gr
 
 ## What was built
 
-- `ui/src/lib/queuedAttachments.ts` reads `content.attachments` and decides, on
+- `ui/src/lib/messageAttachments.ts` reads `content.attachments` and decides, on
   its own, which URL may become an `<img>`: only a same-origin media-proxy URL,
   via the existing `isProxyMediaUrl`. The rule is a safety property, so it lives
-  where a test can hold it without rendering a row.
+  where a test can hold it without rendering a row. Round 2 made this the one
+  read boundary for every attachment surface (see below).
 - `ui/src/components/workbench/QueuedAttachments.tsx` draws the inline group and
   the disclosed remainder. Every target sits in the same 24px band the row's
   existing icon buttons occupy, with a 20px visual inside it, so no attachment —
@@ -150,9 +151,87 @@ with no baseline drift; `typecheck:tests` and `npm run build` clean.
 Not changed, reported instead: `file-viewer-modal.tsx` builds its download href
 as `${mediaUrl}?download=1` inline rather than through `mediaDownloadHref`, which
 already handles an existing query. Pre-existing, unrelated to this PR, and after
-fix 3 unreachable from the queue. The delivered transcript renderer
-(`ChatPage.tsx`, user-message attachments) still drops a token-only attachment
-for the same reason fix 1 addresses; out of this lane's scope.
+fix 3 unreachable from the queue.
+
+Superseded: this section originally recorded the delivered transcript renderer's
+token-only attachment loss as out of this lane's scope. The orchestrator traced
+the same root cause through the delivery projection and extended the scope to a
+shared read boundary; round 2 below is that decision and its evidence.
+
+## Review round 2 — supplemental scope, head 43475cca
+
+Head `f1e97c0c` remains the only findings-bearing head: Codex review 5253087669,
+three classes, all three replied to and resolved. Head `43475cca` took a clean
+Codex pass ("Didn't find any major issues"). No circuit-breaker threshold applies.
+An independent read-only reviewer's focus, token-shape and external-URL
+observations name those same three root causes and add no reviewed head; reviewed
+heads are counted from a review's own commit, not from `ReviewComment.commit`,
+which moves with the diff.
+
+The orchestrator then reproduced two further defects in an isolated pinned-head
+copy and granted a bounded supplemental scope. Both are measurements, not
+inferences, and both are now covered by tests that fail without the fix.
+
+4. **One read boundary instead of three.** The queue row, the transcript row and
+   the lightbox gallery each re-derived "is this an image, and may we fetch it"
+   from the raw record. Round 1 fixed the queue's copy only, which is not enough
+   for the contract's identity property: the projection passes `content` through
+   verbatim, so a token-shaped attachment that the queue could now draw still
+   disappeared from the transcript, which read `url` directly and skipped the row.
+   `queuedAttachments.ts` became `messageAttachments.ts` — a neutral name for what
+   it now is — and all three surfaces read through it. `width`/`height` cross the
+   boundary so the transcript still reserves its box; source order is unchanged;
+   the gallery's membership rule is `att.image`, so a third-party URL still cannot
+   enter a list the viewer pages through; and the gallery is still built from the
+   transcript alone, so a queued preview remains the isolated view it opens as.
+   Reported and deliberately not built: no new flow for a record carrying neither
+   URL nor token. The queue keeps its existing inert chip and the transcript keeps
+   skipping it — no admitted producer writes that shape.
+5. **Wrapped targets overlapping.** Measured at 390px: two stacked 24px bands 4px
+   apart, each extended 6px above and below by `TARGET`'s `::after`, overlap by
+   8px — `elementFromPoint` three pixels under one thumbnail returned the file on
+   the next line. The extensions are what make the target 36px for a finger, so
+   the fix is the sheet's row gap, not the targets: 12px, which is exactly what
+   two 6px extensions need to meet without crossing, and the same geometry the
+   disclosure-to-sheet boundary already had. The 20px visual, the 24px band and
+   the 36px collapsed row are unchanged. The separately reported disclosure-to-
+   sheet overlap was measured at a 12px gap and is not a defect; nothing there
+   was changed.
+6. **A filename that could not be read.** `FileViewerModal`'s title used
+   `truncate`: measured after a real mobile-emulated tap, `clientWidth` 220 against
+   `scrollWidth` 653 with an ellipsis. For an unsupported type that title is the
+   only place the name exists — the body can only say it cannot render the file —
+   and a touch user has no hover to fall back on, so the complete name was
+   unreachable. The title now wraps (`break-words`, which also breaks an unbroken
+   run); the header is `items-start` and `shrink-0` so the icon and actions stay
+   on the first line and the scrolling body is never squeezed by it. Nothing else
+   in the modal changed — the pre-existing `?download=1` construction is still
+   only reported.
+7. **Whitespace-only text.** The row asked `!item.text`, so a stray space or a
+   newline left by a paste counted as authored words and suppressed the filename
+   summary, leaving a blank line. Judged on the trimmed value now, the same way
+   empty text is judged elsewhere. The stored text is untouched; this decides what
+   is shown, not what was written.
+
+Round-2 evidence: `messageAttachments.test.ts` (8 cases) holds the boundary on its
+own — both producer shapes, source order, dimensions, the token escape, the
+gallery's membership rule, and what is not an attachment.
+`MessageAttachmentIdentity.test.tsx` (4 cases) renders the same token-shaped image
+and log through `QueueRow` and `MessageRow`: the same URL before and after
+delivery, the log opened at the URL the delivered one links to, the uploader's
+800x600 box still reserved, and no `<img>` at a third-party host on either
+surface. `ChatQueueRow.test.tsx` grows to 31 with the whitespace cases. The
+browser suite grows to 17 cases x 2 projects = 34, adding three fixture rows (20
+attachments that genuinely wrap at both widths, a long unsupported filename, a
+failed image with a long name): the wrapped-target test hit-tests the pixels just
+outside each band and, with the 4px gap restored, reproduces the orchestrator's
+finding exactly — a point below `wrap01.png` resolving to a `.log` on the next
+line — then passes at 12px; the title tests measure the rendered box rather than
+asserting text presence, requiring no horizontal clipping at any width and a
+genuine wrap where one line cannot hold the name.
+
+Full UI unit suite 4575 passed / 323 files; `npm run lint` with no baseline drift;
+`typecheck:tests` and `npm run build` clean.
 
 ## Status
 
