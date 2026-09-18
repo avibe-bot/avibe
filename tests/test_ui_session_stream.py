@@ -425,6 +425,105 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     assert Path(payload["files"][0]["path"]).read_bytes() == b"attachment-bytes"
 
 
+def test_queued_projection_carries_the_uploaded_file_identity(isolated_state, tmp_path):
+    """A queued message names the file it is waiting to send, in the shape the
+    queue strip draws (issue #2042).
+
+    The strip renders a thumbnail only for a same-origin ``/api/media/<token>``
+    URL, and resolves the rest from ``content.attachments``. That makes three
+    things a backend contract rather than a browser detail: the upload hands back
+    that URL and a ``kind``, the queued projection still carries them on both the
+    live queue read and the reload path, and the same token still resolves to the
+    uploaded bytes — so the file previewed in the queue is the file that reaches
+    the turn when it flushes.
+    """
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    upload = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-queued-1"},
+        files={"file": ("annotation-region.png", b"queued-image-bytes", "image/png")},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+    assert upload.status_code == 201
+    uploaded = upload.get_json()
+    # Same-origin media proxy, not a remote URL: this is the one form the queue
+    # row is allowed to put in an <img src>.
+    assert uploaded["url"] == f"/api/media/{uploaded['token']}"
+    assert uploaded["kind"] == "image"
+    assert uploaded["name"] == "annotation-region.png"
+
+    async def dispatch(payload):
+        settled = _settle_reserved_delivery(payload, state="queued")
+        return {
+            "status_code": 202,
+            "body": {"ok": True, "queued": True, "delivery_state": settled["state"]},
+        }
+
+    sent_attachment = {
+        "token": uploaded["token"],
+        "name": uploaded["name"],
+        "mime": uploaded["mime"],
+        "size": uploaded["size"],
+        "kind": uploaded["kind"],
+        "url": uploaded["url"],
+    }
+    with patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "", "content": {"text": "", "attachments": [sent_attachment]}},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+    assert response.status_code == 202
+    assert response.get_json()["queued"] is True
+
+    def queued_attachment(body: dict) -> dict:
+        assert len(body["queued"]) == 1
+        content = body["queued"][0]["content"]
+        assert len(content["attachments"]) == 1
+        return content["attachments"][0]
+
+    # The live queue read and the reload path project the same identity — an
+    # image-only queued row stays identifiable across a refresh.
+    live = client.get(f"/api/sessions/{session_id}/queue")
+    assert live.status_code == 200
+    assert queued_attachment(live.get_json()) == sent_attachment
+
+    with patch(
+        "vibe.api.get_vibe_agents",
+        return_value={"agents": [], "default_agent_name": None},
+    ):
+        bootstrap = client.get(f"/api/sessions/{session_id}/bootstrap")
+    assert bootstrap.status_code == 200
+    assert queued_attachment(bootstrap.get_json()) == sent_attachment
+
+    # The previewed URL is fetchable same-origin, and the token the preview was
+    # drawn from is the one the flush resolves into the agent turn.
+    media = client.get(uploaded["url"])
+    assert media.status_code == 200
+    assert media.content == b"queued-image-bytes"
+
+    from core.workbench_media import resolve_attachment_specs
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().connect() as conn:
+        specs = resolve_attachment_specs(
+            conn,
+            session_id=session_id,
+            attachments=[queued_attachment(live.get_json())],
+        )
+    assert len(specs) == 1
+    assert specs[0]["name"] == "annotation-region.png"
+    assert Path(specs[0]["path"]).read_bytes() == b"queued-image-bytes"
+
+
 def test_route_reads_the_materialized_message_id_for_a_merged_batch(
     isolated_state,
     tmp_path,

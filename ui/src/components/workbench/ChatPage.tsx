@@ -22,6 +22,7 @@ import { isAgentActivityBoundaryMessage, isRetryableFailureNotice, isTerminalAge
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
+import { readQueuedAttachments } from '../../lib/queuedAttachments';
 import {
   isVaultApprovalRequest,
   placeVaultProvisionRequests,
@@ -132,6 +133,7 @@ import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
+import { QueuedAttachmentGroup, QueuedAttachmentSheet } from './QueuedAttachments';
 import { ActivityCard, ActivityChip } from './AgentActivityGroup';
 import {
   activityGroupsForForeground,
@@ -3011,10 +3013,36 @@ export const QueueRow: React.FC<{
   // contract — so an annotation that is only a highlight or only a boxed region
   // has none, and would sit here as a title, a separator, and empty space.
   const standIn = annotationView && annotationStandIn(annotationView, item.text, hasAttachments);
+  // The files waiting to be sent with this message, previewed on the row itself.
+  // Held separately from ``hasAttachments`` above, which answers a different
+  // question (can this row be recalled) and must keep answering it for an
+  // attachment this renderer cannot draw.
+  const attachments = readQueuedAttachments(item.content);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  // A queued row whose author wrote no words: the files ARE the message, so the
+  // first one names it. This is the same job the screenshot stand-in does, done
+  // with the real thing — so the stand-in's generic word is only reached when
+  // there is nothing renderable to name.
+  const showScreenshotStandIn = standIn?.kind === 'screenshot' && attachments.length === 0;
+  const named = !item.text && standIn?.kind !== 'quote' && attachments.length > 0 ? attachments[0] : null;
+  const summary =
+    named &&
+    (attachments.length > 1
+      ? t('chat.queue.attachments.summary', {
+          name: named.name || t('chat.queue.attachments.untitled'),
+          count: attachments.length - 1,
+        })
+      : named.name || t('chat.queue.attachments.untitled'));
   return (
     <div
       data-queue-row="true"
-      className="relative flex items-start gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none"
+      className={clsx(
+        'relative flex items-start gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        // Wrapping is enabled only while the remainder is disclosed. A collapsed
+        // row therefore cannot wrap at any width — the one thing that could make
+        // it taller than a text-only row is off unless the reader asked for it.
+        attachmentsOpen && 'flex-wrap',
+      )}
     >
       <div
         role="button"
@@ -3038,7 +3066,9 @@ export const QueueRow: React.FC<{
               <MessageSquareQuote className="size-[11px] shrink-0" />
               {t(annotationTitleKey(annotationView.direction))}
             </span>
-            {(item.text || standIn) && <span className="mr-2 text-[11px] text-muted">·</span>}
+            {(item.text || standIn?.kind === 'quote' || showScreenshotStandIn || summary) && (
+              <span className="mr-2 text-[11px] text-muted">·</span>
+            )}
           </>
         )}
         {item.text}
@@ -3050,13 +3080,23 @@ export const QueueRow: React.FC<{
             {standIn.quote}
           </span>
         )}
-        {standIn?.kind === 'screenshot' && (
+        {showScreenshotStandIn && (
           <span className="inline-flex items-center gap-[5px] align-middle text-muted">
             <ImageIcon className="size-[11px] shrink-0" />
             {t('chat.annotation.screenshot')}
           </span>
         )}
+        {summary && <span className="text-muted">{summary}</span>}
       </div>
+      {/* A sibling of the text, never a child of it: a preview or a disclosure
+          click cannot reach the expand/collapse handler above, so inspecting an
+          attachment never also rewrites the row it is on. */}
+      <QueuedAttachmentGroup
+        attachments={attachments}
+        expanded={attachmentsOpen}
+        onToggle={() => setAttachmentsOpen((v) => !v)}
+      />
+      {attachmentsOpen && <QueuedAttachmentSheet attachments={attachments} />}
       {canRecall && (
         <Button
           type="button"

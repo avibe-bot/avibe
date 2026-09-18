@@ -4328,7 +4328,15 @@
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "recall": "撤回到输入框",
-      "remove": "移出队列"
+      "remove": "移出队列",
+      "attachments": {
+        "untitled": "附件",
+        "previewUnavailable": "预览不可用",
+        "summary": "{{name}} 及其余 {{count}} 个",
+        "more": "+{{count}}",
+        "showMore": "显示其余 {{count}} 个附件",
+        "collapse": "收起附件"
+      }
     }
   },
   "vaults": {
