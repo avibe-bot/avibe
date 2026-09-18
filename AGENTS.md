@@ -13,7 +13,7 @@ Current product shape:
 - V2 config-driven service with a Web UI setup wizard and settings pages
 - multi-platform message transport with shared core orchestration
 - multi-backend agent routing across OpenCode, Claude Code, and Codex
-- local Incus-based unified regression environment for real cross-platform verification
+- shared cloud regression and acceptance environment for real cross-platform verification
 
 ## 2. Design Philosophy and Architecture
 
@@ -69,7 +69,7 @@ Decision checklist before writing code:
 - logs: `~/.avibe/logs/vibe_remote.log`
 - persisted state: `~/.avibe/state/`
 - default agent working directory: `_tmp/`
-- generated regression metadata: `.runtime/incus-regression/` in the primary checkout
+- optional local Incus metadata: `.runtime/incus-regression/` in the primary checkout
 
 ## 3. Runtime Environments
 
@@ -94,67 +94,27 @@ Hard rule:
 - Any test that reaches write-capable production paths must redirect the whole
   call path to test-owned state and prove a representative write cannot touch
   real local or external user state; `uses_real_paths` tests must remain read-only.
-- Unless the user explicitly asks otherwise, use the Incus regression environment for user-facing verification.
+- Continue running hermetic unit, contract, and browser-fixture tests locally.
 
-### Regression Testing (Incus)
+### Regression and Acceptance
 
-When the user says `回归测试`, update the latest code into the existing **local**
-Incus regression environment, preserve accumulated product state unless reset is
-explicitly requested, then let the user verify Slack, Discord, Feishu/Lark, and
-WeChat behavior.
+Owner decision, 2026-09-18: use
+[the shared cloud acceptance instance](https://avibe-cloud-e2e-app.avibe.bot)
+for Avibe regression and acceptance, including requests for `回归测试`.
+This supersedes older local-Incus defaults, including delivery-skill suggestions.
 
-Entry points:
-
-- default: `./scripts/run_regression.sh`
-- direct: `python3 scripts/incus_regression.py up --target master`
-- macOS/Lima: `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh`
-
-Hard rules:
-
-- local Incus only for development regression; never use `--remote`, SSH, remote
-  tenant projects, demos, or customer/user environments unless explicitly asked
-  for remote ops
-- use the runner, not raw Incus commands; it owns naming, source sync, state
-  preparation, readiness checks, Show Runtime setup, metadata, and cleanup
-- `master` is the long-running unified four-platform environment; keep it online,
-  preserve product state, sync source, and restart the service in place
-- `worktree` targets are temporary isolated environments; delete each one
-  explicitly with
-  `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
-  when merged, abandoned, or stale
-- `reconcile` lists every worktree environment Incus holds — including ones
-  created outside the runner, which no metadata-driven command can see — and
-  forgets metadata rows whose environment is already gone. It never deletes an
-  environment: no recorded field can prove one is unwanted, so that call stays
-  with the operator. It reports the names the daemon gave, never re-derived from
-  the slug, because a discovered name is bounded by what Incus accepts and
-  `--slug` is stricter; one it would reject gets its objects named for a manual
-  reclamation instead of a command that would exit on its own argument
-- a metadata row is dropped only when the daemon that owns it completed a
-  listing whose every entry was readable, that listing held neither its project
-  nor its instance, and the row is not a reservation whose `up` may still be
-  running. A reservation lives exactly as long as its run: an `up` that fails
-  gives its row back while the daemon reports no project for that slug and the
-  row is still the one that run wrote, both read at that moment rather than
-  remembered from an earlier one — so a project that may bind the port, a
-  listing that cannot answer, and a concurrent `up` that took the slug over all
-  keep the row. `worktrees.json` is reached only through an accessor bound to the
-  daemon it describes — it reserves host ports on this machine and records what
-  this machine's daemon holds — so a `--remote` command cannot name it and
-  neither reads nor writes it: `reconcile --remote` reports the remote inventory
-  with no local provenance, `delete --remote` keeps the local row, and
-  `up --remote` requires `--host-port`
-- never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
-  Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
-- after any regression update, verify service health before reporting success
-
-State and lookup notes:
-
-- regression product state lives under `/home/avibe/.avibe`; `/home/avibe/.vibe_remote` is only the compatibility symlink
-- metadata lives under the primary checkout's `.runtime/incus-regression/`, even
-  when the runner is invoked from a task worktree
-- `.env.regression` is read from the current worktree first, then the primary checkout
-- branch/master regression defaults to a locally built Show Runtime archive; packaged release installs use the packaged manifest path
+- Do not use or recreate the retired local Incus/Lima regression environment
+  for routine acceptance. A missing or inaccessible cloud target is a blocker,
+  not a reason to provision a local replacement.
+- Preserve accumulated state. The designated instance is shared and persistent;
+  its selection alone authorizes neither deployment nor reset/destructive tests,
+  and grants no access to other cloud, tenant, demo, or production environments.
+- Follow [the regression guide](docs/regression/README.md) for scope, access and
+  deployment limitations, and acceptance evidence. HTTP reachability or service
+  health alone is not an E2E pass.
+- The Incus runner remains available for explicitly requested local testing;
+  see [the opt-in local runbook](docs/regression/local-incus.md). Its commands
+  do not operate the designated cloud target.
 
 ## 4. Configuration and Routing Model
 
