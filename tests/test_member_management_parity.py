@@ -11,6 +11,7 @@ import contextlib
 import json
 import re
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -118,7 +119,11 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 291
+    assert len(endpoints) == 292
+    # Additive read-only backend projection inherits native backend-management
+    # authorization; it does not grant lower-tier credential-management access.
+    assert ("GET", "/api/backend/{name}/connection") in endpoints
+    assert http_authorization_policy("GET", "/api/backend/claude/connection").minimum_role == "member"
     # Frozen from 1b191200c: independently protect all existing lower-tier grants.
     baseline_read_roles = json.loads(
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
@@ -152,6 +157,30 @@ def test_complete_registered_api_management_inventory():
                 if role is None:
                     assert not context.has_role(minimum), (method, raw)
     assert actual_read_roles == baseline_read_roles
+
+
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer", None])
+def test_backend_connection_native_route_preserves_management_roles(management_http, monkeypatch, role):
+    request = management_http(role or "viewer", authenticated=role is not None)
+    readiness = AsyncMock(return_value={"ok": True, "ready": True, "application": "applied"})
+    ipc = AsyncMock(side_effect=AssertionError("no live IPC"))
+    monkeypatch.setattr(api, "get_backend_connection", readiness)
+    monkeypatch.setattr(internal_client, "backend_application", ipc)
+    for name in ("claude", "codex", "opencode"):
+        response = request("GET", f"/api/backend/{name}/connection")
+        if role in {"owner", "member"}:
+            assert response.status_code == 200, response.get_json()
+            assert response.get_json() == readiness.return_value
+            assert response.headers["Cache-Control"] == "private, no-store"
+            readiness.assert_awaited_with(name)
+        else:
+            assert response.status_code in {401, 403}, response.get_json()
+            readiness.assert_not_awaited()
+    previous_calls = readiness.await_count
+    unsupported = request("GET", "/api/backend/unknown/connection")
+    assert unsupported.status_code == (400 if role in {"owner", "member"} else 401 if role is None else 403)
+    assert readiness.await_count == previous_calls
+    ipc.assert_not_awaited()
 
 
 @pytest.mark.parametrize("role", ["member", "owner"])

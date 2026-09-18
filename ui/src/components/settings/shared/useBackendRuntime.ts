@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useApi } from '@/context/ApiContext';
@@ -45,6 +45,8 @@ export interface BackendRuntimeState {
   savingRuntime: boolean;
   /** True once the user has typed a path different from the saved one. */
   runtimeDirty: boolean;
+  /** Changes after a runtime mutation settles; consumers must read fresh state. */
+  connectionRevision: number;
 
   setCliPath: (next: string) => void;
   setInstallOutputOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
@@ -52,13 +54,15 @@ export interface BackendRuntimeState {
   detect: (binary?: string) => Promise<void>;
   /** Calls ``installAgent`` then re-runs detect with the resolved path. */
   install: () => Promise<void>;
-  /** Persists ``enabled`` + ``cliPath`` into V2Config. */
+  /** Persists this backend's CLI path; enablement has its own mutation. */
   onSaveRuntime: () => Promise<void>;
-  /** Optimistically flip ``enabled`` + persist; rolls back on save failure. */
+  /** Optimistically flip enabled, then reconcile the latest persisted intent. */
   toggleEnabled: () => void;
   /**
    * Pass to ``BackendLifecycleChip.onChanged``. Updates ``cliPath`` when
-   * the chip reports a fresh install path and re-runs detect.
+   * the chip reports a fresh install path and re-runs detect. A null
+   * notification from onOperationChange(false) observes every settlement,
+   * including rejected restart/upgrade, without modifying a path draft.
    */
   handleLifecycleChanged: (info: { installedPath?: string | null } | undefined | null) => Promise<void>;
 }
@@ -114,20 +118,36 @@ export function useBackendRuntime({
   const [installResult, setInstallResult] = useState<InstallResult | null>(null);
   const [installOutputOpen, setInstallOutputOpen] = useState(false);
   const [savingRuntime, setSavingRuntime] = useState(false);
+  const [connectionRevision, setConnectionRevision] = useState(0);
+  const mutationQueue = useRef(Promise.resolve());
+  const enabledIntent = useRef(0);
+  const pathIntent = useRef(0);
+  const detectionToken = useRef(0);
+  const pathState = useRef({ cliPath, savedCliPath });
+  pathState.current = { cliPath, savedCliPath };
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; enabledIntent.current += 1; detectionToken.current += 1; };
+  }, []);
 
   const detect = useCallback(
     async (binary?: string) => {
+      const token = ++detectionToken.current;
+      const intent = pathIntent.current;
       setDetecting(true);
       try {
         const result = await api.detectCli(binary || cliPath || defaultCli);
+        if (!mounted.current || detectionToken.current !== token || pathIntent.current !== intent) return;
         const nextPath = result.path || cliPath || defaultCli;
         setCliPath(nextPath);
         setCliStatus(result.found ? 'ok' : 'missing');
       } catch (e) {
+        if (!mounted.current || detectionToken.current !== token || pathIntent.current !== intent) return;
         setCliStatus('missing');
         showToast(errorMessage(e) || t('common.saveFailed'), 'error');
       } finally {
-        setDetecting(false);
+        if (mounted.current && detectionToken.current === token) setDetecting(false);
       }
     },
     [api, cliPath, defaultCli, showToast, t],
@@ -171,85 +191,113 @@ export function useBackendRuntime({
   }, [api, backend, defaultCli]);
 
   const install = useCallback(async () => {
+    const intent = pathIntent.current;
     setInstalling(true);
     setInstallResult(null);
     setInstallOutputOpen(false);
     try {
       const result = await api.installAgent(backend);
+      if (!mounted.current) return;
       const installedPath =
         typeof result.path === 'string' && result.path ? result.path : null;
       setInstallResult({ ok: result.ok, message: result.message, output: result.output });
       if (result.ok) {
-        if (installedPath) setCliPath(installedPath);
-        await detect(installedPath || cliPath);
+        if (installedPath) setSavedCliPath(installedPath);
+        if (pathIntent.current === intent) {
+          if (installedPath) setCliPath(installedPath);
+          await detect(installedPath || cliPath);
+        }
         showToast(result.message || t('agentDetection.installAgent'), 'success');
       } else {
         showToast(result.message || t('common.saveFailed'), 'error');
       }
     } catch (e) {
+      if (!mounted.current) return;
       setInstallResult({ ok: false, message: String(e), output: null });
       showToast(errorMessage(e) || String(e), 'error');
     } finally {
-      setInstalling(false);
+      if (mounted.current) {
+        setConnectionRevision((revision) => revision + 1);
+        setInstalling(false);
+      }
     }
   }, [api, backend, cliPath, detect, showToast, t]);
 
   const onSaveRuntime = useCallback(async () => {
     setSavingRuntime(true);
-    try {
-      // Patch-write shape: only THIS backend's fields. Rebuilding the
-      // whole agents section from a pre-save GET would overwrite a
-      // concurrent cross-process write (e.g. an installer updating
-      // another backend's cli_path) inside the locked merge, and the
-      // subsequent rolling refresh could switch the live backend to the
-      // obsolete path.
-      const saved = await api.mutateConfig([
-        setConfigField(['agents', backend, 'enabled'], enabled),
-        setConfigField(['agents', backend, 'cli_path'], cliPath || defaultCli),
-      ]);
-      // The config boundary owns both persistence and live runtime
-      // reconciliation. A second route-level restart would refresh the backend
-      // twice and could interrupt a transport that was just rebuilt.
-      assertBackendRuntimeApplied(saved, t('common.saveFailed'));
-      setSavedCliPath(cliPath);
-      showToast(t('common.saved'), 'success');
-    } catch (e) {
-      showToast(errorMessage(e) || t('common.saveFailed'), 'error');
-    } finally {
-      setSavingRuntime(false);
-    }
-  }, [api, backend, cliPath, defaultCli, enabled, showToast, t]);
+    const path = cliPath || defaultCli;
+    // Save edits only the CLI field. Enablement has its own serialized toggle;
+    // including it here could overwrite a newer optimistic on/off intent.
+    const operation = mutationQueue.current.then(async () => {
+      try {
+        const saved = await api.mutateConfig([setConfigField(['agents', backend, 'cli_path'], path)]);
+        if (!mounted.current) return;
+        setSavedCliPath(path); // persistence succeeded even if application failed
+        assertBackendRuntimeApplied(saved, t('common.saveFailed'));
+        showToast(t('common.saved'), 'success');
+      } catch (e) {
+        if (mounted.current) showToast(errorMessage(e) || t('common.saveFailed'), 'error');
+      } finally {
+        if (mounted.current) {
+          setSavingRuntime(false);
+          setConnectionRevision((revision) => revision + 1);
+        }
+      }
+    });
+    mutationQueue.current = operation;
+    await operation;
+  }, [api, backend, cliPath, defaultCli, showToast, t]);
 
   const toggleEnabled = useCallback(() => {
     const next = !enabled;
+    const intent = ++enabledIntent.current;
     setEnabled(next);
-    // Persist immediately so the routing layer picks up the flip
-    // without forcing the user to also click Save (the Save button
-    // is reserved for cli_path edits). Roll back only if the config write
-    // itself fails; after a successful save the UI should reflect persisted state.
-    void (async () => {
+    mutationQueue.current = mutationQueue.current.then(async () => {
       let saved = false;
       try {
-        // Patch-write shape: only this backend's enabled flag.
-        const savedConfig = await api.mutateConfig([
-          setConfigField(['agents', backend, 'enabled'], next),
-        ]);
+        const savedConfig = await api.mutateConfig([setConfigField(['agents', backend, 'enabled'], next)]);
         saved = true;
+        if (!mounted.current || enabledIntent.current !== intent) return;
+        const persisted = savedConfig?.agents?.[backend]?.enabled;
+        setEnabled(typeof persisted === 'boolean' ? persisted : next);
         assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
       } catch (e) {
+        if (!mounted.current || enabledIntent.current !== intent) return;
         showToast(errorMessage(e) || t('common.saveFailed'), 'error');
-        if (!saved) setEnabled(!next);
+        if (!saved) {
+          // A rejected request may have lost its response after persistence.
+          // Reconcile the uncached config projection instead of guessing rollback.
+          try {
+            const fresh = await api.getBackendConnection(backend);
+            if (!fresh.ok) throw new Error(fresh.message || t('common.saveFailed'));
+            if (mounted.current && enabledIntent.current === intent) setEnabled(fresh.enabled);
+          } catch (cause) {
+            if (mounted.current && enabledIntent.current === intent) showToast(errorMessage(cause) || t('common.saveFailed'), 'error');
+          }
+        }
+      } finally {
+        if (mounted.current && enabledIntent.current === intent) setConnectionRevision((revision) => revision + 1);
       }
-    })();
+    });
   }, [api, backend, enabled, showToast, t]);
 
   const handleLifecycleChanged = useCallback(
     async (info: { installedPath?: string | null } | undefined | null) => {
+      if (!mounted.current) return;
+      if (!info) {
+        if (mounted.current) setConnectionRevision((revision) => revision + 1);
+        return;
+      }
       const installedPath = info?.installedPath || null;
-      if (installedPath) setCliPath(installedPath);
-      await detect(installedPath || cliPath);
+      if (installedPath) setSavedCliPath(installedPath);
+      // The lifecycle chip may still hold the callback from before a user edit.
+      // Read the current draft before accepting its installed path.
+      if (pathState.current.cliPath === pathState.current.savedCliPath) {
+        if (installedPath) setCliPath(installedPath);
+        await detect(installedPath || pathState.current.cliPath);
+      }
     },
-    [cliPath, detect],
+    [detect],
   );
 
   const runtimeDirty = cliPath !== savedCliPath;
@@ -266,7 +314,8 @@ export function useBackendRuntime({
     installOutputOpen,
     savingRuntime,
     runtimeDirty,
-    setCliPath,
+    connectionRevision,
+    setCliPath: (next) => { pathIntent.current += 1; setCliPath(next); },
     setInstallOutputOpen,
     detect,
     install,

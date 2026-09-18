@@ -327,4 +327,25 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cloud_pairing_origin_reaches_effective_ui_listener
+  - id: AUTH-SETUP-119
+    name: Runtime manual provider code reaches native persistence and controller-confirmed readiness
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: opencode
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_manual_provider_connection_reaches_controller_confirmed_readiness
+  - id: AUTH-SETUP-120
+    name: Explicit completion preserves canonical no-IM setup and invalid legacy IM recovery
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_preserves_canonical_and_legacy_platform_configuration
+  - id: AUTH-SETUP-121
+    name: Native and registered custom OpenCode models preserve Agent ownership and complete setup
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: opencode
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_explicit_opencode_model_recovery_preserves_agent_and_completes
 next_priority: []

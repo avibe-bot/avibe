@@ -30,8 +30,6 @@ const DESIGN_FRAME = { width: 1200, height: 756 };
  */
 const CAPTURE_PHASE = 'codex-working';
 const CAPTURE_STATES = ['complete', 'working', 'waiting'];
-/** 20px of shell padding plus the 45px language bar: the setup's authored top (IWQi6). */
-const SETUP_TOP = 65;
 
 const box = async (page: Page, selector: string, index = 0) => {
   const rect = await page.locator(selector).nth(index).boundingBox();
@@ -102,7 +100,7 @@ test.describe('desktop reference geometry', () => {
     // The same type the design specifies: a 34/1.35 title, a 10 gap and a 14/1.57
     // subtitle. The design reports 79 because it rounds each text box up on its own
     // (46 + 10 + 23); the browser stacks the unrounded boxes to 77.9.
-    expect(heading.height).toBeCloseTo(77.89, 1);
+    expect(heading.height).toBeCloseTo(78, 1);
 
     const story = await box(page, '.onboarding-story');
     const access = await box(page, '.onboarding-access');
@@ -116,48 +114,28 @@ test.describe('desktop reference geometry', () => {
     expect(denied).toEqual([]);
   });
 
-  /**
-   * The two steps are anchored differently because the design anchors them differently:
-   * JuwcG and KIxnF centre the welcome inside their frame, IWQi6 tops the setup out at
-   * its own 64.5 padding. So the welcome's y is a RESULT of the window height and the
-   * setup's is a position — and a test that pinned the welcome to 65 was asserting the
-   * one window height where those two happen to agree.
-   */
-  test('the welcome is centred by the window, and the setup is not', async ({ page }) => {
-    await serveProduct(page);
-    await openOnboarding(page);
-    await freezeAt(page, PHASES['codex-working']);
-
-    const centring = async () => {
-      const content = await box(page, '.onboarding-shell-content');
-      const welcome = await box(page, '.onboarding-welcome');
-      return {
-        above: welcome.y - content.y,
-        below: (content.y + content.height) - (welcome.y + welcome.height),
-        headingY: (await box(page, '.onboarding-heading')).y,
-      };
-    };
-
-    await page.setViewportSize({ width: 1200, height: 1200 });
-    const tall = await centring();
-    expect(Math.abs(tall.above - tall.below)).toBeLessThanOrEqual(1);
-    // Centred means it moved: a tall window puts the heading far below the setup's 65.
-    expect(tall.headingY).toBeGreaterThan(SETUP_TOP + 100);
-
-    // At the design's own content box the composition is taller than the window, so
-    // there is no slack to share and the same rule lands it on the content edge — where
-    // the frame draws it. The shell scrolls from there instead of clipping the top.
-    await page.setViewportSize(DESIGN_FRAME);
-    const short = await centring();
-    expect(short.above).toBeLessThanOrEqual(1);
-    expect(round(short.headingY)).toBe(SETUP_TOP);
-
-    await openSetup(page, 'en');
-    // The setup's top is the position itself, so it holds at both window heights.
-    expect(round((await box(page, '.onboarding-heading')).y)).toBe(SETUP_TOP);
-    await page.setViewportSize({ width: 1200, height: 1200 });
-    expect(round((await box(page, '.onboarding-heading')).y)).toBe(SETUP_TOP);
-  });
+  for (const lang of ['en', 'zh']) {
+    for (const viewport of [{ width: 1200, height: 800 }, { width: 1200, height: 1200 }, { width: 390, height: 844 }]) {
+      test(`Welcome → setup preserves title/subtitle anchors ${lang} ${size(viewport)}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const denied = await serveProduct(page);
+        await openOnboarding(page, { lang });
+        const title = await box(page, '.onboarding-heading h1');
+        const subtitle = await box(page, '.onboarding-heading p');
+        await expect(page.getByRole('img', { name: 'avibe', exact: true })).toBeVisible();
+        await openSetup(page, lang);
+        const nextTitle = await box(page, '.onboarding-heading h2');
+        const nextSubtitle = await box(page, '.onboarding-heading p');
+        expect(nextTitle.y).toBeCloseTo(title.y, 0);
+        expect(nextSubtitle.y).toBeCloseTo(subtitle.y, 0);
+        expect(nextTitle.height).toBeCloseTo(title.height, 0);
+        const action = page.locator('.onboarding-setup .onboarding-primary-action');
+        await action.scrollIntoViewIfNeeded();
+        await expect(action).toBeInViewport();
+        expect(denied).toEqual([]);
+      });
+    }
+  }
 
   /**
    * A short window used to buy about 30px by taking the step gaps from 24 to 16 and

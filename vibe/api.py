@@ -7124,7 +7124,7 @@ def _prune_agent_install_jobs(now: float | None = None) -> None:
 def _agent_install_job_succeeded(result: dict, name: str) -> bool:
     if not bool(result.get("ok")):
         return False
-    if name == "claude" or not supports_runtime_refresh(name):
+    if not supports_runtime_refresh(name):
         return True
     restart = result.get("restart")
     return isinstance(restart, dict) and bool(restart.get("ok"))
@@ -7167,7 +7167,7 @@ def start_agent_install_job(name: str) -> dict:
     def _worker() -> None:
         try:
             result = install_agent(name)
-            if result.get("ok") and name != "claude" and supports_runtime_refresh(name):
+            if result.get("ok") and supports_runtime_refresh(name):
                 try:
                     result["restart"] = restart_backend(
                         name,
@@ -10671,6 +10671,79 @@ def _codex_process_status(resolved_binary: str | None) -> str:
     return "running" if _codex_processes(resolved_binary) else "stopped"
 
 
+async def get_backend_connection(name: str) -> dict:
+    """Observe native launch auth and controller application, without a model call."""
+    from vibe import internal_client, runtime
+
+    if not is_agent_backend(name):
+        return {"ok": False, "error": "unsupported_backend"}
+    config = await asyncio.to_thread(load_config)
+    backend_config = getattr(config.agents, name)
+    enabled = bool(backend_config.enabled)
+    installed = await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
+    result = {
+        "ok": True, "backend": name, "installed": installed, "enabled": enabled,
+        "auth": "unknown", "application": "unknown", "ready": False,
+        "entry_eligible": False,
+    }
+    body = {}
+    try:
+        application = await internal_client.backend_application(name)
+        body = application.get("body") or {}
+        if application.get("status_code") == 200 and body.get("ok"):
+            result["application"] = body.get("state") if body.get("state") in {"applied", "draining", "failed"} else "unknown"
+            if enabled and body.get("disabled") is True and result["application"] == "applied":
+                result["application"] = "unknown"
+            if body.get("error"):
+                result["message"] = body["error"]
+    except internal_client.InternalServerUnavailable:
+        if not await asyncio.to_thread(runtime.service_process_running):
+            result["application"] = "stopped"
+    with _backend_apply_receipts_lock:
+        receipt = _backend_apply_receipts.get(name)
+        # A confirmed new controller has applied persisted startup config.
+        # Browser refresh or a recovered socket to the same owner cannot clear
+        # an undelivered request. PID is existing runtime identity, not an epoch.
+        if (receipt and receipt.get("controller_pid") and body.get("controller_pid")
+                and receipt["controller_pid"] != body["controller_pid"]
+                and result["application"] == "applied"):
+            _backend_apply_receipts.pop(name, None)
+            receipt = None
+    if receipt and not receipt.get("ok") and result["application"] != "stopped":
+        result["application"] = "failed"
+        result["message"] = receipt.get("message") or receipt.get("error")
+    if not installed:
+        return result
+    try:
+        if name == "opencode":
+            if not enabled:
+                return result
+            # Read the same persisted launch sources as the provider catalog.
+            # Readiness must not start an OpenCode daemon just to inspect auth.
+            from vibe.opencode_config import read_opencode_provider_auth_entries
+
+            key_ids = await _read_opencode_config_api_key_provider_ids()
+            entries = await asyncio.to_thread(read_opencode_provider_auth_entries, logger_instance=logger)
+            modes = {pid: entry.get("type") for pid, entry in entries.items() if isinstance(entry, dict)}
+            modes.update({pid: "api" for pid in key_ids})
+            effective = next((mode for mode in modes.values() if mode in {"api", "oauth"}), None)
+            result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
+            permission = await asyncio.to_thread(opencode_permission_status)
+            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
+        else:
+            auth = await asyncio.to_thread(get_claude_auth if name == "claude" else get_codex_auth)
+            if not auth.get("ok") or auth.get("auth_mode_uncertain"):
+                return result
+            result["auth"] = {"oauth": "subscription", "api_key": "api_key", "none": "none"}.get(auth.get("active_auth_mode"), "unknown")
+    except Exception as exc:
+        result["message"] = str(exc)
+        return result
+    credential_ready = enabled and result["auth"] in {"subscription", "api_key"} and not result.get("permission_required")
+    result["ready"] = credential_ready and result["application"] == "applied"
+    result["entry_eligible"] = credential_ready and result["application"] in {"applied", "stopped"}
+    return result
+
+
 def get_backend_runtime(name: str) -> dict:
     """Return live lifecycle info for one backend.
 
@@ -10739,7 +10812,7 @@ def _wait_for_controller_ack(marker: Path, timeout: float) -> tuple[bool, str | 
       the handler raised; the controller wrote the message to a companion
       ``<marker>.err`` file before deleting the request marker.
     - ``handled=False, error=None`` — timed out; the controller never
-      consumed the marker. Caller should fall back to a direct kill.
+      consumed the marker. Caller must preserve the failed application.
 
     The companion ``.err`` file is consumed (unlinked) before returning so
     later requests start clean.
@@ -10776,9 +10849,9 @@ def _request_controller_restart(
     state. Killing those processes from the UI server would leave that cache
     stale, so the cleanest path is to ask the controller to call its existing
     ``_refresh_backend_runtime(backend)`` for us. We drop a marker file and
-    wait briefly for the controller to delete it; the caller falls back to a
-    direct process kill when the controller is unreachable (e.g. running
-    detached, not yet started).
+    wait briefly for the controller to delete it. An unreachable running
+    controller remains an unconfirmed apply; no child-process kill can prove
+    that its in-memory state accepted the saved configuration.
 
     Each request gets its own marker filename (``restart-<backend>.<reqid>.cmd``)
     so we can correlate failures back to *this* request. Without the reqid,
@@ -10825,21 +10898,55 @@ def _request_controller_restart(
     return False, None
 
 
+# Bounded to the supported backends; survives modal/HTTP lifetimes. This records
+# undelivered apply requests which the controller cannot itself observe.
+_backend_apply_receipts: dict[str, dict] = {}
+_backend_apply_receipts_lock = threading.Lock()
+
+
+def record_backend_apply_receipt(backend: str, result: dict) -> None:
+    if not is_agent_backend(backend):
+        return
+    from vibe import runtime
+
+    receipt = dict(result)
+    receipt["controller_pid"] = runtime.resolve_service_owner_pid(include_starting=False)
+    with _backend_apply_receipts_lock:
+        _backend_apply_receipts[backend] = receipt
+
+
 def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> dict:
+    try:
+        result = _restart_backend(name, metadata=metadata)
+    except Exception as exc:
+        result = {"ok": False, "message": str(exc)}
+    record_backend_apply_receipt(name, result)
+    return result
+
+
+def _restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> dict:
     """Refresh the backend so the next request picks up new config/env.
 
     Preferred path: drop a runtime-command marker that the controller
     observes and reacts to via ``_refresh_backend_runtime``. This keeps the
-    controller's in-memory transport/session state consistent. If the
-    controller isn't running (e.g. service not yet started), backends with a
-    separate runtime can fall back to killing their OS process directly — the
-    controller's recovery logic will rebuild state when it next starts.
+    controller's in-memory transport/session state consistent. A confirmed
+    stopped controller applies persisted configuration on its next explicit
+    start; a running controller with unavailable IPC remains a failed apply.
 
     Claude has no separate daemon, but the controller keeps SDK sessions
     and a loaded compat config; the marker path refreshes those in memory.
     """
     if not supports_runtime_refresh(name):
         return {"ok": False, "message": f"Restart is not supported for backend: {name}"}
+
+    from vibe import runtime
+
+    try:
+        language = load_config().language
+    except FileNotFoundError:
+        language = "en"
+    if not runtime.service_process_running():
+        return {"ok": True, "apply_on_next_start": True, "message": backend_t("backendConnection.applyOnStart", lang=language)}
 
     controller_handled, controller_error = _request_controller_restart(name, metadata=metadata)
     _invalidate_version_cache(name)
@@ -10856,59 +10963,9 @@ def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> 
             }
         return {"ok": True, "message": runtime_refresh_success_message(name)}
 
-    if name == "opencode":
-        from vibe import runtime
-        from vibe.cli import _stop_opencode_server
-
-        stopped = _stop_opencode_server()
-        if stopped:
-            return {"ok": True, "message": "OpenCode server stopped; it will respawn on next request."}
-        pid = _opencode_server_pid()
-        if not pid or not runtime.pid_alive(pid):
-            return {"ok": True, "message": "OpenCode server is not running; next request will start a fresh one."}
-        return {"ok": False, "message": "Failed to stop OpenCode server."}
-
-    if name == "claude":
-        return {
-            "ok": False,
-            "message": "Claude runtime refresh was not acknowledged by the controller; retry after the service is running.",
-        }
-
-    # codex fallback: kill app-server processes; controller recovery rebuilds.
-    try:
-        import psutil
-    except ImportError:
-        return {"ok": False, "message": "psutil unavailable; cannot manage Codex processes."}
-
-    try:
-        config = V2Config.load()
-        backend_cfg = getattr(getattr(config, "agents", None), "codex", None)
-        configured = getattr(backend_cfg, "cli_path", "") or "codex"
-    except Exception:
-        configured = "codex"
-    resolved = resolve_cli_path(configured)
-
-    pids = _codex_processes(resolved)
-    if not pids:
-        return {"ok": True, "message": "Codex app-server is not running; next request will start a fresh one."}
-
-    failed: list[int] = []
-    for pid in pids:
-        try:
-            proc = psutil.Process(pid)
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-            logger.debug("Codex restart skip pid=%s: %s", pid, exc)
-        except Exception as exc:
-            logger.warning("Failed to stop codex pid=%s: %s", pid, exc)
-            failed.append(pid)
-    if failed:
-        return {"ok": False, "message": f"Failed to stop Codex process(es): {failed}"}
-    return {"ok": True, "message": f"Stopped {len(pids)} Codex process(es); they will respawn on next request."}
+    # A running service with broken IPC is not a stopped backend. Killing its
+    # child process here would hide stale controller state and split ownership.
+    return {"ok": False, "message": backend_t("backendConnection.applyUnacknowledged", lang=language)}
 
 
 _VALID_AUTH_MODES = {"oauth", "api_key"}
@@ -11087,19 +11144,12 @@ def _start_oauth_event_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thre
 
 
 def _on_web_auth_success(backend: str) -> None:
-    """Tell the live controller to refresh its agent after web OAuth success."""
-    try:
-        handled, err = _request_controller_restart(
-            backend,
-            timeout=4.0,
-            metadata={"reason": "web_auth_success", "source": "oauth_callback"},
-        )
-        if handled and err:
-            logger.warning("Controller refresh after web auth reported error: %s", err)
-        elif not handled:
-            logger.info("Controller did not pick up web-auth refresh marker for %s", backend)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to notify controller after web auth: %s", exc)
+    """Surface persistence/application separately from successful consent."""
+    result = restart_backend(
+        backend, metadata={"reason": "web_auth_success", "source": "oauth_callback"},
+    )
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message") or "backend_apply_failed")
 
 
 def _get_oauth_service() -> Any:
@@ -11205,6 +11255,7 @@ async def start_oauth_web_async(
         "url": flow.url,
         "device_code": flow.device_code,
         "awaiting_code": flow.awaiting_code,
+        "callback_kind": flow.callback_kind,
         "provider": flow.provider,
     }
 
@@ -11570,13 +11621,8 @@ def get_codex_auth() -> dict:
         # Surface "we can't read your key — it may live in the OS
         # keychain" so the UI doesn't claim "no key configured" when
         # Codex is in keyring-preferred mode and we have no disk
-        # evidence. We suppress the flag when V2Config has a stored
-        # ``auth_mode`` (the user already saved through our flow), since
-        # we then know the mode and the next save will pin file storage.
-        "auth_mode_uncertain": (
-            bool(disk_state.get("auth_mode_uncertain"))
-            and configured_mode not in _VALID_AUTH_MODES
-        ),
+        # evidence. Saved intent cannot resolve an unreadable native store.
+        "auth_mode_uncertain": bool(disk_state.get("auth_mode_uncertain")),
     }
 
 

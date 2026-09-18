@@ -1,0 +1,65 @@
+/* Native dialogs eKlyp/Q0wFN/DZesH/JEkvL and their Light variants. */
+.connection-dialog {
+  --connection-overlay-shadow: #00000088;
+  --connection-selected-border: #5bffa059;
+  --connection-logo-well: #ffffff04;
+  width: min(568px, calc(100vw - 32px)); max-width: 568px;
+  padding: 24px; gap: 20px; border-radius: 16px;
+  border-color: var(--border-strong); background: var(--surface-2);
+  box-shadow: 0 18px 48px var(--desktop-overlay-shadow, var(--connection-overlay-shadow));
+}
+[data-theme='light'] .connection-dialog { --connection-overlay-shadow: #0a0a1424; --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .connection-dialog { --connection-overlay-shadow: #0a0a1424; --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
+}
+.connection-heading { display: flex; gap: 12px; align-items: center; padding-right: 20px; }
+.connection-logo { width: 40px; height: 40px; flex: none; border: 1px solid var(--border); border-radius: 10px; display: grid; place-items: center; background: var(--logo-well-background, var(--connection-logo-well)); }
+.connection-heading h2 { font-size: 20px; line-height: 24px; font-weight: 600; }
+.connection-heading p { line-height: 15px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.connection-intro { font-size: 13px; line-height: 1.55; color: var(--muted); }
+.backend-connection-form { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.connection-dialog [role='radiogroup'] { height: 40px; padding: 3px; gap: 4px; border-radius: 9px; background: var(--background); border: 1px solid var(--border); }
+.connection-dialog [role='radio'] { min-width: 0; border-radius: 6px; font-size: 12px; line-height: 1.2; font-weight: 500; white-space: normal; flex: 1; }
+.connection-dialog [role='radio'][aria-checked='true'] { background: var(--mint-soft); color: var(--mint); border: 1px solid var(--nav-selected-border, var(--connection-selected-border)); font-weight: 600; }
+.connection-dialog button:disabled:not([role='radio']) { opacity: .4; }
+.backend-connection-form [role='radio']:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.connection-dialog [role='radiogroup']:has(button:disabled) { opacity: .6; }
+.connection-account { display: flex; flex-direction: column; gap: 12px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.connection-account h3 { line-height: 17px; font-size: 14px; font-weight: 600; }
+.connection-account p { font-size: 13px; line-height: 1.6; color: var(--muted); }
+.connection-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.connection-field label, .connection-auth-steps label { font-size: 12px; font-weight: 500; }
+.connection-field p { font-size: 12px; line-height: 1.55; color: var(--muted); }
+.connection-field input { height: 42px; border-radius: 8px; background: var(--background); border-color: var(--border-strong); font-family: var(--font-mono); font-size: 12px; }
+.connection-secret { display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--background); color: var(--muted); }
+.connection-secret input { border: none; background: transparent; padding: 0; box-shadow: none; min-width: 0; }
+.connection-secret code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.connection-secret > svg { flex: none; }
+.connection-secret > button { flex: none; }
+.connection-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 18px; border-top: 1px solid var(--border); }
+.connection-dialog .connection-actions button, .connection-dialog .connection-account button { height: 38px; border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 600; }
+.connection-auth-steps { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.connection-auth-steps > div:has(> a + button) { border-radius: 8px; background: var(--cyan-soft); padding: 0 12px; min-height: 40px; gap: 8px; flex-wrap: nowrap; }
+.connection-auth-steps > div:has(> a + button) a { background: transparent; padding: 0; min-width: 0; flex: 1; }
+.connection-auth-steps > div:has(> a + button) a span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.connection-auth-steps > div:has(> code) { min-height: 54px; background: var(--background); border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; justify-content: space-between; }
+.connection-auth-steps code { background: transparent; font-size: 19px; letter-spacing: 2px; padding: 0; }
+.connection-waiting, .connection-loading, .connection-confirmed { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.connection-waiting svg, .connection-confirmed { color: var(--mint-ink); }
+.connection-error, .connection-field .connection-error { color: var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; }
+.connection-notice { font-size: 12px; color: var(--gold-ink); }
+.connection-provider-list { display: flex; flex-direction: column; gap: 10px; max-height: 300px; overflow-y: auto; }
+.connection-provider { width: 100%; min-height: 64px; border-radius: 10px; padding: 10px 14px; gap: 12px; border: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; justify-content: space-between; text-align: left; }
+.connection-provider strong { display: block; font-size: 13px; font-weight: 600; }
+.connection-provider small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
+.connection-provider svg { flex: none; }
+/* No narrow native frames exist: preserve a centered, scrollable dialog, type,
+   focus and reachable actions rather than inheriting the management sheet. */
+@media (max-width: 767px) {
+  .connection-dialog { left: 50%; right: auto; top: 50%; bottom: auto; transform: translate(-50%, -50%); max-width: 568px; width: calc(100vw - 24px); padding: 20px; max-height: calc(100dvh - 24px); border-radius: 16px; }
+  .connection-dialog > div[aria-hidden='true']:first-child { display: none; }
+  .connection-heading h2 { font-size: 19px; }
+}
+
+.connection-auth-steps > div > a[data-slot="button"] { height: 38px; border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 600; }
+.connection-dialog .connection-auth-steps > div > a:not(:has(+ button)) { height: 38px; border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 600; }

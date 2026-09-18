@@ -21,7 +21,7 @@ export function Fixture() {
     loaded: true, configError: false, enabled, cliPath,
     cliStatus: state === 'error' ? 'missing' : state === 'loading' ? 'unknown' : 'ok',
     detecting: false, installing: false, installResult: null, installOutputOpen: false,
-    savingRuntime: false, runtimeDirty: false, setCliPath, setInstallOutputOpen: noop,
+    savingRuntime: false, runtimeDirty: false, connectionRevision: 0, setCliPath, setInstallOutputOpen: noop,
     detect: asyncNoop, install: asyncNoop, onSaveRuntime: asyncNoop,
     toggleEnabled: () => setEnabled((previous) => !previous), handleLifecycleChanged: asyncNoop,
   };
