@@ -818,6 +818,92 @@ def _request_audience_from_requester(requester: Any) -> str:
     return REQUEST_AUDIENCE_UI
 
 
+def _requester_with_authorization(requester: Any, context: Any) -> Any:
+    """Record the authority a request was actually made under, in the requester JSON.
+
+    A request outlives the call that created it: it is decided later, and its
+    auto-resume turn is dispatched later still. The rest of the requester object
+    is descriptive provenance the caller supplies, so a deferred consumer cannot
+    trust it — the snapshot written here comes from the resolved context, and any
+    copy the caller sent is dropped first by the same helper Runs and Harness
+    definitions use.
+
+    A local caller keeps the historical shape exactly: no key, and a request that
+    had no requester at all still stores NULL.
+    """
+
+    from storage import resource_access_service
+
+    if not isinstance(requester, dict):
+        if not bool(getattr(context, "is_remote", False)):
+            return requester
+        requester = {}
+    return resource_access_service.metadata_with_resource_user_context(requester, context)
+
+
+def _require_request_session_authority(conn: Connection, session_id: Any, context: Any) -> None:
+    """Hold a request to the session its approval would resume.
+
+    A request is decided later, and deciding it resumes the session the
+    requester named — so that session is an effect of the request, not a label
+    on it. A requester who could not start a turn there has to be refused before
+    the pending row exists; otherwise the refusal arrives only after a person
+    has been asked to approve, and the request sits in their queue meanwhile.
+
+    Only a session that exists is an effect. A request naming no session, or an
+    id no session answers to, resumes nothing and stays as useful as it has
+    always been — refusing those would be a new rule about request shape rather
+    than about authority. Roles that manage the runtime already reach every
+    session, so they are not asked.
+    """
+
+    identity = str(session_id or "").strip()
+    if not identity or bool(getattr(context, "can_manage_instance", False)):
+        return
+    known = conn.execute(
+        select(agent_sessions.c.id).where(agent_sessions.c.id == identity).limit(1)
+    ).first()
+    if known is None:
+        return
+
+    from core.vibe_agents import VibeAgentAccessError
+    from storage.workbench_sessions_service import require_session_turn_authority
+    from vibe.authorization import InstanceAuthorizationError
+
+    try:
+        require_session_turn_authority(conn, identity, authorization_context=context)
+    except (LookupError, InstanceAuthorizationError, VibeAgentAccessError) as exc:
+        raise VaultSecretAccessError("Vault request session access is not permitted.") from exc
+
+
+def request_authorization_snapshot(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The trusted authority stored with a request, for its deferred consumers."""
+
+    from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+    requester, _ = _request_json_payloads(row)
+    if not isinstance(requester, dict):
+        return None
+    snapshot = requester.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+    return dict(snapshot) if isinstance(snapshot, dict) else None
+
+
+def _public_requester_payload(requester: Any) -> Any:
+    """Strip the internal authority snapshot from an outward requester view."""
+
+    from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+    if not isinstance(requester, dict):
+        return requester
+    if RESOURCE_USER_CONTEXT_METADATA_KEY not in requester:
+        return requester
+    # A copy: the row's own payload stays intact for the internal consumers that
+    # read it after this projection has been handed out.
+    public = dict(requester)
+    public.pop(RESOURCE_USER_CONTEXT_METADATA_KEY, None)
+    return public
+
+
 def _card_hydration_policy(audience: str | None) -> CardHydrationPolicy:
     normalized = _normalize_request_audience(audience)
     return CardHydrationPolicy(
@@ -1051,7 +1137,7 @@ def _request_row_payload(
         "id": row["id"],
         "request_type": row["request_type"],
         "secret_name": row.get("secret_name"),
-        "requester": requester if isinstance(requester, dict) else requester,
+        "requester": _public_requester_payload(requester),
         "delivery": delivery if isinstance(delivery, dict) else delivery,
         "status": row.get("status"),
         "message_id": row.get("message_id"),
@@ -1765,13 +1851,19 @@ def audit(
     if snapshot is not None and (delivery is None or isinstance(delivery, dict)):
         stored_delivery = dict(delivery or {})
         stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = snapshot
+    # The audit trail is a non-secret summary, and callers now hand it the same
+    # requester payload the request row stores. That payload may carry the
+    # internal authorization snapshot, which belongs to the request's deferred
+    # consumers rather than to a log surface, so it is dropped here once for
+    # every event instead of at each call site.
+    stored_requester = _public_requester_payload(requester)
     conn.execute(
         vault_audit.insert().values(
             id=_id("vau"),
             ts=_now(),
             event=event,
             secret_name=secret_name,
-            requester=json.dumps(requester) if requester is not None else None,
+            requester=json.dumps(stored_requester) if stored_requester is not None else None,
             delivery=json.dumps(stored_delivery) if stored_delivery is not None else None,
             request_id=request_id,
             grant_id=grant_id,
@@ -2991,6 +3083,7 @@ def create_provision_request(
     spec: dict[str, Any] | None = None,
     requester: Any = None,
     message_id: str | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Record an agent's request for a missing secret (dynamic ask).
 
@@ -3011,8 +3104,10 @@ def create_provision_request(
         raise SecretNameCaseConflictError(name, pending_name)
     status = "fulfilled" if already else "pending"
     normalized_spec = normalize_provision_spec(spec)
+    context = resolve_resource_access_context(user_context)
     requester_payload = dict(requester) if isinstance(requester, dict) else requester
     session_id = requester_payload.get("session_id") if isinstance(requester_payload, dict) else None
+    _require_request_session_authority(conn, session_id, context)
     resolved_message_id = message_id
     if isinstance(requester_payload, dict) and not resolved_message_id:
         _, derived_turn_id = _active_session_turn_anchor(conn, session_id)
@@ -3024,13 +3119,14 @@ def create_provision_request(
         delivery_payload["reason"] = reason
     if normalized_spec:
         delivery_payload["spec"] = normalized_spec
+    stored_requester = _requester_with_authorization(requester_payload, context)
     try:
         conn.execute(
             vault_requests.insert().values(
                 id=request_id,
                 request_type="provision",
                 secret_name=name,
-                requester=json.dumps(requester_payload) if requester_payload is not None else None,
+                requester=json.dumps(stored_requester) if stored_requester is not None else None,
                 delivery=json.dumps(delivery_payload),
                 status=status,
                 message_id=resolved_message_id,
@@ -3043,7 +3139,7 @@ def create_provision_request(
         if pending_name is not None and pending_name != name:
             raise SecretNameCaseConflictError(name, pending_name) from exc
         raise VaultServiceError("failed to create provision request") from exc
-    audit(conn, "provision_requested", secret_name=name, requester=requester_payload, request_id=request_id)
+    audit(conn, "provision_requested", secret_name=name, requester=stored_requester, request_id=request_id)
     return {
         "id": request_id,
         "secret_name": name,
@@ -3378,6 +3474,11 @@ def create_access_request(
     payload_audience = audience or _request_audience_from_requester(requester)
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
+    _require_request_session_authority(
+        conn,
+        requester_payload.get("session_id") or delivery_payload.get("session_id"),
+        context,
+    )
     default_selector = {"env": [name]} if name else None
     selector = _source_selector_payload(source_selector or default_selector)
     rows = _request_member_rows_for_selector(conn, source_selector=selector, user_context=context)
@@ -3412,12 +3513,13 @@ def create_access_request(
     delivery_payload["card"] = card
     delivery_payload["source_selector"] = selector
     delivery_payload["purpose"] = purpose
+    stored_requester = _requester_with_authorization(requester, context)
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
             request_type="access",
             secret_name=str(rows[0]["name"]) if len(rows) == 1 else None,
-            requester=json.dumps(requester) if requester is not None else None,
+            requester=json.dumps(stored_requester) if stored_requester is not None else None,
             delivery=json.dumps(delivery_payload),
             status="pending",
             message_id=message_id,
@@ -3425,7 +3527,14 @@ def create_access_request(
             expires_at=expires_at or _request_expiry(),
         )
     )
-    audit(conn, "access_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
+    audit(
+        conn,
+        "access_requested",
+        secret_name=name,
+        requester=stored_requester,
+        delivery=delivery_payload,
+        request_id=request_id,
+    )
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
     return _request_row_payload(dict(row), conn=conn, audience=payload_audience)
 
@@ -3456,6 +3565,11 @@ def create_sign_request(
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
+    _require_request_session_authority(
+        conn,
+        requester_payload.get("session_id") or delivery_payload.get("session_id"),
+        context,
+    )
     card = approval_card(
         conn,
         name,
@@ -3470,12 +3584,13 @@ def create_sign_request(
     delivery_payload.update({"digest": digest, "scheme": scheme, "card": card})
     if signing_context is not None:
         delivery_payload["signing_context"] = signing_context
+    stored_requester = _requester_with_authorization(requester, context)
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
             request_type="sign",
             secret_name=name,
-            requester=json.dumps(requester) if requester is not None else None,
+            requester=json.dumps(stored_requester) if stored_requester is not None else None,
             delivery=json.dumps(delivery_payload),
             status="pending",
             message_id=message_id,
@@ -3483,7 +3598,14 @@ def create_sign_request(
             expires_at=expires_at or _request_expiry(),
         )
     )
-    audit(conn, "sign_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
+    audit(
+        conn,
+        "sign_requested",
+        secret_name=name,
+        requester=stored_requester,
+        delivery=delivery_payload,
+        request_id=request_id,
+    )
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
     return _request_row_payload(dict(row), conn=conn, audience=payload_audience)
 

@@ -85,6 +85,24 @@ def _use_default_model_hub_release_environment(monkeypatch):
     monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _seed_default_state_database(request, tmp_path, sqlite_db_factory):
+    """Give this module's default state database the pre-migrated head.
+
+    The shared seeder decides from a module's own source whether it reaches
+    default SQLite state, and skips one that never names it. Nothing here does:
+    the database is reached through ``config.save()`` and the routes under test,
+    so the skip was a false negative and every case in this file replayed the
+    whole migration chain to arrive at the same empty head. Seeded through the
+    same factory the shared fixture uses, at the isolated home it creates, so
+    the template and the per-test copy keep their single owner.
+    """
+
+    if request.node.get_closest_marker("no_sqlite_template"):
+        return
+    sqlite_db_factory(tmp_path / "home" / ".avibe" / "state" / "vibe.sqlite")
+
+
 def _schema(name: str) -> dict:
     return json.loads((CONTRACTS / name).read_text(encoding="utf-8"))
 

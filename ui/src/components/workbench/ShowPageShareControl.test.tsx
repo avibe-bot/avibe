@@ -6,6 +6,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
+import { showDockId } from '../../context/dockDoc';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { ShowPageShareControl } from './ShowPageShareControl';
 
@@ -45,15 +46,15 @@ vi.mock('@/context/ApiContext', () => ({
   useApi: () => api,
 }));
 
-vi.mock('../../context/DockContext', () => ({
-  useDock: () => ({
-    isDocked: vi.fn(() => false),
-    isPinned: vi.fn(() => false),
-    dock: vi.fn(),
-    pin: vi.fn(),
-    undock: vi.fn(),
-  }),
+const dock = vi.hoisted(() => ({
+  isDocked: vi.fn(() => false),
+  isPinned: vi.fn(() => false),
+  dock: vi.fn(),
+  pin: vi.fn(),
+  undock: vi.fn(),
 }));
+
+vi.mock('../../context/DockContext', () => ({ useDock: () => dock }));
 
 vi.mock('../useShowPages', () => ({
   useShowPageInventory: () => ({
@@ -68,6 +69,8 @@ beforeEach(() => {
   permissionsApi.getPermissions.mockReset();
   permissionsApi.getResourceAccess.mockReset();
   permissionsApi.updateResourceAccess.mockReset();
+  dock.isDocked.mockReturnValue(false);
+  dock.isPinned.mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -708,5 +711,76 @@ describe('ShowPageShareControl request surface', () => {
 
     await waitFor(() => expect(api.getShowPage).toHaveBeenCalledWith('ses-1'));
     expect(mutatingCallsSoFar()).toEqual([]);
+  });
+});
+
+// PERMISSIONS-021. `/api/dock/pins` is an editor-tier route, so the Dock row
+// follows page use, not instance management. PM verified both verbs over signed
+// HTTP: an Editor pins and unpins with a persisted readback, a Viewer is denied.
+describe('PERMISSIONS-021 ShowPageShareControl Dock pin authority', () => {
+  const page = {
+    session_id: 'ses-1',
+    visibility: 'private',
+    active_url: '/show/ses-1/',
+    share_id: null,
+    url_available: true,
+    offline: false,
+    title: 'Release notes',
+  };
+
+  const renderShare = (props: { canPinToDock?: boolean; canUse?: boolean } = {}) => {
+    const access = showPageAccess({ can_use: props.canUse !== false, can_manage: false });
+    api.getShowPageAccess.mockResolvedValue(access);
+    api.getShowPage.mockResolvedValue(page);
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={access}
+          canPinToDock={props.canPinToDock ?? true}
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+  };
+
+  it('pins a page for a user who may use it but may not manage the instance', async () => {
+    renderShare();
+
+    const toggle = await screen.findByRole('switch', { name: 'Pin to Dock' });
+    fireEvent.click(toggle);
+
+    expect(dock.pin).toHaveBeenCalledWith('ses-1');
+    expect(dock.undock).not.toHaveBeenCalled();
+  });
+
+  it('unpins the same page and reports it as docked', async () => {
+    dock.isDocked.mockReturnValue(true);
+    dock.isPinned.mockReturnValue(true);
+    renderShare();
+
+    expect(await screen.findByText(/Pinned — “Release notes” is in your Dock/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('switch', { name: 'Pin to Dock' }));
+
+    expect(dock.undock).toHaveBeenCalledWith(showDockId('ses-1'));
+    expect(dock.pin).not.toHaveBeenCalled();
+  });
+
+  it('offers no Dock control to a role that cannot reach the pins route', async () => {
+    renderShare({ canPinToDock: false });
+
+    // The share link still loads, so this is the Dock row being withheld, not an
+    // unreadable page.
+    await waitFor(() => expect(screen.getByDisplayValue(/\/show\/ses-1\//)).toBeTruthy());
+    expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
+    expect(dock.pin).not.toHaveBeenCalled();
+  });
+
+  it('withholds the Dock control when page use itself is revoked', async () => {
+    renderShare({ canUse: false });
+
+    await waitFor(() => expect(api.getShowPageAccess).toHaveBeenCalled());
+    expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
+    expect(api.getShowPage).not.toHaveBeenCalled();
   });
 });

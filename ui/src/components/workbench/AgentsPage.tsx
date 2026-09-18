@@ -331,6 +331,10 @@ export const AgentsPage: React.FC = () => {
   const visibleTabs = capabilities.can_use_agents ? AGENTS_TAB_ORDER : (['definitions'] as const);
   const activeTab = capabilities.can_use_agents ? agentsTab : 'definitions';
   const canEditAgents = capabilities.can_manage_agents;
+  // Running an Agent is a use operation, editing its definition is management:
+  // `POST /api/sessions` admits an editor, so Run follows chat + Agent use while
+  // every definition field stays read-only.
+  const canRunAgents = capabilities.can_chat && capabilities.can_use_agents;
   // Bulk Agent onboarding is a one-way instance-wide migration and stays Owner
   // on the HTTP policy, so it follows owner identity rather than the Agent-CRUD
   // capability a member also has: keying the fetch off `can_manage_agents` sent
@@ -1607,6 +1611,7 @@ export const AgentsPage: React.FC = () => {
               agent={selected}
               isDefault={defaultName === selected.name}
               canEdit={canEditAgents}
+              canRun={canRunAgents}
               onChange={updateField}
               onSetDefault={onSetDefault}
               onRename={onRename}
@@ -1882,8 +1887,11 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
 interface DetailProps {
   agent: VibeAgentFull;
   isDefault: boolean;
-  /** False on remote instances, where every mutating control is unavailable. */
+  /** Definition-management authority: rename, model, prompt, default, delete. */
   canEdit: boolean;
+  /** Use authority: start a Project session with this Agent. Independent of
+   *  `canEdit` — an editor runs an Agent whose definition they cannot touch. */
+  canRun: boolean;
   onChange: (patch: VibeAgentUpdatePayload) => Promise<void>;
   onSetDefault: () => Promise<void>;
   onRename: (newName: string) => Promise<void>;
@@ -1895,9 +1903,10 @@ interface DetailProps {
 // Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
 // System Prompt (collapsible) → footer Run / Delete. Name is editable
 // for user agents. The backend renames the row and its references atomically;
-// system agents keep their locked identity. On a remote instance `canEdit` is
-// false and the panel degrades to a read-only view of the same fields.
-const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, onChange, onSetDefault, onRename, onDelete, onClose }) => {
+// system agents keep their locked identity. Without `canEdit` the panel degrades
+// to a read-only view of the same fields; Run follows `canRun` instead, so a
+// read-only definition can still be launched by whoever may use it.
+const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, canRun, onChange, onSetDefault, onRename, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -2486,39 +2495,41 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           button was redundant with the top Enable toggle and was
           removed. */}
       <div className="flex items-center gap-2 pt-2">
+        {canRun && (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={() => setRunning(true)}
+            className="border-mint/40 bg-mint-soft text-mint-ink hover:brightness-110"
+          >
+            <Play className="size-3" />
+            {t('agents.detail.run')}
+          </Button>
+        )}
+        <div className="flex-1" />
         {canEdit ? (
-          <>
+          !system ? (
             <Button
               type="button"
-              variant="outline"
+              variant="destructive-soft"
               size="xs"
-              onClick={() => setRunning(true)}
-              className="border-mint/40 bg-mint-soft text-mint-ink hover:brightness-110"
+              onClick={onDelete}
             >
-              <Play className="size-3" />
-              {t('agents.detail.run')}
+              <Trash2 className="size-3" />
+              {t('common.delete')}
             </Button>
-            <div className="flex-1" />
-            {!system ? (
-              <Button
-                type="button"
-                variant="destructive-soft"
-                size="xs"
-                onClick={onDelete}
-              >
-                <Trash2 className="size-3" />
-                {t('common.delete')}
-              </Button>
-            ) : (
-              <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
-            )}
-          </>
+          ) : (
+            <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
+          )
         ) : (
           <span className="text-[10px] text-muted">{t('agents.remoteReadOnlyHint')}</span>
         )}
       </div>
 
-      {canEdit && running && <RunAgentDialog agent={agent} onClose={() => setRunning(false)} />}
+      {/* Derived, not latched: losing `canRun` mid-dialog unmounts it in the same
+          render, so a revoked capability cannot leave an open launcher behind. */}
+      {canRun && running && <RunAgentDialog agent={agent} onClose={() => setRunning(false)} />}
 
       {/* Full-screen system-prompt editor — large input + Markdown preview.
           Opening from collapsed or expanded both jump straight here. */}

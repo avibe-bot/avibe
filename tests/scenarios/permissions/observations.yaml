@@ -59,6 +59,39 @@ observations:
       - retain Editor and Viewer restrictions and true signed principal identity
       - preserve shared inbox read markers and existing Show publication policy
       - validate actual signed HTTP storage and SSE consumers rather than capability predicates alone
+      - give every instance-scoped signal the role gate admits an actual page consumer, so a bare refetch frame wakes the view it was admitted for instead of being delivered to nobody
 
       - include released Member deferred snapshots in binding migration without reopening unattributed or later work
       - serialize migration provenance reads row decisions and marker seal with the existing SQLite writer reservation
+
+  - id: OBS-PERMISSIONS-005
+    source: approved_owner_contract
+    related_scenarios:
+      - PERMISSIONS-020
+      - PERMISSIONS-021
+      - PERMISSIONS-022
+      - PERMISSIONS-023
+      - PERMISSIONS-024
+      - PERMISSIONS-026
+      - PERMISSIONS-027
+      - PERMISSIONS-028
+    summary: Ordinary product operations need the initiating user, not the machine that happens to run them.
+    previous_assumption: Role enforcement at the HTTP surface was enough because everything below it acted for the local Owner.
+    observed_behavior: A remote caller's Agent turn reached CLI commands, raw operations and deferred rows that all resolved to standalone Owner, so a role refused in the browser succeeded through the same person's Agent.
+    required_updates:
+      - resolve one invocation-scoped authority at the CLI entry point and pass it to guards that already exist
+      - classify every parser leaf with a role floor whose default is deny, and refuse before any effect is written
+      - treat an unusable remote provenance as anonymous remote rather than falling back to local Owner
+      - record the initiating authority on deferred rows at the producer and read it back at the consumer
+      - admit the effective target before producing deferred work, so a refusal costs no Run definition or Session row rather than surfacing at dispatch where nobody is waiting
+      - let the edit decide which target is effective, so a definition that replaces its Session is admitted for the destination it chooses and never for the one it abandons
+      - read the follow-the-Session marker from the edit's final session policy, and resolve and admit the Agent every future fire will select before work becomes per-run
+      - treat a target whose Session has not been opened yet as the placement it is rather than as no target, without giving a blank or unusable target any authorization meaning
+      - keep saved automation control on the authority the definition already carries instead of restamping it to whoever pressed run or pause
+      - keep every outward projection of a deferred row free of the recorded authority
+      - keep a genuinely local invocation byte-for-byte unchanged so standalone administration is unaffected
+      - separate use from management on the surfaces that mix them, without turning Member-tier controls into Editor ones
+    known_by_design:
+      - historical rows written before this change carry no authority snapshot; they stay unattributed rather than being backfilled or inferred (UNPROVEN)
+      - host screenshot and prompt-template export remain host-scoped operations
+      - terminal, filesystem, shell and SQL sandboxing is a separate boundary and is out of this class

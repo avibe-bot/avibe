@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -10,10 +10,14 @@ import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizatio
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { VaultsPage } from './VaultsPage';
 
+type WorkbenchEventHandlers = { onVaultsUpdated?: (data: unknown) => void };
+
+const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   getVaultAudit: vi.fn(),
   getVaultGrants: vi.fn(),
+  getVaultRequests: vi.fn(),
   listVaultSecrets: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
@@ -80,6 +84,15 @@ function renderPage(context = remoteOwner) {
 }
 
 beforeEach(() => {
+  eventHandlers.length = 0;
+  api.connectWorkbenchEvents.mockImplementation((handlers: WorkbenchEventHandlers) => {
+    eventHandlers.push(handlers);
+    return () => {
+      const at = eventHandlers.indexOf(handlers);
+      if (at >= 0) eventHandlers.splice(at, 1);
+    };
+  });
+  api.getVaultRequests.mockResolvedValue({ requests: [] });
   api.listVaultSecrets.mockResolvedValue({ secrets: [] });
   api.getVaultGrants.mockResolvedValue({ grants: [] });
   api.getVaultAudit.mockResolvedValue({
@@ -114,5 +127,28 @@ describe('VaultsPage remote audit history', () => {
 
     expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();
     expect(screen.queryByText('vaults.remoteReadOnly')).toBeNull();
+  });
+});
+
+// PERMISSIONS-016 — `vaults.updated` is admitted at the Editor tier that owns
+// the endpoint it announces, and below runtime management the controller reduces
+// the frame to its type alone. The pending-requests list is the consumer that
+// has to wake on it, so it is driven here through the real page rather than
+// asserted on the stream stub.
+describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated frame', () => {
+  it('refetches pending requests from the signal alone', async () => {
+    renderPage(activeOrgMember);
+    await waitFor(() => expect(api.getVaultRequests).toHaveBeenCalled());
+    const before = api.getVaultRequests.mock.calls.length;
+
+    await act(async () => {
+      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
+    });
+
+    await waitFor(() => expect(api.getVaultRequests.mock.calls.length).toBeGreaterThan(before));
+    // The frame carried no secret name; the refetch still asks for this Editor's
+    // own pending scope.
+    const [query] = api.getVaultRequests.mock.calls.at(-1) ?? [];
+    expect(query).toMatchObject({ status: 'pending' });
   });
 });

@@ -48,10 +48,14 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
-from core.caller_context import caller_context_from_env, caller_resource_user_context
+from core.caller_context import (
+    caller_context_from_env,
+    caller_resource_user_context,
+    env_declares_remote_caller,
+)
 from core.command_runner import command_line_preview
 from core.install_integrity import verify_python_environment, verify_site_packages
-from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     NO_EVENT_EXIT_CODE,
@@ -376,6 +380,54 @@ def _reserved_session_cli_error(exc: "UnresolvableSessionTarget") -> TaskCliErro
     )
 
 
+def _retyped_placement_refusal(
+    exc: Exception, *, help_command: str | None
+) -> Exception:
+    """Give a refused Session placement the same first-class code the preflight gives it.
+
+    A command that names an EXISTING target is admitted by
+    ``_require_cli_turn_authority``, which already reports each refusal under its
+    own code. A command that CREATES its target is admitted by the reservation
+    writer instead, one layer below the CLI, and its refusals arrived here as bare
+    ``PermissionError``s -- so the same user, refused for the same reason, got
+    ``task_command_failed`` and a prose string with nothing to branch on. Re-typed
+    at the printer for the same reason the reserved-target case above is: every
+    creating command inherits it, including ones added later.
+    """
+
+    from core.vibe_agents import VibeAgentAccessError
+    from storage.workbench_sessions_service import ProjectAccessDeniedError
+    from vibe.authorization import InstanceAuthorizationError
+
+    if isinstance(exc, TaskCliError):
+        return exc
+    if isinstance(exc, InstanceAuthorizationError):
+        return TaskCliError(
+            str(exc),
+            code=exc.code,
+            help_command=help_command,
+            details={"minimum_role": exc.minimum_role},
+        )
+    if isinstance(exc, ProjectAccessDeniedError):
+        # Covers both shapes the placement check refuses: a Project the caller
+        # cannot chat in, and a destination that is no Project at all -- work with
+        # no Scope creates unplaced Sessions, which is runtime management.
+        return TaskCliError(
+            "You cannot place new work here",
+            code=exc.code,
+            hint="Pass --scope-id for a Project you can chat in, or ask for access to this one.",
+            help_command=help_command,
+        )
+    if isinstance(exc, VibeAgentAccessError):
+        return TaskCliError(
+            str(exc),
+            code="agent_access_forbidden",
+            hint="The Agent this work would run on is not one you can use.",
+            help_command=help_command,
+        )
+    return exc
+
+
 def _print_task_error(exc: Exception, *, help_command: str | None = None) -> None:
     # Re-typed BEFORE the ``TaskCliError`` branch, and here rather than in each command's
     # own ``except``, because this is the one printer every CLI admission door funnels its
@@ -392,6 +444,7 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         ResourceAccessError,
     )
 
+    exc = _retyped_placement_refusal(exc, help_command=help_command)
     if (
         isinstance(exc, ResourceAccessError)
         and exc.code == HARNESS_ACCESS_FORBIDDEN_CODE
@@ -2569,9 +2622,9 @@ def _task_payload(task, *, brief: bool = False):
             "enabled": task.enabled,
         }
     payload = task.to_dict()
-    from storage.message_deliveries import metadata_without_delegated_owner
+    from storage.message_deliveries import public_message_metadata
 
-    payload["metadata"] = metadata_without_delegated_owner(payload.get("metadata"))
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
     payload.update(derived)
     return payload
 
@@ -2922,6 +2975,196 @@ def _resolve_session_target_args(
     return session_id or None, session_key
 
 
+class _CommandTarget(NamedTuple):
+    """Where the work a command is about to write will actually speak.
+
+    At most one field is set. ``session_id`` is a Session that exists now, so the
+    caller is admitted to it directly. ``placement_scope_key`` is a target that
+    names a Scope whose Session does not exist yet — the deprecated IM key for a
+    thread nobody has opened — so the work describes a Session that will be
+    created later, and the question is the reservation writer's: may this caller
+    put work in that Scope, with that Agent. Neither set means the target names
+    nothing to admit anyone to.
+    """
+
+    session_id: Optional[str] = None
+    placement_scope_key: Optional[str] = None
+
+
+def _resolve_command_target(session_id: Optional[str], session_key: str) -> _CommandTarget:
+    """Read a command's named target, without creating anything it describes.
+
+    A target is named one of two ways: an Agent Session ID — typed, or defaulted
+    from the caller environment — or the legacy scope key the IM surfaces still
+    accept. Both are resolved read-only, through the primitives their own dispatch
+    uses, so asking who may drive a Session never creates the row the question is
+    about.
+
+    An empty target is not an authorization answer. A blank argument, an ID that
+    does not parse and a malformed key are shape and lifecycle questions owned by
+    the validator, the creation policy or the repair path that already reports
+    them; a binding whose row is gone stays editable by the person who has to fix
+    it. What must NOT be empty is a well-formed key whose Session has simply not
+    been opened yet: that target is where future work lands, so it is returned as
+    a placement rather than silently admitted.
+    """
+
+    if session_id:
+        try:
+            resolve_session_id_target(session_id)
+        except ValueError:
+            return _CommandTarget()
+        return _CommandTarget(session_id=session_id)
+    if not (session_key or "").strip():
+        return _CommandTarget()
+    try:
+        target = parse_session_key(session_key)
+    except ValueError:
+        # Shape is the caller's own validator's question, reported in its
+        # vocabulary. Nothing exists to admit anyone to.
+        return _CommandTarget()
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    _ensure_cli_sqlite_state()
+    service = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        row = service.find_session_for_anchor(
+            scope_key=target.session_scope,
+            session_anchor=session_anchor_for_target(target),
+        )
+    finally:
+        service.close()
+    existing = str((row or {}).get("id") or "") or None
+    if existing:
+        return _CommandTarget(session_id=existing)
+    return _CommandTarget(placement_scope_key=target.session_scope)
+
+
+def _require_cli_turn_authority(
+    session_id: Optional[str],
+    *,
+    session_key: str = "",
+    help_command: str,
+) -> _CommandTarget:
+    """Admit this invocation to the Session the work it is about to write runs in.
+
+    A Run row, a callback route and a stored Task/Watch definition are all
+    rebuilt later under the authority recorded when the row was written, so the
+    question has to be answered before the row exists. Deciding only at dispatch
+    lets a caller who may not chat in that Project — or may not use the Agent
+    that Session selected — occupy the target anyway, and leaves the refusal
+    somewhere nobody is waiting for it.
+
+    It asks ``core.services.sessions`` the same pair a Workbench turn already
+    answers, under this invocation's own authority: a local invocation keeps
+    standalone Owner semantics, and a remote one is the caller the host signed.
+    Saved automation CONTROL is deliberately not here — running, pausing or
+    removing a stored definition stays Editor admission over the authority the
+    definition already carries, and must not restamp itself to whoever asked.
+
+    Returns the target it read, because half the question can only be asked later:
+    a target whose Session does not exist yet is admitted by Scope and Agent, and
+    which Agent was selected is not known until the caller resolves it. Callers
+    that can name such a target finish with ``_require_cli_target_placement``.
+    """
+
+    target = _resolve_command_target(session_id, session_key)
+    target_session_id = target.session_id
+    if not target_session_id:
+        return target
+
+    from core.services import sessions as sessions_service
+    from core.vibe_agents import VibeAgentAccessError
+    from vibe.authorization import InstanceAuthorizationError
+
+    _ensure_cli_sqlite_state()
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.connect() as conn:
+            sessions_service.require_session_turn_authority(conn, target_session_id)
+    except LookupError as exc:
+        # Same meaning ``vibe session get`` gives it: a Session the caller may
+        # not reach is not a Session they get to learn about.
+        raise TaskCliError(
+            str(exc),
+            code="session_not_found",
+            hint="Target a Session you can continue, or create a new one for this work.",
+            help_command=help_command,
+            details={"session_id": target_session_id},
+        ) from exc
+    except InstanceAuthorizationError as exc:
+        raise TaskCliError(
+            str(exc),
+            code=exc.code,
+            help_command=help_command,
+            details={"session_id": target_session_id, "minimum_role": exc.minimum_role},
+        ) from exc
+    except VibeAgentAccessError as exc:
+        raise TaskCliError(
+            str(exc),
+            code="agent_access_forbidden",
+            hint="The Agent this Session runs on is not one you can use.",
+            help_command=help_command,
+            details={"session_id": target_session_id},
+        ) from exc
+    finally:
+        engine.dispose()
+    return target
+
+
+def _require_cli_placement_authority(
+    scope_key: str,
+    *,
+    agent: Optional[VibeAgent],
+    agent_name: Optional[str],
+) -> None:
+    """Admit a definition that will create its Sessions later, where it will create them.
+
+    ``_require_cli_turn_authority`` answers this for a definition bound to a Session
+    that exists, and the reservation writer answers it for one that reserves during
+    the edit. A ``create_per_run`` definition does neither: it records a destination
+    and creates a Session there on every fire, so without this the placement was
+    admitted for the first time at dispatch — long after the caller who chose it
+    could be told no.
+
+    Refusals travel as they are: ``_print_task_error`` gives each one the code its
+    preflight sibling already reports.
+    """
+
+    from core.services import sessions as sessions_service
+
+    _ensure_cli_sqlite_state()
+    sessions_service.require_session_placement_authority(
+        scope_key=scope_key,
+        agent_id=agent.id if agent else None,
+        agent_name=agent.name if agent else (agent_name or None),
+    )
+
+
+def _require_cli_target_placement(
+    target: _CommandTarget,
+    *,
+    agent: Optional[VibeAgent],
+    agent_name: Optional[str] = None,
+) -> None:
+    """Finish ``_require_cli_turn_authority`` for a target that has no Session yet.
+
+    A legacy key naming a thread nobody has opened is a real, supported target:
+    the work is stored now and its Session is created on the first dispatch. So
+    it is admitted like the placement it is, once the Agent that dispatch will
+    select is known — not left unasked because there was no row to ask about.
+    """
+
+    if not target.placement_scope_key:
+        return
+    _require_cli_placement_authority(
+        target.placement_scope_key,
+        agent=agent,
+        agent_name=agent_name,
+    )
+
+
 def _default_session_id_from_caller(caller_context) -> Optional[str]:
     if caller_context is None:
         return None
@@ -3212,6 +3455,12 @@ def _validate_callback_session_id(session_id: str, *, help_command: str) -> None
             help_command=help_command,
             details={"session_id": session_id},
         ) from exc
+    # A callback is a turn in the Session it names, posted by this run. Both
+    # spellings reach here -- an explicit ``--callback-session-id`` and the
+    # caller's own Session when Avibe defaults it -- and the answer is needed
+    # before the run is reserved or enqueued, because the callback route is
+    # recorded on the row and replayed under the authority stored with it.
+    _require_cli_turn_authority(session_id, help_command=help_command)
 
 
 def _resolve_runs_list_session_filter(args) -> Optional[str]:
@@ -3658,9 +3907,9 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
             "last_error": watch.last_error,
         }
     payload = watch.to_dict()
-    from storage.message_deliveries import metadata_without_delegated_owner
+    from storage.message_deliveries import public_message_metadata
 
-    payload["metadata"] = metadata_without_delegated_owner(payload.get("metadata"))
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
     payload.update(derived)
     return payload
 
@@ -3764,7 +4013,7 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 
 
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
-    from storage.message_deliveries import metadata_without_delegated_owner
+    from storage.message_deliveries import public_message_metadata
 
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
@@ -3793,7 +4042,7 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "callback_status": normalized.get("callback_status"),
             "callback_run_id": normalized.get("callback_run_id"),
         }
-    normalized["metadata"] = metadata_without_delegated_owner(normalized.get("metadata"))
+    normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
     return normalized
 
 
@@ -4210,6 +4459,15 @@ def cmd_task_add(args):
                 required=session_policy == "existing",
                 help_command="vibe task add --help",
             )
+            # Before the reservation and before the definition row: a stored
+            # schedule fires under the authority written with it, so the Session
+            # it will speak in is admitted while the caller is still here to be
+            # told no.
+            command_target = _require_cli_turn_authority(
+                session_id,
+                session_key=session_key,
+                help_command="vibe task add --help",
+            )
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=getattr(args, "cwd", None),
                 existing_cwd=None,
@@ -4237,7 +4495,18 @@ def cmd_task_add(args):
             expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
                 agent_resolution
             )
-            if session_policy == "create_once":
+            # Where every future fire lands, admitted before the definition row.
+            # A named target whose Session is still future, a per-run definition
+            # that reserves one on each fire, and a reserved reusable Session all
+            # ask the reservation writer's question; the first two ask it here.
+            _require_cli_target_placement(command_target, agent=agent, agent_name=agent_name)
+            if session_policy == "create_per_run":
+                _require_cli_placement_authority(
+                    scope_key or "",
+                    agent=agent,
+                    agent_name=agent_name,
+                )
+            elif session_policy == "create_once":
                 session_id = _reserve_definition_session(
                     agent_name=agent_name,
                     agent_id=agent.id if agent else None,
@@ -4857,7 +5126,6 @@ def cmd_task_update(args):
             metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
         elif getattr(args, "clear_agent", False):
             metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
-        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
 
         message_changed = any(
             getattr(args, name, None) is not None
@@ -4886,6 +5154,29 @@ def cmd_task_update(args):
             next_schedule_type=schedule_type,
             help_command="vibe task update --help",
         )
+        # Which Session this definition will actually speak in, decided by the
+        # policy above rather than by what is stored today.
+        retains_existing_session = _update_retains_existing_session(
+            session_policy,
+            stored_session_id=task.session_id,
+            create_session=bool(getattr(args, "create_session", False)),
+        )
+        # ...and therefore whether a Session can still own the Agent choice.
+        follows_session_agent = _follows_session_agent_after_update(
+            metadata,
+            session_policy=session_policy,
+        )
+        command_target = _CommandTarget()
+        if retains_existing_session:
+            # An update rewrites the definition under the invoker, so the target it
+            # keeps -- named here or inherited by leaving the binding alone -- is
+            # reauthorized, unlike run/pause/resume, which only steer a definition
+            # that already carries its own authority.
+            command_target = _require_cli_turn_authority(
+                session_id,
+                session_key=session_key,
+                help_command="vibe task update --help",
+            )
         explicit_cwd = getattr(args, "cwd", None)
         _reject_inert_create_once_cwd_update(
             explicit_cwd=explicit_cwd,
@@ -4905,14 +5196,7 @@ def cmd_task_update(args):
         # into ``session_workdir``, and for a command task that answer is the command's
         # directory: an unrelated ``--name`` edit on a reserved definition wrote the
         # subprocess directory into ``metadata["session_workdir"]``.
-        command_only_cwd = task.has_command and (
-            session_policy == "existing"
-            or (
-                session_policy == "create_once"
-                and bool(task.session_id)
-                and not getattr(args, "create_session", False)
-            )
-        )
+        command_only_cwd = task.has_command and retains_existing_session
         if command_only_cwd:
             session_workdir = _stored_session_workdir(task, metadata)
             cwd = _resolve_command_only_cwd(
@@ -4974,12 +5258,17 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         agent_resolution = _AgentTargetResolution(None, False)
+        # Every branch below either rebinds this or leaves the definition's Agent to
+        # someone else; the reservation writer reads it either way, and without a
+        # value the follow-the-Session branch raised UnboundLocalError there.
+        agent = None
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
             # belongs to its bound Session, and the pin wins over the Session row at
             # dispatch -- so an unrelated ``--name`` edit would silently move every
-            # future fire onto a different Agent.
+            # future fire onto a different Agent. The reservation below still resolves
+            # and admits the Agent it gives the Session it creates.
             pass
         elif agent_name is None and session_policy != "existing":
             agent_resolution = _resolve_agent_target(
@@ -5003,7 +5292,20 @@ def cmd_task_update(args):
         expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
             agent_resolution
         )
-        if session_policy == "create_once" and (
+        # See ``vibe task add``: the effective target's placement, once the Agent
+        # this edit selects is known.
+        _require_cli_target_placement(
+            command_target,
+            agent=agent_resolution.agent,
+            agent_name=agent_name,
+        )
+        if session_policy == "create_per_run":
+            _require_cli_placement_authority(
+                scope_key,
+                agent=agent_resolution.agent,
+                agent_name=agent_name,
+            )
+        elif session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
@@ -5207,6 +5509,14 @@ def cmd_hook_send(args):
             deliver_key=getattr(args, "deliver_key", None),
             help_command="vibe hook send --help",
         )
+        # Deprecated, but it still queues a real Agent turn, so it is admitted
+        # like one -- including through the legacy key, which names the same
+        # Session by its scope and thread.
+        command_target = _require_cli_turn_authority(
+            session_id,
+            session_key=session_key,
+            help_command="vibe hook send --help",
+        )
         message = _resolve_prompt_input(
             args,
             help_command="vibe hook send --help",
@@ -5219,6 +5529,16 @@ def cmd_hook_send(args):
             help_command="vibe hook send --help",
         )
         agent = agent_resolution.agent
+        # The other half of the gate above, now that the Agent this hook will run
+        # on is known: a key whose thread has not been opened yet reserves its
+        # Session at dispatch, in the Scope named here.
+        _require_cli_target_placement(command_target, agent=agent)
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        # Deprecated, but it still enqueues an Agent turn, so it travels with the
+        # same initiating snapshot ``vibe agent run`` records. Empty for a local
+        # caller, exactly as before.
+        provenance_metadata = metadata_with_resource_user_context(None) or None
         request = _task_request_store().enqueue_hook_send(
             session_key=session_key,
             session_id=session_id,
@@ -5229,6 +5549,7 @@ def cmd_hook_send(args):
             agent_id=agent.id if agent else None,
             run_type="agent_run",
             source_kind="cli",
+            metadata=provenance_metadata,
             expected_enabled_agent_id=(
                 agent.id
                 if agent is not None and agent_resolution.requires_enabled_write_guard
@@ -5332,8 +5653,20 @@ def cmd_agent_list(args):
 
 
 def cmd_agent_show(args):
+    # Reading one Agent is selection-shaped — the row names its backend, model and
+    # instructions — so it answers under use access to that exact resource, the
+    # same ACL ``vibe agent list`` already filters by.
     try:
-        agent = _agent_store().require(args.name)
+        agent = _agent_store().require_accessible(args.name)
+    except VibeAgentAccessError as exc:
+        _print_task_error(
+            TaskCliError(str(exc), code="agent_access_forbidden", details={"agent": args.name})
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(TaskCliError(str(exc), code="agent_not_found", details={"agent": args.name}))
+        return 1
+    try:
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
     except Exception as exc:
@@ -5402,8 +5735,15 @@ def cmd_agent_models(args):
             )
         agent = None
         if name:
+            # Naming an Agent here reads that Agent's own model and effort, so it
+            # follows the same use access as selecting it. The catalog options
+            # below stay open: they describe a backend, not an Agent.
             try:
-                agent = _agent_store().require(name)
+                agent = _agent_store().require_accessible(name)
+            except VibeAgentAccessError as exc:
+                raise TaskCliError(
+                    str(exc), code="agent_access_forbidden", details={"agent": name}
+                ) from exc
             except Exception as exc:
                 raise TaskCliError(str(exc), code="agent_not_found", details={"agent": name}) from exc
             backend = agent.backend
@@ -5966,6 +6306,60 @@ def _definition_session_policy_for_update(
     return current_policy or "existing"
 
 
+def _update_retains_existing_session(
+    session_policy: str,
+    *,
+    stored_session_id: Optional[str],
+    create_session: bool,
+) -> bool:
+    """Whether the edited definition keeps speaking in a Session that already exists.
+
+    ``existing`` binds to one by definition, and a reusable ``create_once`` binding
+    that has already reserved keeps it unless this edit asks for a replacement. The
+    remaining shapes -- a first or replacement reservation, and one Session per run
+    -- place the work somewhere that does not exist yet, so the old row is not the
+    target and the destination Scope and Agent are what has to be admitted.
+    """
+
+    if session_policy == "existing":
+        return True
+    return (
+        session_policy == "create_once"
+        and bool(stored_session_id)
+        and not create_session
+    )
+
+
+def _follows_session_agent_after_update(
+    metadata: dict[str, Any],
+    *,
+    session_policy: str,
+) -> bool:
+    """Whether Agent authority still belongs to a Session, under this edit's policy.
+
+    "Follow the bound Session's Agent" is authority held by a Session the definition
+    has: ``--clear-agent`` hands it to the one it is bound to, and the reset rebind
+    stamps it on a ``create_once`` definition pointed at a Session it just made. The
+    marker then stops the edit from resolving an Agent, because there is nothing to
+    decide -- the row the definition speaks in already answers, and re-resolving
+    would pin today's default over it (HFR-245).
+
+    ``create_per_run`` has no such row: every fire makes a throwaway Session from the
+    definition itself, so the marker outlives what it described. Left standing it
+    kept the edit from resolving an Agent while each future fire still picked one --
+    the Scope's default, admitted for nobody, because the placement guard below was
+    handed no Agent to ask about. It is cleared here, before that Agent is resolved
+    and admitted, rather than after the row is saved.
+    """
+
+    if not metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY):
+        return False
+    if session_policy != "create_per_run":
+        return True
+    metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+    return False
+
+
 def _reject_inert_create_once_cwd_update(
     *,
     explicit_cwd: Optional[str],
@@ -6364,6 +6758,7 @@ def _reserve_cli_session(
     metadata: Optional[dict] = None,
     session_anchor_target=None,
     visibility: str = "background",
+    authorization_context=None,
 ) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
@@ -6386,6 +6781,7 @@ def _reserve_cli_session(
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
             require_enabled_agent=True,
+            authorization_context=authorization_context,
         )
     else:
         session_anchor = f"standalone_{uuid4().hex[:12]}"
@@ -6400,6 +6796,7 @@ def _reserve_cli_session(
             visibility=visibility,
             metadata=metadata,
             require_enabled_agent=True,
+            authorization_context=authorization_context,
         )
     if not session_id:
         raise TaskCliError(
@@ -6430,6 +6827,7 @@ def _reserve_forked_cli_session(
     reasoning_effort: Optional[str],
     scope_key: Optional[str],
     visibility: str,
+    authorization_context=None,
 ):
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,
@@ -6447,6 +6845,7 @@ def _reserve_forked_cli_session(
             scope_id=scope_key,
             visibility=visibility,
             db_path=paths.get_sqlite_state_path(),
+            authorization_context=authorization_context,
         )
     except SessionForkError as exc:
         if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
@@ -6652,6 +7051,10 @@ def cmd_agent_run(args):
                 session_key=session_key,
                 help_command="vibe agent run --help",
             )
+            # The Agent resolved above is the SESSION's -- an explicit --agent
+            # may only restate it -- so admitting the caller to the Session
+            # answers both halves of the turn it is about to queue.
+            _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
         if session_policy == "existing" and (args.post_to or args.deliver_key):
             _validate_delivery_args(
                 session_id=session_id,
@@ -6666,6 +7069,9 @@ def cmd_agent_run(args):
         legacy_deliver_key = args.deliver_key
         if (getattr(args, "same_scope", False) or (getattr(args, "scope_id", None) or "").strip()) and legacy_deliver_key != scope_key:
             legacy_deliver_key = None
+        # The caller's own authority, resolved once. A remote caller reserves
+        # under it; a local caller stays ``None`` and keeps Owner semantics.
+        caller_authorization = caller_resource_user_context(caller_context)
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -6674,6 +7080,7 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
+                authorization_context=caller_authorization,
             )
             reserved_session_id = session_id
         elif session_policy == "none":
@@ -6683,6 +7090,7 @@ def cmd_agent_run(args):
                 workdir=run_cwd,
                 metadata=session_metadata,
                 visibility=visibility,
+                authorization_context=caller_authorization,
             )
             reserved_session_id = session_id
         elif session_policy == "fork":
@@ -6693,6 +7101,7 @@ def cmd_agent_run(args):
                 reasoning_effort=args.reasoning_effort,
                 scope_key=scope_key,
                 visibility=visibility,
+                authorization_context=caller_authorization,
             )
             session_id = fork_result.session_id
             reserved_session_id = session_id
@@ -6721,6 +7130,15 @@ def cmd_agent_run(args):
                 **provenance_metadata,
                 "session_fork": fork_result.fork.to_metadata(),
             }
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        # `caller_context` above is descriptive provenance. Deferred execution
+        # rechecks authority from the stored snapshot instead, so a remote
+        # caller's own identity has to travel with the Run; a local caller keeps
+        # no key and stays local.
+        provenance_metadata = metadata_with_resource_user_context(
+            provenance_metadata, caller_authorization
+        )
         request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
@@ -7510,7 +7928,9 @@ def cmd_session_send_now(args):
     try:
         engine = _open_session_engine()
         with engine.connect() as conn:
-            sessions_service.get_active_session(conn, session_id)
+            # Promotion is chat work, so it is authorized before the controller
+            # is asked to act — the IPC hop carries no caller identity.
+            sessions_service.require_session_chat_access(conn, session_id)
         controller_result = asyncio.run(internal_client.send_now(session_id))
     except LookupError:
         _print_task_error(
@@ -7611,7 +8031,7 @@ def cmd_session_queue_list(args):
         )
         engine = _open_session_engine()
         with engine.connect() as conn:
-            sessions_service.get_active_session(conn, session_id)
+            sessions_service.require_session_chat_access(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
                 raise TaskCliError(
@@ -7672,7 +8092,9 @@ def cmd_session_queue_remove(args):
             from storage.agent_session_rows import reserve_write_lock
 
             reserve_write_lock(conn)
-            sessions_service.get_active_session(conn, session_id)
+            # Inside the writer transaction, before the row is retired: the
+            # refusal and the delete decide on the same committed state.
+            sessions_service.require_session_chat_access(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
                 raise TaskCliError(
@@ -9764,6 +10186,9 @@ def cmd_vault_request(args):
     except vault_service.SecretNameCaseConflictError as exc:
         _print_task_error(TaskCliError(str(exc), code="secret_name_case_conflict", help_command=help_command))
         return 1
+    except vault_service.VaultSecretAccessError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_access_forbidden", help_command=help_command))
+        return 1
     except vault_service.VaultServiceError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_spec", help_command=help_command))
         return 1
@@ -9840,6 +10265,9 @@ def cmd_vault_sign(args):
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.VaultSecretAccessError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_access_forbidden", help_command=help_command))
         return 1
     except api.VaultApiError as exc:
         _print_task_error(TaskCliError(str(exc), code=exc.code, help_command=help_command))
@@ -10569,6 +10997,13 @@ def cmd_watch_add(args):
             required=session_policy == "existing",
             help_command="vibe watch add --help",
         )
+        # Same gate as ``vibe task add``: the waiter's hook is a turn in this
+        # Session, replayed later under the authority stored with the Watch.
+        command_target = _require_cli_turn_authority(
+            session_id,
+            session_key=session_key,
+            help_command="vibe watch add --help",
+        )
         agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
@@ -10592,7 +11027,15 @@ def cmd_watch_add(args):
             if session_policy != "existing"
             else None
         )
-        if session_policy == "create_once":
+        # See ``vibe task add``: where the stored Watch's hook will land.
+        _require_cli_target_placement(command_target, agent=agent, agent_name=agent_name)
+        if session_policy == "create_per_run":
+            _require_cli_placement_authority(
+                scope_key or "",
+                agent=agent,
+                agent_name=agent_name,
+            )
+        elif session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 agent_id=agent.id if agent else None,
@@ -10906,7 +11349,6 @@ def cmd_watch_update(args):
             metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
         elif getattr(args, "clear_agent", False):
             metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
-        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
         cwd = (
             None
             if getattr(args, "clear_cwd", False)
@@ -10944,9 +11386,24 @@ def cmd_watch_update(args):
             next_schedule_type="watch",
             help_command="vibe watch update --help",
         )
-        creates_future_session = session_policy == "create_per_run" or (
-            session_policy == "create_once" and (bool(getattr(args, "create_session", False)) or not session_id)
+        creates_future_session = not _update_retains_existing_session(
+            session_policy,
+            stored_session_id=session_id,
+            create_session=bool(getattr(args, "create_session", False)),
         )
+        # ...and therefore whether a Session can still own the Agent choice.
+        follows_session_agent = _follows_session_agent_after_update(
+            metadata,
+            session_policy=session_policy,
+        )
+        command_target = _CommandTarget()
+        if not creates_future_session:
+            # The effective target, named or inherited -- see ``vibe task update``.
+            command_target = _require_cli_turn_authority(
+                session_id,
+                session_key=session_key,
+                help_command="vibe watch update --help",
+            )
         session_workdir = (
             _resolve_definition_session_cwd(
                 explicit_cwd=getattr(args, "cwd", None),
@@ -10969,12 +11426,16 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
         agent_resolution = _AgentTargetResolution(None, False)
+        # See ``vibe task update``: the reservation writer reads this on the
+        # follow-the-Session branch too, where nothing else binds it.
+        agent = None
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
             # belongs to its bound Session, and the pin wins over the Session row at
             # dispatch -- so an unrelated ``--name`` edit would silently move every
-            # future watch hook onto a different Agent.
+            # future watch hook onto a different Agent. The reservation below still
+            # resolves and admits the Agent it gives the Session it creates.
             pass
         elif agent_name is None and session_policy != "existing":
             agent_resolution = _resolve_agent_target(
@@ -10998,7 +11459,20 @@ def cmd_watch_update(args):
         expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
             agent_resolution
         )
-        if session_policy == "create_once" and (
+        # See ``vibe task add``: the effective target's placement, once the Agent
+        # this edit selects is known.
+        _require_cli_target_placement(
+            command_target,
+            agent=agent_resolution.agent,
+            agent_name=agent_name,
+        )
+        if session_policy == "create_per_run":
+            _require_cli_placement_authority(
+                scope_key,
+                agent=agent_resolution.agent,
+                agent_name=agent_name,
+            )
+        elif session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
@@ -13679,6 +14153,27 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         if current.get("paired"):
             _print_remote_already_configured(current)
             return 0
+
+    # The guided entry point (``vibe`` / ``vibe remote``) is admitted at the
+    # management floor so it can report what is already configured, but past this
+    # line it performs exactly what ``vibe remote pair`` does: it writes this
+    # machine's identity. Refusing here, before a pairing key is solicited or
+    # spent, keeps both entry points on the one Owner answer.
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    try:
+        require_instance_role(None, "owner")
+    except InstanceAuthorizationError as exc:
+        _print_task_error(
+            TaskCliError(
+                str(exc),
+                code=exc.code,
+                details={"command": "vibe remote pair", "minimum_role": exc.minimum_role},
+            )
+        )
+        return 1
+
+    if guided:
         _print_remote_setup_intro()
         if not _wait_for_pairing_key_ready():
             print("Remote access setup cancelled.")
@@ -14259,6 +14754,42 @@ def _request_show_page_prewarm_best_effort(
     return None
 
 
+def _reserve_dispatching_show_event(session_id: str, payload: dict) -> None:
+    """Write a dispatching Show event here, under this invocation's authority.
+
+    A dispatching event is deferred Agent work, and the controller rebuilds that
+    turn from the reservation rather than from whatever woke it. The live UI is a
+    separate process reached over a local token, so it would resolve a remote
+    caller as this machine's Owner and record the wrong authority. Reserving
+    first keeps the answer this invocation was admitted under; the POST that
+    follows replays the same event id, so the live path still owns publishing and
+    dispatch, and an unreachable UI still falls back exactly as before.
+
+    Non-dispatching events start no turn and have no deferred consumer, so they
+    stay on the single-write path.
+
+    This reservation is the only point where the caller's authority is still
+    known, so its failure is the command's failure. Falling through would hand
+    the same turn to the live UI or to the local fallback, and both would write
+    it again as this machine's Owner -- turning a refusal into an escalation and
+    a storage fault into an unstamped row. Either path may replay this
+    reservation once it exists; neither may create a second one after it did not.
+    """
+
+    from core.show_session_events import (
+        ShowSessionEventStore,
+        show_event_request_requests_dispatch,
+    )
+
+    if not show_event_request_requests_dispatch(payload):
+        return
+    store = ShowSessionEventStore()
+    try:
+        store.append(session_id, payload)
+    finally:
+        store.close()
+
+
 def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 
@@ -14794,6 +15325,7 @@ def cmd_show_event(args):
             else f"show_evt_{uuid4().hex[:16]}"
         )
         event_id_for_retry = payload["id"]
+        _reserve_dispatching_show_event(session_id, payload)
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             # The local bridge handles both shapes: non-dispatch events are
@@ -17860,17 +18392,262 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
     return 0
 
 
+#: The role floor each public command namespace runs under, keyed by the parser
+#: leaf path the user actually typed (aliases are their own keys). It is a
+#: NAMESPACE floor, not a second policy engine: the resource answer — which
+#: Project, Agent, page or secret — stays with the existing policy functions the
+#: services call. ``None`` means the leaf deliberately carries no instance-role
+#: contract, and every one of those is classified in the audit rather than left
+#: out. A leaf missing from this table is admitted as Owner, so a command added
+#: later fails closed until it is classified; ``test_cli_command_admission``
+#: walks the parser so that classification cannot be forgotten silently.
+_CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
+    # Public facts, unchanged: a version and an update check answer the same
+    # thing to anyone, and status is not gated merely because doctor is.
+    ("version",): None,
+    ("check-update",): None,
+    ("status",): None,
+    # Host scope, not instance scope: these act on this machine's screen and on
+    # authored files, and have no role contract to repair here.
+    ("screenshot",): None,
+    ("debug", "prompt", "export"): None,
+    # Memory owns its own verified identity and proof lifecycle.
+    ("memory", "status"): None,
+    ("memory", "profile"): None,
+    ("memory", "list"): None,
+    ("memory", "search"): None,
+    ("memory", "remember"): None,
+    # Runtime, configuration and retention are operational management.
+    (): "member",
+    ("start",): "member",
+    ("stop",): "member",
+    ("restart",): "member",
+    ("doctor",): "member",
+    ("upgrade",): "member",
+    ("runtime", "status"): "member",
+    ("runtime", "prepare"): "member",
+    ("runtime", "clean"): "member",
+    # Remote access: operating the tunnel is management, but pairing writes this
+    # machine's identity, so setup admits at the management floor and the command
+    # itself keeps the Owner check in front of any pairing effect.
+    ("remote",): "member",
+    ("remote", "status"): "member",
+    ("remote", "start"): "member",
+    ("remote", "stop"): "member",
+    ("remote", "pair"): "owner",
+    # Agents: discovery, selection and running are use; the definition lifecycle
+    # is management, admitted before any builtin synchronization or import.
+    ("agent", "list"): "editor",
+    ("agent", "show"): "editor",
+    ("agent", "models"): "editor",
+    ("agent", "run"): "editor",
+    ("agent", "create"): "member",
+    ("agent", "update"): "member",
+    ("agent", "enable"): "member",
+    ("agent", "disable"): "member",
+    ("agent", "remove"): "member",
+    ("agent", "import"): "member",
+    ("agent", "default"): "member",
+    # Harness: one instance-wide Editor floor for reads and ordinary control.
+    ("runs", "list"): "editor",
+    ("runs", "show"): "editor",
+    ("runs", "cancel"): "editor",
+    ("harness", "status"): "editor",
+    ("task", "add"): "editor",
+    ("task", "update"): "editor",
+    ("task", "list"): "editor",
+    ("task", "ls"): "editor",
+    ("task", "show"): "editor",
+    ("task", "pause"): "editor",
+    ("task", "resume"): "editor",
+    ("task", "run"): "editor",
+    ("task", "remove"): "editor",
+    ("task", "rm"): "editor",
+    ("watch", "add"): "editor",
+    ("watch", "update"): "editor",
+    ("watch", "list"): "editor",
+    ("watch", "ls"): "editor",
+    ("watch", "show"): "editor",
+    ("watch", "pause"): "editor",
+    ("watch", "resume"): "editor",
+    ("watch", "remove"): "editor",
+    ("watch", "rm"): "editor",
+    ("hook", "send"): "editor",
+    # Sessions and their queue, mirroring the HTTP surface: reading is Viewer
+    # work, editing and the queue are Editor work, and both sides are narrowed
+    # further by the effective Project role of each session the command touches.
+    ("session", "list"): "viewer",
+    ("session", "get"): "viewer",
+    ("session", "update"): "editor",
+    ("session", "send-now"): "editor",
+    ("session", "queue", "list"): "editor",
+    ("session", "queue", "remove"): "editor",
+    # Vault: the namespace is Editor work, as it is over HTTP. Metadata and
+    # deletion stay Member work, but that answer belongs to the secret's own
+    # policy (``_require_secret_resource_management``), which now sees the
+    # caller — the same split the browser goes through. Key material is this
+    # machine's identity and is the one Owner floor here.
+    ("vault", "list"): "editor",
+    ("vault", "find"): "editor",
+    ("vault", "tags"): "editor",
+    ("vault", "run"): "editor",
+    ("vault", "fetch"): "editor",
+    ("vault", "access"): "editor",
+    ("vault", "sign"): "editor",
+    ("vault", "await"): "editor",
+    ("vault", "request"): "editor",
+    ("vault", "inject"): "editor",
+    ("vault", "export"): "editor",
+    ("vault", "edit"): "editor",
+    ("vault", "rm"): "editor",
+    ("vault", "key", "export"): "owner",
+    ("vault", "key", "import"): "owner",
+    # Show: reading a page is Viewer work and writing to one is Editor work; the
+    # page's own ACL still decides which page, on both sides.
+    ("show", "list"): "viewer",
+    ("show", "path"): "viewer",
+    ("show", "status"): "viewer",
+    ("show", "marks"): "viewer",
+    ("show", "update"): "editor",
+    ("show", "mark"): "editor",
+    ("show", "unmark"): "editor",
+    ("show", "reply"): "editor",
+    ("show", "event"): "editor",
+    ("show", "annotate"): "editor",
+    # Skills are an Editor capability; these two already carry their own scope
+    # contract and keep it.
+    ("skill", "list"): "editor",
+    ("skill", "load"): "editor",
+    ("data", "query"): "editor",
+    ("data", "skill-usage"): "editor",
+    ("data", "retention"): "member",
+}
+
+#: Argv-level entry points the supervisor and the installer use. They are not
+#: parser leaves, and they are Owner work: an invocation that declares a remote
+#: caller must not reach them as an alternate entry.
+_INTERNAL_ACTIVATION_COMMANDS = ("__restart-supervisor", "__activate-upgrade", "__activate-install")
+
+
+def _cli_invocation_authority(env: Optional[Mapping[str, str]] = None):
+    """Resolve, once, the authority this CLI invocation runs under.
+
+    A genuinely local invocation resolves to ``None``, which keeps standalone
+    Owner administration. A remote Agent invocation runs as the remote user whose
+    snapshot Avibe injected — but only while that snapshot still describes this
+    installation. The environment is carried across process boundaries and
+    outlives the pairing it was minted under, so the claims alone are not
+    provenance: they are validated the same way every other deferred consumer
+    validates a stored snapshot, against the configured instance and its durable
+    ready binding.
+
+    A declared-remote invocation whose provenance is missing, malformed or no
+    longer valid here stays an anonymous remote context and fails closed. It does
+    not become local just because the claims it should have carried are absent or
+    stale — that would turn a rejected remote caller into the machine's owner.
+    """
+
+    from storage.resource_access_service import (
+        RESOURCE_USER_CONTEXT_METADATA_KEY,
+        resource_user_context_from_metadata,
+    )
+    from vibe.authorization import AuthorizationContext
+
+    source = os.environ if env is None else env
+    snapshot = caller_resource_user_context(caller_context_from_env(source))
+    if snapshot is None and not env_declares_remote_caller(source):
+        return None
+    context = resource_user_context_from_metadata({RESOURCE_USER_CONTEXT_METADATA_KEY: snapshot})
+    return AuthorizationContext(is_remote=True) if context is None else context
+
+
+def _dispatch_path(parser: argparse.ArgumentParser, args) -> tuple[tuple[str, ...], bool]:
+    """Return the parser leaf the user reached, and whether it needs a subcommand."""
+
+    path: list[str] = []
+    current = parser
+    while True:
+        action = next(
+            (item for item in current._actions if isinstance(item, argparse._SubParsersAction)),
+            None,
+        )
+        if action is None:
+            return tuple(path), False
+        chosen = getattr(args, action.dest, None)
+        if not chosen or chosen not in action.choices:
+            return tuple(path), True
+        path.append(chosen)
+        current = action.choices[chosen]
+
+
+def _require_command_admission(parser: argparse.ArgumentParser, args) -> None:
+    """Admit the invocation to this command's namespace before it can act."""
+
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    path, subcommand_missing = _dispatch_path(parser, args)
+    if path not in _CLI_COMMAND_FLOORS and subcommand_missing:
+        # Not a command at all: argparse is about to print usage and exit, and no
+        # product effect can run in between.
+        return
+    floor = _CLI_COMMAND_FLOORS.get(path, "owner")
+    if floor is None:
+        return
+    try:
+        require_instance_role(None, floor)
+    except InstanceAuthorizationError as exc:
+        command = " ".join(("vibe", *path)).strip()
+        _print_task_error(
+            TaskCliError(
+                str(exc),
+                code=exc.code,
+                details={"command": command, "minimum_role": exc.minimum_role},
+            )
+        )
+        sys.exit(1)
+
+
+def _require_internal_activation_admission(command: str) -> None:
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    try:
+        require_instance_role(None, "owner")
+    except InstanceAuthorizationError as exc:
+        print(f"{command}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
+    """Public CLI entry: resolve the invocation's authority once, then dispatch.
+
+    The whole dispatch runs inside the invocation, including argument parsing and
+    the internal activation entry points, so nothing this process does on the
+    caller's behalf can be mistaken for local administration. Entering it with
+    ``None`` for a local invocation is deliberate: skipping activation would leave
+    a surrounding authority in place for a nested local call.
+    """
+
+    from vibe.authorization import invocation_authority
+
     cache_running_vibe_path()
     argv = sys.argv[1:]
-    if argv and argv[0] == "__restart-supervisor":
-        sys.exit(_dispatch_restart_supervisor(argv[1:]))
-    if argv and argv[0] == "__activate-upgrade":
-        sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
-    if argv and argv[0] == "__activate-install":
-        sys.exit(_dispatch_installer_activation(argv[1:]))
-    parser = build_parser()
-    args = parser.parse_args()
+    with invocation_authority(_cli_invocation_authority()):
+        if argv and argv[0] in _INTERNAL_ACTIVATION_COMMANDS:
+            _require_internal_activation_admission(argv[0])
+        if argv and argv[0] == "__restart-supervisor":
+            sys.exit(_dispatch_restart_supervisor(argv[1:]))
+        if argv and argv[0] == "__activate-upgrade":
+            sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
+        if argv and argv[0] == "__activate-install":
+            sys.exit(_dispatch_installer_activation(argv[1:]))
+        parser = build_parser()
+        args = parser.parse_args()
+        _require_command_admission(parser, args)
+        _dispatch_parsed_command(parser, args)
+
+
+def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
+    """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
         sys.exit(cmd_stop())

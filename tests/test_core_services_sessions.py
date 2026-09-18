@@ -77,13 +77,22 @@ def test_public_surface_is_stable():
         "is_session_archived",
         "list_sessions",
         "list_sessions_page",
+        # Chat-authority guard the queue commands share with the HTTP routes:
+        "require_session_chat_access",
+        # Chat authority plus the session's Agent: what a producer of deferred
+        # work must clear before the reservation it will be rebuilt from exists.
+        "require_session_turn_authority",
+        # The same question for a target whose Session does not exist yet: the
+        # Scope the future Session will be created in, plus the Agent the future
+        # dispatch will select.
+        "require_session_placement_authority",
         "set_agent_status",
         "touch_session",
         "touch_session_agent_activity",
         "update_session",
         # Legacy IM-style reservation helpers added in C2 for the CLI:
         "reserve_agent_session",
-            "reserve_standalone_agent_session",
+        "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
         # Terminal-archive guard raised by update_session on an archived row:

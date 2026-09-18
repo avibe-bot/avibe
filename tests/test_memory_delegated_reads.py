@@ -530,7 +530,7 @@ def test_public_definition_projection_preserves_sqlite_runtime_owner(managers, m
             restored = ManagedWatchStore().get_watch(definition.id)
         for item in [shown, *listed, fallback]:
             assert "delegated_memory_owner" not in item["metadata"]
-            assert item["metadata"]["resource_user_context"] == resource
+            assert "resource_user_context" not in item["metadata"]
         assert restored.metadata["delegated_memory_owner"] == owner
         assert restored.metadata["resource_user_context"] == resource
     finally:

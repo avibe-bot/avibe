@@ -1028,16 +1028,28 @@ def _spawn_stdin(
     process.stdin.close()
 
 
-def _memory_ui_child_env(
+def independent_process_env(
     env: dict[str, str] | None,
     *,
-    memory_ui_secret: str | None,
-) -> dict[str, str] | None:
+    memory_ui_secret: str | None = None,
+) -> dict[str, str]:
+    """Build the environment for a process Avibe owns, not one it runs for a caller.
+
+    The service, the UI server, the connector and the restart supervisor all
+    outlive the call that started them and act as the installation. The caller
+    provenance the current process may be carrying belongs to that call, so it
+    stops here — the child's own entry point is Owner work and would refuse it
+    anyway. ``None`` is materialized rather than passed through to ``Popen``,
+    because an implicit inherit would carry the caller across too.
+    """
+
+    from core.caller_context import environment_without_caller_context
+
+    child_env = environment_without_caller_context(env)
     if memory_ui_secret is None:
-        return env
+        return child_env
     from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
 
-    child_env = dict(os.environ if env is None else env)
     child_env[MEMORY_UI_SECRET_STDIN_ENV] = "1"
     return child_env
 
@@ -1065,7 +1077,7 @@ def spawn_background(
             start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=_memory_ui_child_env(env, memory_ui_secret=memory_ui_secret),
+            env=independent_process_env(env, memory_ui_secret=memory_ui_secret),
         )
         _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     finally:
@@ -1099,7 +1111,7 @@ def spawn_service_background_process(
             start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=_memory_ui_child_env(env, memory_ui_secret=memory_ui_secret),
+            env=independent_process_env(env, memory_ui_secret=memory_ui_secret),
         )
         _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     finally:

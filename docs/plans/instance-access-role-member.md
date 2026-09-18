@@ -18,7 +18,7 @@ This file is the **cross-lane contract**. Field names, role identifiers, and cap
 ## Decisions (frozen)
 
 1. **Identifier**: the instance access role string is `member` (not `admin`, not `instance_member`).
-2. **UI / docs copy**: display the instance access role as **"Member"** (ZH: **「成员」**). The owner accepts its overlap with the cloud organization-role copy. The stored/token value remains `member`.
+2. **UI / docs copy**: display the instance access role as **"Member"** (ZH: **「管理者」**). The stored/token value remains `member`. *(Superseded 2026-09-18: the Chinese label was 「成员」 when this was frozen, accepting the overlap with the cloud organization-role copy. The owner replaced it with 「管理者」 to end that overlap; English is unchanged. Authoritative record: `docs/plans/editor-permission-parity.md`.)*
 3. **Ownership transfer stays owner-only.** `member` cannot transfer instance ownership (Personal or Organization). Treat it as member management.
 4. **Applies to both Personal and Organization Avibe.**
 5. **Personal vs Organization ACL**: `member` is treated as editor-or-higher for the Personal resource-use bypass (`has_role("editor")` already covers it once rank is `viewer < editor < member < owner`). Organization ACL evaluation is unchanged for *use*: `member` is still subject to Agent / Project resource ACL like any non-owner Organization principal. Agent *management* is owner-equivalent at the resource layer, including resources owned by another subject, resources bound to another organization policy, and resources with no policy row.
@@ -145,7 +145,7 @@ Project ACL (`access_role` `editor|viewer`) is **out of scope**.
 
 - `ui/src/lib/sessionInfo.ts`: `instance_role: 'owner' | 'member' | 'editor' | 'viewer'`; `InstanceCapabilities.can_manage_access_members: boolean`.
 - Permissions page (`ui/src/features/permissions/`): role picker offers `member`; controls that mutate members / roles require `can_manage_access_members` (not `can_manage_instance`).
-- i18n: EN `"Member"` / ZH `"成员"` for the instance-access role. The deliberate overlap with organization-member copy is accepted.
+- i18n: EN `"Member"` / ZH `"管理者"` for the instance-access role (ZH superseded 2026-09-18; it read `"成员"` here, accepting the overlap with organization-member copy).
 - AppShell / Workbench / settings: continue to key off capabilities. After projection includes `can_manage_instance=true` for member, those surfaces light up automatically. Member-management widgets must additionally require `can_manage_access_members`.
 
 ## Tests (property, not enumerations)
@@ -160,7 +160,7 @@ Seed one principal of every existing role **plus** `member`, run the change, ass
 6. Pre-`member` allowlist / token / snapshot fixtures still load.
 7. Personal `member` gets the Personal editor resource-use bypass (Agent + projects); Personal `viewer` does not.
 8. Organization `member` remains subject to Agent / Project ACL for *use*; Agent management is owner-equivalent at the resource layer.
-9. Instance-access role copy is `"Member"` / `"成员"` without changing the stored value.
+9. Instance-access role copy is `"Member"` / `"管理者"` (ZH superseded 2026-09-18, was `"成员"`) without changing the stored value.
 
 ## Lane split
 
@@ -220,7 +220,7 @@ The initial implementation left three authorization layers inconsistent. The cap
 
 1. `member` gets owner-equivalent Agent management at the resource layer. This includes built-in Agents, Agents owned by other subjects, missing-policy rows, and Organization policies bound to another organization. Editor behavior is unchanged. Resource *use* remains ACL-governed, and `_policy_allows_owner_control` remains limited to the Instance Owner or resource owner.
 2. Instance-wide default Agent selection is open to `member`: the HTTP route is member-tier and `set_default_agent_name` uses `can_manage_agents`. Bulk Agent onboarding and credential/host-lifecycle routes remain Owner-only.
-3. The instance-access role display copy is `"Member"` in English and `"成员"` in Chinese. The stored/token value remains `member`; overlap with organization-member copy is deliberate.
+3. The instance-access role display copy is `"Member"` in English and `"管理者"` in Chinese (ZH superseded 2026-09-18, was `"成员"` with deliberate organization-member overlap). The stored/token value remains `member`.
 
 ### Pre-catalog fallback audit
 

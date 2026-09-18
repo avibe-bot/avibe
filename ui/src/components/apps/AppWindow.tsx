@@ -410,6 +410,7 @@ export const AppWindow: React.FC<{
                 compact
                 sessionId={showpageSid}
                 canManageInstance={capabilities.can_manage_instance}
+                canPinToDock={capabilities.can_chat}
                 onOpenChange={handleShareOpenChange}
                 ownerWindowId={win.id}
               />

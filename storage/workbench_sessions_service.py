@@ -291,16 +291,91 @@ def get_session(
     )
 
 
-def get_active_session(conn: Connection, session_id: str) -> dict[str, Any]:
+def get_active_session(
+    conn: Connection,
+    session_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Like :func:`get_session` but treats archived sessions as absent.
 
     Archived sessions are soft-deleted: the agent-facing ``vibe session`` surface
     must never surface them, so ``get`` / ``update`` raise ``LookupError`` for an
     archived id exactly as they would for a missing one.
+
+    The caller's authority is carried through rather than re-derived, so the
+    Project read check in :func:`get_session` answers for whoever asked.
     """
-    payload = get_session(conn, session_id)
+    payload = get_session(conn, session_id, authorization_context=authorization_context)
     if payload.get("status") == "archived":
         raise LookupError(f"Session not found: {session_id}")
+    return payload
+
+
+def require_session_chat_access(
+    conn: Connection,
+    session_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Active session payload for a caller allowed to drive its conversation.
+
+    Reading a session is Viewer work; changing what it will say next is chat
+    work, so inspecting, dropping or promoting queued messages resolves the same
+    effective role ``update_session`` requires — the decision the HTTP layer
+    already makes for ``/api/sessions/<id>/...`` in its Project middleware.
+
+    A refusal is ``LookupError``, matching every other guard here: someone who
+    cannot chat in the Project should not learn the session exists.
+    """
+
+    context = require_instance_role(authorization_context, "editor")
+    payload = get_active_session(conn, session_id, authorization_context=context)
+    if not _has_runtime_management_access(context):
+        role = project_access_service.get_effective_session_role(conn, context, session_id)
+        if not project_access_service.role_allows(role, "editor"):
+            raise LookupError(f"Session not found: {session_id}")
+    return payload
+
+
+def require_session_turn_authority(
+    conn: Connection,
+    session_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Active session payload for a caller allowed to start a turn in it.
+
+    Queueing deferred work needs chat access to the session *and* use access to
+    the Agent that will run it — the same pair ``sessions_service`` requires
+    before it reserves a new session, asked here about one that already exists.
+
+    A turn is rebuilt later from its reservation, under the authority recorded
+    when the row was written, so both answers have to be known before the row
+    exists. Deciding only at execution time would let a refused caller occupy
+    the session, and leaves the refusal somewhere nobody is waiting for it.
+
+    The Agent half asks about the session's *selected* Agent, the same resource
+    check reserving a session applies to the Agent it is given. A row that
+    selects none — an IM or pre-catalog session carrying only a backend — is
+    left to the entitlement rule the turn already applies at execution, so this
+    refuses what a caller may not reach without newly refusing what they could.
+
+    A refusal keeps this module's ``LookupError`` for chat access and
+    ``VibeAgentAccessError`` for the Agent, so callers keep their own vocabulary.
+    """
+
+    context = require_instance_role(authorization_context, "editor")
+    payload = require_session_chat_access(conn, session_id, authorization_context=context)
+
+    from core.vibe_agents import ensure_agent_selection_access
+
+    ensure_agent_selection_access(
+        conn,
+        agent_name=payload.get("agent_name"),
+        agent_id=payload.get("agent_id"),
+        user_context=context,
+    )
     return payload
 
 
@@ -310,6 +385,7 @@ def list_sessions_page(
     platform: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> PageResult[dict[str, Any]]:
     """Active sessions, most-recently-active first, offset-paginated for the CLI.
 
@@ -321,12 +397,26 @@ def list_sessions_page(
 
     ``visibility == 'foreground'`` is positive for the reason ``list_sessions`` spells
     out: runtime-owned ``system`` sessions are excluded without naming them.
+
+    Project access narrows the QUERY, exactly as it does in ``list_sessions``.
+    Filtering the rows afterwards would be a different answer: the page is built
+    from ``limit + 1`` rows, so inaccessible sessions would consume the page and
+    the caller would page through gaps whose size tells them what is there.
     """
+    context = require_instance_role(authorization_context, "viewer")
     request = PageRequest(page=max(int(page), 1), limit=max(int(limit), 1))
     query = select(agent_sessions).where(
         agent_sessions.c.status == "active",
         agent_sessions.c.visibility == "foreground",
     )
+    if not _has_runtime_management_access(context):
+        accessible_scope_ids = {
+            project_access_service.project_scope_id(project_id)
+            for project_id in project_access_service.accessible_project_ids(conn, context)
+        }
+        if not accessible_scope_ids:
+            return page_result_from_limit_plus_one([], request)
+        query = query.where(agent_sessions.c.scope_id.in_(accessible_scope_ids))
     if platform:
         platform_filter = agent_sessions.c.scope_id.like(f"{platform}::%")
         if platform == "avibe":
@@ -345,7 +435,10 @@ def list_sessions_page(
         .offset(request.offset)
     )
     rows = [dict(row) for row in conn.execute(query).mappings().all()]
-    payloads = [_row_to_payload(row) for row in rows]
+    payloads = [
+        _row_to_payload(row, include_local_details=_include_local_details(context))
+        for row in rows
+    ]
     return page_result_from_limit_plus_one(payloads, request)
 
 

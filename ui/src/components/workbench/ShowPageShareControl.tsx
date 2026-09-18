@@ -20,6 +20,9 @@ export const ShowPageShareControl: React.FC<{
   sessionId: string;
   initialAccess?: ShowPageAccess | null;
   canManageInstance?: boolean;
+  /** Dock pin/undock authority. `/api/dock/pins` is an editor-tier route, so
+   *  this is deliberately NOT `canManageInstance`. */
+  canPinToDock?: boolean;
   onPayloadChange?: (payload: ShowPageLinkInfo) => void;
   onOpenChange?: (open: boolean) => void;
   compact?: boolean;
@@ -28,6 +31,7 @@ export const ShowPageShareControl: React.FC<{
   sessionId,
   initialAccess = null,
   canManageInstance = false,
+  canPinToDock = false,
   onPayloadChange,
   onOpenChange,
   compact = false,
@@ -320,7 +324,7 @@ export const ShowPageShareControl: React.FC<{
           </div>
         ) : null}
 
-        {payload && canManageInstance ? (
+        {payload && canPinToDock ? (
           <div className="border-t border-border pt-3">
             <div className="flex items-center gap-3">
               <span className="grid size-9 shrink-0 place-items-center rounded-md border border-border bg-foreground/[0.03] text-cyan-ink">

@@ -34,6 +34,7 @@ from vibe.authorization import (
     INSTANCE_ROLES,
     AuthorizationContext,
     context_from_session_payload,
+    default_authorization_context,
     instance_owner_context,
 )
 
@@ -224,7 +225,9 @@ def resolve_resource_access_context(
 
     if has_request_context():
         return context
-    return instance_owner_context()
+    # Outside a request, the invocation that is running owns the answer; with no
+    # invocation either, this is a standalone local entry point and stays Owner.
+    return default_authorization_context()
 
 
 def ensure_harness_definition_write(
@@ -261,6 +264,10 @@ def metadata_allows_harness_runtime(
     return bool(context is not None and context.has_role("editor"))
 
 
+def _normalized_snapshot_email(email: str | None) -> str | None:
+    return (email or "").strip().lower() or None
+
+
 def metadata_with_resource_user_context(
     metadata: Mapping[str, Any] | None,
     user_context: ResourceUserContext | Mapping[str, Any] | None = None,
@@ -275,6 +282,12 @@ def metadata_with_resource_user_context(
 
     result[RESOURCE_USER_CONTEXT_METADATA_KEY] = {
         "sub": context.subject,
+        # Project ACLs bind ``email`` / ``email_domain`` principals, so a
+        # snapshot without it denies deferred work the live request allowed.
+        # Normalized the way ``_matching_binding_role`` compares it. Written
+        # from the signed context after the key is dropped above, so caller
+        # metadata cannot supply one.
+        "email": _normalized_snapshot_email(context.email),
         "vibe_organization_id": context.organization_id,
         "vibe_organization_member_id": context.organization_member_id,
         "vibe_organization_role": context.organization_role,
@@ -1410,8 +1423,19 @@ def _policy_allows(
     # runtime access intentionally ignores them for validated remote sessions.
     # Direct non-remote contexts still use the stored policy so service-level
     # ACL checks cannot be bypassed by a caller-supplied role alone.
+    #
+    # A Personal Instance is the other half of that same rule: it has no
+    # Organization to be an active member of, so it qualifies on the SIGNED
+    # instance kind (as ``agent`` above already does) rather than on missing
+    # Organization claims. Management is unaffected — metadata writes still go
+    # through ``_require_secret_resource_management`` and protected secrets still
+    # require their approval and proof.
     if resource_kind in {"skill", "vault_secret"}:
-        if context.is_remote and context.is_active_organization_member and context.has_role("editor"):
+        if (
+            context.is_remote
+            and context.has_role("editor")
+            and (context.is_active_organization_member or context.is_personal_instance)
+        ):
             return True
     if not context.can_use_resource(resource_kind):
         return False

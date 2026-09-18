@@ -7796,6 +7796,141 @@ def test_public_show_page_events_preserve_dispatch_for_authorized_user(monkeypat
     assert dispatches[0]["session_id"] == "ses123"
 
 
+def test_public_show_page_dispatch_records_the_visitor_that_admitted_it(monkeypatch, tmp_path):
+    """PERMISSIONS-027: the share route resolves its visitor once and stores that visitor.
+
+    Admission and provenance have to read one object. A share visitor is not
+    whoever this process would otherwise resolve to, and pairing, claims and
+    access can all change between two awaits — so resolving a second time could
+    admit one person and record the deferred turn under another. The resolver
+    below answers differently after its first call, which makes any second
+    resolution visible in the identity that ends up persisted.
+    """
+
+    from dataclasses import replace as replace_context
+
+    from core.show_session_events import ShowSessionEventStore
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    published = []
+    monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
+
+    resolved = []
+    resolve_public_editor = ui_server._show_public_editor_context
+
+    def changing_editor_context():
+        context = resolve_public_editor()
+        resolved.append(context)
+        if len(resolved) == 1:
+            return context
+        return replace_context(context, email="someone-else@example.com", subject="user-9")
+
+    monkeypatch.setattr("vibe.ui_server._show_public_editor_context", changing_editor_context)
+
+    appended = []
+    append_event = ShowSessionEventStore.append
+
+    def recording_append(self, session_id, payload, **kwargs):
+        appended.append(kwargs.get("authorization_context"))
+        return append_event(self, session_id, payload, **kwargs)
+
+    monkeypatch.setattr(ShowSessionEventStore, "append", recording_append)
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _active_org_cookie(config, "editor@example.com", "user-2"),
+        domain="alex.avibe.bot",
+    )
+
+    reserved = []
+
+    async def fake_dispatch_async(payload, **kwargs):
+        # Read the reservation where the controller picks it up. Acceptance
+        # materializes the snapshot out of the delivery row afterwards, so this
+        # is the moment the recorded authority has to be there.
+        with create_sqlite_engine().connect() as conn:
+            row = message_deliveries.get_delivery(conn, payload["user_message_id"])
+            reserved.append(message_deliveries.delivery_payload(row)["metadata"])
+        _accept_dispatch(payload)
+        return {"status_code": 202, "body": {"ok": True}}
+
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
+        response = client.post(
+            f"/p/{share_id}/__show/events",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers=_public_show_write_headers(share_id),
+            json={
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Please take this on.", "dispatch": True},
+            },
+        )
+
+    assert response.status_code == 201
+    # One resolution answered the admission decision, the display author and the
+    # authority the reservation is written under.
+    assert len(resolved) == 1
+    assert appended == [resolved[0]]
+    # The stored event is authored by that same visitor. The public projection
+    # drops the email on the way out, which is why the identity is checked here
+    # and in the reservation rather than in the response body.
+    assert published[0]["payload"]["author"]["email"] == "editor@example.com"
+    assert "email" not in response.get_json()["event"]["payload"]["author"]
+
+    snapshot = reserved[0][resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+    assert snapshot["email"] == "editor@example.com"
+    assert snapshot["sub"] == "user-2"
+
+
+def test_public_show_page_dispatch_fails_closed_without_a_resolved_visitor(monkeypatch, tmp_path):
+    """PERMISSIONS-027: no resolved visitor, no write — never a fall through to local authority.
+
+    ``ShowSessionEventStore.append`` treats a missing context as "the running
+    invocation answers", which on this process is the local Owner. The share
+    route must therefore refuse before it gets there rather than hand down a
+    ``None`` the store would resolve for it.
+    """
+
+    from core.show_session_events import ShowSessionEventStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    monkeypatch.setattr("vibe.ui_server._show_public_editor_context", lambda: None)
+    monkeypatch.setattr(
+        ShowSessionEventStore,
+        "append",
+        lambda *args, **kwargs: pytest.fail("a write ran without a resolved visitor"),
+    )
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _active_org_cookie(config, "editor@example.com", "user-2"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        f"/p/{share_id}/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers=_public_show_write_headers(share_id),
+        json={
+            "type": "human.annotation.created",
+            "annotation": {"comment": "Please take this on.", "dispatch": True},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "public_show_events_login_required"
+
+
 @pytest.mark.parametrize("event_type", ["assistant.mark.created", "system.annotation.control"])
 def test_public_show_page_events_reject_non_human_types(monkeypatch, tmp_path, event_type):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

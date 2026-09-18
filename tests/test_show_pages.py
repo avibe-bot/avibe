@@ -3954,6 +3954,9 @@ def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tm
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    # A dispatching event reserves its turn under the caller's own
+    # authority before anything is posted, so the session has to exist.
+    _seed_show_cli_session()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
 
     captured = {}
@@ -4014,6 +4017,9 @@ def test_show_event_cli_dispatch_preserves_top_level_payload(monkeypatch, tmp_pa
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    # A dispatching event reserves its turn under the caller's own
+    # authority before anything is posted, so the session has to exist.
+    _seed_show_cli_session()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
 
     captured = {}
@@ -4129,6 +4135,9 @@ def test_show_event_cli_embedded_dispatch_fallback_uses_synchronous_bridge(monke
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    # A dispatching event reserves its turn under the caller's own
+    # authority before anything is posted, so the session has to exist.
+    _seed_show_cli_session()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
     captured = {}
 
@@ -4171,6 +4180,9 @@ def test_show_event_cli_failed_delivery_reports_generated_event_id(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    # A dispatching event reserves its turn under the caller's own
+    # authority before anything is posted, so the session has to exist.
+    _seed_show_cli_session()
     monkeypatch.setattr(cli, "_post_show_event_to_live_ui", lambda *_args: None)
     attempted = {}
 
@@ -4220,6 +4232,9 @@ def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    # A dispatching event reserves its turn under the caller's own
+    # authority before anything is posted, so the session has to exist.
+    _seed_show_cli_session()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
     posted = {}
 
@@ -4412,6 +4427,9 @@ def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
+    # A dispatching event reserves its turn under the caller's own
+    # authority before anything is posted, so the session has to exist.
+    _seed_show_cli_session()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
     posted = {}
 

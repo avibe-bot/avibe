@@ -1261,6 +1261,11 @@ export type WorkbenchEventHandlers = {
   onSessionStatus?: (data: { session_id: string; agent_status: 'idle' | 'running' | 'failed' }) => void;
   // The send-while-busy queue for a session changed (enqueue / flush / remove).
   onQueueUpdated?: (data: { session_id: string }) => void;
+  // A Task / Watch definition was created, edited, enabled, paused or removed.
+  // Instance-scoped like the two below, and `definition_type` is a hint, not a
+  // filter: below runtime management the server reduces the frame to `{}`, so a
+  // consumer that reads the field must still refetch when it is absent.
+  onDefinitionsUpdated?: (data: { definition_type?: string }) => void;
   onRunsUpdated?: (data: {
     run_id: string;
     status: HarnessRunStatus;
@@ -3242,6 +3247,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onQueueUpdated?.(envelope.data);
+      });
+    });
+    source.addEventListener('definitions.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{ definition_type?: string }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/harness'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onDefinitionsUpdated?.(envelope.data);
       });
     });
     source.addEventListener('runs.updated', (e: MessageEvent) => {

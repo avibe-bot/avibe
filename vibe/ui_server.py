@@ -11934,6 +11934,14 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
         return True
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
         return True
+    from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS
+
+    if event_type in INSTANCE_SCOPED_REFETCH_EVENTS:
+        # Instance-wide invalidations: the recipient refetches an endpoint that
+        # re-applies its own authority, so they bypass the session/scope filter
+        # below even when a publisher attaches an optional session id. What the
+        # frame may CARRY is decided by ``_workbench_event_payload_for_context``.
+        return True
     data = _workbench_event_data(payload)
     if event_type == "projects.changed":
         # This global invalidation is safe only while it carries no project data.
@@ -11967,6 +11975,15 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     Returns ``None`` when the event cannot be projected safely for this
     recipient, in which case the caller drops the frame.
     """
+    from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS
+
+    if event_type in INSTANCE_SCOPED_REFETCH_EVENTS and not _has_runtime_management_access(context):
+        # Below runtime management the frame is a bare signal: consumers refetch
+        # and ignore the body, while publishers attach identifiers (session ids,
+        # ``vaults.updated``'s secret name) that this recipient's own read
+        # endpoints may filter out. Reducing the class, not one field, keeps a
+        # future publisher field from disclosing by default.
+        return json.dumps({"type": event_type, "data": {}}, separators=(",", ":"))
     if (
         event_type == "show.event"
         and context is not None
@@ -13596,7 +13613,15 @@ def _show_page_runtime_failure_response(
 
 def _show_session_event_error_response(exc: Exception):
     code = getattr(exc, "code", "show_session_event_failed")
-    status = 404 if code == "session_not_found" else 409 if code == "event_id_conflict" else 400
+    status = (
+        404
+        if code == "session_not_found"
+        else 409
+        if code == "event_id_conflict"
+        else 403
+        if code == "session_access_forbidden"
+        else 400
+    )
     return jsonify({"ok": False, "code": code, "error": str(exc)}), status
 
 
@@ -13757,13 +13782,26 @@ def _show_limited_viewer_is_allowed(
     return allowlisted
 
 
-async def _show_public_request_author() -> dict[str, str] | None:
-    context = await asyncio.to_thread(_show_public_editor_context)
+def _show_public_author_from_context(context: Any) -> dict[str, str] | None:
+    """Project one validated public Editor context into its display author.
+
+    The author is a rendering of the authority, not a second source of it, so
+    the write path resolves the context once and derives both from that object.
+    """
+
     if context is None:
         return None
     if context.is_remote:
         return {"kind": "user", "email": context.email} if context.email else None
     return {"kind": "local"}
+
+
+async def _show_public_request_author() -> dict[str, str] | None:
+    """Resolve and project in one step, for the read-only public surfaces."""
+
+    return _show_public_author_from_context(
+        await asyncio.to_thread(_show_public_editor_context)
+    )
 
 
 def _show_request_author() -> dict[str, str] | None:
@@ -13819,6 +13857,7 @@ async def _show_event_response_from_payload(
     public: bool = False,
     public_share_id: str | None = None,
     allow_dispatch: bool = True,
+    authorization_context: Any = None,
 ):
     context = getattr(g, "authorization_context", None)
     is_remote_caller = context is not None and context.is_remote
@@ -13848,6 +13887,14 @@ async def _show_event_response_from_payload(
             ),
             400,
         )
+    # The share route has no validated request context of its own — its visitor
+    # is whoever the link admitted, not whoever this process would otherwise
+    # resolve to — so it resolves that visitor once at its own boundary and hands
+    # the object down. Resolving again here would let the identity that admitted
+    # the write differ from the identity the deferred turn is stored under.
+    event_context = context if context is not None else authorization_context
+    if public and event_context is None:
+        return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
     store = _show_session_event_store()
     try:
         event_payload = store.append(
@@ -13855,6 +13902,7 @@ async def _show_event_response_from_payload(
             payload,
             author=author,
             reserve_dispatch=allow_dispatch,
+            authorization_context=event_context,
         )
     except Exception as exc:
         return _show_session_event_error_response(exc)
@@ -16110,7 +16158,11 @@ async def serve_public_show_page(share_id, asset_path):
                 )
             if request.method != "POST":
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
-            author = await _show_public_request_author()
+            # One resolution for the whole write: the admission decision below,
+            # the display author, and the authority the event is stored under all
+            # come from this object, so they cannot describe different people.
+            write_context = await asyncio.to_thread(_show_public_editor_context)
+            author = _show_public_author_from_context(write_context)
             if author is None:
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
             can_annotate = _show_annotation_capability(
@@ -16135,6 +16187,7 @@ async def serve_public_show_page(share_id, asset_path):
                 public=True,
                 public_share_id=share_id,
                 allow_dispatch=can_annotate,
+                authorization_context=write_context,
             )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):

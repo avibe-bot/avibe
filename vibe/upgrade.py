@@ -38,6 +38,7 @@ from vibe.package_shape import (
 )
 
 from config import paths as config_paths
+from core.caller_context import environment_without_caller_context
 from core.install_integrity import (
     IntegrityResult,
     isolated_probe_environment,
@@ -382,7 +383,11 @@ def defer_upgrade_activation(
             start_new_session=True,
             close_fds=True,
             cwd=get_safe_cwd(),
-            env=isolated_probe_environment(),
+            # Activation is Avibe's own work: it runs after this process exits,
+            # under the installation's authority, not the caller's. Keep the
+            # interpreter isolation this spawn already needs and drop the caller
+            # hop on top of it, rather than changing what probes inherit.
+            env=environment_without_caller_context(isolated_probe_environment()),
         )
 
 

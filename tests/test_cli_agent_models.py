@@ -158,7 +158,15 @@ def test_cmd_agent_models_by_name_echoes_current(monkeypatch):
     agent = SimpleNamespace(
         name="my-audit", backend="claude", model="claude-opus-4-8", reasoning_effort="high"
     )
-    monkeypatch.setattr(cli, "_agent_store", lambda: SimpleNamespace(require=lambda name: agent))
+    # Naming an Agent reads that Agent, so the command asks the store for one
+    # the caller may USE. ``require`` stays on the stub because the two answer
+    # the same row here -- the access check is exercised in the permissions
+    # scenarios, not by weakening it into this catalog test.
+    monkeypatch.setattr(
+        cli,
+        "_agent_store",
+        lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
+    )
     monkeypatch.setattr(
         cli.api,
         "agent_model_options",
@@ -188,7 +196,15 @@ def test_cmd_agent_models_current_flags_invalid_effort(monkeypatch):
     agent = SimpleNamespace(
         name="drifted", backend="claude", model="claude-opus-4-8", reasoning_effort="bogus"
     )
-    monkeypatch.setattr(cli, "_agent_store", lambda: SimpleNamespace(require=lambda name: agent))
+    # Naming an Agent reads that Agent, so the command asks the store for one
+    # the caller may USE. ``require`` stays on the stub because the two answer
+    # the same row here -- the access check is exercised in the permissions
+    # scenarios, not by weakening it into this catalog test.
+    monkeypatch.setattr(
+        cli,
+        "_agent_store",
+        lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
+    )
     monkeypatch.setattr(
         cli.api,
         "agent_model_options",
@@ -213,7 +229,15 @@ def test_cmd_agent_models_model_filter_keeps_current_honest(monkeypatch):
     agent = SimpleNamespace(
         name="my-audit", backend="claude", model="claude-opus-4-8", reasoning_effort="high"
     )
-    monkeypatch.setattr(cli, "_agent_store", lambda: SimpleNamespace(require=lambda name: agent))
+    # Naming an Agent reads that Agent, so the command asks the store for one
+    # the caller may USE. ``require`` stays on the stub because the two answer
+    # the same row here -- the access check is exercised in the permissions
+    # scenarios, not by weakening it into this catalog test.
+    monkeypatch.setattr(
+        cli,
+        "_agent_store",
+        lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
+    )
     monkeypatch.setattr(
         cli.api,
         "agent_model_options",

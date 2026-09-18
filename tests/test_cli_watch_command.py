@@ -507,10 +507,11 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["metadata"]["resource_user_context"][
-        "vibe_instance_role"
-    ] == "editor"
-    assert len(ManagedWatchStore(store_path).list_watches()) == 1
+    # Persisted for the deferred run, hidden from the projection it prints.
+    assert "resource_user_context" not in payload["definition"]["metadata"]
+    stored = ManagedWatchStore(store_path).list_watches()
+    assert len(stored) == 1
+    assert stored[0].metadata["resource_user_context"]["vibe_instance_role"] == "editor"
     assert len(startup_calls) == 1
 
 
