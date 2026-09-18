@@ -6,9 +6,7 @@ import {
   isLocalOnlyMessagingField,
   isMemorySettingsPath,
   isOwnerOnlyPath,
-  rememberSettingsPath,
-  SETTINGS_LAST_PATH_KEY,
-  settingsLandingPath,
+  SETTINGS_LANDING_PATH,
 } from './adminNavigation';
 
 beforeEach(() => {
@@ -43,27 +41,12 @@ describe('isOwnerOnlyPath', () => {
   });
 });
 
-describe('settings landing memory', () => {
-  it('remembers the most recent canonical section or detail', () => {
-    rememberSettingsPath('/settings/backends/claude');
-    expect(window.localStorage.getItem(SETTINGS_LAST_PATH_KEY)).toBe('/settings/backends/claude');
-    expect(settingsLandingPath(true)).toBe('/settings/backends/claude');
+describe('settings landing', () => {
+  it('opens General, which every role can read', () => {
+    expect(SETTINGS_LANDING_PATH).toBe('/settings/general');
+    expect(isOwnerOnlyPath(SETTINGS_LANDING_PATH)).toBe(false);
   });
 
-  it('falls back to Replies for members when an owner-only section was remembered', () => {
-    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, '/settings/service');
-    expect(settingsLandingPath(false)).toBe('/settings/replies');
-  });
-
-  it('does not remember transitional platform scope pages as the Settings landing page', () => {
-    rememberSettingsPath('/settings/platforms/groups');
-    expect(settingsLandingPath(true)).toBe('/settings/replies');
-  });
-
-  it.each(['/settings/appearance', '/settings/account'])('retires a remembered preference destination: %s', (path) => {
-    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, path);
-    expect(settingsLandingPath(true)).toBe('/settings/replies');
-  });
 });
 
 describe('isLocalOnlyMessagingField', () => {

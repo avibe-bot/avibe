@@ -107,6 +107,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               enabled={runtime.enabled}
               cliStatus={runtime.cliStatus}
               onChanged={runtime.handleLifecycleChanged}
+              onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
             />
             {!hideEnableToggle && (
               <ToggleSwitch enabled={runtime.enabled} onClick={runtime.toggleEnabled} />

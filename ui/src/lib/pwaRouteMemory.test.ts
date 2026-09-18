@@ -51,6 +51,31 @@ describe('PWA route memory', () => {
     expect(setItem).toHaveBeenCalledWith('avibe.pwa.last-route.v1', '/chat/session-456');
   });
 
+  it('cold-launches an installed PWA back onto General through the whole chain', () => {
+    // One test-owned store carries the actual write -> read -> resolve path, so
+    // the allowlist entry is exercised where the product uses it rather than
+    // only where it is declared.
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => { store.set(key, value); },
+    };
+
+    writeLastPwaPath('/settings/general?tab=theme#appearance', storage);
+    expect(store.get('avibe.pwa.last-route.v1')).toBe('/settings/general');
+
+    const remembered = readLastPwaPath(storage);
+    expect(remembered).toBe('/settings/general');
+    expect(resolvePwaLaunchPath(true, { pathname: '/', search: '', hash: '' }, remembered))
+      .toBe('/settings/general');
+
+    // The allowlist is still a list, not a prefix rule: an unknown sub-path is
+    // rejected at the write, leaving the last restorable route intact.
+    expect(normalizeRestorablePwaPath('/settings/general/theme')).toBeNull();
+    writeLastPwaPath('/settings/general/theme', storage);
+    expect(readLastPwaPath(storage)).toBe('/settings/general');
+  });
+
   it('tolerates unavailable browser storage', () => {
     expect(
       readLastPwaPath({

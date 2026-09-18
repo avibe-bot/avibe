@@ -13,13 +13,29 @@ import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
 
 function routePath(element: ts.JsxOpeningLikeElement): string | null {
   if (element.tagName.getText() !== 'Route') return null;
-  const path = element.attributes.properties.find(
+  const path = jsxAttribute(element, 'path')?.initializer;
+  return path && ts.isStringLiteral(path) ? path.text : null;
+}
+
+function jsxAttribute(
+  element: ts.JsxOpeningLikeElement,
+  name: string,
+): ts.JsxAttribute | undefined {
+  return element.attributes.properties.find(
     (property): property is ts.JsxAttribute =>
-      ts.isJsxAttribute(property) && property.name.getText() === 'path',
+      ts.isJsxAttribute(property) && property.name.getText() === name,
   );
-  return path?.initializer && ts.isStringLiteral(path.initializer)
-    ? path.initializer.text
-    : null;
+}
+
+/** The `to` of a `<Route element={<Navigate to="…" />} />`, or null for a page route. */
+function redirectTarget(element: ts.JsxOpeningLikeElement): string | null {
+  const initializer = jsxAttribute(element, 'element')?.initializer;
+  if (!initializer || !ts.isJsxExpression(initializer)) return null;
+  const rendered = initializer.expression;
+  if (!rendered || !ts.isJsxSelfClosingElement(rendered)) return null;
+  if (rendered.tagName.getText() !== 'Navigate') return null;
+  const to = jsxAttribute(rendered, 'to')?.initializer;
+  return to && ts.isStringLiteral(to) ? to.text : null;
 }
 
 function resolveRoutePath(path: string, parentPath: string | null): string {
@@ -27,7 +43,13 @@ function resolveRoutePath(path: string, parentPath: string | null): string {
   return parentPath ? `${parentPath.replace(/\/$/, '')}/${path}` : path;
 }
 
-function declaredRoutePaths(sourceText: string): string[] {
+type DeclaredRoutes = {
+  paths: string[];
+  /** Resolved route path -> the path its `<Navigate>` element sends callers to. */
+  redirects: Record<string, string>;
+};
+
+function declaredRoutes(sourceText: string): DeclaredRoutes {
   const source = ts.createSourceFile(
     'App.tsx',
     sourceText,
@@ -35,38 +57,58 @@ function declaredRoutePaths(sourceText: string): string[] {
     true,
     ts.ScriptKind.TSX,
   );
-  const declared: string[] = [];
+  const paths: string[] = [];
+  const redirects: Record<string, string> = {};
+
+  const record = (element: ts.JsxOpeningLikeElement, resolvedPath: string) => {
+    paths.push(resolvedPath);
+    const target = redirectTarget(element);
+    if (target !== null) redirects[resolvedPath] = target;
+  };
 
   const visit = (node: ts.Node, parentPath: string | null) => {
     if (ts.isJsxElement(node)) {
       const path = routePath(node.openingElement);
       const resolvedPath = path === null ? parentPath : resolveRoutePath(path, parentPath);
-      if (path !== null) declared.push(resolvedPath as string);
+      if (path !== null) record(node.openingElement, resolvedPath as string);
       node.children.forEach((child) => visit(child, resolvedPath));
       return;
     }
     if (ts.isJsxSelfClosingElement(node)) {
       const path = routePath(node);
-      if (path !== null) declared.push(resolveRoutePath(path, parentPath));
+      if (path !== null) record(node, resolveRoutePath(path, parentPath));
       return;
     }
     ts.forEachChild(node, (child) => visit(child, parentPath));
   };
 
   visit(source, null);
-  return declared;
+  return { paths, redirects };
 }
+
+const appRoutes = () =>
+  declaredRoutes(readFileSync(new URL('../App.tsx', import.meta.url), 'utf8'));
 
 describe('AppShell route policy', () => {
   it('matches every page and generated legacy redirect declared by App.tsx', () => {
-    const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
     const declared = [
-      ...declaredRoutePaths(appSource),
+      ...appRoutes().paths,
       ...LEGACY_SETTINGS_REDIRECTS.map((redirect) => redirect.from),
     ];
     const catalog = [...APPLICATION_ROUTE_PATHS, ...APPLICATION_DYNAMIC_ROUTE_PATHS];
 
     expect([...declared].sort()).toEqual([...catalog].sort());
+  });
+
+  it('sends each retired Settings alias to the page that took its content over', () => {
+    // Read off App.tsx itself: an alias that still points at the page it was
+    // moved away from is a live wrong destination, not a stale constant.
+    const { redirects } = appRoutes();
+
+    // Theme controls moved to General; the rest of Appearance did not survive.
+    expect(redirects['/settings/appearance']).toBe('/settings/general');
+    // Account remains part of the Replies page, so its alias is unchanged.
+    expect(redirects['/settings/account']).toBe('/settings/replies');
   });
 
   it('recognizes exact and dynamic routes without reserving their namespaces', () => {

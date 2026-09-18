@@ -194,3 +194,80 @@ def test_controller_rejects_unknown_backend_reconcile() -> None:
         asyncio.run(Controller.reconcile_agent_backends(controller, ["unknown"]))
 
     controller.backend_restart_coordinator.request_restart.assert_not_awaited()
+
+
+def test_application_projection_tracks_prepare_drain_failure_retry_and_registration():
+    async def run():
+        service = _AgentService()
+        service.agents = {"opencode": object(), "claude": object()}
+        controller = _controller(service)
+        refresh = AsyncMock()
+        coordinator = BackendRestartCoordinator(controller, refresh, poll_interval=0.001)
+        assert coordinator.snapshot("opencode") == {"state": "applied"}
+        assert coordinator.snapshot("codex") == {"state": "unavailable"}
+
+        preparing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def prepare(_backend):
+            preparing.set()
+            await release.wait()
+
+        service.prepare_backend_restart = prepare
+        request = asyncio.create_task(coordinator.request_restart("opencode"))
+        await preparing.wait()
+        assert coordinator.snapshot("opencode") == {"state": "draining"}
+        assert coordinator.snapshot("claude") == {"state": "applied"}
+        service.active = True
+        release.set()
+        assert await request == "draining"
+        assert coordinator.snapshot("opencode") == {"state": "draining"}
+        refresh.side_effect = RuntimeError("application failed")
+        service.active = False
+        with pytest.raises(RuntimeError, match="application failed"):
+            await coordinator.wait("opencode")
+        assert coordinator.snapshot("opencode") == {"state": "failed", "error": "application failed"}
+        assert coordinator.snapshot("claude") == {"state": "applied"}
+
+        refresh.side_effect = None
+        assert await coordinator.request_restart("opencode") == "restarted"
+        assert coordinator.snapshot("opencode") == {"state": "applied"}
+        service.agents.pop("opencode")
+        assert coordinator.snapshot("opencode") == {"state": "unavailable"}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("prepare failed"), asyncio.CancelledError()])
+def test_application_projection_retains_prepare_failure_and_cancellation(failure):
+    async def run():
+        service = _AgentService()
+        service.agents = {"opencode": object()}
+        service.prepare_backend_restart = AsyncMock(side_effect=failure)
+        controller = _controller(service)
+        coordinator = BackendRestartCoordinator(controller, AsyncMock())
+        with pytest.raises(type(failure)):
+            await coordinator.request_restart("opencode")
+        assert coordinator.snapshot("opencode")["state"] == "failed"
+        assert not service.draining
+        controller.session_turns.end_backend_drain.assert_awaited_once_with("opencode", resume_deferred=False)
+
+    asyncio.run(run())
+
+
+def test_cancelled_application_remains_failed_after_task_is_removed():
+    async def run():
+        service = _AgentService()
+        service.agents = {"opencode": object()}
+        service.active = True
+        coordinator = BackendRestartCoordinator(_controller(service), AsyncMock())
+        await coordinator.request_restart("opencode")
+        await asyncio.sleep(0)
+        task = coordinator._tasks["opencode"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert coordinator.snapshot("opencode") == {"state": "failed", "error": "cancelled"}
+        assert not service.draining
+
+    asyncio.run(run())

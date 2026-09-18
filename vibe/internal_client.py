@@ -395,6 +395,25 @@ async def invalidate_activity_streaming(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def backend_application(
+    backend: str, *, socket_path: Optional[Path] = None, timeout: float = 5.0,
+) -> dict[str, Any]:
+    from modules.agents.catalog import AGENT_BACKENDS
+
+    if backend not in AGENT_BACKENDS:
+        raise ValueError("unsupported_backend")
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://localhost", timeout=timeout,
+        ) as client:
+            response = await client.get(f"/internal/backend-application/{backend}")
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": response.status_code, "body": response.json() if response.content else {}}
+
+
 async def reconcile_agent_backends(
     backends: list[str],
     *,

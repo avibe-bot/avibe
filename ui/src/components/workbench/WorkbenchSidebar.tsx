@@ -1,7 +1,7 @@
 import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
   Archive,
@@ -22,6 +22,7 @@ import {
   Plus,
   Search,
   Settings2,
+  SquarePen,
   WandSparkles,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -47,6 +48,7 @@ import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
+import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
   to: string;
@@ -61,7 +63,40 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
   { to: '/vaults', i18nKey: 'workbench.nav.vaults', icon: KeyRound },
 ];
 
-const CAPS_COLLAPSED_KEY = 'vibe-remote:caps-collapsed';
+// One navigation row (design m8K59, 216 x 40). Selected / hover / default are the
+// three states the approved source draws, each on its own token so Light and Dark
+// follow the table instead of a hard-coded neon.
+const SidebarNavRow: React.FC<{
+  to: string;
+  end?: boolean;
+  icon: LucideIcon;
+  label: string;
+}> = ({ to, end, icon: Icon, label }) => (
+  <NavLink
+    to={to}
+    end={end}
+    className={({ isActive }) =>
+      clsx(
+        'group flex h-10 items-center gap-2.5 rounded-xl border px-3 text-[13px] transition-colors',
+        isActive
+          ? 'border-[var(--nav-selected-border)] bg-[var(--nav-selected-bg)] font-semibold text-foreground shadow-[var(--shadow-glow-nav-mint)]'
+          : 'border-transparent font-medium text-muted hover:bg-[var(--nav-hover-bg)] hover:text-foreground',
+      )
+    }
+  >
+    {({ isActive }) => (
+      <>
+        <Icon
+          className={clsx(
+            'size-[17px] shrink-0',
+            isActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground',
+          )}
+        />
+        <span className="truncate">{label}</span>
+      </>
+    )}
+  </NavLink>
+);
 
 // 360px floating popover that opens when the user hovers the Inbox entry.
 // Mirrors design.pen KmQ1L — header + a few session cards + footer "open full
@@ -696,25 +731,6 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
-  // Capabilities section is collapsible to free room for Projects; the choice is
-  // remembered (best-effort localStorage, same convention as the other toggles).
-  const [capsCollapsed, setCapsCollapsed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem(CAPS_COLLAPSED_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  const toggleCaps = () =>
-    setCapsCollapsed((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(CAPS_COLLAPSED_KEY, next ? '1' : '0');
-      } catch {
-        /* best-effort */
-      }
-      return next;
-    });
 
   // Small open/close delays so the popover doesn't flicker as the cursor
   // brushes through the inbox row on its way somewhere else, and survives
@@ -761,128 +777,114 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   }, [totalUnread]);
 
   // Fill the sidebar column and cap its height so the project list (and only the
-  // project list) scrolls; Inbox + Capabilities stay pinned. The Inbox hover
-  // popover stays OUT of any overflow box below, so it is never clipped.
+  // project list) scrolls; the brand row and navigation stay pinned. The Inbox
+  // hover popover stays OUT of any overflow box below, so it is never clipped.
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-      {/* Search moved to a compact icon in the Projects header (left of the add
-          button) to reclaim this full row for the Projects list. ⌘K still works. */}
-      {/* Inbox entry — hover opens the floating popover (portaled above the chat). */}
-      <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
-        <PopoverAnchor asChild>
-          <div onMouseEnter={openPopover} onMouseLeave={queueClose}>
-        <NavLink
-          to="/inbox"
-          className={({ isActive }) =>
-            clsx(
-              'group flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] font-semibold transition-colors',
-              // Cyan active state per design.pen ze15A — mint is reserved
-              // for sessions / projects so the two reads stay distinct.
-              isActive
-                ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-glow-sm-cyan'
-                : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-            )
-          }
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      {/* Brand row tLDP1 — identity on the left, Search and Inbox on the right.
+          Search and Inbox are siblings of the home link, not nested inside it. */}
+      <div className="flex shrink-0 items-center gap-2.5 py-2">
+        <Link
+          to="/"
+          className="group flex min-w-0 flex-1 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
         >
-          {({ isActive }) => (
-            <>
-              <Inbox className={clsx('size-4', isActive ? 'text-cyan-ink' : 'text-foreground')} />
-              <span className="flex-1">{t('workbench.nav.inbox')}</span>
-              {badge && (
-                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
-                  {badge}
-                </span>
-              )}
-              <ChevronRight className="size-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
-            </>
-          )}
-        </NavLink>
+          {/* Decorative: the link's accessible name is the localized brand text
+              beside it, so naming the image too would read the destination twice. */}
+          <img
+            src={logoImg}
+            alt=""
+            aria-hidden="true"
+            className="h-9 w-[38px] shrink-0 rounded-[7px] border border-mint/35 bg-[var(--logo-well-background)] object-cover transition-shadow group-hover:shadow-glow-sm-mint"
+          />
+          <div className="min-w-0 leading-tight">
+            <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
+            {/* tLDP1 labels this row "Workbench", not the full "Agent OS ·
+                Workbench" the settings shell uses: at 248 with Search and Inbox
+                beside it, the longer line only ever renders truncated. */}
+            <div className="truncate text-[11px] text-muted">{t('workbench.eyebrow')}</div>
           </div>
-        </PopoverAnchor>
-        <InboxHoverPopover
-          sessions={inboxSessions}
-          unreadBySession={unreadBySession}
-          unreadSessions={unreadSessions}
-          totalUnread={totalUnread}
-          canMarkRead={canChat}
-          onItemClick={onItemClick}
-          onMarkAllRead={onMarkAllRead}
-          onMouseEnter={openPopover}
-          onMouseLeave={queueClose}
-        />
-      </Popover>
-
-      {capabilityNav.length > 0 && <div className="flex flex-col gap-1.5">
-        <button
+        </Link>
+        <Button
           type="button"
-          onClick={toggleCaps}
-          aria-expanded={!capsCollapsed}
-          className="group flex items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
+          variant="ghost"
+          size="icon"
+          className="size-8 shrink-0 rounded-lg text-muted hover:text-foreground"
+          aria-label={t('workbench.search.entry')}
+          onClick={onOpenSearch}
         >
-          <span className="flex-1 text-left">{t('workbench.capabilitiesLabel')}</span>
-          <ChevronDown className={clsx('size-3.5 shrink-0 transition-transform', capsCollapsed && '-rotate-90')} />
-        </button>
-        {!capsCollapsed && (
-          <nav className="flex flex-col gap-0.5">
-          {capabilityNav.map(({ to, i18nKey, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                clsx(
-                  'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors',
-                  isActive
-                    ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
-                    : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon className={clsx('size-4', isActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
-                  <span>{t(i18nKey)}</span>
-                </>
-              )}
-            </NavLink>
-          ))}
-          </nav>
-        )}
-      </div>}
+          <Search className="size-[18px]" />
+        </Button>
+        {/* Inbox entry — hover opens the floating popover (portaled above the chat).
+            At zero unread there is no badge node at all and the icon stays muted;
+            both reads come from the same real counter. */}
+        <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
+          <PopoverAnchor asChild>
+            <div className="shrink-0" onMouseEnter={openPopover} onMouseLeave={queueClose}>
+              <NavLink
+                to="/inbox"
+                aria-label={t('workbench.nav.inbox')}
+                className="relative flex size-8 items-center justify-center rounded-lg transition-colors hover:bg-[var(--nav-hover-bg)]"
+              >
+                {({ isActive }) => (
+                  <>
+                    <Inbox
+                      className={clsx(
+                        'size-[18px]',
+                        badge ? 'text-cyan-ink' : isActive ? 'text-foreground' : 'text-muted',
+                      )}
+                    />
+                    {badge && (
+                      <span className="absolute right-0.5 top-0.5 inline-flex min-w-[14px] items-center justify-center rounded-full border border-surface bg-cyan px-[3px] font-mono text-[9px] font-bold leading-[12px] text-primary-foreground">
+                        {badge}
+                      </span>
+                    )}
+                  </>
+                )}
+              </NavLink>
+            </div>
+          </PopoverAnchor>
+          <InboxHoverPopover
+            sessions={inboxSessions}
+            unreadBySession={unreadBySession}
+            unreadSessions={unreadSessions}
+            totalUnread={totalUnread}
+            canMarkRead={canChat}
+            onItemClick={onItemClick}
+            onMarkAllRead={onMarkAllRead}
+            onMouseEnter={openPopover}
+            onMouseLeave={queueClose}
+          />
+        </Popover>
+      </div>
 
-      {/* Projects section — design.pen b8wX2. Header row carries the
-          "Projects" label on the left (matching the Capabilities label
-          style) and the 22x22 add button on the right. */}
+      {/* Navigation m8K59 — one always-expanded group. "New chat" is the home
+          itself, which is where a task is described and a session is created. */}
+      <nav className="flex shrink-0 flex-col gap-0.5">
+        {canChat && (
+          <SidebarNavRow to="/" end icon={SquarePen} label={t('workbench.nav.newChat')} />
+        )}
+        {capabilityNav.map(({ to, i18nKey, icon }) => (
+          <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
+        ))}
+      </nav>
+
+      {/* Projects section t7o96 — the label on the left and the create
+          affordance on the right; Search now lives in the brand row. */}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5">
         <div className="flex items-center justify-between px-1">
-          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-muted">
             {t('workbench.projectsLabel')}
           </span>
-          {/* Borderless ghost icon buttons (design-system Button) — search +
-              add, grouped on the right. Search moved here from a full-width
-              row above to reclaim that space for the Projects list; ⌘K still
-              works. Both are roomy 28px tap targets. */}
-          <div className="flex items-center gap-0.5">
-            {canManageProjects && <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 text-muted hover:text-foreground"
-              aria-label={t('workbench.search.entry')}
-              onClick={onOpenSearch}
-            >
-              <Search className="size-4" />
-            </Button>}
-            {canCreateProject && <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 text-muted hover:text-foreground"
-              aria-label={t('workbench.addProject')}
-              onClick={() => setShowNewProject(true)}
-            >
-              <FolderPlus className="size-4" />
-            </Button>}
-          </div>
+          {canCreateProject && <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-[22px] shrink-0 text-muted hover:text-foreground"
+            aria-label={t('workbench.addProject')}
+            onClick={() => setShowNewProject(true)}
+          >
+            <FolderPlus className="size-[15px]" />
+          </Button>}
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5">
@@ -897,10 +899,11 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               {t('workbench.projectsLoadError')}
             </div>
           )}
+          {/* True empty state e5Kplg — a real row, not a centered illustration. */}
           {projects !== null && projects.length === 0 && (
-            <div className="flex flex-col items-center gap-1.5 rounded-md border border-dashed border-border px-3 py-4 text-center">
-              <Folder className="size-4 text-muted" />
-              <div className="text-[11px] text-muted">{t('workbench.projectsEmpty')}</div>
+            <div className="flex items-center gap-[7px] rounded-md px-1.5 py-[7px]">
+              <FolderPlus className="size-[14px] shrink-0 text-muted" />
+              <span className="min-w-0 truncate text-[11px] text-muted">{t('workbench.projectsEmpty')}</span>
             </div>
           )}
           {projects !== null && <SortableProjectList

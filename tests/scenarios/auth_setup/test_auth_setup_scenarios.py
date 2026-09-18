@@ -86,6 +86,79 @@ def test_auth_setup_catalog_priorities_reference_live_scenarios():
     assert set(catalog.get("next_priority", [])) <= live_ids
 
 
+@pytest.mark.parametrize(
+    ("access", "role"),
+    [("local", "owner"), ("personal", "owner"), ("organization", "owner"), ("organization", "member")],
+)
+def test_setup_completion_uses_the_same_authorized_config_flow(monkeypatch, tmp_path, access, role):
+    """Scenario: AUTH-SETUP-405 — real auth, CSRF, config persistence and read-back."""
+    from config.v2_settings import SettingsStore
+    from vibe import internal_client
+
+    config = _save_config(tmp_path, paired=True, instance_kind="personal" if access == "local" else access)
+    pairing = config.remote_access
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda *_args: None)
+    reconcile = AsyncMock(return_value={"status_code": 200, "body": {"ok": True}})
+    monkeypatch.setattr(internal_client, "reconcile_platforms", reconcile)
+    # Any unintended runtime action must fail instead of starting a real process.
+    monkeypatch.setattr(remote_access, "reconcile", Mock(side_effect=AssertionError("pairing changed")))
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    client = app.test_client()
+    base_url = "http://localhost" if access == "local" else "https://alex.avibe.bot"
+    peer = {"REMOTE_ADDR": "127.0.0.1" if access == "local" else "203.0.113.44"}
+    if access != "local":
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(
+                config, "owner@example.com", "owner-1",
+                role=role,
+                access_source="owner" if role == "owner" else "organization_group",
+                organization_id="组织-甲" if access == "organization" else None,
+                organization_member_id="成员-甲" if access == "organization" else None,
+                organization_role=role if access == "organization" else None,
+                group_ids=["研发组"] if access == "organization" else None,
+            ),
+            domain="alex.avibe.bot",
+        )
+    headers = csrf_headers(client, base_url=base_url)
+    SettingsStore.reset_instance()
+    try:
+        session = client.get("/api/session", base_url=base_url, environ_base=peer).get_json()
+        assert session["remote"] is (access != "local")
+        assert session["capabilities"]["can_manage_instance"] is True
+        initial = client.get("/api/config", base_url=base_url, environ_base=peer)
+        assert initial.status_code == 200
+        assert initial.get_json()["setup_state"]["needs_setup"] is True
+        settings = client.get("/api/settings?platform=slack", base_url=base_url, environ_base=peer)
+        assert settings.status_code == 200
+
+        # Use the same narrow POSTs as the platform step and Summary.
+        for payload in (
+            {"slack": {"bot_token": "xoxb-setup-fixture", "app_token": "xapp-setup-fixture"}},
+            {"setup_completed": True, "update": {"auto_update": False}},
+        ):
+            response = client.post(
+                "/api/config", json=payload, headers=headers, base_url=base_url, environ_base=peer,
+            )
+            assert response.status_code == 200, response.get_json()
+        assert response.get_json()["setup_state"]["needs_setup"] is False
+
+        saved = V2Config.load()
+        assert saved.setup_completed is True
+        assert saved.slack.bot_token == "xoxb-setup-fixture"
+        assert saved.remote_access == pairing
+        assert saved.setup_state()["needs_setup"] is False
+        reread = client.get("/api/config", base_url=base_url, environ_base=peer)
+        assert reread.status_code == 200
+        assert reread.get_json()["setup_state"]["needs_setup"] is False
+        reconcile.assert_awaited()
+    finally:
+        SettingsStore.reset_instance()
+
+
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-404"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3422,3 +3495,268 @@ def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, 
     readback = request("GET", "/api/backend/claude/auth")
     assert readback.status_code == 200
     assert "isolated-test-credential" not in json.dumps(readback.get_json())
+
+
+def test_manual_provider_connection_reaches_controller_confirmed_readiness(monkeypatch, tmp_path):
+    """AUTH-SETUP-119: runtime manual-code transport -> native store -> apply -> read."""
+    from core.backend_restart import BackendRestartCoordinator
+    from core.internal_server import create_app
+    from modules.agents.opencode.server import OpenCodeServerManager
+    from vibe import api, internal_client
+    from vibe.opencode_config import get_opencode_auth_path, upsert_opencode_provider_api_key
+    from tests.test_backend_restart import _AgentService, _controller
+
+    isolated = tmp_path / "测试 用户"
+    isolated.mkdir()
+    monkeypatch.setenv("HOME", str(isolated))
+    monkeypatch.setenv("AVIBE_HOME", str(isolated / "avibe"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated / "data"))
+    config = V2Config.default()
+    config.agents.opencode.enabled = True
+    config.save()
+    upsert_opencode_provider_api_key("test-provider", "old-test-key")
+    api.setup_opencode_permission()
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(isolated / "bin/opencode"))
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+
+    async def scenario():
+        service = _AgentService()
+        service.agents = {"opencode": object()}
+        service.active = True
+        controller = _controller(service)
+        refresh = AsyncMock()
+        coordinator = BackendRestartCoordinator(controller, refresh, poll_interval=0.001)
+        controller.backend_restart_coordinator = coordinator
+        internal_app = create_app(controller)
+        callbacks = []
+
+        async def callback(request):
+            body = await request.json()
+            callbacks.append(body)
+            assert body == {"deployment": "fixture", "method": 1, "code": "test-consent-code"}
+            auth_path = get_opencode_auth_path()
+            auth_path.parent.mkdir(parents=True, exist_ok=True)
+            auth_path.write_text(json.dumps({"test-provider": {"type": "oauth", "access": "test-access", "refresh": "test-refresh"}}))
+            return web.json_response({"ok": True})
+
+        upstream = web.Application()
+        upstream.router.add_post('/provider/test-provider/oauth/callback', callback)
+        server = web.AppRunner(upstream)
+        await server.setup()
+        site = web.TCPSite(server, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        transport = SimpleNamespace(base_url=f"http://127.0.0.1:{port}", ensure_running=AsyncMock())
+
+        class Provider:
+            async def get_provider_auth(self):
+                return {"test-provider": [{"type": "api"}, {"type": "oauth"}]}
+
+            async def start_provider_oauth(self, provider_id, **kwargs):
+                assert provider_id == "test-provider" and kwargs["method"] == 1
+                return {"method": "code", "url": "https://provider.invalid/authorize"}
+
+            async def wait_provider_oauth(self, provider_id, **kwargs):
+                return await OpenCodeServerManager.wait_provider_oauth(transport, provider_id, **kwargs)
+
+        harness = AuthSetupScenarioHarness()
+        auth = harness.service
+        monkeypatch.setattr(auth, "_opencode_server", AsyncMock(return_value=Provider()))
+        monkeypatch.setattr(auth, "_OPENCODE_OAUTH_PROMPT_ANSWERS", {"test-provider": {"deployment": "fixture", "method": 999, "code": "must-not-override"}})
+        # No-hook consumers retain the existing coordinator application owner.
+        monkeypatch.setattr(auth, "_refresh_backend_runtime", coordinator.request_restart)
+        monkeypatch.setattr(api, "load_config", V2Config.load)
+
+        async def projection(name):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=internal_app), base_url="http://localhost") as client:
+                response = await client.get(f"/internal/backend-application/{name}")
+                return {"status_code": response.status_code, "body": response.json()}
+
+        monkeypatch.setattr(internal_client, "backend_application", projection)
+        runner = ScenarioRunner(harness)
+
+        async def start(h):
+            h.web_flow = await auth.start_web_setup("opencode", provider_id="test-provider", force_reset=False)
+            assert h.web_flow.callback_kind == "code"
+            assert h.web_flow.waiter_task is not None
+            assert not callbacks
+
+        async def submit(h):
+            result = await auth.submit_web_code(h.web_flow.flow_id, "test-consent-code")
+            assert result["ok"]
+            duplicate = await auth.submit_web_code(h.web_flow.flow_id, "test-consent-code")
+            assert not duplicate["ok"]
+            await h.web_flow.waiter_task
+            assert h.web_flow.state == "success"
+            state = await api.get_backend_connection("opencode")
+            assert state["auth"] == "subscription"
+            assert state["application"] == "draining" and not state["ready"]
+
+        async def apply(h):
+            service.active = False
+            await coordinator.wait("opencode")
+            assert (await api.get_backend_connection("opencode"))["ready"]
+            refresh.assert_awaited_once_with("opencode", False)
+            assert len(callbacks) == 1
+            assert await api._read_opencode_config_api_key("test-provider") is None
+
+        try:
+            await runner.run(ScenarioStep("start", start), ScenarioStep("submit", submit), ScenarioStep("apply", apply))
+            ScenarioExpect.step_history(runner, ["start", "submit", "apply"])
+        finally:
+            await server.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_setup_completion_preserves_canonical_and_legacy_platform_configuration(monkeypatch, tmp_path):
+    """AUTH-SETUP-120: no mandatory IM; saved invalid IM remains actionable."""
+    from config.v2_config import DiscordConfig
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe import internal_client
+    monkeypatch.setattr(internal_client, "reconcile_platforms", AsyncMock(return_value={
+        "status_code": 200, "body": {"ok": True},
+    }))
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "配置 空间"))
+    config = V2Config.default()
+    assert config.platforms.enabled == []
+    config.save()
+    client = app.test_client()
+    result = client.post('/api/config', json={"setup_completed": True}, headers=csrf_headers(client))
+    assert result.status_code == 200, result.get_json()
+    assert V2Config.load().setup_completed
+    assert V2Config.load().platforms.enabled == []
+
+    config = V2Config.load()
+    config.setup_completed = False
+    config.platforms.enabled = ["slack"]
+    config.slack.bot_token = ""
+    config.save()
+    result = client.post('/api/config', json={"setup_completed": True}, headers=csrf_headers(client))
+    assert result.status_code == 400
+    assert "slack" in json.dumps(result.get_json()).lower()
+    assert V2Config.load().platforms.enabled == ["slack"]
+    assert not V2Config.load().setup_completed
+
+    # The actual embedded form sends only changed credential leaves. Another
+    # actor's unrelated update between read and repair must survive.
+    config = V2Config.load()
+    config.runtime.default_cwd = str(tmp_path / "并发工作目录")
+    config.slack.app_token = "xapp-test-app-token"
+    config.save()
+    repair = client.post('/api/config', json={"slack": {"bot_token": "xoxb-test-bot-token"}}, headers=csrf_headers(client))
+    assert repair.status_code == 200, repair.get_json()
+    assert not V2Config.load().setup_completed
+    assert V2Config.load().runtime.default_cwd == str(tmp_path / "并发工作目录")
+    result = client.post('/api/config', json={"setup_completed": True}, headers=csrf_headers(client))
+    assert result.status_code == 200, result.get_json()
+    restored = V2Config.load()
+    assert restored.platforms.enabled == ["slack"]
+    assert restored.slack.bot_token == "xoxb-test-bot-token"
+
+    # Discord's same embedded form has an auxiliary guild-settings write. The
+    # credential patch cannot persist that selection by itself. Exercise the
+    # real settings owner before completion (Wizard consumer covers failure and
+    # retry of that second write with the mounted selected checkboxes).
+    config = V2Config.load()
+    config.setup_completed = False
+    config.platforms.enabled = ["discord"]
+    config.discord = DiscordConfig(bot_token="")
+    config.save()
+    settings = client.post('/api/settings', json={"platform": "discord", "guilds": {"old": {"enabled": True}}}, headers=csrf_headers(client))
+    assert settings.status_code == 200
+    repair = client.post('/api/config', json={"discord": {"bot_token": "fixture-discord-token"}}, headers=csrf_headers(client))
+    assert repair.status_code == 200, repair.get_json()
+    assert not V2Config.load().setup_completed
+    assert client.get('/api/settings?platform=discord').get_json()["guild_allowlist"] == ["old"]
+    for selected in ({"selected": {"enabled": True}}, {}):
+        saved = client.post('/api/settings', json={"platform": "discord", "guilds": selected}, headers=csrf_headers(client))
+        assert saved.status_code == 200, saved.get_json()
+        assert client.get('/api/settings?platform=discord').get_json()["guild_allowlist"] == list(selected)
+        assert V2Config.load().platforms.enabled == ["discord"]
+        assert V2Config.load().slack.bot_token == "xoxb-test-bot-token"
+    result = client.post('/api/config', json={"setup_completed": True}, headers=csrf_headers(client))
+    assert result.status_code == 200, result.get_json()
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "poe"])
+@pytest.mark.parametrize("model_id", ["explicit-model", "family/custom-model"])
+def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypatch, tmp_path, provider, model_id):
+    """AUTH-SETUP-121: compatible model -> real Agent/default -> route -> completion."""
+    from core.vibe_agents import VibeAgentStore
+    from modules.agents.opencode.agent import resolve_opencode_model_dict
+    from vibe import api
+    from vibe.opencode_config import upsert_opencode_provider_api_key, upsert_opencode_provider_model
+
+    config = V2Config.default()
+    config.agents.opencode.enabled = True
+    config.agents.opencode.default_provider = provider
+    config.save()
+    upsert_opencode_provider_api_key(provider, "fixture-only-key")
+    if model_id == "family/custom-model":
+        # A user-managed model absent from the vendor catalog is a real route
+        # only when registered in the existing native provider config owner.
+        upsert_opencode_provider_model(provider, model_id)
+    api.setup_opencode_permission()
+    server = SimpleNamespace(
+        get_providers=AsyncMock(return_value={"all": [
+            {"id": provider, "name": provider}, {"id": "openai", "name": "OpenAI"},
+        ], "connected": [provider]}),
+        get_provider_auth=AsyncMock(return_value={provider: [{"type": "api"}]}),
+        get_native_available_models=AsyncMock(return_value={"providers": [
+            {"id": provider, "models": {"explicit-model": {}}},
+        ]}),
+        close_http_session=AsyncMock(),
+    )
+    monkeypatch.setattr(api, "_opencode_get_server", AsyncMock(return_value=server))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(tmp_path / "测试/bin/opencode"))
+    # Isolated application evidence, never the machine's running controller.
+    from vibe import internal_client
+    monkeypatch.setattr(internal_client, "backend_application", AsyncMock(return_value={
+        "status_code": 200, "body": {"ok": True, "state": "applied", "controller_pid": 123},
+    }))
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+    client = app.test_client()
+    headers = csrf_headers(client)
+    rows = client.get('/api/agents').get_json()
+    agent = next(row for row in rows["agents"] if row["backend"] == "opencode")
+    assert agent["model"] == "openai/gpt-5.6-sol"
+    client.post('/api/agents/default', json={"name": agent["name"]}, headers=headers)
+    store = VibeAgentStore()
+    try:
+        before = store.require(agent["name"])
+        catalog = asyncio.run(api.get_opencode_providers_async())
+        assert catalog["ok"]
+        connected = {row["id"] for row in catalog["providers"] if row["active_auth_type"] in {"api", "oauth"}}
+        assert connected == {provider}
+        route = resolve_opencode_model_dict(before.model, provider)
+        assert route["providerID"] not in connected
+        assert not V2Config.load().setup_completed
+        # Opening, cancelling and a rejected edit do not alter the old row.
+        invalid = client.patch(f'/api/agents/{agent["name"]}', json={"backend": "claude"}, headers=headers)
+        assert invalid.status_code == 400
+        assert store.require(agent["name"]).model == before.model
+        selected = next(row for row in catalog["providers"] if row["id"] == provider)
+        assert model_id in selected["models"]
+        result = client.patch(f'/api/agents/{agent["name"]}', json={"model": f"{provider}/{model_id}"}, headers=headers)
+        assert result.status_code == 200, result.get_json()
+        persisted = store.require(agent["name"])
+        assert persisted.model == f"{provider}/{model_id}"
+        assert persisted.reasoning_effort == before.reasoning_effort
+        assert persisted.system_prompt == before.system_prompt
+        assert persisted.metadata == before.metadata
+        assert store.get_default_agent().name == before.name
+        route = resolve_opencode_model_dict(persisted.model, provider)
+        assert route == {"providerID": provider, "modelID": model_id}
+        assert route["modelID"] in selected["models"]
+        assert route["providerID"] in connected
+        assert asyncio.run(api.get_backend_connection('opencode'))["ready"]
+        completed = client.post('/api/config', json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+        assert V2Config.load().platforms.enabled == []
+        assert store.get_default_agent().name == before.name
+    finally:
+        store.close()

@@ -246,6 +246,16 @@ scenarios:
     layer: scenario
     backend: show_identity
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_limited_show_identity_closed_loop_installs_guest_lease
+  - id: AUTH-SETUP-405
+    name: Local and authenticated remote managers complete the same setup flow without changing pairing
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_uses_the_same_authorized_config_flow
+    supporting_tests:
+      - ui/src/App.remoteAuth.test.tsx
+      - ui/src/components/AppShell.test.tsx
   - id: AUTH-SETUP-210
     name: Lost Model Hub OAuth start response converges on one provider flow
     status: covered
@@ -317,4 +327,25 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cloud_pairing_origin_reaches_effective_ui_listener
+  - id: AUTH-SETUP-119
+    name: Runtime manual provider code reaches native persistence and controller-confirmed readiness
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: opencode
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_manual_provider_connection_reaches_controller_confirmed_readiness
+  - id: AUTH-SETUP-120
+    name: Explicit completion preserves canonical no-IM setup and invalid legacy IM recovery
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_preserves_canonical_and_legacy_platform_configuration
+  - id: AUTH-SETUP-121
+    name: Native and registered custom OpenCode models preserve Agent ownership and complete setup
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: opencode
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_explicit_opencode_model_recovery_preserves_agent_and_completes
 next_priority: []

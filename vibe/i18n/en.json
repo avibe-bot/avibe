@@ -1,4 +1,8 @@
 {
+  "backendConnection": {
+    "applyOnStart": "Configuration will apply on next start.",
+    "applyUnacknowledged": "Backend refresh was not acknowledged by the controller."
+  },
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."

@@ -1,15 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { Check } from 'lucide-react';
 import clsx from 'clsx';
-import { useApi } from '../context/ApiContext';
-import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
-import { setConfigField } from '../lib/configMutations';
+import { useLanguageSelection } from '../lib/useLanguageSelection';
 
 export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
-  const { i18n, t } = useTranslation();
-  const { mutateConfig } = useApi();
-  const { capabilities } = useInstanceAuthorization();
+  const { languages, current: currentLang, select } = useLanguageSelection();
   const [isOpen, setIsOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -25,14 +20,6 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
 
-  const languageCodes = Object.keys(i18n.options.resources ?? {});
-  const availableLanguages = languageCodes.length ? languageCodes : ['en'];
-  const languages = availableLanguages.map((code) => ({
-    code,
-    label: t(`language.${code}`, { defaultValue: code }),
-  }));
-  const currentLang = languages.find((l) => l.code === i18n.language) || languages[0];
-
   const shortLabel = (code: string) => {
     if (code === 'zh') return '中';
     return code.slice(0, 2).toUpperCase();
@@ -40,14 +27,7 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
 
   const handleSelect = async (code: string) => {
     setIsOpen(false);
-    if (code === i18n.language) return;
-    i18n.changeLanguage(code);
-    if (!capabilities.can_manage_instance) return;
-    try {
-      await mutateConfig([setConfigField(['language'], code)]);
-    } catch {
-      // Ignore save errors - language change already applied locally
-    }
+    await select(code);
   };
 
   return (

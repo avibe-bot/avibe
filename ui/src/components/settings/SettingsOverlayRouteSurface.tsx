@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 
 import { RouteSurfaceActivityBoundary } from '@/components/RouteSurfaceActivityBoundary';
 import { Dialog, DialogSurfaceContent, DialogTitle } from '@/components/ui/dialog';
+import { useSetupHandoffDeparture } from '@/components/workbench/backendReadiness';
 import {
   closeSettingsOverlay,
   isSettingsEntryPath,
@@ -29,6 +30,14 @@ export const SettingsOverlayRouteSurface = ({
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
+  // The route this surface renders behind any overlay — the retained origin
+  // while Settings is open, the foreground route otherwise.
+  const backgroundLocation = settingsSurfaceOpen ? origin.location : location;
+  // Which route is rendered here is also the only thing that can tell a real
+  // departure from the home apart from the route guard unmounting and remounting
+  // it in place, so the setup handoff reads it from here rather than guessing
+  // from a component's lifecycle.
+  useSetupHandoffDeparture(backgroundLocation.pathname);
   const replaceBackground = useCallback<Navigator['replace']>((to, state) => {
     if (!origin) return;
     const path = resolvePath(to, origin.location.pathname);
@@ -57,7 +66,7 @@ export const SettingsOverlayRouteSurface = ({
           active={!settingsSurfaceOpen}
           inactiveReplace={replaceBackground}
         >
-          <Routes location={settingsSurfaceOpen ? origin.location : location}>
+          <Routes location={backgroundLocation}>
             {children}
             <Route path="*" element={fallbackElement} />
           </Routes>
@@ -74,6 +83,18 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
+              // The overlay covers the work area and stops at the shell sidebar,
+              // which is what keeps the origin project/session visible behind it.
+              // This overrides the primitive's historical 240 default with
+              // AppShell's actual `w-[248px]`; it is asserted against the
+              // sidebar's measured edge rather than restated as a shared token,
+              // so the two cannot drift apart unnoticed.
+              //
+              // Below md the surface is the whole viewport, so the primitive's
+              // left border would draw a hairline down the screen edge and make
+              // Settings-from-home look different from a direct Settings link.
+              // There is no sidebar to divide from until the offset applies.
+              className="border-l-0 md:left-[248px] md:border-l"
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;

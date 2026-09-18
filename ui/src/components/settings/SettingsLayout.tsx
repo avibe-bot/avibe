@@ -2,7 +2,7 @@ import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
-  Bot,
+  ArrowLeft,
   Brain,
   ChevronDown,
   ChevronLeft,
@@ -10,14 +10,16 @@ import {
   Globe,
   Hash,
   Keyboard,
+  Layers,
   MessageCircle,
   MessageSquare,
   Package,
-  PlugZap,
+  Plug,
   Server,
   Settings,
   ShieldCheck,
   Stethoscope,
+  Unplug,
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -26,7 +28,7 @@ import clsx from 'clsx';
 import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
-import { rememberSettingsPath, settingsLandingPath } from '@/lib/adminNavigation';
+import { SETTINGS_LANDING_PATH } from '@/lib/adminNavigation';
 import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import {
@@ -34,8 +36,6 @@ import {
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { AccountMenu } from '../AccountMenu';
-import { LanguageSwitcher } from '../LanguageSwitcher';
-import { ThemeToggle } from '../ThemeToggle';
 import { VersionBadge } from '../VersionBadge';
 import { modelHubEnabledFromConfig } from './models/featureFlags';
 
@@ -51,15 +51,21 @@ type SettingsItem = {
 };
 
 type SettingsGroup = {
-  labelKey: TranslationKey;
+  /** Omitted for the landing group, which needs no header above the first row. */
+  labelKey?: TranslationKey;
   items: SettingsItem[];
 };
 
 const SETTINGS_GROUPS: SettingsGroup[] = [
   {
+    items: [
+      { path: SETTINGS_LANDING_PATH, labelKey: 'settings.sections.general', icon: Settings },
+    ],
+  },
+  {
     labelKey: 'settings.groups.agents',
     items: [
-      { path: '/settings/backends', labelKey: 'settings.sections.backends', icon: Bot, ownerOnly: true },
+      { path: '/settings/backends', labelKey: 'settings.sections.backends', icon: Server, ownerOnly: true },
       { path: '/settings/models', labelKey: 'settings.sections.models', icon: Cpu, ownerOnly: true, feature: 'models' },
       { path: '/settings/memory', labelKey: 'settings.sections.memory', icon: Brain, ownerOnly: true, feature: 'memory' },
       { path: '/settings/replies', labelKey: 'settings.sections.replies', icon: MessageSquare },
@@ -71,14 +77,14 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       {
         path: '/settings/platforms',
         labelKey: 'nav.messagingPlatforms',
-        icon: PlugZap,
+        icon: Plug,
         ownerOnly: true,
         defaultOpen: true,
         children: [
           {
             path: '/settings/platforms',
             labelKey: 'settings.sections.platformConnections',
-            icon: PlugZap,
+            icon: Unplug,
             exact: true,
           },
           { path: '/settings/platforms/users', labelKey: 'nav.users', icon: MessageCircle },
@@ -97,7 +103,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     labelKey: 'settings.groups.system',
     items: [
       { path: '/settings/shortcuts', labelKey: 'settings.sections.shortcuts', icon: Keyboard },
-      { path: '/settings/service', labelKey: 'settings.sections.service', icon: Server, ownerOnly: true },
+      { path: '/settings/service', labelKey: 'settings.sections.service', icon: Layers, ownerOnly: true },
       { path: '/settings/dependencies', labelKey: 'settings.sections.dependencies', icon: Package, ownerOnly: true },
       { path: '/settings/diagnostics', labelKey: 'settings.sections.diagnostics', icon: Stethoscope, ownerOnly: true },
       { path: '/settings/access', labelKey: 'settings.sections.access', icon: ShieldCheck },
@@ -125,15 +131,21 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
       end={item.exact}
       title={t(item.labelKey)}
       className={clsx(
-        'flex min-h-11 items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors md:min-h-0',
+        'flex min-h-11 items-center gap-2 rounded-[9px] px-2.5 py-2 text-[12.5px] transition-colors md:min-h-[34px] md:py-0',
         'md:justify-center lg:justify-start',
         active
-          ? 'bg-mint/[0.09] text-foreground'
-          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+          ? 'bg-mint-soft font-semibold text-foreground'
+          : 'font-medium text-muted hover:bg-foreground/[0.04] hover:text-foreground',
       )}
     >
-      <Icon className={clsx('size-4 shrink-0', active ? 'text-mint-ink' : 'text-muted')} />
-      <span className="truncate md:hidden lg:block">{t(item.labelKey)}</span>
+      <Icon className={clsx('size-3.5 shrink-0', active ? 'text-mint-ink' : 'text-muted')} />
+      {/* The rail is a fixed 196 and a section name is not optional detail: an
+          ellipsis here hides which of two neighbouring pages a row leads to
+          ("Messaging Platforms" / "Platform Connections" both cut to "Platform…"
+          in English). Wrapping keeps every label readable in any language, and
+          two lines at this size still fit the row's min height, so nothing moves
+          for the labels that already fitted. */}
+      <span className="min-w-0 leading-[1.3] break-words md:hidden lg:block">{t(item.labelKey)}</span>
     </NavLink>
   );
 };
@@ -155,15 +167,15 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
         aria-expanded={open}
         onClick={() => setManualOpen(!open)}
         className={clsx(
-          'flex min-h-11 w-full items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors md:min-h-0',
+          'flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 py-2 text-[12.5px] font-medium transition-colors md:min-h-[34px] md:py-0',
           'md:justify-center lg:justify-start',
           childActive
             ? 'text-foreground'
             : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
         )}
       >
-        <Icon className={clsx('size-4 shrink-0', childActive ? 'text-mint-ink' : 'text-muted')} />
-        <span className="min-w-0 flex-1 truncate text-left md:hidden lg:block">{t(item.labelKey)}</span>
+        <Icon className={clsx('size-3.5 shrink-0', childActive ? 'text-mint-ink' : 'text-muted')} />
+        <span className="min-w-0 flex-1 leading-[1.3] break-words text-left md:hidden lg:block">{t(item.labelKey)}</span>
         <ChevronDown
           className={clsx(
             'size-3.5 shrink-0 text-muted transition-transform md:hidden lg:block',
@@ -183,6 +195,38 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
 const SettingsNavItem: React.FC<{ item: SettingsItem }> = ({ item }) =>
   item.children?.length ? <SettingsNavGroup item={item} /> : <SettingsNavLink item={item} />;
 
+/**
+ * Leaving Settings has one meaning regardless of the control that triggers it:
+ * an overlay returns to the surface it covered, a direct visit goes to the
+ * Workbench. Both paths keep the originating project, session and unsent draft.
+ */
+const ReturnToApp: React.FC<{
+  className?: string;
+  'aria-label'?: string;
+  children: React.ReactNode;
+}> = ({ className, 'aria-label': ariaLabel, children }) => {
+  const navigate = useNavigate();
+  const overlayOrigin = useSettingsOverlayContext();
+
+  if (!overlayOrigin) {
+    return (
+      <NavLink to="/" aria-label={ariaLabel} className={className}>
+        {children}
+      </NavLink>
+    );
+  }
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      onClick={() => closeSettingsOverlay(navigate, overlayOrigin)}
+      className={className}
+    >
+      {children}
+    </button>
+  );
+};
+
 export const SettingsLayout: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -190,12 +234,17 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
-  const overlayOrigin = useSettingsOverlayContext();
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
+  // The shared `max-w-[1180px]` is a reading column for pages made of prose and
+  // form rows. General is not one: its source (r6G6P) draws content that simply
+  // fills whatever the rail leaves, so capping it would re-introduce a fixed
+  // column the design does not have. Opting one route out — the way Model Hub
+  // already does — leaves every other Settings page exactly as it was.
+  const isFluidContent = isModelHub || pathMatches(location.pathname, SETTINGS_LANDING_PATH);
 
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
@@ -285,6 +334,10 @@ export const SettingsLayout: React.FC = () => {
       : activeSection.path;
   }, [activeTrail, atRoot, location.pathname]);
 
+  // One class string for both branches below, so the touch target and the
+  // chevron cannot drift apart depending on where the control points.
+  const mobileBackClassName = '-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden';
+
   const mobileBackLabel = mobileBackTarget === '/'
     ? t('settings.backToWorkbench')
     : mobileBackTarget === '/settings'
@@ -294,24 +347,30 @@ export const SettingsLayout: React.FC = () => {
       });
 
   useEffect(() => {
-    if (atRoot || !location.pathname.startsWith('/settings/')) return;
-    rememberSettingsPath(location.pathname);
-  }, [atRoot, location.pathname]);
-
-  useEffect(() => {
     if (!atRoot || !isDesktop) return;
-    navigate(settingsLandingPath(capabilities.can_manage_instance), { replace: true });
-  }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
+    navigate(SETTINGS_LANDING_PATH, { replace: true });
+  }, [atRoot, isDesktop, navigate]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
       <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
-          {mobileBackTarget && (
+          {/* Leaving Settings for the Workbench is the same action whichever
+              control triggers it, so the phone's root back goes through
+              ReturnToApp like the desktop close and rail row do: with a retained
+              origin it unwinds the Settings entries it opened over, instead of
+              pushing a second home in front of them and leaving the whole chain
+              one Back away. Every destination inside Settings stays an ordinary
+              link, and a direct visit still gets one. */}
+          {mobileBackTarget === '/' ? (
+            <ReturnToApp aria-label={mobileBackLabel} className={mobileBackClassName}>
+              <ChevronLeft className="size-5" />
+            </ReturnToApp>
+          ) : (
             <NavLink
               to={mobileBackTarget}
               aria-label={mobileBackLabel}
-              className="-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden"
+              className={mobileBackClassName}
             >
               <ChevronLeft className="size-5" />
             </NavLink>
@@ -333,24 +392,12 @@ export const SettingsLayout: React.FC = () => {
               <VersionBadge />
             </div>
           )}
-          {overlayOrigin ? (
-            <button
-              type="button"
-              onClick={() => closeSettingsOverlay(navigate, overlayOrigin)}
-              aria-label={t('settings.close')}
-              className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
-            >
-              <X className="size-4" />
-            </button>
-          ) : (
-            <NavLink
-              to="/"
-              aria-label={t('settings.close')}
-              className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
-            >
-              <X className="size-4" />
-            </NavLink>
-          )}
+          <ReturnToApp
+            aria-label={t('settings.close')}
+            className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
+          >
+            <X className="size-4" />
+          </ReturnToApp>
         </div>
       </header>
 
@@ -363,12 +410,22 @@ export const SettingsLayout: React.FC = () => {
             atRoot ? 'flex' : 'hidden md:flex',
           )}
         >
+          <ReturnToApp
+            aria-label={t('settings.backToApp')}
+            className="mb-2 hidden min-h-10 shrink-0 items-center gap-2.5 rounded-[9px] px-2.5 text-[14px] text-foreground transition-colors hover:bg-foreground/[0.05] md:flex md:justify-center lg:justify-start"
+          >
+            <ArrowLeft className="size-[17px] shrink-0" />
+            <span className="truncate md:hidden lg:block">{t('settings.backToApp')}</span>
+          </ReturnToApp>
+
           <div className="min-h-0 flex-1 overflow-y-auto">
             {visibleGroups.map((group) => (
-              <div key={group.labelKey} className="mb-2 last:mb-0">
-                <div className="px-2 pb-1 pt-1 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted md:hidden lg:block">
-                  {t(group.labelKey)}
-                </div>
+              <div key={group.labelKey ?? group.items[0]?.path} className="mb-2 last:mb-0">
+                {group.labelKey && (
+                  <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted md:hidden lg:block">
+                    {t(group.labelKey)}
+                  </div>
+                )}
                 <div className="flex flex-col gap-0.5">
                   {/* A manual disclosure choice belongs to this route visit only. */}
                   {group.items.map((item) => (
@@ -382,9 +439,7 @@ export const SettingsLayout: React.FC = () => {
             ))}
           </div>
 
-          <div className="mt-3 flex shrink-0 items-center gap-2 border-t border-border px-2 pt-3 md:flex-col lg:flex-row">
-            <LanguageSwitcher openUpward />
-            <ThemeToggle />
+          <div className="mt-3 flex shrink-0 items-center gap-2 border-t border-border px-2 pt-3">
             <AccountMenu openUpward />
           </div>
         </nav>
@@ -394,7 +449,8 @@ export const SettingsLayout: React.FC = () => {
             key={location.pathname}
             className={clsx(
               'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 motion-safe:animate-in motion-safe:slide-in-from-right-4 motion-safe:duration-200 md:px-6 md:pb-7 md:pt-7 md:animate-none lg:px-8',
-              isModelHub ? 'min-h-full' : 'mx-auto max-w-[1180px]',
+              isModelHub && 'min-h-full',
+              !isFluidContent && 'mx-auto max-w-[1180px]',
             )}
           >
             <Outlet />

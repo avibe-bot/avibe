@@ -12,7 +12,6 @@ import {
   deferRemoteAuthRedirect,
   reportRemoteAuthorizationState,
   remoteLoginPath,
-  shouldBypassSetupForRemoteOwner,
   REMOTE_AUTH_REQUIRED_EVENT,
   REMOTE_AUTH_STATE_EVENT,
   shouldDeferRemoteAuthRedirect,
@@ -84,6 +83,17 @@ describe('remote auth navigation', () => {
     });
   });
 
+  it('requires authentication before opening remote setup', async () => {
+    await expect(checkRemoteAuthForPath(
+      '/setup',
+      async () => ({ remote: true, authenticated: false }),
+    )).resolves.toEqual({
+      session: { remote: true, authenticated: false },
+      loginRequired: true,
+      checkSetup: true,
+    });
+  });
+
   it('signals AuthGuard instead of navigating automatically', () => {
     platform.isIosDevice.mockReturnValue(true);
     platform.isStandalonePwa.mockReturnValue(true);
@@ -96,7 +106,6 @@ describe('remote auth navigation', () => {
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(REMOTE_AUTH_REQUIRED_EVENT);
   });
 });
-
 describe('remote authorization recovery', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -167,31 +176,5 @@ describe('remote authorization recovery', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(fetchMock).toHaveBeenCalledOnce();
-  });
-});
-
-describe('setup bypass for remote runtime access', () => {
-  it('bypasses setup only for an authenticated Instance Owner', () => {
-    expect(
-      shouldBypassSetupForRemoteOwner({
-        remote: true,
-        authenticated: true,
-        capabilities: { can_manage_instance: true },
-      }),
-    ).toBe(true);
-    expect(
-      shouldBypassSetupForRemoteOwner({
-        remote: true,
-        authenticated: true,
-        capabilities: { can_manage_instance: false },
-      }),
-    ).toBe(false);
-    expect(
-      shouldBypassSetupForRemoteOwner({
-        remote: false,
-        authenticated: true,
-        capabilities: { can_manage_instance: true },
-      }),
-    ).toBe(false);
   });
 });

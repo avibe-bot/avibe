@@ -12,6 +12,7 @@ import {
   holdMobileProjectsListForChatReturn,
   readMobileProjectsListSnapshot,
 } from '../lib/mobileProjectsListMemory';
+import { selectLanguage } from '../lib/useLanguageSelection';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -39,11 +40,31 @@ const api = vi.hoisted(() => ({
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
-const i18n = vi.hoisted(() => ({
-  language: 'en',
-  options: { resources: { en: {}, zh: {} } },
-  changeLanguage: vi.fn(),
-}));
+/** One per test, not one per file: a language operation belongs to the i18n
+ *  instance and outlives any render root, so a pick made in one test would
+ *  follow a shared instance into the next. */
+const makeI18n = () => {
+  const instance = {
+    language: 'en',
+    options: { resources: { en: {}, zh: {} } },
+    changeLanguage: vi.fn(async (code: string) => {
+      instance.language = code;
+    }),
+  };
+  return instance;
+};
+
+/** What `useTranslation` actually hands a component: not the instance but a copy
+ *  of it, made fresh on every language change, keeping the instance itself as
+ *  `__original`. The shell holds one of these, which is why a language change is
+ *  what sends it back to read the config again. */
+const copyOf = (instance: ReturnType<typeof makeI18n>) => Object.assign(
+  Object.create(Object.getPrototypeOf(instance)),
+  instance,
+  { __original: instance },
+);
+
+let i18n = makeI18n();
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
   instanceKind: null as 'personal' | 'organization' | null,
@@ -111,12 +132,12 @@ vi.mock('react-i18next', () => ({
 beforeEach(() => {
   viewport.isDesktop = false;
   clearMobileProjectsListSnapshot();
+  instanceAuth.remote = true;
   instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
   instanceAuth.capabilities.can_use_show_pages = true;
-  i18n.language = 'en';
-  i18n.changeLanguage.mockResolvedValue(undefined);
+  i18n = makeI18n();
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
@@ -131,8 +152,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('AppShell setup recovery', () => {
-  it('shows the remote-owner recovery card instead of the wizard', async () => {
+describe('AppShell setup access', () => {
+  it.each([
+    { remote: false, instanceKind: 'personal' as const },
+    { remote: true, instanceKind: 'personal' as const },
+    { remote: true, instanceKind: 'organization' as const },
+  ])('renders the wizard for $instanceKind access (remote: $remote)', async (context) => {
+    Object.assign(instanceAuth, context);
     render(
       <MemoryRouter initialEntries={['/setup']}>
         <Routes>
@@ -143,9 +169,8 @@ describe('AppShell setup recovery', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/settings/service');
-    expect(screen.queryByTestId('wizard')).toBeNull();
+    expect(await screen.findByTestId('wizard')).toBeTruthy();
+    expect(screen.queryByTestId('workbench-sidebar')).toBeNull();
   });
 });
 
@@ -283,6 +308,67 @@ describe('AppShell persistent Workbench chrome', () => {
     await waitFor(() => expect(i18n.changeLanguage).toHaveBeenCalledWith('zh'));
   });
 
+  it('keeps a language the user picked while the instance config was still being read', async () => {
+    viewport.isDesktop = true;
+    const instance = i18n;
+    let answer: (config: unknown) => void = () => {};
+    api.getConfig.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+
+    // They pick before the read answers, from a control the shell never sees.
+    await act(async () => { await selectLanguage(instance, 'zh'); });
+    await act(async () => { answer({ language: 'en', platforms: { enabled: [] } }); });
+
+    // A read that started before the pick cannot be the answer to it.
+    expect(instance.changeLanguage.mock.calls.map(([code]) => code)).toEqual(['zh']);
+    expect(instance.language).toBe('zh');
+  });
+
+  it('does not undo that pick when the language change itself starts the read again', async () => {
+    viewport.isDesktop = true;
+    const instance = i18n;
+    // The instance config as it was before the pick — what a reader that cached
+    // it, or one racing the save, still has to hand back.
+    api.getConfig.mockResolvedValue({ language: 'en', platforms: { enabled: [] } });
+
+    // A function, not one element: React skips a re-render handed back the very
+    // element it already rendered, and the shell re-rendering is the point here.
+    const tree = () => (
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+    const view = render(tree());
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    await waitFor(() => expect(api.getConfig).toHaveBeenCalledTimes(1));
+
+    await act(async () => { await selectLanguage(instance, 'zh'); });
+
+    // The language change replaces the object every consumer holds, which is
+    // what sends the shell back for a second read of the older config.
+    i18n = copyOf(instance);
+    await act(async () => { view.rerender(tree()); });
+
+    await waitFor(() => expect(api.getConfig).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(instance.changeLanguage.mock.calls.map(([code]) => code)).toEqual(['zh']);
+    expect(instance.language).toBe('zh');
+  });
+
   it.each([
     'personal',
     null,
@@ -303,7 +389,7 @@ describe('AppShell persistent Workbench chrome', () => {
 
     expect(await screen.findByTestId('workbench')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href')).toBe(
-      '/settings/replies',
+      '/settings/general',
     );
     expect(screen.queryByTestId('language-switcher')).toBeNull();
     expect(screen.queryByTestId('theme-toggle')).toBeNull();
@@ -320,7 +406,7 @@ describe('AppShell persistent Workbench chrome', () => {
           <Route element={<AppShell />}>
             <Route index element={<div data-testid="workbench" />} />
             <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
-            <Route path="settings/replies" element={<div data-testid="settings" />} />
+            <Route path="settings/general" element={<div data-testid="settings" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -328,7 +414,7 @@ describe('AppShell persistent Workbench chrome', () => {
 
     expect(await screen.findByTestId('chat')).toBeTruthy();
     let settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
-    expect(settingsToggle.getAttribute('href')).toBe('/settings/replies');
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/general');
     await user.click(settingsToggle);
 
     expect(await screen.findByTestId('settings')).toBeTruthy();

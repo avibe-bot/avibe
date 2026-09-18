@@ -65,7 +65,7 @@ const ShowPageWindow: React.FC<{
 };
 
 // The portal layer that hosts app windows. Covers the workbench main area (right
-// of the 240px sidebar on desktop). The layer itself is pointer-events-none so
+// of the 248px sidebar on desktop). The layer itself is pointer-events-none so
 // empty space passes clicks through to the workbench underneath; each AppWindow
 // re-enables pointer events on itself (minimized windows stay mounted but inert,
 // so their terminal/editor state survives a minimize). Desktop-only — mobile opens
