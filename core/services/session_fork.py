@@ -145,6 +145,28 @@ class SourceMessageAnchor:
         return self.running_turn or is_input_turn(self.author, self.message_type)
 
 
+def _require_agent_selection(
+    conn: Any,
+    context: Any,
+    *,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+) -> None:
+    """Hold the Agent the fork will run as to the caller's selection authority."""
+
+    from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access
+
+    try:
+        ensure_agent_selection_access(
+            conn, agent_id=agent_id, agent_name=agent_name, user_context=context
+        )
+    except VibeAgentAccessError as exc:
+        raise SessionForkError(
+            "agent access is not permitted",
+            code="session_fork_agent_forbidden",
+        ) from exc
+
+
 def reserve_forked_session(
     *,
     source_session_id: str,
@@ -200,6 +222,21 @@ def reserve_forked_session(
                     "editor",
                 ):
                     raise SessionForkError("source_not_found")
+                # A permitted source does not authorize an arbitrary
+                # destination: without this, a fork can place a copy of the
+                # transcript into a Project the caller cannot chat in. Same
+                # rule and same tier as an ordinary re-placement in
+                # ``workbench_sessions_service.update_workbench_session``, and
+                # it runs before any reserved row or native-fork metadata.
+                destination_scope_id = _clean_optional(scope_id) if scope_id is not None else None
+                if destination_scope_id and not context.can_manage_instance:
+                    destination_project_id = project_access_service.project_id_from_scope_id(
+                        destination_scope_id
+                    )
+                    if destination_project_id is None or not project_access_service.can_chat_project(
+                        conn, context, destination_project_id
+                    ):
+                        raise SessionForkError("destination_not_permitted")
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()
@@ -241,6 +278,12 @@ def reserve_forked_session(
                     )
                     effective_native_turn_started = True
             source_message_id = source_anchor.message_id
+            if agent_name:
+                # The fork will RUN AS this Agent, so selecting it needs use
+                # access to that exact resource — being enabled is not the same
+                # as being one this caller may select. Ordered after the source
+                # checks so an unreachable source still answers first.
+                _require_agent_selection(conn, context, agent_name=agent_name)
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
                 raise SessionForkError(
@@ -265,6 +308,16 @@ def reserve_forked_session(
                     raise SessionForkError(
                         "source session Agent backend does not match the session backend"
                     )
+                # Without an override the fork still runs as the source's Agent,
+                # so that inherited identity is selected authority too. Ordered
+                # after the unavailable and backend answers so their existing
+                # meaning is unchanged.
+                _require_agent_selection(
+                    conn,
+                    context,
+                    agent_id=inherited_agent["id"],
+                    agent_name=inherited_agent["name"],
+                )
 
             if override_agent is not None:
                 target_agent_id = override_agent.id

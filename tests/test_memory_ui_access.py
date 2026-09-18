@@ -48,7 +48,7 @@ def test_ui_read_secret_is_consumed_from_stdin_without_entering_child_environmen
     assert ui_access.initialize_process_ui_read_secret() == secret
     assert ui_access.MEMORY_UI_SECRET_STDIN_ENV not in ui_access.os.environ
 
-    child_env = runtime._memory_ui_child_env(
+    child_env = runtime.independent_process_env(
         {"PATH": "/bin"},
         memory_ui_secret=secret,
     )

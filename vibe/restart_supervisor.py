@@ -584,7 +584,7 @@ def _schedule_restart_locked(
                 start_new_session=True,
                 close_fds=True,
                 cwd=get_safe_cwd(),
-                env=runtime._memory_ui_child_env(
+                env=runtime.independent_process_env(
                     env,
                     memory_ui_secret=memory_ui_secret,
                 ),

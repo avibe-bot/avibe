@@ -75,6 +75,53 @@ def _publish_definition_reclaim_hint() -> None:
         logger.debug("session definition reclaim wake failed", exc_info=True)
 
 
+def require_reservation_access(
+    conn: Connection,
+    authorization_context: Any,
+    *,
+    scope_id: str | None,
+    agent_id: str | None,
+    agent_name: str | None,
+) -> None:
+    """Hold a new reservation to the caller's Project-placement and Agent authority.
+
+    A caller that HAS a context — an explicit argument, or the authority the
+    running invocation was entered under — is held to the same rule the Workbench
+    applies when it creates or re-places a session, so a Project the caller cannot
+    chat in, a standalone Session below runtime management, and an Agent they may
+    not select are all refused before the row exists.
+
+    With neither, this is the historical local entry point: the controller's own
+    IM flows and a local CLI invocation keep Owner semantics and reserve exactly
+    as before. Reading the invocation authority here is what makes the several
+    reservation paths — a direct run, a fork, a Task/Watch/Hook definition —
+    carry the caller without each one threading a parameter.
+    """
+
+    if authorization_context is None:
+        from vibe.authorization import current_invocation_authority
+
+        authorization_context = current_invocation_authority()
+    if authorization_context is None:
+        return
+
+    from core.vibe_agents import ensure_agent_selection_access
+    from storage import project_access_service
+    from storage.workbench_sessions_service import ProjectAccessDeniedError
+    from vibe.authorization import require_instance_role
+
+    context = require_instance_role(authorization_context, "editor")
+    if not context.can_manage_instance:
+        project_id = project_access_service.project_id_from_scope_id(scope_id)
+        if project_id is None or not project_access_service.can_chat_project(
+            conn, context, project_id
+        ):
+            raise ProjectAccessDeniedError
+    ensure_agent_selection_access(
+        conn, agent_id=agent_id, agent_name=agent_name, user_context=context
+    )
+
+
 def _require_enabled_agent_identity(
     conn: Connection,
     *,
@@ -407,6 +454,7 @@ class SQLiteSessionsService:
         metadata: dict[str, Any] | None = None,
         require_enabled_agent: bool = False,
         expected_reference_agent_id: str | None = None,
+        authorization_context: Any = None,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
@@ -430,6 +478,13 @@ class SQLiteSessionsService:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return None
+            require_reservation_access(
+                conn,
+                authorization_context,
+                scope_id=scope_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+            )
             return create_agent_session_row(
                 conn,
                 scope_id=scope_id,
@@ -448,6 +503,37 @@ class SQLiteSessionsService:
                 require_workdir=False,
             )
 
+    def require_placement_access(
+        self,
+        *,
+        scope_key: str,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
+        authorization_context: Any = None,
+    ) -> None:
+        """Admit a placement whose Sessions are reserved later, under the same rule.
+
+        A stored definition that creates one Session per run describes a placement
+        without performing it, so nothing reaches ``reserve_agent_session`` while the
+        caller is still here. Asking the identical question now means the definition
+        is refused where someone is waiting for the answer, instead of every future
+        fire being refused where nobody is.
+
+        Nothing is committed: resolving a legacy key can materialise its scope, and a
+        check has no business leaving that behind.
+        """
+
+        now = _utc_now_iso()
+        with self.engine.connect() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, str(scope_key or ""), now=now)
+            require_reservation_access(
+                conn,
+                authorization_context,
+                scope_id=scope_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+            )
+
     def reserve_standalone_agent_session(
         self,
         *,
@@ -462,6 +548,7 @@ class SQLiteSessionsService:
         metadata: dict[str, Any] | None = None,
         require_enabled_agent: bool = False,
         expected_reference_agent_id: str | None = None,
+        authorization_context: Any = None,
     ) -> str:
         """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
@@ -483,6 +570,15 @@ class SQLiteSessionsService:
                 agent_id = identity["id"]
                 agent_name = identity["name"]
                 backend = identity["backend"]
+            # Ahead of the id claim and the mkdir below: a refused reservation
+            # must leave no session row and no workspace directory behind.
+            require_reservation_access(
+                conn,
+                authorization_context,
+                scope_id=None,
+                agent_id=agent_id,
+                agent_name=agent_name,
+            )
             session_id = new_session_id(conn)
             resolved_workdir = normalize_workdir(workdir)
             if resolved_workdir is None:

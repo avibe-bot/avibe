@@ -55,7 +55,10 @@ export const Workbench: React.FC = () => {
     ...(capabilities.can_manage_agents
       ? [{ key: 'openAgents' as const, icon: Bot, onClick: () => navigate('/agents') }]
       : []),
-    ...(capabilities.can_manage_instance
+    // This chip only navigates to /harness, which the sidebar, the capability
+    // tabs and the route guard all authorize with `can_chat`. The Agents chip
+    // above is deliberately different: it is labelled as management.
+    ...(capabilities.can_chat
       ? [{ key: 'openHarness' as const, icon: Activity, onClick: () => navigate('/harness') }]
       : []),
   ];

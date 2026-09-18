@@ -144,6 +144,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
             <ShowPageShareControl
               sessionId={sessionId}
               canManageInstance={capabilities.can_manage_instance}
+              canPinToDock={capabilities.can_chat}
               onOpenChange={setShareOpen}
             />
           </div>

@@ -2824,6 +2824,7 @@ export const ChatPage: React.FC = () => {
           canOpenShowPage={canOpenShowPage}
           canManageShowPage={canManageShowPage}
           canManageInstance={capabilities.can_manage_instance}
+          canPinToDock={capabilities.can_chat}
           sessionActions={sessionActions}
           titleFieldRef={titleFieldRef}
         />
@@ -3418,6 +3419,7 @@ interface ChatHeaderBarProps {
   canOpenShowPage?: boolean;
   canManageShowPage?: boolean;
   canManageInstance?: boolean;
+  canPinToDock?: boolean;
   // Shared session actions, rendered behind the mobile-only ⋯ at the far right.
   // Empty (or absent) withdraws the trigger — which is what a read-only session
   // yields, since every one of those writes is refused.
@@ -3430,7 +3432,7 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
@@ -3584,6 +3586,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 sessionId={session.id}
                 initialAccess={showPageAccess}
                 canManageInstance={canManageInstance}
+                canPinToDock={canPinToDock}
                 onPayloadChange={onShowPageVisibilityChange}
                 onOpenChange={onShareOpenChange}
               />

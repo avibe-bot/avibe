@@ -242,6 +242,19 @@ def _resource_context_from_env(source: Mapping[str, str]) -> Optional[dict[str, 
     return dict(parsed) if isinstance(parsed, dict) else None
 
 
+def env_declares_remote_caller(env: Mapping[str, str] | None = None) -> bool:
+    """True when the invocation env declares a remote caller.
+
+    Read on its own because :func:`caller_context_from_env` answers ``None`` for a
+    missing session id, before it ever looks at this flag. An entry point that has
+    to tell a genuinely local invocation from a declared-remote one whose
+    provenance is incomplete needs the declaration itself.
+    """
+
+    source = env if env is not None else os.environ
+    return _clean(source.get(AVIBE_CALLER_REMOTE_ENV)).lower() in {"1", "true"}
+
+
 def caller_resource_user_context(context: Optional[CallerContext]) -> Optional[Mapping[str, Any]]:
     """Return explicit remote ACL context for a CLI write.
 
@@ -253,6 +266,28 @@ def caller_resource_user_context(context: Optional[CallerContext]) -> Optional[M
     if context is None or not context.is_remote:
         return None
     return dict(context.resource_user_context or {})
+
+
+def environment_without_caller_context(env: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """Return ``env`` with this invocation's caller provenance removed.
+
+    Avibe hands a caller's identity to a subprocess it runs ON that caller's
+    behalf — an Agent turn, a backend, a Harness call — and that hop is the whole
+    point of the contract above. A process Avibe itself owns is the opposite
+    case: the restart supervisor, a deferred activation, the service and the UI
+    server outlive the call that scheduled them and act as the installation, not
+    as whoever pressed the button. Inheriting the scheduling caller there would
+    make an independently owned process run under an authority nobody granted it
+    — and its own entry point, which is Owner work, would refuse it.
+
+    Strip at the boundary where the independent process is created, after the
+    scheduling operation has already been admitted on its own merits. ``None``
+    means "the current environment", and is materialized rather than passed on:
+    a spawn that inherits implicitly would inherit the caller too.
+    """
+
+    source = os.environ if env is None else env
+    return {key: value for key, value in source.items() if key not in CALLER_CONTEXT_ENV_NAMES}
 
 
 def validated_caller_env_snapshot(source: object) -> dict[str, str]:
@@ -379,7 +414,7 @@ def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[Ca
         session_key=_clean(source.get(AVIBE_CALLER_SESSION_KEY_ENV)) or None,
         message_id=_clean(source.get(AVIBE_CALLER_MESSAGE_ID_ENV)) or None,
         workspace_id=_clean(source.get(AVIBE_CALLER_WORKSPACE_ID_ENV)) or None,
-        is_remote=_clean(source.get(AVIBE_CALLER_REMOTE_ENV)).lower() in {"1", "true"},
+        is_remote=env_declares_remote_caller(source),
         resource_user_context=_resource_context_from_env(source),
     )
 

@@ -32,6 +32,7 @@ import clsx from 'clsx';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { DEFAULT_TAB, harnessEmptyStateKey, harnessTabFromParam, TAB_ORDER, type TabKey } from './harnessTabs';
 import type {
   HarnessDefinitionCounts,
@@ -171,6 +172,11 @@ type Selection =
 export const HarnessPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  // Harness is an editor surface, but this banner is one shared instance
+  // preference: `PUT /api/workbench/prefs` is member-tier, so below that the
+  // switch must read as read-only instead of silently reverting.
+  const { capabilities } = useInstanceAuthorization();
+  const canManageBanner = capabilities.can_manage_instance;
   const now = useVisibleNow();
   const [tab, setTab] = useState<TabKey>(DEFAULT_TAB);
   const [tasks, setTasks] = useState<HarnessTask[]>([]);
@@ -307,6 +313,9 @@ export const HarnessPage: React.FC = () => {
 
   const onToggleBanner = useCallback(
     async (next: boolean) => {
+      // Derived from the live capability, so a mid-session revocation refuses the
+      // write in the same render the switch goes disabled.
+      if (!canManageBanner) return;
       setBannerEnabled(next); // optimistic
       setBannerPending(true);
       try {
@@ -318,7 +327,7 @@ export const HarnessPage: React.FC = () => {
         setBannerPending(false);
       }
     },
-    [api],
+    [api, canManageBanner],
   );
 
   const clearSessionFilter = useCallback(() => {
@@ -638,12 +647,14 @@ export const HarnessPage: React.FC = () => {
       <div className="flex items-center justify-between gap-4 rounded-xl border border-border-strong bg-surface px-4 py-3">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">{t('harness.bannerToggle.title')}</div>
-          <div className="text-[12px] text-muted">{t('harness.bannerToggle.description')}</div>
+          <div className="text-[12px] text-muted">
+            {canManageBanner ? t('harness.bannerToggle.description') : t('harness.bannerToggle.readOnlyHint')}
+          </div>
         </div>
         <Switch
           checked={bannerEnabled}
           onCheckedChange={onToggleBanner}
-          disabled={bannerPending}
+          disabled={bannerPending || !canManageBanner}
           label={t('harness.bannerToggle.title')}
         />
       </div>

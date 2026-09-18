@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import re
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from core.inbox_events import (
     DEFINITIONS_UPDATED_EVENT,
@@ -76,15 +78,30 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
         "workbench.events.bridge.status",
     }
 )
-_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated"})
-_PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
+#: Change notifications whose consumers refetch an instance-scoped endpoint
+#: rather than read the frame. Harness and Vault are editor HTTP namespaces —
+#: ``/api/harness/*`` applies no resource ACL and ``vault_service.list_requests``
+#: / ``list_grants`` give an editor the full runtime read — so a notification
+#: admitted at a higher role than the endpoint it announces leaves an editor's
+#: Harness and Vault pages on a stream that never wakes them.
+#:
+#: One set, two owners: this is both the role tier below and the projection rule
+#: in ``ui_server._workbench_event_payload_for_context``, which reduces the frame
+#: to its bare signal for a recipient without runtime management. Admission is the
+#: role; what a frame may CARRY is decided there, because publishers attach
+#: identifiers — a run's session, a Vault secret name — that are not uniformly
+#: inside a lower role's read scope, and no consumer reads them.
+INSTANCE_SCOPED_REFETCH_EVENTS = frozenset(
     {
         DEFINITIONS_UPDATED_EVENT,
         RUNS_UPDATED_EVENT,
         VAULTS_UPDATED_EVENT,
-        "remote_access.quality.changed",
     }
 )
+_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated"}) | INSTANCE_SCOPED_REFETCH_EVENTS
+#: Remote-access link quality describes the instance's own connection, which is
+#: instance management, and stays member-only.
+_PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset({"remote_access.quality.changed"})
 
 @dataclass(frozen=True)
 class HttpAuthorizationPolicy:
@@ -302,6 +319,46 @@ def instance_owner_context() -> AuthorizationContext:
     return AuthorizationContext(instance_role="owner")
 
 
+_INVOCATION_AUTHORITY: ContextVar["AuthorizationContext | None"] = ContextVar(
+    "avibe_invocation_authority", default=None
+)
+
+
+@contextmanager
+def invocation_authority(context: "AuthorizationContext | None") -> Iterator[None]:
+    """Activate the authority an invocation runs under, for its lifetime only.
+
+    Set explicitly by an entry point that knows who invoked it — today the CLI
+    dispatch boundary. It is the default the two role resolvers fall back to when
+    a service call passes no context, which is why it is invocation-scoped and
+    never global: the token is reset in ``finally``, so ``SystemExit``, an
+    exception, and nested or sequential invocations all restore the previous
+    authority. Activating ``None`` is meaningful — an explicit local invocation
+    nested under a remote one masks it and restores it on exit.
+
+    What bounds the scope is ownership, not the carrier. A ``ContextVar`` is
+    copied into whatever this invocation itself starts — ``asyncio.to_thread``
+    and a task created inside the block both copy the current context — which is
+    what a command that awaits its own work needs, and is not a leak. The scope
+    ends where the invocation does: one entry point sets it, around one dispatch,
+    and resets it on the way out. A separate process, and a thread started
+    outside this block, each begin from their own context, so an independently
+    started controller, daemon or supervisor is never running inside a caller's.
+    """
+
+    token = _INVOCATION_AUTHORITY.set(context)
+    try:
+        yield
+    finally:
+        _INVOCATION_AUTHORITY.reset(token)
+
+
+def current_invocation_authority() -> "AuthorizationContext | None":
+    """Return the active invocation authority, or None outside one."""
+
+    return _INVOCATION_AUTHORITY.get()
+
+
 class InstanceAuthorizationError(PermissionError):
     def __init__(self, minimum_role: str):
         super().__init__(f"Instance role '{minimum_role}' is required")
@@ -309,14 +366,43 @@ class InstanceAuthorizationError(PermissionError):
         self.minimum_role = minimum_role
 
 
+def _in_http_request() -> bool:
+    try:
+        from vibe.ui_compat import has_request_context
+
+        return bool(has_request_context())
+    except Exception:
+        return False
+
+
+def default_authorization_context() -> AuthorizationContext:
+    """The authority a service call that passes no context runs under.
+
+    Inside an HTTP request this is the local Owner, exactly as it has always
+    been, and the invocation carrier is not consulted: a signed HTTP caller
+    authorizes itself by passing its context explicitly, so a call that passes
+    none is not silently re-attributed to whoever the request belongs to. That
+    boundary is retained deliberately, not repaired here.
+
+    Outside a request, an active invocation authority is the caller; with no
+    invocation either, this is a standalone local entry point and keeps Owner
+    administration.
+    """
+
+    if _in_http_request():
+        return instance_owner_context()
+    invocation = _INVOCATION_AUTHORITY.get()
+    return invocation if invocation is not None else instance_owner_context()
+
+
 def require_instance_role(
     context: AuthorizationContext | Mapping[str, Any] | None,
     minimum_role: str,
 ) -> AuthorizationContext:
-    """Authorize a service call; omitted context denotes local Owner administration."""
+    """Authorize a service call; omitted context resolves to the invocation authority."""
 
     resolved = (
-        instance_owner_context()
+        default_authorization_context()
         if context is None
         else context
         if isinstance(context, AuthorizationContext)

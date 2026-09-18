@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from storage.importer import ensure_sqlite_state
 from vibe import cli
 
 
@@ -3361,6 +3362,11 @@ def test_agent_run_rejects_cross_backend_agent_for_existing_session(tmp_path: Pa
 
 def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    # The raw schema template carries no import marker, so the first CLI call to
+    # ``_ensure_cli_sqlite_state`` would run the JSON importer over this database
+    # and drop the rows seeded below. Establish the state first, as the rest of
+    # this module does, then seed what the command is meant to find.
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="codex-worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
@@ -3434,6 +3440,11 @@ def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp
 
 def test_agent_run_rejects_post_to_thread_for_threadless_session_before_enqueue(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    # The raw schema template carries no import marker, so the first CLI call to
+    # ``_ensure_cli_sqlite_state`` would run the JSON importer over this database
+    # and drop the rows seeded below. Establish the state first, as the rest of
+    # this module does, then seed what the command is meant to find.
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
@@ -3466,6 +3477,11 @@ def test_agent_run_rejects_post_to_thread_for_threadless_session_before_enqueue(
 
 def test_agent_run_rejects_cross_platform_deliver_key_before_enqueue(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    # The raw schema template carries no import marker, so the first CLI call to
+    # ``_ensure_cli_sqlite_state`` would run the JSON importer over this database
+    # and drop the rows seeded below. Establish the state first, as the rest of
+    # this module does, then seed what the command is meant to find.
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
@@ -3521,6 +3537,11 @@ def test_agent_run_rejects_delivery_options_without_session_policy() -> None:
 
 def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    # The raw schema template carries no import marker, so the first CLI call to
+    # ``_ensure_cli_sqlite_state`` would run the JSON importer over this database
+    # and drop the rows seeded below. Establish the state first, as the rest of
+    # this module does, then seed what the command is meant to find.
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")

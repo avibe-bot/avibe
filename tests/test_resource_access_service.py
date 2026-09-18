@@ -1936,6 +1936,59 @@ def test_pre_member_resource_user_context_snapshot_keeps_editor_role() -> None:
     assert not restored.can_manage_instance
 
 
+def test_deferred_snapshot_carries_the_signed_email_and_ignores_supplied_metadata() -> None:
+    """PERMISSIONS-025: Project email ACLs need the principal the request had.
+
+    The normalized form is the one ``_matching_binding_role`` compares, and the
+    key is written from the signed context after any caller-supplied value is
+    dropped, so untrusted metadata can neither mint nor override it.
+    """
+
+    context = resource_access_service.ResourceUserContext(
+        subject="editor-1",
+        email="Editor@Example.COM ",
+        organization_id="org-1",
+        organization_member_id="organization-member-1",
+        organization_role="member",
+        instance_role="editor",
+        instance_access_source="email",
+        claims_issued_at=1_700_000_000,
+        is_remote=True,
+    )
+    spoofed = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "someone-else",
+            "email": "owner@example.com",
+            "vibe_instance_role": "owner",
+        }
+    }
+    metadata = resource_access_service.metadata_with_resource_user_context(spoofed, context)
+    assert metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]["email"] == "editor@example.com"
+    restored = resource_access_service.resource_user_context_from_metadata(metadata)
+    assert restored is not None
+    assert restored.email == "editor@example.com"
+    assert restored.subject == "editor-1"
+    assert restored.instance_role == "editor"
+
+
+def test_historical_snapshot_without_an_email_is_not_given_one() -> None:
+    """PERMISSIONS-025: an unstamped principal stays absent rather than inferred."""
+
+    legacy = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "editor-1",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_role": "member",
+        }
+    }
+    restored = resource_access_service.resource_user_context_from_metadata(legacy)
+    assert restored is not None
+    assert restored.email is None
+    assert restored.has_role("editor")
+
+
 def test_instance_member_operates_resources_without_rewriting_acl(tmp_path, sqlite_schema_db_factory) -> None:
     db = tmp_path / "vibe.sqlite"
     sqlite_schema_db_factory(db)

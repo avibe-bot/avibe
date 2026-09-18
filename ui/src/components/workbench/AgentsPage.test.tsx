@@ -1,13 +1,14 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
-import type { VibeAgentBrief, WorkbenchEventHandlers } from '../../context/ApiContext';
+import type { VibeAgentBrief, WorkbenchEventHandlers, WorkbenchProject } from '../../context/ApiContext';
 import type { InstanceCapabilities, InstanceRole } from '../../lib/sessionInfo';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
 import { AgentsPage } from './AgentsPage';
 
 type FakeApi = {
@@ -18,6 +19,8 @@ type FakeApi = {
   updateVibeAgent: ReturnType<typeof vi.fn>;
   removeVibeAgent: ReturnType<typeof vi.fn>;
   getRunningAgents: ReturnType<typeof vi.fn>;
+  listProjects: ReturnType<typeof vi.fn>;
+  createSession: ReturnType<typeof vi.fn>;
   connectWorkbenchEvents: ReturnType<typeof vi.fn>;
 };
 
@@ -119,6 +122,8 @@ function makeApi(
     updateVibeAgent,
     removeVibeAgent,
     getRunningAgents: vi.fn().mockResolvedValue({ ok: true, counts: { total: 2 } }),
+    listProjects: vi.fn().mockResolvedValue({ projects: [] }),
+    createSession: vi.fn().mockResolvedValue({ id: 'ses_created' }),
     connectWorkbenchEvents: vi.fn((next: WorkbenchEventHandlers) => {
       handlers = next;
       return vi.fn();
@@ -126,12 +131,18 @@ function makeApi(
   };
 }
 
-const MEMBER_CAPABILITIES: InstanceCapabilities = {
-  ...OWNER_INSTANCE_CAPABILITIES,
-  is_instance_owner: false,
-  can_manage_instance: false,
-  can_manage_access_members: false,
-};
+const MEMBER_CAPABILITIES = capabilitiesFor('member');
+
+const project = (id: string, canChat: boolean): WorkbenchProject => ({
+  id,
+  scope_id: `proj_${id}`,
+  display_name: `project ${id}`,
+  folder_path: `/tmp/${id}`,
+  created_at: '2026-08-21T00:00:00Z',
+  last_active_at: null,
+  archived: false,
+  capabilities: { can_chat: canChat, has_folder: true },
+});
 
 function renderPage(
   api: FakeApi,
@@ -2452,5 +2463,122 @@ describe('AgentsPage reconnect reconciliation', () => {
 
     expect(screen.getByDisplayValue('C')).toBeTruthy();
     expect(getVibeAgent.mock.calls.slice(3).some(([name]) => name === 'agent-a')).toBe(false);
+  });
+});
+
+// PERMISSIONS-020. Running an Agent is a use operation; editing its definition
+// is management. These render the capabilities the server projects for each
+// role and follow the click through to the API call it should reach.
+describe('PERMISSIONS-020 AgentsPage Run authority is independent of definition management', () => {
+  const roleTree = (role: InstanceRole) => (
+    <InstanceAuthorizationContext.Provider
+      value={{
+        remote: true,
+        instanceKind: 'organization',
+        instanceRole: role,
+        capabilities: capabilitiesFor(role),
+      }}
+    >
+      <MemoryRouter initialEntries={['/agents']}>
+        <AgentsPage />
+      </MemoryRouter>
+    </InstanceAuthorizationContext.Provider>
+  );
+
+  const renderAsRole = (api: FakeApi, role: InstanceRole) => {
+    apiRef.current = api;
+    return render(roleTree(role));
+  };
+
+  const agentApi = (agent = brief('agent-a', 'A')) =>
+    makeApi(vi.fn().mockResolvedValue(listResult(agent)), vi.fn().mockResolvedValue(fullAgent(agent, 'prompt')));
+
+  it('lets an editor launch a session from an Agent whose definition stays locked', async () => {
+    const agent = brief('agent-a', 'A');
+    const api = agentApi(agent);
+    api.listProjects.mockResolvedValue({
+      projects: [project('chat-ok', true), project('read-only', false)],
+    });
+    renderAsRole(api, 'editor');
+
+    await waitFor(() => expect(screen.getByText('agents.detail.run')).toBeTruthy());
+    // Management stays denied on the same render that offers Run.
+    expect(screen.queryByText('agents.newAgent')).toBeNull();
+    expect(screen.queryByText('common.delete')).toBeNull();
+    expect(screen.getByText('agents.remoteReadOnly')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('agents.detail.run').closest('button')!);
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByRole('combobox')).toBeTruthy());
+
+    // Only Projects whose own capabilities admit a chat are offered.
+    const select = within(dialog).getByRole('combobox') as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual(['chat-ok']);
+
+    fireEvent.click(within(dialog).getByText('agents.runDialog.open').closest('button')!);
+    await waitFor(() =>
+      expect(api.createSession).toHaveBeenCalledWith({
+        project_id: 'chat-ok',
+        agent_backend: 'codex',
+        agent_name: 'agent-a',
+        agent_id: 'id-agent-a',
+        model: 'gpt-5',
+        reasoning_effort: 'medium',
+      }),
+    );
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+    expect(api.removeVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it.each(['member', 'owner'] as const)('keeps Run reachable for %s', async (role) => {
+    const api = agentApi();
+    api.listProjects.mockResolvedValue({ projects: [project('chat-ok', true)] });
+    renderAsRole(api, role);
+
+    await waitFor(() => expect(screen.getByText('agents.detail.run')).toBeTruthy());
+    // The management surface a role above editor keeps.
+    expect(screen.getByText('agents.newAgent')).toBeTruthy();
+    expect(screen.getByText('common.delete')).toBeTruthy();
+  });
+
+  it('offers no Run to a viewer, who may neither chat nor use Agents', async () => {
+    const api = agentApi();
+    renderAsRole(api, 'viewer');
+
+    await waitFor(() => expect(api.getVibeAgent).toHaveBeenCalled());
+    expect(screen.queryByText('agents.detail.run')).toBeNull();
+    expect(screen.queryByText('agents.newAgent')).toBeNull();
+    expect(api.listProjects).not.toHaveBeenCalled();
+  });
+
+  it('closes an open launcher when the Run authority is revoked mid-session', async () => {
+    const api = agentApi();
+    api.listProjects.mockResolvedValue({ projects: [project('chat-ok', true)] });
+    apiRef.current = api;
+    const view = render(roleTree('editor'));
+
+    await waitFor(() => expect(screen.getByText('agents.detail.run')).toBeTruthy());
+    fireEvent.click(screen.getByText('agents.detail.run').closest('button')!);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+
+    view.rerender(roleTree('viewer'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it('cannot launch when no Project admits this editor', async () => {
+    const api = agentApi();
+    api.listProjects.mockResolvedValue({ projects: [project('read-only', false)] });
+    renderAsRole(api, 'editor');
+
+    await waitFor(() => expect(screen.getByText('agents.detail.run')).toBeTruthy());
+    fireEvent.click(screen.getByText('agents.detail.run').closest('button')!);
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('agents.runDialog.noProject')).toBeTruthy());
+
+    const open = within(dialog).getByText('agents.runDialog.open').closest('button') as HTMLButtonElement;
+    expect(open.disabled).toBe(true);
+    fireEvent.click(open);
+    expect(api.createSession).not.toHaveBeenCalled();
   });
 });

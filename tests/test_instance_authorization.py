@@ -568,7 +568,14 @@ def test_workbench_events_follow_role_boundaries() -> None:
         assert can_receive_workbench_event(context, "message.updated")
     assert not can_receive_workbench_event(viewer, "queue.updated")
     assert can_receive_workbench_event(editor, "queue.updated")
-    assert not can_receive_workbench_event(editor, "runs.updated")
+    # An Editor uses Runs, Harness definitions and Vault, so these instance-wide
+    # invalidations are admitted for them as bare refetch signals. What an Editor
+    # then sees is decided by the refetch under their own authority, and the
+    # payload filter strips any publisher identifier riding along.
+    assert can_receive_workbench_event(editor, "runs.updated")
+    assert can_receive_workbench_event(editor, "definitions.updated")
+    assert can_receive_workbench_event(editor, "vaults.updated")
+    assert not can_receive_workbench_event(viewer, "runs.updated")
     assert can_receive_workbench_event(member, "runs.updated")
     assert can_receive_workbench_event(member, "definitions.updated")
     assert can_receive_workbench_event(member, "vaults.updated")

@@ -85,6 +85,122 @@ onboarding design or unrelated feature changes. #2030 migration is not reopened.
 Other active lanes (notably shared-backend-connection) are no-touch; use an
 isolated checkout and report overlap rather than modifying their branches.
 
+## PM decisions recorded during implementation
+
+### Scope of the structural class
+
+- The structural finding is one class: **ordinary product operations were
+  missing an initiating user**, with three consuming gaps — omitted context at
+  guards that already exist, raw operations with no role/resource guard, and
+  deferred/IPC producer loss. All deferred Show, Vault and Run provenance stays
+  under that root class rather than being split into a class of its own.
+- Admitted scope for the expanded class: Agent, Session, Run/Task/Watch/Hook,
+  Vault, Show, Runtime/config, Skills, Memory.
+- Excluded: no backfill or migration for historical unstamped records (their
+  origin stays UNPROVEN); `screenshot` and `debug prompt export` keep host
+  scope; terminal/filesystem/shell/SQL sandboxing is a different boundary.
+- Not findings, on evidence: browser provenance and the reservation writer's
+  placement check were already repaired in this branch, and a synthetic public
+  `None` context is not a bypass.
+- The audit's surface inventory is a reviewed classification. Only the rows with
+  executed coverage may be reported as verified.
+- The three UI gates (Agents Run, Dock pinning, background-work banner) are
+  use-versus-management findings in the client. They are named separately and are
+  not counted into the backend A/B/C/D classes.
+
+### Frozen semantics
+
+The decisions above fix scope; these fix behavior. Together with
+`docs/plans/editor-permission-audit.md` they are the reviewable contract for
+this PR.
+
+- **Authority precedence is explicit > HTTP > invocation > local Owner.** An
+  explicitly passed context always wins. Inside an HTTP request the resolvers
+  keep their existing behavior and never consult the invocation carrier:
+  `require_instance_role(None)` still resolves the local Owner, and the resource
+  resolver still reads the request's own signed or anonymous context and fails
+  closed downstream. Outside a request the active invocation authority answers;
+  with neither, this is a standalone local entry point and keeps Owner.
+- **The invocation authority is scoped to one invocation.** One entry point sets
+  it around one dispatch and resets it in `finally`, so an exception, `SystemExit`
+  and nested or sequential invocations all restore the previous authority.
+  Activating `None` is meaningful: an explicit local invocation nested under a
+  remote one masks it and restores it on exit.
+- **A declared-remote caller with missing or malformed provenance fails closed.**
+  It becomes an anonymous remote context. It never degrades to local Owner
+  because the data it should have carried is absent.
+- **Claims are validated against the current binding, not merely parsed.** The
+  carrier is an environment that crosses process boundaries and outlives the
+  pairing it was minted under, so a well-formed claim is not yet provenance: it
+  is accepted only for the instance this installation is configured for and only
+  while that instance holds a durable ready binding — the same validation every
+  other deferred consumer applies to a stored snapshot. A claim for another
+  instance, or one whose binding is gone, is stale rather than privileged: it
+  becomes anonymous remote, never local Owner.
+- **A process Avibe owns does not inherit the caller.** The identity hop exists
+  for a subprocess run *on a caller's behalf*. The service, the UI server, the
+  connector, the restart supervisor and a deferred activation outlive the call
+  that started them and act as the installation, so
+  `environment_without_caller_context` strips the carrier where that process is
+  created, after the scheduling operation has been admitted on its own merits.
+  `None` is materialized rather than passed to `Popen`, so an implicit inherit
+  cannot carry the caller across either.
+- **Provenance must be durable, not ambient.** Work decided after the call that
+  created it runs in another process, where no carrier reaches. The authority is
+  therefore written into the row — `vault_requests.requester`, the reserved
+  `message_deliveries` row — and read back from it. The snapshot is written only
+  for a remote context, so a local caller's bytes are unchanged, and no outward
+  view (payloads, `get_request`, `list_requests`, `vault_audit`, the Show echo,
+  the transcript stream) exposes it.
+- **Agent use is Editor; Agent definition management is Member.** Running,
+  listing, showing and reading models are Editor. Create/update/enable/disable/
+  remove/import/default are Member. The reported UI defect is exactly this line
+  drawn in the wrong place.
+- **Raw Session operations carry role and resource guards.** Reads are Viewer;
+  update, send-now and queue mutation are Editor, on top of the effective
+  Project/Session resource check that already existed.
+- **A manual Harness run is Editor control of a saved definition's authority.**
+  `task run` executes a definition whose authority was fixed when it was saved;
+  it does not re-authorize to the person pressing run. Harness namespaces stay
+  instance-wide and the scheduler is unchanged — no org-aware Harness ACL is
+  introduced by this PR.
+- **Deferred work is admitted for the target it will actually use, before the row
+  exists.** A producer that binds to an existing Session is held to that Session;
+  one that creates its own is held to the destination Scope and Agent it chose. An
+  edit decides which applies: keeping a binding — named again or simply left alone
+  — reauthorizes it, while replacing it is judged on the destination and never on
+  the Session the edit is removing, because old-target authority is not a source
+  requirement for creating a new one (this is not a fork). A `create_per_run`
+  definition asks the reservation writer's own question through
+  `require_session_placement_authority`, since it reserves nothing while the caller
+  is present; with no Scope at all it would reserve a standalone Session per fire,
+  so an Editor is refused there on both instance kinds while Member, Owner and
+  local callers are unchanged. A target that names a Scope whose Session does not
+  exist yet — the deprecated IM key for an unopened thread, accepted by `hook send`,
+  `task add/update` and `watch add/update` — is that same placement, not an absent
+  target: it is admitted once the Agent the future dispatch will select is known.
+  An empty target stays what the path that owns it says it is — a blank argument,
+  an unparseable ID or key, or a binding whose row is gone keep their existing
+  shape, lifecycle and repair behavior and gain no authorization meaning. Saved
+  automation control — `task run`, `pause`, `resume`, `remove` —
+  stays outside this gate. No scheduler change and no per-definition Harness ACL.
+- **Machine-key operations are Owner.** `vault key export` / `vault key import`
+  move the machine's key material and stay at the top floor.
+- **A callback keeps the identity that created it.** The resumed turn runs under
+  the original requester's snapshot, not the daemon's own. Records written before
+  this change carry no snapshot; their origin stays UNPROVEN and they are left
+  unattributed. No backfill, no inferred principal, and no hard-expiry redesign
+  of deferred requests.
+- **Show events resolve once and check before the effect.** The reserved
+  delivery row is the writer's carrier, because `_dispatch_async` overrides the
+  IPC body. `ShowSessionEventStore.append` pre-checks chat access and Agent
+  selection for a dispatching event inside the writing transaction. The public
+  `/p` write resolves its visitor exactly once, so admission, the display author
+  and the recorded authority cannot describe different people, and no resolved
+  visitor is a 403 rather than a fall through to the local default. The public
+  projection drops the email. Page-read ACLs for public and limited pages are
+  untouched and stay independent of this write path.
+
 ## Evidence and acceptance
 
 - Render the real authorization provider for Editor/Viewer/Member/Owner and

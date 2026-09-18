@@ -3870,7 +3870,8 @@
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
       "title": "后台任务横幅",
-      "description": "在会话底部显示进行中的后台任务。"
+      "description": "在会话底部显示进行中的后台任务。",
+      "readOnlyHint": "该横幅是实例共享设置，当前角色无法修改。"
     },
     "sessionFilter": {
       "chip": "仅看:本会话 {{id}}",

@@ -25,7 +25,7 @@ from storage.models import agent_sessions, messages, resource_access_policies, r
 from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_peer, remote_session_cookie
 from vibe import internal_client, remote_access, ui_server
-from vibe.authorization import AuthorizationContext
+from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS, AuthorizationContext
 from vibe.sse_broker import broker
 from vibe.ui_compat import g
 
@@ -285,9 +285,18 @@ def test_permissions_016_real_sse_management_and_session_delivery(operations, ro
     """PERMISSIONS-016: publisher payloads traverse both stream gates."""
     state = operations
     events = [
-        ("vaults.updated", vaults_updated_payload(scope="requests", request_id="request-α")),
+        (
+            "vaults.updated",
+            vaults_updated_payload(scope="requests", request_id="request-α", secret_name="SECRET_α"),
+        ),
         ("definitions.updated", {"definition_type": "scheduled"}),
         ("runs.updated", run_updated_payload(run_id="run-α", status="running")),
+        # The same instance-wide invalidation with the optional session id a
+        # publisher may attach: admission must not start depending on it.
+        (
+            "runs.updated",
+            run_updated_payload(run_id="run-β", status="running", session_id=state.sessions[0]["id"]),
+        ),
         ("remote_access.quality.changed", {"state": "healthy", "sampled_at": "2026-09-17T14:00:00Z"}),
         ("message.updated", {"session_id": state.sessions[1]["id"], "id": "message-α"}),
         ("session.status", {"session_id": state.sessions[0]["id"], "status": "running"}),
@@ -323,8 +332,18 @@ def test_permissions_016_real_sse_management_and_session_delivery(operations, ro
     if role in {"member", "owner"}:
         assert [(frame["type"], frame["data"]) for frame in delivered[: len(events)]] == events
         assert len(delivered) == len(events) + (role == "owner")
-    elif role == "editor" and state.kind == "personal":
-        assert [(frame["type"], frame["data"]) for frame in delivered] == [events[-1]]
+    elif role == "editor":
+        # An Editor uses Harness, Vault and Runs, so the instance-wide
+        # invalidations reach them as bare signals they refetch under their own
+        # authority. Empty data is the assertion that no publisher identifier —
+        # secret name or session id — rides along. Everything else is unchanged:
+        # link quality stays management, the unknown event stays Owner-only, and
+        # session frames still follow the Project ACL.
+        invalidations = [
+            (event_type, {}) for event_type, _ in events if event_type in INSTANCE_SCOPED_REFETCH_EVENTS
+        ]
+        reachable_sessions = [events[-1]] if state.kind == "personal" else []
+        assert [(frame["type"], frame["data"]) for frame in delivered] == [*invalidations, *reachable_sessions]
     else:
         assert delivered == []
 

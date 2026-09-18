@@ -222,12 +222,24 @@ capabilities:
     scenario_tests:
       - tests/scenarios/permissions/test_permissions_scenarios.py
       - tests/scenarios/permissions/test_member_instance_operations.py
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py
+      - tests/scenarios/permissions/test_cli_invocation_authority.py
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py
+      - tests/scenarios/permissions/test_effective_target_preflight.py
     harness:
       - tests/scenario_harness/permissions.py
     unit_or_contract_tests:
       - tests/test_permissions.py
+      - tests/test_resource_access_service.py
+      - tests/test_ui_show_pages.py
       - ui/src/features/permissions/PermissionsPage.test.tsx
       - ui/src/components/workbench/ShowPageSharingSettings.test.tsx
+      - ui/src/components/workbench/AgentsPage.test.tsx
+      - ui/src/components/workbench/ShowPageShareControl.test.tsx
+      - ui/src/components/workbench/HarnessPage.banner.test.tsx
+      - ui/src/components/workbench/HarnessPage.events.test.tsx
+      - ui/src/components/workbench/VaultsPage.test.tsx
+      - ui/src/lib/useVaultRequestRefresh.test.ts
   - id: message_delivery
     name: scheduled result delivery
     status: active

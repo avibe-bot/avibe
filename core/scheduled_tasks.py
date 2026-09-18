@@ -7659,15 +7659,26 @@ class ScheduledTaskService:
                         logger.warning("failed to persist Vault waiter outcome for %s; will retry", request_id)
                         return "pending"
                 else:
+                    callback_metadata: dict[str, Any] = {
+                        "vault_request_type": request_type,
+                        "vault_request_status": request_status,
+                    }
+                    # Auto-resume is deferred work the requesting caller
+                    # authorized, so it travels under the authority that was
+                    # recorded when the request row was created — the same rule
+                    # a Run's callback follows. Re-deriving it inside the
+                    # daemon would resume a remote caller's session as local.
+                    from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+                    requester_context = vault_service.request_authorization_snapshot(row)
+                    if requester_context:
+                        callback_metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = requester_context
                     enqueue_session_callback(
                         self.request_store,
                         session_id=plan.session_id,
                         message=plan.message,
                         source_actor=f"vault:{request_id}",
-                        metadata={
-                            "vault_request_type": request_type,
-                            "vault_request_status": request_status,
-                        },
+                        metadata=callback_metadata,
                     )
                 status = "sent"
         except ValueError:
@@ -7707,11 +7718,26 @@ class ScheduledTaskService:
             if isinstance(run_metadata, dict)
             else ""
         )
-        callback_metadata = (
-            {CALLBACK_TERMINAL_TURN_ID_METADATA_KEY: terminal_turn_id}
-            if terminal_turn_id
+        callback_metadata: dict[str, Any] = (
+            {CALLBACK_TERMINAL_TURN_ID_METADATA_KEY: terminal_turn_id} if terminal_turn_id else {}
+        )
+        # A callback turn is deferred work the parent Run's caller authorized, so
+        # it inherits that Run's snapshot verbatim. Re-deriving it here would run
+        # a remote caller's follow-up as local; refreshing it would hand the
+        # child authority the caller may no longer hold. The snapshot carries the
+        # initiating role and ACL attributes, which the child's own admission
+        # check re-applies against the current instance binding, Project and
+        # Agent — durable automation is deliberately not cut off by the recorded
+        # refresh window.
+        from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+        parent_resource_context = (
+            run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+            if isinstance(run_metadata, Mapping)
             else None
         )
+        if isinstance(parent_resource_context, Mapping):
+            callback_metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = dict(parent_resource_context)
         if status in {"failed", "canceled"}:
             terminal_message = self._fallback_callback_result(run, status=status)
             terminal_callback = enqueue_session_callback(
