@@ -1,6 +1,6 @@
 # Public Show server API admission
 
-Status: implementation contract approved by PM seskmjhgq2476 on2026-09-18; not deployed. Implementation owner: backend lane sesvfjhjkzzjy. Existing E2E consumer owner: reg/seszbebbz6fwq. Owner requests GitHub push to the existing E2E instance. This contract describes the minimum product capability needed to reuse its existing signed receiver.
+Status: implementation contract approved by PM seskmjhgq2476 on2026-09-18; not deployed. Implementation owner: backend lane sesa4968u458k (analyst sesvfjhjkzzjy completed read-only research). Existing E2E consumer owner: reg/seszbebbz6fwq. Owner requests GitHub push to the existing E2E instance. This contract describes the minimum product capability needed to reuse its existing signed receiver.
 
 ## Outcome
 An explicitly registered public Show POST endpoint can authenticate an ordinary server-to-server request without requiring browser cookies or Origin. All unrelated routes retain their existing protection. A separate webhook-only Show workspace uses this capability; the existing PR report workspace stays private. This page is an ingress artifact, not a second executor or scheduler.
@@ -47,6 +47,7 @@ Same external inbox + sole remotePM seszbebbz6fwq. One managed forever Harness d
 ## Accepted product scope
 - `vibe/ui_server.py`
 - new `core/show_api.py`
+- `core/show_runtime.py`: PM-approved extension on 2026-09-18 to the existing request and transport options only; see implementation mechanics below
 - `core/show_pages.py` only where required to reuse page/workspace lifecycle
 - `tests/test_ui_show_pages.py`, `tests/test_ui_server_mutation_protection.py`, new `tests/test_show_api.py`, new `tests/test_show_api_integration.py`
 - `scripts/check_show_router.mjs` only for reusing its pinned real Runtime integration path
@@ -65,6 +66,55 @@ No V2/DB migration, UI/frontend, Cloud backend, Runtime protocol/repo or broad u
 Implement on feat/show-server-api based at4e0214fcd846; open a real non-draftPR, let cyhhao trigger Codex, keep durable combinedWatch and PMgate, no merge. This contract commit is part of that PR, no stacked specPR. Product files belong to one lane.
 
 Prepare a pinned installable artifact and rollback/state-preservation/health plan after gates; do not activate ad or change Cloud edge/GitHub hooks/Vault yet. The owner has authorized obtaining working e2e push; any request for remaining authority must identify a concrete necessary action against actual policies, after the result is reviewable. Do not demand approval simply because analysis prose said "separate". A live signing secret and admin-controlled hook registration remain concrete commissioning prerequisites.
+
+## Implementation mechanics and evidence
+
+- A native POST adapter dispatches with `parse_json=False`. The resolver runs
+  after existing host/proxy and role hooks and supplies the registration used by
+  Origin exemption and forwarding. The same resolver rechecks after upload, so
+  revocation or declaration changes during a slow body prevent dispatch. Browser
+  POSTs without registration keep legacy JSON parsing and normal protection.
+- The resolver reads at most 16 KiB of regular manifest data, accepts at most 16
+  unique routes, and requires a concrete confined `api/<path>.ts`. Paths use
+  ASCII alphanumeric/underscore/hyphen segments and have a 256-character limit.
+  Raw URI aliases and queries do not acquire admission. Manifest parsing rejects
+  duplicate keys; invalid optional declarations disable admission.
+- Body limits are 1 MiB hard maximum, 10 seconds for upload and 30 seconds for
+  the complete registered operation, including capability negotiation and
+  response streaming. Requests allow at most 64 header fields / 16 KiB in total,
+  with 16 declared metadata names of at most 64 characters and values of at most
+  2048 bytes. Names are case-insensitive `x-` metadata under a fixed exclusion
+  policy for credentials, hop/proxy/internal protocol and browser identity.
+  Content type is forwarded; the regular Show header allowlist is unchanged.
+- Request and response compression are rejected; declared body length is only
+  an early bound and actual original bytes are independently counted. Duplicate
+  request headers and connection-nominated metadata are controlled failures.
+- PM independently approved `core/show_runtime.py` scope after inspecting the
+  consuming call chain at `17d5258ac`: `request()` otherwise calls `ensure()` on
+  a missing endpoint, `automatic=False` does not prohibit startup, and `status()`
+  inspects installation rather than exposing a live endpoint. Existing
+  `request(start_if_needed=True, max_response_bytes=None)` defaults retain all
+  prior behavior. This ingress passes `False` and 64 KiB. Missing endpoint fails
+  before capability probes or lifecycle operations. The existing transport owns
+  streaming and process-fenced failure invalidation; oversized/encoded handler
+  responses close their stream without invalidating a healthy Runtime.
+- Bounded Runtime response materialization recalculates content length and
+  removes transfer/encoding framing. The ingress exposes only a generic no-store
+  receipt and accepted 2xx/4xx/5xx status, never handler output, redirect headers,
+  cookies or exception detail. Redirects and response policy failures return
+  502; unavailable Runtime returns 503. HTTP 204/205 receipts have empty bodies.
+- Real integration uses Runtime `5a9a6a52f2ae03611d617a659bfd0c1c32389478`, the
+  existing CI fixture pin, through actual HTTP UI -> Runtime -> TS handler ->
+  Python signed receiver -> temporary SQLite inbox. It confirms exact non-ASCII,
+  whitespace and newline digest, committed 202 receipt, tamper 401 with no new
+  row, SHARED identity and revocation. HOME/XDG/config and representative child
+  Vault-path writes are test-owned; credentials are synthetic. The existing
+  `check_show_router.mjs` invokes this test using its already-built pinned
+  Runtime, so mocks are not the only CI boundary evidence.
+- Local validation: 594 existing Show/mutation tests passed. Focused new
+  registration/admission/transport tests and the pinned real integration passed;
+  final PR/CI evidence is recorded in the delivery report. No service deployment,
+  signing key commissioning, hook registration or external delivery is claimed.
 
 ## Source evidence
 Analysis read Avibe4e0214fcd8460b68751affb3f00f04156d2970d1, Cloud backend9616a2f2e9b372cc762ef59decc972aaa3a89caa and Show Runtime5e31eda3536db3ea4de018fb253d0ed7d5c69a09. Actual installed e2e host is3.1.1.dev0+g4019b704c99a; these are distinct artifacts. Cloud uses hostname tunnel passthrough to UI5123, so no Cloud backend source change is indicated. Current Show API Origin guard and header allowlist block GitHub. Existing staged receiver tests:13passed synthetic/temp/mock, not live dispatch. Full dated recommendation remains a PM investigation artifact outside the branch.

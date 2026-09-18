@@ -283,6 +283,10 @@ class ShowRuntimeRequestTimeoutError(TimeoutError):
     """A proxied Runtime request exceeded its total request deadline."""
 
 
+class ShowRuntimeResponseLimitError(ValueError):
+    """A handler response violates this request's bounded transport policy."""
+
+
 class ShowRuntimeUnavailableError(RuntimeError):
     def __init__(
         self,
@@ -1139,10 +1143,17 @@ class ShowRuntimeManager:
         render_target: str | None = None,
         timeout_seconds: float | None = None,
         automatic: bool = True,
+        start_if_needed: bool = True,
+        max_response_bytes: int | None = None,
     ) -> httpx.Response:
         base_url = self._base_url
         process = self._process
         if base_url is None:
+            if not start_if_needed:
+                evidence = ShowRuntimeFailureEvidence(ShowRuntimeFailureDimension.RUNTIME, "runtime_unavailable")
+                raise ShowRuntimeUnavailableError(
+                    evidence.reason, classify_show_runtime_failure(evidence), show_runtime_recovery_action(evidence)
+                )
             ready = await self.ensure(automatic=automatic)
             if not ready.available or not ready.base_url:
                 raise self._unavailable_error(ready)
@@ -1183,6 +1194,7 @@ class ShowRuntimeManager:
             body=body,
             phase_timeout_seconds=phase_timeout_seconds,
             total_timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
         )
 
     async def request_global(
@@ -1230,11 +1242,45 @@ class ShowRuntimeManager:
         body: bytes | None,
         phase_timeout_seconds: float,
         total_timeout_seconds: float | None = None,
+        max_response_bytes: int | None = None,
     ) -> httpx.Response:
         """Own transport failures and publish their recovery evidence."""
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(phase_timeout_seconds, connect=5.0)) as client:
-                request = client.request(method, f"{base_url}{path}", headers=headers, content=body)
+                async def bounded_response() -> httpx.Response:
+                    bounded_headers = {**headers, "accept-encoding": "identity"}
+                    async with client.stream(method, f"{base_url}{path}", headers=bounded_headers, content=body) as response:
+                        # Reject compression before iteration: a decoder may allocate
+                        # arbitrarily large output from a single compressed chunk.
+                        if response.headers.get("content-encoding", "identity").lower() != "identity":
+                            raise ShowRuntimeResponseLimitError("Unsupported Show response encoding")
+                        if len(response.headers) > 64 or sum(
+                            len(k) + len(v) for k, v in response.headers.raw
+                        ) > 16 * 1024:
+                            raise ShowRuntimeResponseLimitError("Show response headers exceed limit")
+                        length = response.headers.get("content-length")
+                        if length is not None and (
+                            len(length) > 10 or not length.isdecimal() or int(length) > max_response_bytes
+                        ):
+                            raise ShowRuntimeResponseLimitError("Show response exceeds limit")
+                        content = bytearray()
+                        async for chunk in response.aiter_raw():
+                            if len(content) + len(chunk) > max_response_bytes:
+                                raise ShowRuntimeResponseLimitError("Show response exceeds limit")
+                            content.extend(chunk)
+                        materialized_headers = [
+                            (k, v) for k, v in response.headers.raw
+                            if k.lower() not in {b"content-length", b"transfer-encoding", b"content-encoding"}
+                        ]
+                        return httpx.Response(
+                            response.status_code, headers=materialized_headers, content=bytes(content),
+                            request=response.request,
+                        )
+
+                request = (
+                    client.request(method, f"{base_url}{path}", headers=headers, content=body)
+                    if max_response_bytes is None else bounded_response()
+                )
                 if total_timeout_seconds is None:
                     return await request
                 try:

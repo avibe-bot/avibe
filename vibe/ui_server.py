@@ -622,6 +622,8 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 
 
 def _is_mutation_guard_exempt() -> bool:
+    if getattr(request._request.state, "show_server_api_registration", None) is not None:
+        return True
     if request.path in {
         "/auth/callback",
         "/auth/show-identity/callback",
@@ -676,6 +678,8 @@ def _is_show_api_mutation() -> bool:
 
 
 def _ensure_csrf_cookie(response: Response) -> Response:
+    if getattr(request._request.state, "show_server_api_registration", None) is not None:
+        return response
     if _is_current_immutable_static_asset_request():
         return response
     if response.headers.getlist("Set-Cookie"):
@@ -2938,6 +2942,22 @@ def enforce_project_role_capabilities():
         )
     if not project_access_service.role_allows(role, required_project_role):
         return jsonify({"ok": False, "error": "not_found"}), 404
+    return None
+
+
+@app.before_request
+async def resolve_public_show_server_api():
+    # Host/proxy and role hooks above run first. Only the native POST adapter
+    # opts into this resolver; legacy/browser routes retain their old contract.
+    if not getattr(request._request.state, "show_server_api_candidate", False):
+        return None
+    from core.show_api import resolve_server_api
+
+    incoming = request._request
+    incoming.state.show_server_api_registration = await asyncio.to_thread(
+        resolve_server_api, incoming.scope.get("raw_path", b""), incoming.method,
+        incoming.scope.get("query_string", b""),
+    )
     return None
 
 
@@ -15914,6 +15934,87 @@ def redirect_public_show_page_to_canonical_path(share_id):
         return redirect(f"/p/{quote(share_id, safe='')}/")
     finally:
         store.close()
+
+
+def _show_server_api_result(status_code: int):
+    # No handler payload, error, response headers or browser tokens cross back
+    # through this ingress. The HTTP status is the receipt protocol.
+    response = (
+        FastAPIResponse(content=b"") if status_code in {204, 205}
+        else jsonify({"ok": True} if 200 <= status_code < 300 else {"error": "show_server_api_rejected"})
+    )
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+async def _serve_show_server_api(starlette_request: FastAPIRequest, registration):
+    from core import show_api
+    from core.show_runtime import (
+        ShowRuntimeContext, ShowRuntimeProtocolEnvelope, ShowRuntimeRequestTimeoutError,
+        ShowRuntimeResponseLimitError, ShowRuntimeUnavailableError, get_show_runtime_manager,
+    )
+
+    try:
+        headers = show_api.server_api_headers(starlette_request, registration)
+        body = await show_api.read_server_api_body(starlette_request, registration)
+        # Revalidate after waiting for the body: publication or the manifest may
+        # have been revoked. Use the same resolver, never a second admission rule.
+        current = await asyncio.to_thread(
+            show_api.resolve_server_api, starlette_request.scope.get("raw_path", b""), "POST",
+            starlette_request.scope.get("query_string", b""),
+        )
+        if current != registration:
+            return _show_server_api_result(404)
+        proxied = await get_show_runtime_manager().request(
+            "POST", f"/sessions/{quote(registration.session_id, safe='')}/app/{registration.path}",
+            envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.SHARED),
+            headers=headers, body=body, base_path=f"/p/{registration.share_id}/",
+            start_if_needed=False, max_response_bytes=show_api.MAX_RESPONSE_BYTES,
+            timeout_seconds=show_api.TOTAL_TIMEOUT_SECONDS,
+        )
+        status = proxied.status_code
+        if not (200 <= status < 300 or 400 <= status < 600):
+            status = 502
+        return _show_server_api_result(status)
+    except show_api.ServerAPIRequestError as exc:
+        return _show_server_api_result(exc.status_code)
+    except ShowRuntimeResponseLimitError:
+        return _show_server_api_result(502)
+    except ShowRuntimeRequestTimeoutError:
+        return _show_server_api_result(504)
+    except ShowRuntimeUnavailableError:
+        return _show_server_api_result(503)
+    except Exception:
+        logger.warning("Show server API request failed")
+        return _show_server_api_result(503)
+
+
+@app.post("/p/{share_id}/{asset_path:path}", include_in_schema=False)
+async def public_show_post(starlette_request: FastAPIRequest, share_id: str, asset_path: str):
+    from core.show_api import TOTAL_TIMEOUT_SECONDS
+
+    starlette_request.state.show_server_api_candidate = True
+    started = time.monotonic()
+
+    async def handler():
+        registration = getattr(starlette_request.state, "show_server_api_registration", None)
+        if registration is not None:
+            try:
+                return await asyncio.wait_for(
+                    _serve_show_server_api(starlette_request, registration),
+                    timeout=max(0, TOTAL_TIMEOUT_SECONDS - (time.monotonic() - started)),
+                )
+            except asyncio.TimeoutError:
+                return _show_server_api_result(504)
+        # Preserve legacy JSON validation for non-opted-in browser POSTs, after
+        # the normal Origin/CSRF/visibility hooks have made their decisions.
+        request._body_present = bool(await starlette_request.body())
+        await request.load_json()
+        return await serve_public_show_page(share_id, asset_path)
+
+    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
 
 
 @app.route(

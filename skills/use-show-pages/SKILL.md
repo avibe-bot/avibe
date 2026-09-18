@@ -2,7 +2,7 @@
 name: use-show-pages
 slug: use-show-pages
 description: Build, inspect, update, restore, or share Avibe Show Pages for visual explanations, diagrams, reports, or interactive prototypes. Covers the page workspace and its Git history.
-version: 0.3.0
+version: 0.4.0
 ---
 
 # Use Show Pages
@@ -37,6 +37,13 @@ For more usage details, run `vibe show --help` or a subcommand help such as `vib
 
 For live runtime, visibility, and URL availability, treat
 `vibe show status` and the relevant command output as authoritative.
+
+### Public server-to-server handlers
+
+For an explicitly published POST endpoint that authenticates a non-browser
+sender, read [Public server APIs](references/server-api.md) before authoring its
+`.show-api.json` declaration. Trusted handler code owns sender authentication;
+the declaration does not publish a page or install/start its Runtime.
 
 ### Show Page workspace history
 
