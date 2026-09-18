@@ -53,3 +53,11 @@ Session policies, resource authorization, and process supervision.
   through Vault; explicit CLI targeting remains available.
 - The callback consumer and credential grants are not changed to compensate
   for bad producer identity. No new storage schema or alternate routing owner.
+
+## Local acceptance
+
+HFR-486 reproduced both original failures before the change. The accepted
+related suites passed 1,463 tests; four skips are two Windows-only worker
+contracts on macOS and two Organization-only denial shapes in the Personal
+instance matrix. Pinned Ruff 0.4.9 passed. These are isolated source/process
+tests, not a running-host upgrade or live provider/credential trial.

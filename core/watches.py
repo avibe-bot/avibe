@@ -17,6 +17,7 @@ from uuid import uuid4
 from config import paths
 from config.atomic_io import write_atomic
 from core import watch_worker
+from core.caller_context import background_command_env
 from core.command_runner import SupervisedCommandStartupError, run_supervised_command
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
@@ -2386,6 +2387,11 @@ class ManagedWatchService:
                 label=f"watch {watch.id}",
                 on_spawn=_register_spawn,
                 max_output_bytes=None,
+                env=background_command_env(
+                    session_id=watch.session_id,
+                    source="watch",
+                    metadata=watch.metadata,
+                ),
                 # Which watch this waiter belongs to. A waiter that keeps persistent
                 # state per watch -- cursor files, locks -- cannot otherwise tell
                 # itself apart from an identically configured sibling watch, and two
