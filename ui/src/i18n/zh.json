@@ -2510,7 +2510,8 @@
     "accountMenuLabel": "账户（{{email}}）",
     "signedInAs": "当前登录账户",
     "signOut": "退出登录",
-    "signingOut": "正在退出…"
+    "signingOut": "正在退出…",
+    "resizeSidebar": "调整侧栏宽度"
   },
   "workbench": {
     "eyebrow": "工作台",

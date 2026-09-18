@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
+import { APP_TAB_PARAM } from '../apps/appLaunch';
 import {
   APP_SHELL_SCROLL_ID,
   clearMobileProjectsListSnapshot,
@@ -285,6 +286,57 @@ describe('AppShell workbench sidebar', () => {
     await user.click(screen.getByRole('button', { name: 'leave-chat' }));
     expect(await screen.findByTestId('inbox-surface')).toBeTruthy();
     expect(readMobileProjectsListSnapshot()).toEqual({ visibleCounts: {}, scrollTop: 0 });
+  });
+});
+
+describe('AppShell sidebar width', () => {
+  const renderShell = (initialEntry = '/') => render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route path="*" element={<div data-testid="surface" />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+
+  // The sidebar and the content offset must read ONE value, or dragging the
+  // divider would move the sidebar out from under the page it frames.
+  it('sizes the sidebar and offsets the content from the same width', async () => {
+    viewport.isDesktop = true;
+    renderShell();
+    await screen.findByTestId('surface');
+
+    expect(document.querySelector('aside')?.className).toContain('w-[var(--app-sidebar-w)]');
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className)
+      .toContain('md:ml-[var(--app-sidebar-w)]');
+  });
+
+  it.each([
+    [true, 1],
+    [false, 0],
+  ])('offers the resize separator only in desktop layout (desktop: %s)', async (isDesktop, expected) => {
+    viewport.isDesktop = isDesktop;
+    renderShell();
+    await screen.findByTestId('surface');
+
+    expect(screen.queryAllByRole('separator', { name: 'appShell.resizeSidebar' }))
+      .toHaveLength(expected);
+  });
+
+  it('leaves a standalone app tab without a sidebar to resize', async () => {
+    viewport.isDesktop = true;
+    // The shell reads standalone mode from the document URL, once, at mount.
+    window.history.replaceState({}, '', `/apps/editor?${APP_TAB_PARAM}=1`);
+    try {
+      renderShell('/apps/editor');
+      await screen.findByTestId('surface');
+
+      expect(document.querySelector('aside')).toBeNull();
+      expect(screen.queryByRole('separator', { name: 'appShell.resizeSidebar' })).toBeNull();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
   });
 });
 

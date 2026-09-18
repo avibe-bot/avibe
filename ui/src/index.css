@@ -35,6 +35,16 @@
   --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
 }
 
+/* Width of the desktop shell sidebar. The sidebar itself, every md+ content
+   offset and the Settings overlay's left edge read this one value, so dragging
+   the divider moves all of them together — including the overlay, which lives in
+   a portal outside the shell's subtree. SidebarResizer overrides it on the
+   document element while the shell is mounted; this default is its drag minimum
+   (MIN_SIDEBAR_WIDTH), so the shell renders unchanged with no JS at all. */
+:root {
+  --app-sidebar-w: 248px;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

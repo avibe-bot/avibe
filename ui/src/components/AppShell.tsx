@@ -12,6 +12,7 @@ import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
+import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerProvider';
@@ -358,11 +359,13 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar Y1TiVV — 248 wide, 20/16 padding, top group and bottom cluster
-          pushed apart. The brand row, navigation and projects are one unit inside
-          WorkbenchSidebar; this frame owns only the column and the bottom. */}
+      {/* Sidebar Y1TiVV — 248 wide by default, 20/16 padding, top group and bottom
+          cluster pushed apart. The brand row, navigation and projects are one unit
+          inside WorkbenchSidebar; this frame owns only the column and the bottom.
+          The width is SidebarResizer's --app-sidebar-w, which <main> below and the
+          Settings overlay read too, so a drag moves the whole layout at once. */}
       {!chromeless && (
-      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[248px] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex">
+      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex">
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
         </div>
@@ -415,6 +418,12 @@ export const AppShell: React.FC = () => {
             </span>
           </div>
         </div>
+
+        {/* Out of flow, so it neither joins the column nor takes any of its gap.
+            Desktop-only like the tree above it: below md the shell has no sidebar
+            edge to drag, and unmounting here is what ends a gesture that was live
+            when the viewport crossed the breakpoint. */}
+        {isDesktop && <SidebarResizer />}
       </aside>
       )}
 
@@ -455,8 +464,8 @@ export const AppShell: React.FC = () => {
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
             : isFullScreenMobile
-              ? 'min-h-0 flex-1 overflow-hidden md:ml-[248px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
-            : 'flex-1 min-h-0 overflow-y-auto md:ml-[248px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+              ? 'min-h-0 flex-1 overflow-hidden md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
+            : 'flex-1 min-h-0 overflow-y-auto md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
           !chromeless && (showBottomNav ? 'pb-[var(--mobile-nav-clearance)]' : 'pb-0'),
           // Board 04 draws the Workbench home on flat $--background. The console
           // aurora stays with the rest of its page family (Agents, Skills,
