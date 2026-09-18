@@ -127,14 +127,21 @@ from the environment or the local repository may select a host or a principal
 other than the authorized one.
 
 Identity is part of that authorization, and a healthy CLI login is not consent.
-`gh auth status --hostname github.com` proves an account is authenticated there,
-never that it belongs to the person asking or that they delegated publishing to
-it — on a shared host or an installation operated for someone else it can be an
-unrelated identity. Use
-an existing trusted binding between this user and that account, or name the
-actual account in the approval. **Fail closed:** if the credential appears to
-belong to someone else and no binding says otherwise, do not post — hand the
-draft back instead. Once bound, the binding holds; do not re-confirm per post.
+What matters is the effective account of the actual call, resolved under the
+same environment that will submit: `GH_TOKEN` and `GITHUB_TOKEN` override stored
+credentials, so a token in the environment — not the login you looked at — may
+be what posts. `gh api --hostname github.com user --jq .login` names that
+effective account, and `gh auth status --active --hostname github.com` reports
+the active one rather than every account on the host. Neither proves the account
+belongs to the person asking or that they delegated publishing to it; on a
+shared host or an installation operated for someone else it can be an unrelated
+identity. Use an existing trusted binding between this user and that account, or
+name the actual account in the approval. **Fail closed:** if the effective
+account is unknown, or looks like someone else's with no binding saying
+otherwise, hand the draft back instead of posting. A stale inactive login on the
+same host is not a reason to refuse — it says nothing about the active channel.
+Never print a token, switch accounts, or edit global `gh` config to pass this
+check. Once bound, the binding holds; do not re-confirm per post.
 
 ## Security reports
 
@@ -183,22 +190,25 @@ Target repository: `github.com/avibe-bot/avibe`. Spell the host out in every
 call this workflow makes — searching, creating, reading back, commenting, and
 reconciling after a timeout. Pass the repository as `github.com/avibe-bot/avibe`
 rather than `avibe-bot/avibe`, add `--hostname github.com` to a `gh api` call,
-and check the acting account with `gh auth status --hostname github.com`.
+and check the acting account with `gh auth status --active --hostname
+github.com`.
 
-**With an existing authorized GitHub connection.** When `gh` is installed, a
-github.com account has access to that repository, and that account is bound to
-this user per Publication authority, file the issue with `gh issue create --repo
-github.com/avibe-bot/avibe`.
+**With an existing authorized GitHub connection.** When `gh` is installed, the
+effective github.com account has access to that repository, and that account is
+bound to this user per Publication authority, file the issue with `gh issue
+create --repo github.com/avibe-bot/avibe`.
 
-**Never substitute a generated value into a shell command string.** Title, body,
-and search query are all report-derived: a title containing `` `vibe status` ``
-or `$(...)` pasted into a quoted argument runs on this machine before `gh` ever
-sees it, and `--body-file` protects only the body. Pass every such value as its
-own argv element with no shell in between — a non-shell subprocess invocation
-(`shell=False`) with the title read from a file, the body via `--body-file`, and
-the query as a plain argument. If a shell is unavoidable, the value must reach
-it as a quoted variable expansion read from a file, never as text spliced into
-the command.
+**A report-derived value is data, never syntax.** Title, body, and search query
+all come out of the report, and every context they travel through has syntax of
+its own. In a shell, a title containing `` `vibe status` `` or `$(...)` runs on
+this machine before `gh` ever sees it, and `--body-file` protects only the body:
+pass every such value as its own argv element with no shell in between — a
+non-shell invocation (`shell=False`) with the title read from a file, the body
+via `--body-file`, and the query as a plain argument. If a shell is unavoidable,
+the value must reach it as a quoted variable expansion read from a file, never
+as text spliced into the command. In a URL the same values need percent-encoding
+(see below). Apply the rule to whatever context comes next, not only to these
+two.
 
 Issues read/write plus repository metadata is the entire scope this needs; no
 webhook, workflow, or admin permission is involved. (Separately tracking a PR or
@@ -207,12 +217,22 @@ Avibe Vault, load the `use-avibe-vault` skill and reference the secret by name �
 never ask the user to paste a token into chat.
 
 **Without an authorized channel.** Finish the sanitized report, give it to the
-user, and state plainly that it was not submitted. For a user who does have a
-GitHub account, you may also offer the prefilled issue form
-(`https://github.com/avibe-bot/avibe/issues/new` with `title` and `body` as URL
-query parameters); do not present that link as a route for someone without a
-GitHub account. Not having a credential is not a reason to leave the user with
-nothing — the finished draft is still the deliverable.
+user, and state plainly that it was not submitted. Not having a credential is
+not a reason to leave the user with nothing — the finished draft is still the
+deliverable.
+
+A prefilled issue form is an optional extra on top of that draft, never a
+submission: building the link changes nothing on GitHub, and the user still has
+to open it and press the button themselves. Do not open or send it on their
+behalf. Build it against `https://github.com/avibe-bot/avibe/issues/new` with
+`title` and `body` as query parameters, and encode each value with a real query
+builder (`urllib.parse.urlencode`, `URLSearchParams`). Raw interpolation loses
+the report: `#` starts a fragment and `&` starts another parameter, so a title
+carrying `#2037 & 100%` arrives truncated or altered. Do not offer the link to
+someone without a GitHub account. If the report is too long to survive the link,
+hand over the complete draft with the plain
+`https://github.com/avibe-bot/avibe/issues/new` URL rather than trimming the
+report to fit.
 
 **Official Avibe intake.** A maintainer-operated channel that does not require
 a GitHub account is planned but not implemented: there is no endpoint, payload
@@ -228,9 +248,18 @@ this installation.
 - report the verified issue URL; do not promise a number or an ID before it is
   confirmed
 - if a channel only acknowledged receipt, say "received", not "issue created"
-- a network timeout is an unknown outcome, not a failure: search the repository
-  for a matching issue from that account and reconcile before retrying, so a
-  retry cannot create a duplicate
+
+An unknown outcome stays unknown. Creating an issue and posting a comment are
+both non-idempotent and `gh` offers no idempotency key, so a timeout means the
+write may still be in flight rather than lost. Reconcile once and boundedly:
+search the pinned repository for a matching item from the effective account. A
+match is confirmation — read it back and report it. An empty result confirms
+nothing, because the write may still be processing or the index may lag, so do
+not read it as failure and do not retry on it. Keep the draft, say plainly that
+the outcome is unknown and what you checked, and let the user decide whether a
+later retry is worth the duplicate risk. Retry only a confirmed failure, within
+the authorization you already had. Never claim the report was filed exactly
+once, and never invent an idempotency key to pretend otherwise.
 
 ## Following up
 
