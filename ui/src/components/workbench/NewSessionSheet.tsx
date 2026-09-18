@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { useNewSession } from '../../lib/useNewSession';
@@ -18,7 +18,7 @@ interface NewSessionSheetProps {
 
 // The workbench center ＋ opens this instead of jumping to the home canvas.
 // Pick a project (chips, most-recent first), describe the task, and it creates
-// the session + routes to /chat with the message pre-seeded — the same flow as
+// the session + submits the message before routing to /chat — the same flow as
 // the desktop Workbench home, surfaced as a mobile bottom sheet (design.pen KSXXB).
 // The create flow itself lives in the shared useNewSession hook (one source of
 // truth with the home); the sheet only owns its open/close + draft lifecycle.
@@ -32,6 +32,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
     active: open,
     loadErrorText: t('newSession.loadError'),
     createFailedText: t('newSession.createFailed'),
+    errorText: t,
   });
   // Stashed prompt: the no-project path closes the sheet (unmounting the
   // Composer) to create a project, so we hold the typed text and re-seed it
@@ -63,9 +64,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
     if (result) {
       setPendingDraft('');
       const navigateToSession = () =>
-        navigate(`/chat/${encodeURIComponent(result.sessionId)}`, {
-          state: { initialMessage: result.initialMessage },
-        });
+        navigate(`/chat/${encodeURIComponent(result.sessionId)}`);
       if (authorization) authorization.runNavigation(navigateToSession);
       else navigateToSession();
       onClose();
@@ -111,6 +110,11 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
           {ns.error && (
             <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
               {ns.error}
+              {ns.uncertainSessionId && (
+                <Link className="ml-2 underline" to={`/chat/${encodeURIComponent(ns.uncertainSessionId)}`} target="_blank" rel="noopener noreferrer">
+                  {t('newSession.inspectSession')}
+                </Link>
+              )}
             </div>
           )}
 
@@ -121,6 +125,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
             onSend={send}
             placeholder={t('newSession.placeholder')}
             disabled={ns.sending || !ns.loaded}
+            sendDisabled={Boolean(ns.uncertainSessionId)}
             initialDraft={pendingDraft}
           />
         </DialogContent>

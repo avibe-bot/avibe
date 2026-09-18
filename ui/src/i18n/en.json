@@ -170,6 +170,8 @@
     "loadFailed": "Couldn't load — tap to retry"
   },
   "newSession": {
+    "sendUncertain": "The send result is unknown. Your draft is kept here. Open the conversation to check before sending again.",
+    "inspectSession": "Open conversation",
     "title": "New session",
     "project": "Project",
     "newProject": "New",
@@ -2518,7 +2520,7 @@
     "placeholderTitle": "Your AI workbench is coming together",
     "placeholderBody": "Agents, Skills, Harness, and Vaults will live here. For now, jump into the control panel to configure platforms and backends.",
     "home": {
-      "heroTitle": "What would you like to do?",
+      "heroTitle": "What would you like to build today?",
       "heroBody": "Pick a starting point, or describe your own task",
       "suggestions": {
         "exploreTitle": "Explore a project",
@@ -2532,6 +2534,9 @@
         "planDraft": "Help me turn this goal into a concrete step-by-step plan"
       },
       "inputPlaceholder": "Describe a task or ask a question...",
+      "openProject": "Open project",
+      "manageAgents": "Manage Agents",
+      "createTask": "Create background task",
       "chooseWorkspace": "Choose a workspace",
       "workspaceAria": "Workspace: {{path}}",
       "noProjectForChat": "No projects yet — add one before starting a chat",
@@ -4226,6 +4231,7 @@
       }
     },
     "compose": {
+      "sendFailed": "Could not send. Your draft has been kept for retry.",
       "placeholder": "Type a message…",
       "placeholderBusy": "Type to queue while the agent works…",
       "placeholderArchived": "This session is archived — read-only",

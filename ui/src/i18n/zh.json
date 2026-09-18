@@ -170,6 +170,8 @@
     "loadFailed": "加载失败，点击重试"
   },
   "newSession": {
+    "sendUncertain": "发送结果暂时无法确认，草稿已保留。请先打开会话查看，避免重复发送。",
+    "inspectSession": "查看会话",
     "title": "新建会话",
     "project": "选择项目",
     "newProject": "新项目",
@@ -2518,7 +2520,7 @@
     "placeholderTitle": "你的 AI 工作台正在搭建",
     "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
-      "heroTitle": "你想做什么？",
+      "heroTitle": "今天想搭点什么？",
       "heroBody": "从一个真实任务开始，助手可以规划、研究和构建",
       "suggestions": {
         "exploreTitle": "探索项目",
@@ -2532,6 +2534,9 @@
         "planDraft": "帮我把这个目标拆成具体、可执行的步骤"
       },
       "inputPlaceholder": "给你的助手安排任务…",
+      "openProject": "打开项目",
+      "manageAgents": "管理 Agents",
+      "createTask": "建后台任务",
       "chooseWorkspace": "选择工作区",
       "workspaceAria": "工作区：{{path}}",
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
@@ -4226,6 +4231,7 @@
       }
     },
     "compose": {
+      "sendFailed": "发送失败，草稿已保留，可重试。",
       "placeholder": "输入消息…",
       "placeholderBusy": "Agent 处理中，输入将排队…",
       "placeholderArchived": "会话已归档，仅可查看",

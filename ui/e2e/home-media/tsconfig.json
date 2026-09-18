@@ -1,0 +1,1 @@
+{"extends":"../../tsconfig.app.json","compilerOptions":{"noEmit":true,"rootDir":"../.."},"include":["./**/*.ts","./**/*.tsx"],"exclude":[]}

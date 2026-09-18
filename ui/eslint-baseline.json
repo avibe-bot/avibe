@@ -125,9 +125,6 @@
     "src/lib/useMessageSearch.ts": {
       "react-hooks/set-state-in-effect": 1
     },
-    "src/lib/useNewSession.ts": {
-      "react-hooks/set-state-in-effect": 1
-    },
     "src/lib/usePendingVaultRequests.ts": {
       "react-hooks/preserve-manual-memoization": 1
     }

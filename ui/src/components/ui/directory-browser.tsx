@@ -18,13 +18,13 @@ import {
   LayoutGrid,
   Monitor,
   RefreshCw,
-  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import { Button } from './button';
+import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { errorMessage } from '@/lib/errorMessage';
 
 interface DirectoryBrowserProps {
@@ -120,6 +120,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const reqIdRef = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
@@ -129,21 +130,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   // shortcuts from Finder.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        // Escape precedence: cancel an in-progress folder create, else revert
-        // manual path editing to the breadcrumb, else close the picker. Path
-        // editing must be handled here (not just in the input) because this
-        // window listener would otherwise close the whole picker on Esc.
-        if (creating) {
-          setCreating(false);
-          setNewFolderName('');
-          setCreateError(null);
-        } else if (pathEditing) {
-          setPathEditing(false);
-        } else {
-          onClose();
-        }
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n' && !creating) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n' && !creating) {
         e.preventDefault();
         setCreating(true);
       }
@@ -341,45 +328,42 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const canForward = historyIndex < history.length - 1;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('directoryBrowser.title')}
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[80vh] max-h-[720px] min-h-[560px] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-        onClick={(e) => e.stopPropagation()}
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent
+        aria-describedby={undefined}
+        closeLabel={t('directoryBrowser.cancel')}
+        onEscapeKeyDown={(event) => {
+          if (creating || pathEditing) {
+            event.preventDefault();
+            setCreating(false);
+            setNewFolderName('');
+            setCreateError(null);
+            setPathEditing(false);
+          }
+        }}
+        className="flex h-[80dvh] max-h-[720px] min-h-0 w-full max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl border-border-strong bg-surface p-0 max-md:h-[90dvh] max-md:p-0 max-md:pb-0"
       >
         {/* Traffic-light header */}
         <div className="flex items-center gap-3 border-b border-border bg-surface-2 px-4 py-3">
           <div className="flex items-center gap-2">
             <button
               type="button"
-              aria-label="Close"
+              aria-label={t('directoryBrowser.cancel')}
               onClick={onClose}
               className="size-3 rounded-full bg-[#FF5F57] transition hover:brightness-110"
             />
             <span className="size-3 rounded-full bg-[#FFBD2E]" />
             <span className="size-3 rounded-full bg-[#28C840]" />
           </div>
-          <div className="flex flex-1 items-center justify-center gap-2 text-[13px] font-semibold text-foreground">
+          <DialogTitle className="flex flex-1 items-center justify-center gap-2 pr-8 text-[13px] font-semibold text-foreground">
             <FolderOpen className="size-3.5 text-mint-ink" />
             {t('directoryBrowser.title')}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t('directoryBrowser.cancel')}
-            className="text-muted transition hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
+          </DialogTitle>
+
         </div>
 
         {/* Toolbar — history arrows + breadcrumb + show-hidden + new-folder */}
-        <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
           <button
             type="button"
             onClick={goBack}
@@ -439,7 +423,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
               {pathError && <div className="px-1 text-[10.5px] text-destructive-ink">{pathError}</div>}
             </div>
           ) : (
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-[11px]">
+            <div className="flex min-w-[100px] flex-1 items-center gap-1 overflow-x-auto rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-[11px]">
               {breadcrumbs.map((crumb, i) => (
                 <React.Fragment key={`${crumb.path}-${i}`}>
                   {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted" />}
@@ -646,7 +630,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             {t('directoryBrowser.select')}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };
