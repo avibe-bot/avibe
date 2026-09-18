@@ -101,7 +101,8 @@ Hard rule:
 Owner decision, 2026-09-18: use
 [the shared cloud acceptance instance](https://avibe-cloud-e2e-app.avibe.bot)
 for Avibe regression and acceptance, including requests for `回归测试`.
-This supersedes older local-Incus defaults, including delivery-skill suggestions.
+This supersedes older local-Incus defaults in delivery skills and task plans;
+historical evidence does not select the environment for new acceptance runs.
 
 - Do not use or recreate the retired local Incus/Lima regression environment
   for routine acceptance. A missing or inaccessible cloud target is a blocker,

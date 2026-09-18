@@ -1,9 +1,11 @@
 # Memory IM attachment five-platform acceptance
 
-> **Safety boundary:** Run manual checks only in the local Incus regression
-> environment after the owner authorizes a regression update. Preserve the
-> long-lived `master` target and its product state. Never use `--remote`,
-> `--reset-config`, or `--reset-all`.
+> **Safety boundary:** Select the current acceptance environment through
+> [the regression guide](README.md): the designated shared cloud instance is
+> the default. Preserve its accumulated product state. Updating the instance
+> requires owner authorization and an established deployment procedure;
+> selecting the target alone does not request an update. Do not reset state or
+> substitute a local Incus environment for this acceptance check.
 
 ## Evidence boundary
 

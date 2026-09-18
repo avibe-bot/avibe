@@ -4,6 +4,8 @@ Use [the shared cloud acceptance instance](https://avibe-cloud-e2e-app.avibe.bot
 for Avibe regression and acceptance, including `回归测试`. This is the owner's
 2026-09-18 decision and supersedes the former workstation-local Incus/Lima
 default, including older delivery-skill suggestions to update local `master`.
+Current environment selection belongs to this guide and the owner's decision;
+older task plans and historical test records do not override it.
 
 For example, after a messaging fix, verify the affected journey on this
 instance and its intended test channels. Do not run `scripts/run_regression.sh`
