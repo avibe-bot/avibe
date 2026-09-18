@@ -43,3 +43,34 @@ Cancel changes rereads saved intent in place, nested picker dismissal preserves
 the parent, and only Save persists the exact ordered pairs. Desktop/mobile EN/ZH
 screenshots also cover explicit pinning, long identities and light/dark footer
 geometry. Its in-memory route API is installed only for the route fixture view.
+
+`token-scope.spec.ts` extends `MH-MENU-COMPOSE-001` with finite rendering
+contracts for the catalog name, picker row/name, portalled editor input/body,
+and the editor's forwarded field label. An opt-in fixture also mounts the real
+`GuardImpact` / `GuardGapList` with no dialog ancestor and checks their body,
+label/count, list/hop, and hint geometry. Expected values are painted CSS
+properties, not the existence of custom-property names.
+
+The matrix covers desktop/mobile Chromium and explicit dark/light themes
+against the opposite system preference, plus both system preferences with no
+explicit theme. A nested light boundary on the standalone guard body checks its
+label against the local muted-ink role. The catalog → picker → custom-editor
+path uses production components and Radix portals. The direct edit path is also
+used by the controls. Tailwind's generated utilities and the imported production
+stylesheets participate in every run.
+
+Sensitivity controls remove/relocate emitted declarations, put a metric under
+inactive print media, use a root alias with a missing dependency, and freeze an
+ink above the nested light boundary. Positive controls use `:where`, `:is`,
+an ancestor-qualified selector, active media/supports conditions, a repaired
+dependency, and a theme selector list. These run in fresh browser contexts;
+they never rewrite source or contact Avibe. They verify this contract's
+sensitivity, not a new cascade evaluator.
+
+The suite does not certify every Model Hub class, arbitrary React branches or
+CSS conditions, theme nesting in both directions, Tailwind directive modes,
+pseudo-elements, or other browser engines. The existing root-derived washes,
+accent mixes, and shadows retain their known mixed-theme limitation. Production
+CSS and component behavior are unchanged. See
+`docs/plans/issue-1856-model-hub-token-guard.md` (repository root) for the source
+mutation reproduction and the historical analyzer boundary.

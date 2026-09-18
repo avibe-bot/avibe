@@ -235,6 +235,7 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::finds an already-added model by its supplier and shows it as already added
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::asks which row a typed ID names as the ID it would be saved as
+      - ui/e2e/model-catalog/token-scope.spec.ts
   - id: MH-GATEWAY-STATUS-001
     name: Gateway route coverage stays independent of Agent selections and attributes Agent issues below the catalog
     status: covered
