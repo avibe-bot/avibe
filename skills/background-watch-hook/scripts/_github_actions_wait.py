@@ -100,7 +100,9 @@ def normalize_selected_runs(selected: dict[str, list[dict[str, Any]]]) -> dict[s
                 "head_branch": run.get("head_branch"),
                 "run_attempt": run.get("run_attempt"),
             }
-            for run in runs
+            # run_started_at can move during a rerun. Run ordering is not a
+            # verdict change and must not affect durable snapshot equality.
+            for run in sorted(runs, key=lambda item: str(item.get("id") or ""))
         ]
         for workflow, runs in selected.items()
     }
