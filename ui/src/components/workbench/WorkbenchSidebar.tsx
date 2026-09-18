@@ -35,7 +35,11 @@ import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { SessionPinAction } from './SessionPinAction';
-import { SESSION_ROW_MENU_POSITION_CLASS } from './sessionRowLayout';
+import {
+  SESSION_ROW_INDENT_CLASS,
+  SESSION_ROW_MENU_POSITION_CLASS,
+  SESSION_STATUS_DOT_MOTION_CLASS,
+} from './sessionRowLayout';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -232,8 +236,10 @@ const InboxHoverPopover: React.FC<{
 // Session status dot colours. Maps the agent-runtime status to the user's
 // gray / green / red: idle → muted (gray), running → mint (green) + glow,
 // failed → destructive (red) + glow. Tokens resolve from src/index.css.
+// Running also pulses — keyed on nothing but the status, so selection, unread
+// count, hover and focus cannot start or stop the motion.
 const STATUS_DOT_CLASS: Record<string, string> = {
-  running: 'bg-mint shadow-glow-dot-mint',
+  running: `bg-mint shadow-glow-dot-mint ${SESSION_STATUS_DOT_MOTION_CLASS}`,
   failed: 'bg-destructive shadow-glow-dot-destructive',
   idle: 'bg-muted',
 };
@@ -312,7 +318,12 @@ export const SessionRow: React.FC<{
 
   if (renaming) {
     return (
-      <div className="flex items-center gap-2 py-1.5 pl-[26px] pr-2.5">
+      <div
+        className={clsx(
+          'flex items-center gap-2 border-transparent py-1.5 pr-2.5',
+          SESSION_ROW_INDENT_CLASS,
+        )}
+      >
         <span
           className={clsx(
             'size-[5px] shrink-0 rounded-full',
@@ -347,11 +358,14 @@ export const SessionRow: React.FC<{
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-colors duration-150 ease-out motion-reduce:transition-none',
+            'group/sess relative flex items-center gap-2 rounded-md py-1.5 text-left transition-colors duration-150 ease-out motion-reduce:transition-none',
+            SESSION_ROW_INDENT_CLASS,
             canManageMetadata ? 'pr-11' : 'pr-2.5',
+            // Only the accent's colour turns on with selection; its width is
+            // already reserved above, so the row's contents do not move.
             active
-              ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
-              : 'hover:bg-foreground/[0.04]',
+              ? 'border-mint bg-mint-soft font-semibold text-foreground'
+              : 'border-transparent hover:bg-foreground/[0.04]',
           )}
         >
           <button

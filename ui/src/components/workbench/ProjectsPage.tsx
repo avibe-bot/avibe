@@ -52,10 +52,14 @@ import { mobileSessionActions } from './chatSessionActions';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
+import { SESSION_STATUS_DOT_MOTION_CLASS } from './sessionRowLayout';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 
+// Same status → colour mapping the desktop sidebar draws, and the same pulse
+// while the agent is running; the two surfaces share the motion class so a
+// running session reads the same way on a phone as on a desktop.
 const DOT: Record<string, string> = {
-  running: 'bg-mint shadow-glow-dot-mint',
+  running: `bg-mint shadow-glow-dot-mint ${SESSION_STATUS_DOT_MOTION_CLASS}`,
   failed: 'bg-destructive',
   idle: 'bg-muted',
 };
