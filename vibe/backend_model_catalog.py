@@ -5,13 +5,18 @@ import hashlib
 import json
 import logging
 import os
+import re
+import stat
+import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
+from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -22,6 +27,9 @@ from vibe.claude_model_catalog import (
     load_catalog_models,
 )
 from vibe.codex_config import get_codex_home
+
+if TYPE_CHECKING:
+    from storage.lock import MigrationFileLock
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +46,8 @@ REMOTE_CATALOG_USER_AGENT = "avibe/backend-model-catalog"
 REMOTE_CATALOG_CACHE_VERSION = 2
 CODEX_HUB_CATALOG_TIMEOUT_SECONDS = 15.0
 CODEX_HUB_CATALOG_MAX_BYTES = 8 * 1024 * 1024
+CODEX_HUB_CATALOG_HISTORY_LIMIT = 1
+_CODEX_HUB_CATALOG_NAME = re.compile(r"standard-responses-[0-9a-f]{16}\.json")
 
 _HIDDEN_VISIBILITIES = {"hide", "hidden"}
 _VISIBLE_VISIBILITIES = {"visible", "list"}
@@ -129,6 +139,166 @@ def get_cached_catalog_path() -> Path:
 def _codex_hub_catalog_path(catalog: bytes) -> Path:
     digest = hashlib.sha256(catalog).hexdigest()[:16]
     return paths.get_runtime_dir() / "model-hub" / "codex" / f"standard-responses-{digest}.json"
+
+
+class CodexHubCatalog:
+    """One owner's pin on an immutable catalog generation.
+
+    Caches, pending launches and transports acquire independent pins and close
+    them at their lifecycle boundary. Finalization is only an abandoned-owner
+    fallback: exception tracebacks must not delay ordinary release.
+    """
+
+    def __init__(self, path: Path, descriptor: int) -> None:
+        self.path = path
+        self.descriptor = descriptor
+        self._release = weakref.finalize(self, _release_codex_hub_catalog, path, descriptor)
+
+    def retain(self) -> CodexHubCatalog:
+        """Acquire an independent pin before giving up this owner's pin."""
+        if not self._release.alive:
+            raise RuntimeError("Cannot retain a released Codex catalog")
+        with _codex_hub_catalog_lock(self.path.parent):
+            return _pin_codex_hub_catalog(self.path)
+
+    def close(self) -> None:
+        self._release()
+
+    def __enter__(self) -> CodexHubCatalog:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    @contextmanager
+    def inherited_subprocess_kwargs(self):
+        """Keep the file pinned in the child even if its Avibe parent exits."""
+        if not self._release.alive:
+            raise RuntimeError("Cannot launch with a released Codex catalog")
+        if os.name != "nt":
+            yield {"pass_fds": (self.descriptor,)}
+            return
+        import msvcrt
+
+        # Each spawn gets its own temporary inheritable handle, so simultaneous
+        # launches cannot reset one another's inheritance flags.
+        descriptor = os.dup(self.descriptor)
+        try:
+            os.set_inheritable(descriptor, True)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.lpAttributeList = {"handle_list": [msvcrt.get_osfhandle(descriptor)]}
+            yield {"startupinfo": startupinfo, "close_fds": True}
+        finally:
+            os.close(descriptor)
+
+
+def _codex_hub_catalog_lock(directory: Path, *, timeout_seconds: float = 30.0) -> MigrationFileLock:
+    # Lightweight catalog/handler imports must not initialize SQLite storage.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(directory / ".catalog.lock", timeout_seconds=timeout_seconds)
+
+
+def _open_codex_hub_catalog(path: Path) -> int:
+    """Open only an ordinary file without following a candidate symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise OSError(f"Codex catalog is not an exclusive regular file: {path}")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _pin_codex_hub_catalog(path: Path) -> CodexHubCatalog:
+    descriptor = _open_codex_hub_catalog(path)
+    try:
+        if os.name != "nt":
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return CodexHubCatalog(path, descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _prune_codex_hub_catalogs_locked(directory: Path) -> None:
+    """Keep every pinned generation and at most one unpinned history file.
+
+    Caller holds the publication lock. Name order only chooses the spare;
+    neither timestamps nor age establish that a generation is unused.
+    """
+    spare = 0
+    for path in sorted(directory.iterdir()):
+        if not _CODEX_HUB_CATALOG_NAME.fullmatch(path.name):
+            continue
+        descriptor = None
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode) or path.lstat().st_nlink != 1:
+                continue
+            descriptor = _open_codex_hub_catalog(path)
+            if os.name != "nt":
+                import fcntl
+
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+            # On Windows the deletion itself is the non-blocking pin probe:
+            # any reader's open handle denies deletion. Close our probe first,
+            # while the publication lock still excludes a new reader.
+            if os.name == "nt":
+                os.close(descriptor)
+                descriptor = None
+            if spare < CODEX_HUB_CATALOG_HISTORY_LIMIT:
+                spare += 1
+                continue
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 32:
+                # ERROR_SHARING_VIOLATION: a cache/child still owns its pin.
+                continue
+            logger.warning("Could not reclaim Codex Model Hub catalog %s", path, exc_info=True)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def prune_codex_hub_catalogs(directory: Path) -> None:
+    """Best-effort reclamation at publication and reference-release boundaries."""
+    from storage.lock import MigrationLockTimeout
+
+    try:
+        if not directory.is_dir():
+            return
+        with _codex_hub_catalog_lock(directory, timeout_seconds=0):
+            _prune_codex_hub_catalogs_locked(directory)
+    except MigrationLockTimeout:
+        # A publisher/cleaner already owns this directory. Its sweep, or the
+        # next lifecycle boundary, retries reclamation.
+        logger.debug("Codex catalog cleanup deferred while publication is in progress")
+    except OSError:
+        logger.warning("Could not clean Codex Model Hub catalogs in %s", directory, exc_info=True)
+
+
+def _release_codex_hub_catalog(path: Path, descriptor: int) -> None:
+    # Close, do not LOCK_UN: a spawned app-server inherits the same open file
+    # description and must keep its lock even if the Avibe parent goes away.
+    os.close(descriptor)
+    prune_codex_hub_catalogs(path.parent)
 
 
 def _codex_hub_catalog_bytes(
@@ -278,11 +448,26 @@ def _codex_hub_catalog_bytes(
 def _publish_codex_hub_catalog(
     raw_catalog: bytes,
     configured_models: Sequence[Mapping[str, Any]] | None = None,
-) -> Path:
+) -> CodexHubCatalog:
     catalog = _codex_hub_catalog_bytes(raw_catalog, configured_models)
     path = _codex_hub_catalog_path(catalog)
-    write_atomic(path, catalog)
-    return path
+    with _codex_hub_catalog_lock(path.parent):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            write_atomic(path, catalog)
+        pinned = _pin_codex_hub_catalog(path)
+        try:
+            if os.read(pinned.descriptor, len(catalog) + 1) != catalog:
+                raise ValueError("Codex catalog digest path contains different bytes")
+        except BaseException:
+            pinned.close()
+            raise
+        try:
+            _prune_codex_hub_catalogs_locked(path.parent)
+        except OSError:
+            logger.warning("Could not clean Codex Model Hub catalogs in %s", path.parent, exc_info=True)
+        return pinned
 
 
 def _export_codex_bundled_catalog(
@@ -331,7 +516,7 @@ def prepare_codex_hub_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
     configured_models: Sequence[Mapping[str, Any]] | None = None,
-) -> Path:
+) -> CodexHubCatalog:
     """Prepare the exact binary's catalog immediately before a Hub launch."""
 
     return _publish_codex_hub_catalog(

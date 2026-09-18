@@ -8,12 +8,17 @@ import logging
 import os
 import signal
 from asyncio.subprocess import Process
-from typing import Any, Awaitable, Callable, Optional
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from core.process_diagnostics import log_process_snapshot, process_identity
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from vibe.codex_config import format_toml_basic_string
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from vibe.backend_model_catalog import CodexHubCatalog
 
 STREAM_BUFFER_LIMIT = 128 * 1024 * 1024  # 128 MB
 
@@ -97,6 +102,7 @@ class CodexTransport:
         runtime_args: list[str] | None = None,
         runtime_env: dict[str, str] | None = None,
         runtime_fingerprint: str = "direct",
+        model_hub_catalog: CodexHubCatalog | None = None,
     ) -> None:
         self._binary = binary
         self._cwd = cwd
@@ -104,6 +110,9 @@ class CodexTransport:
         self._runtime_args = runtime_args or []
         self._runtime_env = runtime_env
         self.runtime_fingerprint = runtime_fingerprint
+        self._model_hub_catalog = model_hub_catalog.retain() if model_hub_catalog is not None else None
+        self._catalog_required = model_hub_catalog is not None
+        self._catalog_exit_task: asyncio.Task[None] | None = None
         self._process: Optional[Process] = None
         self._request_id: int = 0
         self._pending: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
@@ -129,9 +138,19 @@ class CodexTransport:
 
     async def start(self) -> None:
         """Launch the app-server and perform the ``initialize`` handshake."""
+        try:
+            await self._start()
+        except BaseException:
+            if self._process is None or self._process.returncode is not None:
+                self._release_model_hub_catalog()
+            raise
+
+    async def _start(self) -> None:
         if self._process and self._process.returncode is None:
             logger.warning("CodexTransport.start() called but process is already running")
             return
+        if self._catalog_required and self._model_hub_catalog is None:
+            raise RuntimeError("A stopped Codex Hub transport needs a newly prepared catalog")
 
         self._closed_event.clear()
         cmd = (
@@ -141,6 +160,10 @@ class CodexTransport:
             + self._extra_args
             + _avibe_app_server_config_args()
         )
+        if self._model_hub_catalog is not None:
+            # The path actually consumed must be the one we pin, even if a
+            # backend extra argument tries to select a different generation.
+            cmd += ["-c", f"model_catalog_json={format_toml_basic_string(str(self._model_hub_catalog.path))}"]
         logger.info("Launching Codex app-server: %s (cwd=%s)", " ".join(cmd), self._cwd)
 
         if not os.path.exists(self._cwd):
@@ -156,7 +179,24 @@ class CodexTransport:
         }
         if self._runtime_env is not None:
             subprocess_kwargs["env"] = self._runtime_env
-        self._process = await asyncio.create_subprocess_exec(*cmd, **subprocess_kwargs)
+        catalog = self._model_hub_catalog
+        inheritance = catalog.inherited_subprocess_kwargs() if catalog is not None else nullcontext({})
+        with inheritance as catalog_kwargs:
+            spawn = asyncio.create_task(
+                asyncio.create_subprocess_exec(*cmd, **subprocess_kwargs, **catalog_kwargs)
+            )
+            try:
+                self._process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                # Cancellation can race the OS spawn. Settle it before closing
+                # inherited handles or losing the only reference to this child.
+                self._process = await spawn
+                await self.stop()
+                raise
+        if catalog is not None:
+            self._catalog_exit_task = asyncio.create_task(
+                self._release_catalog_on_exit(self._process, catalog)
+            )
         identity = process_identity(self._process.pid)
         logger.info(
             "Codex app-server started (pid=%s pgid=%s sid=%s service_pgid=%s)",
@@ -218,6 +258,7 @@ class CodexTransport:
         self._initialized = False
         proc = self._process
         if not proc or proc.returncode is not None:
+            self._release_model_hub_catalog()
             self._closed_event.set()
             self._cleanup_tasks()
             return
@@ -243,6 +284,7 @@ class CodexTransport:
                     pass
 
         self._cleanup_tasks()
+        self._release_model_hub_catalog()
         self._closed_event.set()
         # Fail all pending futures
         for fut in self._pending.values():
@@ -250,6 +292,18 @@ class CodexTransport:
                 fut.set_exception(ConnectionError("Transport stopped"))
         self._pending.clear()
         logger.info("Codex app-server stopped")
+
+    async def _release_catalog_on_exit(self, proc: Process, catalog: CodexHubCatalog) -> None:
+        """Stdout EOF is not process exit; keep the pin until wait confirms it."""
+        await proc.wait()
+        catalog.close()
+        if self._model_hub_catalog is catalog:
+            self._model_hub_catalog = None
+
+    def _release_model_hub_catalog(self) -> None:
+        if self._model_hub_catalog is not None:
+            self._model_hub_catalog.close()
+            self._model_hub_catalog = None
 
     def _cleanup_tasks(self) -> None:
         for task in (self._reader_task, self._stderr_task, self._notify_task):

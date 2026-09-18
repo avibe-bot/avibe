@@ -9,12 +9,14 @@ import shlex
 import shutil
 import socket
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 
 from config.v2_config import ModelHubBackendModelConfig
 from modules.agents.codex.transport import CodexTransport
+from modules.agents.codex.transport import CodexRPCError
 from modules.agents.model_hub import (
     ModelHubLaunch,
     build_claude_hub_env,
@@ -24,7 +26,12 @@ from modules.agents.model_hub import (
 )
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
-from vibe.backend_model_catalog import _codex_hub_catalog_bytes
+from vibe.backend_model_catalog import (
+    CodexHubCatalog,
+    _codex_hub_catalog_bytes,
+    _codex_hub_catalog_path,
+    _publish_codex_hub_catalog,
+)
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -153,6 +160,94 @@ async def _codex_turn(binary, runtime, gateway, catalog, *, effort, native_confi
         params["turn"]["status"] for method, params in notifications if method == "turn/completed"
     ] == ["completed"] * turns
     return bodies, models, notifications, config["config"]
+
+
+def test_codex_reloads_catalog_after_initialize(codex_catalog_runtime):
+    """MH-PROTOCOL-004: a live app-server rereads its catalog for a new thread."""
+    binary, runtime, raw_catalog = codex_catalog_runtime
+    catalog_path = runtime.home / "reload-catalog.json"
+    catalog_path.write_bytes(_codex_hub_catalog_bytes(raw_catalog))
+
+    async def probe():
+        transport = CodexTransport(
+            binary=binary,
+            cwd=str(runtime.home),
+            runtime_args=["-c", f"model_catalog_json={json.dumps(str(catalog_path))}"],
+            runtime_env=runtime.env,
+        )
+        try:
+            await transport.start()
+            catalog_path.unlink()
+            with pytest.raises(CodexRPCError, match="failed to load configuration"):
+                await transport.send_request(
+                    "thread/start",
+                    {"cwd": str(runtime.home), "ephemeral": True},
+                )
+        finally:
+            await transport.stop()
+
+    asyncio.run(probe())
+
+
+@pytest.mark.parametrize("inherit", [True, False])
+def test_codex_inherits_catalog_pin(codex_catalog_runtime, monkeypatch, inherit):
+    """MH-PROTOCOL-004: only a child pin, not the history spare, saves its catalog."""
+    binary, runtime, raw_catalog = codex_catalog_runtime
+    # Preserve native model behavior while producing distinct valid catalogs.
+    # Choose the consumer's path after sorting, so it cannot win the history
+    # spare by chance, regardless of which catalog this Codex version bundles.
+    variants = []
+    for index in range(5):
+        payload = json.loads(raw_catalog)
+        payload["models"][0]["display_name"] = f"Retention fixture {index}"
+        variants.append(json.dumps(payload).encode())
+    variants.sort(key=lambda raw: _codex_hub_catalog_path(_codex_hub_catalog_bytes(raw)).name)
+    catalog = _publish_codex_hub_catalog(variants[-1])
+    path = catalog.path
+    if not inherit:
+        monkeypatch.setattr(CodexHubCatalog, "inherited_subprocess_kwargs", lambda self: nullcontext({}))
+
+    async def probe():
+        transport = CodexTransport(
+            binary=binary,
+            cwd=str(runtime.home),
+            runtime_args=["-c", f"model_catalog_json={json.dumps(str(path))}"],
+            runtime_env=runtime.env,
+            model_hub_catalog=catalog,
+        )
+        try:
+            await transport.start()
+            # Simulate loss of the parent's descriptor without killing pytest.
+            catalog.close()
+            transport._model_hub_catalog.close()
+            for raw in variants[:-1]:
+                with _publish_codex_hub_catalog(raw) as successor:
+                    assert successor.path.name < path.name
+            assert path.is_file() is inherit
+            if inherit:
+                thread = await transport.send_request(
+                    "thread/start",
+                    {"cwd": str(runtime.home), "ephemeral": True},
+                )
+                assert thread["thread"]["id"]
+            else:
+                with pytest.raises(CodexRPCError, match="failed to load configuration"):
+                    await transport.send_request(
+                        "thread/start",
+                        {"cwd": str(runtime.home), "ephemeral": True},
+                    )
+        finally:
+            catalog.close()
+            await transport.stop()
+        assert transport._process.returncode is not None
+        # Simulated parent loss already closed every parent pin. The next
+        # publication must reclaim the child's catalog once it really exits.
+        with _publish_codex_hub_catalog(variants[0]):
+            pass
+        assert not path.exists()
+        assert len(list(path.parent.glob("standard-responses-*.json"))) == 1
+
+    asyncio.run(probe())
 
 
 @pytest.mark.parametrize("effort", [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"])

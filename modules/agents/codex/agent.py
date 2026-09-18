@@ -8,6 +8,7 @@ import logging
 import os
 import shlex
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
@@ -63,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from modules.agents.model_hub import ModelHubLaunch
+    from vibe.backend_model_catalog import CodexHubCatalog
 
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
 _CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
@@ -142,7 +144,7 @@ class CodexAgent(BaseAgent):
         super().__init__(controller)
         self.codex_config = codex_config
         self._registered_runtime = registered_runtime
-        self._model_hub_catalog_path: Path | None = None
+        self._model_hub_catalog: CodexHubCatalog | None = None
         self._model_hub_catalog_lock = asyncio.Lock()
         self._model_hub_catalog_generation = 0
 
@@ -856,22 +858,23 @@ class CodexAgent(BaseAgent):
         """Reload persisted runtime config before respawning app-server transports."""
         self.codex_config = codex_config
         self.controller.config.codex = codex_config
-        self._model_hub_catalog_generation += 1
-        self._model_hub_catalog_path = None
+        await self.invalidate_model_hub_runtime()
         await self.refresh_auth_state()
 
     async def invalidate_model_hub_runtime(self) -> None:
         """Make the next Hub launch rebuild its catalog without touching Direct transports."""
         self._model_hub_catalog_generation += 1
-        self._model_hub_catalog_path = None
+        if self._model_hub_catalog is not None:
+            self._model_hub_catalog.close()
+        self._model_hub_catalog = None
 
-    async def prepare_model_hub_runtime(self) -> Path:
+    async def prepare_model_hub_runtime(self) -> CodexHubCatalog:
         """Bind Hub metadata to this Agent's exact configured Codex binary."""
         from vibe import backend_model_catalog
 
         async with self._model_hub_catalog_lock:
-            if self._model_hub_catalog_path is not None:
-                return self._model_hub_catalog_path
+            if self._model_hub_catalog is not None:
+                return self._model_hub_catalog
             generation = self._model_hub_catalog_generation
             binary = self.codex_config.binary
             configured_models = None
@@ -882,23 +885,39 @@ class CodexAgent(BaseAgent):
                     model.to_payload()
                     for model in store.load().agents["codex"].models
                 ]
-            try:
-                path = await asyncio.to_thread(
+            preparation = asyncio.create_task(
+                asyncio.to_thread(
                     backend_model_catalog.prepare_codex_hub_catalog,
                     binary,
                     None,
                     configured_models,
                 )
+            )
+            try:
+                catalog = await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                # The export runs in a thread and cannot be cancelled. Its
+                # result must still release its pin after the caller leaves.
+                preparation.add_done_callback(self._discard_model_hub_catalog)
+                raise
             except Exception as exc:
                 raise CodexModelHubCatalogUnavailableError(
                     "Codex Model Hub catalog preparation failed"
                 ) from exc
             if self._model_hub_catalog_generation != generation:
+                catalog.close()
                 raise CodexModelHubCatalogUnavailableError(
                     "Codex Model Hub catalog generation changed during preparation"
                 )
-            self._model_hub_catalog_path = path
-            return path
+            self._model_hub_catalog = catalog
+            return catalog
+
+    @staticmethod
+    def _discard_model_hub_catalog(preparation: asyncio.Task) -> None:
+        try:
+            preparation.result().close()
+        except Exception:
+            logger.warning("Cancelled Codex catalog preparation failed", exc_info=True)
 
     async def prepare_resume_binding(
         self,
@@ -949,6 +968,7 @@ class CodexAgent(BaseAgent):
 
     async def shutdown_runtime(self) -> None:
         """Stop all app-server transports during vibe-remote shutdown."""
+        await self.invalidate_model_hub_runtime()
         if not hasattr(self, "_transport_last_activity"):
             self._transport_last_activity = {}
         if not hasattr(self, "_transport_locks"):
@@ -1674,7 +1694,7 @@ class CodexAgent(BaseAgent):
 
         while True:
             wait_for_active_turns = False
-            async with self._transport_locks[cwd]:
+            async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
                 existing_dead = bool(
@@ -1716,19 +1736,21 @@ class CodexAgent(BaseAgent):
                     runtime_args: list[str] = []
                     runtime_env: dict[str, str] | None = None
                     runtime_fingerprint = "direct"
+                    catalog = None
                     if launch is not None:
                         from modules.agents.model_hub import build_codex_hub_launch
 
-                        if (
-                            launch.channel == "hub"
-                            and self._model_hub_catalog_path is None
-                        ):
-                            await self.prepare_model_hub_runtime()
+                        if launch.channel == "hub":
+                            # Capture the reference before any later await.
+                            # Invalidation may drop the cache while we retire
+                            # an old transport or spawn/initialize its successor.
+                            catalog = (await self.prepare_model_hub_runtime()).retain()
+                            catalog_pins.callback(catalog.close)
                         runtime_args, runtime_env = build_codex_hub_launch(
                             [],
                             os.environ.copy(),
                             launch,
-                            model_catalog_path=self._model_hub_catalog_path,
+                            model_catalog_path=catalog.path if catalog is not None else None,
                         )
                         runtime_fingerprint = launch.fingerprint
 
@@ -1794,6 +1816,7 @@ class CodexAgent(BaseAgent):
                         runtime_args=runtime_args,
                         runtime_env=runtime_env,
                         runtime_fingerprint=runtime_fingerprint,
+                        model_hub_catalog=catalog,
                     )
 
                     # Wire up callbacks

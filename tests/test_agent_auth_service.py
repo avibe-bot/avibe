@@ -2236,7 +2236,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         new_config = CodexCompatConfig(enabled=True, binary="/new/codex", extra_args=[])
         agent = CodexAgent.__new__(CodexAgent)
         agent.codex_config = old_config
-        agent._model_hub_catalog_path = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog = SimpleNamespace(path=Path("/runtime/codex-old.json"), close=Mock())
         agent._model_hub_catalog_lock = asyncio.Lock()
         agent._model_hub_catalog_generation = 0
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=old_config))
@@ -2251,7 +2251,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         prepare_catalog.assert_not_called()
         self.assertIs(agent.codex_config, new_config)
         self.assertIs(agent.controller.config.codex, new_config)
-        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertIsNone(agent._model_hub_catalog)
         self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once()
 

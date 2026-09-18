@@ -22,6 +22,12 @@ from modules.agents.codex.transport import CodexRPCError
 
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
 
+
+def _catalog_reference(path):
+    catalog = SimpleNamespace(path=Path(path), close=Mock())
+    catalog.retain = Mock(return_value=catalog)
+    return catalog
+
 _modules_pkg = types.ModuleType("modules")
 _agents_pkg = types.ModuleType("modules.agents")
 _codex_pkg = types.ModuleType("modules.agents.codex")
@@ -594,6 +600,8 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(agent._attach_transport_activation(cwd, transport))
+        agent._model_hub_catalog_generation = 0
+        agent._model_hub_catalog = None
         await agent.shutdown_runtime()
 
         transport.stop.assert_awaited_once_with()
@@ -897,6 +905,8 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         transport.stop = stop_transport
 
+        agent._model_hub_catalog_generation = 0
+        agent._model_hub_catalog = None
         await agent.shutdown_runtime()
 
         late_commit.assert_not_called()
@@ -5413,7 +5423,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_locks = {}
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
-        agent._model_hub_catalog_path = None
+        agent._model_hub_catalog = None
         agent._model_hub_catalog_lock = asyncio.Lock()
         agent._model_hub_catalog_generation = 0
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=agent.codex_config))
@@ -5698,7 +5708,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 gateway_base_url="http://127.0.0.1:8317",
                 gateway_token="ephemeral-token",
             )
-            agent._model_hub_catalog_path = Path(cwd) / "codex-hub-catalog.json"
+            agent._model_hub_catalog = _catalog_reference(Path(cwd) / "codex-hub-catalog.json")
 
             with patch(
                 "vibe.backend_model_catalog.prepare_codex_hub_catalog",
@@ -5712,8 +5722,8 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_runtime_config_switches_binary_without_catalog_export(self):
         agent = self._agent()
-        previous_catalog = Path("/runtime/codex-old.json")
-        agent._model_hub_catalog_path = previous_catalog
+        previous_catalog = _catalog_reference("/runtime/codex-old.json")
+        agent._model_hub_catalog = previous_catalog
         next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
         agent.refresh_auth_state = AsyncMock()
 
@@ -5726,14 +5736,14 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         prepare_catalog.assert_not_called()
         self.assertIs(agent.codex_config, next_config)
         self.assertIs(agent.controller.config.codex, next_config)
-        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertIsNone(agent._model_hub_catalog)
         self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once_with()
 
     async def test_runtime_config_same_binary_invalidates_prepared_catalog(self):
         agent = self._agent()
-        previous_catalog = Path("/runtime/codex-old.json")
-        agent._model_hub_catalog_path = previous_catalog
+        previous_catalog = _catalog_reference("/runtime/codex-old.json")
+        agent._model_hub_catalog = previous_catalog
         agent.refresh_auth_state = AsyncMock()
         next_config = SimpleNamespace(binary=agent.codex_config.binary, extra_args=["--next"])
 
@@ -5745,7 +5755,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
         prepare_catalog.assert_not_called()
         self.assertIs(agent.codex_config, next_config)
-        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertIsNone(agent._model_hub_catalog)
         self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once_with()
 
@@ -5753,19 +5763,19 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent = self._agent()
         transport = SimpleNamespace(stop=AsyncMock())
         agent._transports["/repo"] = transport
-        agent._model_hub_catalog_path = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog = _catalog_reference("/runtime/codex-old.json")
 
         await agent.invalidate_model_hub_runtime()
 
-        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertIsNone(agent._model_hub_catalog)
         self.assertEqual(agent._model_hub_catalog_generation, 1)
         transport.stop.assert_not_awaited()
 
     async def test_startup_catalog_preparation_cannot_overwrite_new_runtime_generation(self):
         agent = self._agent()
         previous_config = agent.codex_config
-        previous_catalog = Path("/runtime/codex-old.json")
-        next_catalog = Path("/runtime/codex-new.json")
+        previous_catalog = _catalog_reference("/runtime/codex-old.json")
+        next_catalog = _catalog_reference("/runtime/codex-new.json")
         next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
         agent.refresh_auth_state = AsyncMock()
         previous_started = threading.Event()
@@ -5788,7 +5798,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.to_thread(previous_started.wait, 1))
             await agent.refresh_runtime_config(next_config)
             self.assertIs(agent.codex_config, next_config)
-            self.assertIsNone(agent._model_hub_catalog_path)
+            self.assertIsNone(agent._model_hub_catalog)
             release_previous.set()
             with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
                 await startup
@@ -5802,12 +5812,12 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIs(agent.codex_config, next_config)
-        self.assertEqual(agent._model_hub_catalog_path, next_catalog)
+        self.assertEqual(agent._model_hub_catalog, next_catalog)
         self.assertEqual(recovered, next_catalog)
 
     async def test_model_hub_catalog_preparation_retries_after_transient_failure(self):
         agent = self._agent()
-        catalog = Path("/runtime/codex-recovered.json")
+        catalog = _catalog_reference("/runtime/codex-recovered.json")
 
         with patch(
             "vibe.backend_model_catalog.prepare_codex_hub_catalog",
@@ -5815,11 +5825,11 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         ) as prepare_catalog:
             with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
                 await agent.prepare_model_hub_runtime()
-            self.assertIsNone(agent._model_hub_catalog_path)
+            self.assertIsNone(agent._model_hub_catalog)
             recovered = await agent.prepare_model_hub_runtime()
 
         self.assertEqual(recovered, catalog)
-        self.assertEqual(agent._model_hub_catalog_path, catalog)
+        self.assertEqual(agent._model_hub_catalog, catalog)
         self.assertEqual(prepare_catalog.call_count, 2)
 
     async def test_missing_prepared_hub_catalog_preserves_existing_transport_and_threads(self):
