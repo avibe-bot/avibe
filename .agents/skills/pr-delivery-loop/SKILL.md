@@ -226,7 +226,7 @@ or invent a payload format.
   [更新回归] | [更新并验证]
   ```
 
-### Authorized regression updates
+### Authorized regression actions
 
 For Avibe, bind the action and recheck `MERGED`, then follow
 `docs/regression/README.md` and the current owner decision. Other repositories
@@ -236,7 +236,7 @@ update, restart, reset, or destructive scenario run. After a separately
 authorized update, verify the actual running revision and service health;
 report scenario results separately. HTTP reachability alone is not an E2E pass.
 
-### Explicitly selected local Incus updates
+### Authorized local regression updates
 
 The following procedure applies only when the owner has explicitly selected
 an existing local Incus `master` environment for the update. It is not the
