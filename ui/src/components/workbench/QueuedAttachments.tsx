@@ -5,6 +5,7 @@ import { ChevronDown, FileText, Image as ImageIcon, ImageOff } from 'lucide-reac
 
 import { useFileViewer } from '@/components/ui/file-viewer-context';
 import { useImageViewer } from '@/components/ui/image-viewer-context';
+import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import type { QueuedAttachment } from '@/lib/queuedAttachments';
 
 // What a queued message's attachments look like on the one line the queue strip
@@ -122,6 +123,26 @@ const Chip: React.FC<{ att: QueuedAttachment }> = ({ att }) => {
       </span>
     );
   }
+  if (!isProxyMediaUrl(att.url)) {
+    // A third-party URL is opened the way a delivered attachment opens one: the
+    // `FileCard`'s plain external link. The in-app viewer deliberately refuses
+    // to fetch a host that is not ours, so routing this there would reach a
+    // modal that can only ever say "preview failed" — the name would be
+    // readable, but the file would not.
+    return (
+      <a
+        href={att.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={name}
+        title={name}
+        data-queue-attachment="file-external"
+        className={TARGET}
+      >
+        <span className={pill}>{body}</span>
+      </a>
+    );
+  }
   return (
     <button
       type="button"
@@ -181,31 +202,44 @@ export const QueuedAttachmentGroup: React.FC<{
 }> = ({ attachments, expanded, onToggle }) => {
   const total = attachments.length;
   if (total === 0) return null;
-  if (expanded) {
-    return (
-      <div className="flex shrink-0 items-center" data-queue-attachments="expanded">
-        <Disclosure count={total} expanded onToggle={onToggle} />
-      </div>
-    );
-  }
   return (
-    <div className="flex shrink-0 items-center gap-1" data-queue-attachments="inline">
-      {attachments.slice(0, 2).map((att, i) => (
-        <Item key={i} att={att} />
-      ))}
-      {total > 2 && (
-        // The third slot is desktop-only, and `hidden` is display:none — so at a
-        // narrow width it leaves the tab order with its thumbnail, and exactly
-        // one of the two `+N` buttons below is reachable at any one width.
-        <div className="hidden shrink-0 sm:flex">
-          <Item att={attachments[2]} />
-        </div>
+    <div
+      className="flex shrink-0 items-center gap-1"
+      data-queue-attachments={expanded ? 'expanded' : 'inline'}
+    >
+      {/* Disclosing replaces the inline previews rather than adding to them: the
+          sheet below lists every attachment exactly once, in source order. */}
+      {!expanded && (
+        <>
+          {attachments.slice(0, 2).map((att, i) => (
+            <Item key={i} att={att} />
+          ))}
+          {total > 2 && (
+            // The third slot is desktop-only, and `hidden` is display:none — so at a
+            // narrow width it leaves the tab order with its thumbnail, and exactly
+            // one of the two `+N` buttons below is reachable at any one width.
+            <div className="hidden shrink-0 sm:flex">
+              <Item att={attachments[2]} />
+            </div>
+          )}
+        </>
       )}
+      {/* Both disclosure buttons hold their place across the toggle. A keyboard
+          user who presses `+N` is standing on one of them, and unmounting it
+          would drop focus to the document instead of leaving it on the same
+          control — now labelled "collapse". Keeping them mounted also means a
+          row disclosed at a narrow width still offers its way back after the
+          window widens. */}
       {total > 2 && (
-        <Disclosure count={total - 2} expanded={false} onToggle={onToggle} className="sm:hidden" />
+        <Disclosure count={total - 2} expanded={expanded} onToggle={onToggle} className="sm:hidden" />
       )}
-      {total > 3 && (
-        <Disclosure count={total - 3} expanded={false} onToggle={onToggle} className="hidden sm:flex" />
+      {(expanded || total > 3) && (
+        <Disclosure
+          count={total - 3}
+          expanded={expanded}
+          onToggle={onToggle}
+          className="hidden sm:flex"
+        />
       )}
     </div>
   );

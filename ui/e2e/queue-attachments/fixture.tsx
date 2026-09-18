@@ -44,12 +44,23 @@ const FIVE = [
   { url: '/api/media/med_5', name: 'console-log.txt', mime: 'text/plain' },
 ];
 
+// The signed third-party link a delivered attachment can carry: not ours to
+// fetch, and not ours to rewrite either — the query is part of the signature.
+const SIGNED = 'https://files.example.com/spec.pdf?sig=abc123&expires=1789';
+
 const QUEUE: WorkbenchMessage[] = [
   queued('q-text', 'A queued message with no files at all'),
   queued('q-image', '', [media('med_1', 'annotation-region.png')]),
   queued('q-mixed', 'Compare these against the spec', FIVE),
   queued('q-broken', '', [media('med_broken', 'console-log.png')]),
   queued('q-file', '', [{ url: '/api/media/med_5', name: 'console-log.txt', mime: 'text/plain' }]),
+  queued('q-remote', '', [{ url: SIGNED, name: 'spec.pdf', mime: 'application/pdf' }]),
+  // What an IM inbound actually writes (core/handlers/message_handler): a media
+  // token and a mimetype, with the URL left to whoever renders it.
+  queued('q-token', '', [
+    { token: 'med_im1', name: 'feishu-screenshot.png', mimetype: 'image/png', size: 4096 },
+    { token: 'med_im2', name: 'trace.log', mimetype: 'text/plain', size: 12 },
+  ]),
 ];
 
 // The transcript gallery deliberately CONTAINS the queued image, so the spec can

@@ -105,6 +105,55 @@ measured in the browser fixture (the fixture runs one theme); real
 fulfilment rather than by a running service; owner acceptance on a deployed
 instance is still outstanding.
 
+## Review round 1 — head f1e97c0c, Codex review 5253087669
+
+One findings-bearing head. Three P2 findings, all verified against the code
+before acting, all three a distinct root-cause class, so no circuit-breaker
+threshold applies. The orchestrator independently re-inventoried the same three
+and withdrew a fourth, alleged duplication in the disclosed sheet: the expanded
+branch *replaces* the inline previews, so the sheet lists each attachment once.
+No slicing or deletion was introduced for that withdrawn finding.
+
+1. **Admitted attachment shape normalization.** Two producers write
+   `content.attachments`: a Web upload records `{url, mime, kind}` (the proxy URL
+   is minted at upload time), an IM inbound records `{token, name, mimetype,
+   size}` (`core/handlers/message_handler`) and leaves the URL to the renderer.
+   `public_delivery_payload` passes `content` through verbatim, so the second
+   shape reached the queue as a chip with no URL behind it — a screenshot pasted
+   into Feishu arrived nameless and unopenable. Fixed in `readQueuedAttachments`,
+   which now mints `/api/media/<token>` when no URL is present and reads
+   `mimetype` beside `mime`. The token is percent-encoded, which is what makes
+   the minted URL satisfy `isProxyMediaUrl` by construction rather than by
+   assumption. No backend change: the read boundary already owned this decision.
+2. **Disclosure focus lifecycle.** The expanded branch mounted a different
+   control in place of the `+N` the user had just activated, so browser focus
+   fell to the document. Both width-specific controls now hold their position
+   across the toggle and are relabelled in place; a row disclosed at a narrow
+   width also keeps a way back after the window widens.
+3. **Media action routing by URL trust.** A non-proxy URL was being handed to the
+   in-app file viewer, which refuses to fetch a third-party host and can only
+   answer "preview failed". It now uses the same explicit external link a
+   delivered attachment uses (`FileCard`: `target="_blank" rel="noopener
+   noreferrer"`), with the URL passed through untouched so a signed query still
+   verifies. Nothing is fetched to paint the row.
+
+Round-1 evidence: `ChatQueueRow.test.tsx` grows to 28 cases — focus retention at
+both capacities, the external link including a signed query, the IM token shape,
+and the token escape that keeps a minted URL inside the proxy route. The browser
+suite grows to 14 cases x 2 projects = 28, adding two fixture rows (a signed
+third-party link, an IM token pair): real focus assertions through expand and
+collapse, a popup whose URL is byte-for-byte the signed one with a request
+counter proving the row fetched nothing, and a token-minted thumbnail decoded to
+`naturalWidth > 0`. Full UI unit suite 4561 passed / 321 files; `npm run lint`
+with no baseline drift; `typecheck:tests` and `npm run build` clean.
+
+Not changed, reported instead: `file-viewer-modal.tsx` builds its download href
+as `${mediaUrl}?download=1` inline rather than through `mediaDownloadHref`, which
+already handles an existing query. Pre-existing, unrelated to this PR, and after
+fix 3 unreachable from the queue. The delivered transcript renderer
+(`ChatPage.tsx`, user-message attachments) still drops a token-only attachment
+for the same reason fix 1 addresses; out of this lane's scope.
+
 ## Status
 
 - [x] Owner instruction and compact design recovered.

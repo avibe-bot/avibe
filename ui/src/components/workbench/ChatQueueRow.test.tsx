@@ -288,6 +288,60 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
     expect(chips()).toHaveLength(1);
   });
 
+  // The in-app viewer refuses to fetch a host that is not ours, so it would only
+  // ever say "preview failed" here. A delivered attachment in the same position
+  // opens an external link, and so does this one.
+  it('opens a third-party file the way a delivered one does, not in the viewer', () => {
+    // A signed link carries its own query. The URL is handed over exactly as it
+    // arrived — nothing appended, nothing rewritten — or the signature no longer
+    // matches what the far end will check.
+    const signed = 'https://files.example.com/spec.pdf?sig=abc123&expires=1789';
+    const { openFile } = mountQueued(item([{ url: signed, name: 'spec.pdf', mime: 'application/pdf' }]));
+
+    const chip = chips()[0];
+    expect(chip.getAttribute('data-queue-attachment')).toBe('file-external');
+    expect(chip.tagName).toBe('A');
+    expect(chip.getAttribute('href')).toBe(signed);
+    expect(chip.getAttribute('target')).toBe('_blank');
+    expect(chip.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(chip.getAttribute('aria-label')).toBe('spec.pdf · PDF');
+
+    fireEvent.click(chip);
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  // An IM inbound stores ``{token, mimetype}`` where a Web upload stores
+  // ``{url, mime, kind}`` — the same media object, written by a different path.
+  // A screenshot pasted into Feishu has to reach the Web queue as a picture, not
+  // as a chip with nothing behind it.
+  it('reads the token shape an IM inbound writes, not only the upload shape', () => {
+    const { openImage } = mountQueued(
+      item([
+        { token: 'med_im1', name: 'screenshot.png', mimetype: 'image/png', size: 4096 },
+        { token: 'med_im2', name: 'trace.log', mimetype: 'text/plain', size: 12 },
+      ]),
+    );
+
+    expect(thumbs()).toHaveLength(1);
+    expect(thumbs()[0].querySelector('img')?.getAttribute('src')).toBe('/api/media/med_im1');
+    fireEvent.click(thumbs()[0]);
+    expect(openImage).toHaveBeenCalledWith('/api/media/med_im1', { isolated: true });
+
+    // And the file beside it is openable rather than inert.
+    expect(chips()[0].getAttribute('data-queue-attachment')).toBe('file');
+    expect(chips()[0].getAttribute('aria-label')).toBe('trace.log · LOG');
+  });
+
+  // The escape is what keeps a minted URL inside the media-proxy route, which is
+  // the same test that decides whether it may become an <img> at all.
+  it('does not let a token escape the media-proxy path', () => {
+    mountQueued(item([{ token: '../secrets?x=1', name: 'odd.png', mimetype: 'image/png' }]));
+
+    expect(thumbs()[0].querySelector('img')?.getAttribute('src')).toBe(
+      '/api/media/..%2Fsecrets%3Fx%3D1',
+    );
+  });
+
   it('opens an image on its own, and a file in the file viewer', () => {
     const notes = { url: '/api/media/med_9', name: 'notes.pdf', mime: 'application/pdf' };
     const { openImage, openFile } = mountQueued(item([media('shot.png', 'med_1'), notes]));
@@ -351,13 +405,44 @@ describe('QueueRow — the files waiting to be sent with a queued message', () =
     // The row wraps only now, and the text control is exactly as it was.
     expect(row().className).toContain('flex-wrap');
     expect(text.getAttribute('aria-expanded')).toBe('false');
-    expect(more()).toHaveLength(1);
+    // The inline previews are gone — the sheet is the one place the files are
+    // listed, so nothing is shown twice — and both width-specific controls stay
+    // put, each now offering the way back.
+    expect(thumbs()).toHaveLength(5);
+    expect(document.querySelector('[data-queue-attachments="inline"]')).toBeNull();
+    expect(more().map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Collapse attachments',
+      'Collapse attachments',
+    ]);
     expect(more()[0].getAttribute('aria-expanded')).toBe('true');
-    expect(more()[0].getAttribute('aria-label')).toBe('Collapse attachments');
 
     fireEvent.click(more()[0]);
     expect(document.querySelector('[data-queue-attachments="disclosed"]')).toBeNull();
     expect(row().className).not.toContain('flex-wrap');
+  });
+
+  // Unmounting the button under the user's finger is not a cosmetic problem: the
+  // browser drops focus to the document, so the next Tab restarts from the top
+  // of the page and the control they just used cannot be pressed again.
+  // Both capacities, because each width has its own control and a fix that only
+  // held the narrow one would leave the desktop user exactly where they started.
+  it.each([
+    [0, 'Show 3 more attachments'],
+    [1, 'Show 2 more attachments'],
+  ])('leaves focus on the disclosure control it was activated from (%i)', (index, collapsedLabel) => {
+    mountQueued(item(five));
+    const control = more()[index as number];
+    control.focus();
+
+    fireEvent.click(control);
+
+    expect(document.activeElement).toBe(control);
+    expect(control.getAttribute('aria-label')).toBe('Collapse attachments');
+
+    fireEvent.click(control);
+
+    expect(document.activeElement).toBe(control);
+    expect(control.getAttribute('aria-label')).toBe(collapsedLabel);
   });
 
   it('leaves the queued message itself alone while its files are inspected', () => {
