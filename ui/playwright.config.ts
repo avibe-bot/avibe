@@ -16,7 +16,15 @@ import { BASE_URL } from './e2e/support/env';
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: ['**/chat-paging/**', '**/inbox-return/**', '**/model-catalog/**', '**/model-provider/**'],
+  // This suite is the specs directly in `e2e/`. Every subdirectory is either
+  // shared support or a per-feature hermetic suite that owns a `playwright.*.config.ts`
+  // and starts its own dev server against a fixture page; running one here would
+  // ask a live instance for a fixture URL it does not serve. That rule used to be
+  // restated as a list of directory names, which is a copy of the structure that
+  // has to be updated by hand — and five suites had already fallen out of it, so
+  // `npm run e2e` collected 136 foreign tests against the instance it mutates.
+  // Add a spec here to run it live; add a directory to keep it hermetic.
+  testIgnore: ['**/e2e/*/**'],
   outputDir: './e2e/.artifacts/test-results',
   // Every spec mutates shared instance state (sources, agent modes, the
   // runtime switch). Parallel workers would race on it, so the suite is serial
