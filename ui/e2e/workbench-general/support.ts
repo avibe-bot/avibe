@@ -22,7 +22,10 @@ const SESSION = {
   instance_role: 'owner',
 };
 
-const config = (language: Lang) => ({
+/** The instance as this harness's server holds it — exported so a spec that
+ *  answers a WRITE to `/api/config` can answer with the same instance it reads,
+ *  rather than describing a second one. */
+export const config = (language: Lang) => ({
   mode: 'local',
   setup_state: { needs_setup: false },
   platforms: { enabled: [] },
@@ -54,6 +57,7 @@ const PROJECTS = {
 };
 
 const AGENTS = {
+  ok: true,
   agents: [
     { name: 'codex', backend: 'codex', enabled: true },
     { name: 'claude', backend: 'claude', enabled: true },

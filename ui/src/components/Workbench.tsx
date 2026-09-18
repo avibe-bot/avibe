@@ -10,7 +10,7 @@ import { Composer, type ComposerHandle } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
 import { ReadyBanner } from './workbench/ReadyBanner';
-import { shouldShowReadyBanner, useBackendReadiness } from './workbench/backendReadiness';
+import { shouldShowReadyBanner, useBackendReadiness, useSetupHandoff } from './workbench/backendReadiness';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../lib/sessionInfo';
@@ -75,19 +75,19 @@ export const Workbench: React.FC = () => {
   // The wizard hands `{ onboardingCompleted: true }` to this route. That is an
   // event, not a property of the location — history state survives a reload, so
   // leaving the key in place would re-announce the same setup every time the
-  // user came back here. Latch it for this visit (a readiness answer can still
-  // arrive later) and replace the history entry with the REST of its state, so
-  // the overlay origin and anything else travelling with it stays intact.
-  // The backend itself must still confirm it is ready, and that producer is not
-  // on this branch yet (see useBackendReadiness), so today nothing renders.
+  // user came back here. Take it out of the entry, keeping the REST of the state
+  // so the overlay origin and anything else travelling with it stays intact, and
+  // hold the event for the page (see useSetupHandoff: this home is remounted
+  // mid-handoff, and a readiness answer can still arrive after that).
+  // The backend itself must still confirm it is ready, so holding it alone shows
+  // nothing: it only makes the question worth asking.
   const wizardState = location.state as Record<string, unknown> | null;
   const wizardJustFinished = Boolean(wizardState?.onboardingCompleted);
-  const [onboardingCompleted, setOnboardingCompleted] = useState(wizardJustFinished);
-  const [bannerDismissed, setBannerDismissed] = useState(false);
-  // Adjusted during render rather than in an effect (the codebase's effect-free
-  // pattern), guarded so it cannot loop: the key can also arrive at an already
-  // mounted home, and latching it a frame later would race the replace below.
-  if (wizardJustFinished && !onboardingCompleted) setOnboardingCompleted(true);
+  const {
+    completed: onboardingCompleted,
+    dismissed: bannerDismissed,
+    dismiss: dismissReadyBanner,
+  } = useSetupHandoff(wizardJustFinished);
   useEffect(() => {
     if (!wizardState?.onboardingCompleted) return;
     const { onboardingCompleted: _consumed, ...rest } = wizardState;
@@ -99,7 +99,9 @@ export const Workbench: React.FC = () => {
   const currentBackend = ns.agentRoute.agent_backend
     ?? ns.agents.find((agent) => agent.name === ns.agentRoute.agent_name)?.backend
     ?? null;
-  const readiness = useBackendReadiness(currentBackend);
+  // Asked only while there is a completion left to announce: an ordinary visit,
+  // and every visit after the user has dismissed the banner, reads nothing.
+  const readiness = useBackendReadiness(currentBackend, onboardingCompleted && !bannerDismissed);
   const showReadyBanner = shouldShowReadyBanner({
     onboardingCompleted,
     readiness,
@@ -188,7 +190,7 @@ export const Workbench: React.FC = () => {
     // expressed anywhere in the design, so none is imposed here.
     <div className="flex w-full flex-col gap-6 md:min-h-[calc(100dvh-4rem)]">
       {showReadyBanner && currentBackend && (
-        <ReadyBanner backend={currentBackend} onDismiss={() => setBannerDismissed(true)} />
+        <ReadyBanner backend={currentBackend} onDismiss={dismissReadyBanner} />
       )}
 
       <div className="flex flex-col items-center justify-center gap-6 py-6 md:flex-1 md:py-0">

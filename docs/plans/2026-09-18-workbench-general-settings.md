@@ -36,17 +36,35 @@ f86a3dc683606456e491c71aa964ba468ca328de on 2026-09-18 02:45 and froze:
 - `useApi().getBackendConnection(name: 'claude' | 'codex' | 'opencode'): Promise<BackendConnectionState>`
 - `GET /api/backend/{backend}/connection`, fields unchanged from the contract above
 
-The producer now exists as PR #2032 at b664dd95d5f05f991c51ff8b3add1811520dff0e and is **not merged**; its
-first review round is repairing install/apply and manual-code expiry, and the canonical interface and the
-completion event are unchanged by that repair. This lane neither duplicates the type/method nor writes a
-second fetch wrapper to compile against unmerged code.
+The producer merged as PR #2032 (master 6ed01cd574328f90890680469619e0efcf87986b) and was merged into this
+branch with an ordinary merge commit. The frozen names above are the merged ones; this lane imports them and
+neither duplicates the type/method nor writes a second fetch wrapper, provider or store.
 
-**The seam is one function body.** `ui/src/components/workbench/backendReadiness.ts` holds
-`useBackendReadiness(backend)`, which returns `null` today, and `shouldShowReadyBanner(...)`, which is
-complete and unit-tested. Wiring after #2032 merges means probing `backend` through the frozen method and
-returning `{ backend, ready }`; the predicate already refuses anything that is pending, failed, or answers
-for a backend other than the one the home would run. Production readiness therefore stays null until real
-ok + ready + backend evidence exists — a rendered banner is never claimed from a screenshot.
+**What the consumer does.** `ui/src/components/workbench/backendReadiness.ts` holds the whole seam.
+`useBackendReadiness(backend, asked)` issues at most one `getBackendConnection` per question asked — no
+polling, no start, no auth, no install, no write — and publishes `{ backend, ready }` only when the answer
+succeeded, says `ready`, and is about the backend that was asked about. Its type is `Pick<BackendConnectionState,
+'backend' | 'ready'>`, derived from the producer's type rather than restated. Anything else — pending, an
+unknown or unsupported backend name, a refused or denied read, a wrong-backend or not-ready answer — publishes
+nothing and never blocks the home. An answer whose question is no longer being asked is dropped and what was
+observed is cleared, including the A -> B -> A case where the stale answer names the backend now in effect.
+`shouldShowReadyBanner(...)` is unchanged: it refuses anything not corroborated.
+
+**The handoff is held for the page, not for the component.** The completion arrives as router state on a
+navigation that crosses the setup boundary, and crossing it is exactly what makes `AuthGuard` re-validate:
+the home is unmounted and remounted underneath it while that runs, after the history entry has already been
+consumed. A latch in component state dies with that remount and the completion can then never be announced at
+all — observed end to end in the browser, where the home issued no readiness read whatsoever. `useSetupHandoff`
+therefore holds the event, and a dismissal, for as long as the page the wizard handed over to is open. Reload
+silence is unchanged and is carried by the consumed history entry, not by the latch.
+
+**And it ends when the user leaves the visit it was made for.** The home is unmounted for two unrelated
+reasons — the guard re-validating in place, and an ordinary departure — and only the ROUTE tells them apart, so
+`useSetupHandoffDeparture` reads the route the surface is actually rendering rather than any component's
+cleanup; ending on unmount would end it during the guard's remount too, which is the bug the page scope exists
+to fix. It reads that background route rather than the shell's chrome location: Settings opened over the home
+is not a departure on either form factor, because the home is still there behind the overlay holding a banner
+the user has not answered, while the shell's own location follows the foreground URL below md.
 
 ## Implementation record
 
@@ -252,13 +270,46 @@ by label so it fails on the history, not on the element type. Unit scope adds th
 root and holds internal back destinations to links. Re-validated: the six browser cases on the built app, the five
 affected unit files (91), the browser suite's `typecheck`, `lint` on the changed files, and `build`.
 
+## Producer integration — what the end-to-end run found
+
+Wiring the merged producer into the home was one function body, as planned. Driving it end to end was not, and
+that is where the value was: `e2e/workbench-general/setup-handoff.spec.ts` walks the real wizard to its own
+Enter, lets the real completion handler save and navigate, and then holds the home's readiness read open — a
+state no unit test can stage, because the pending window only exists between a real navigation and a real
+response. The banner must stay silent until that read answers for the backend the home's Agent route actually
+runs, and the case asserts nothing was ever refused by the harness guard.
+
+The first run showed the home issuing no readiness read at all. The wizard's navigation did carry
+`{ onboardingCompleted: true }`, and the home did consume it — and was then unmounted and remounted, because
+`AuthGuard` deliberately re-validates when the setup boundary is crossed and shows Loading while it does. The
+remounted home read an entry it had already emptied, so the completion was gone before the Agent route had even
+resolved: with a latch in component state the banner could never appear after a real wizard completion, however
+ready the backend was. Every mocked suite passed throughout, because each one renders the home once.
+
+The repair keeps the accepted semantics exactly and only changes the latch's lifetime: `useSetupHandoff` holds
+the completion, and a dismissal, for the page. Nothing else moved — the history entry is still consumed on
+arrival, reload silence is still carried by that consumed entry, and `shouldShowReadyBanner` is untouched.
+`AuthGuard` is not touched either; its re-validation is deliberate, and the consumer now survives it. Both the
+new unit case and the browser case fail against the component-state latch and pass against this one.
+
+Review then found the other half of the same lifetime: it had a correct start and no end. A page-held handoff
+survives an ordinary departure too, so arriving home with a completion, leaving for another route, and coming
+back announced the setup a second time. The end is the route, not the component — see the contract above — and
+`SettingsOverlayRouteSurface` is the one place that already knows which route is being rendered behind any
+overlay, so it states the departure there instead of a second router integration. The real shell reproduces it:
+`e2e/workbench-general/setup-handoff.spec.ts` leaves the home through the sidebar's own link and returns
+through it, and that case fails without the end and passes with it. The same browser flow now also picks a
+NON-default model through the composer's own picker while the readiness read is still open, so the announcement
+arriving over a home in use, and being dismissed on it, is held to leaving the user's route untouched.
+
 ## Progress
 
 - [x] Owner parallel start, latest master and isolated workspace verified.
 - [x] Native design packet and existing route/state ownership inventory.
 - [x] Independent shell, home/Composer, General implementation.
-- [ ] Producer #2011 contract integration and cross-lane consumer verification — blocked on #2032 merging; the
-      seam is frozen and isolated to `useBackendReadiness`.
+- [x] Producer #2011 contract integration and cross-lane consumer verification — #2032 merged into this branch;
+      the home consumes the merged type/method, and `e2e/workbench-general/setup-handoff.spec.ts` drives the real
+      wizard Enter, router, `ApiProvider` and completion handler against fixture transport.
 - [x] Focused/browser verification; PM pre-push spot-check pending.
 - [ ] Non-draft PR, exact-head Codex/CI and zero unresolved threads.
 - [ ] Owner acceptance and separately authorized merge.

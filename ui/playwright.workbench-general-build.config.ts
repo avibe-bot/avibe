@@ -4,6 +4,11 @@ import { defineConfig, devices } from '@playwright/test';
  * The same hermetic harness as `playwright.workbench-general.config.ts`, against
  * the built app instead of the dev server.
  *
+ * `setup-handoff.spec.ts` is here because what it grades is a lifecycle: the
+ * home reads the backend once per question asked, and StrictMode's development
+ * double-mount asks it twice — a bundle-only claim about request count cannot be
+ * made against a server that deliberately runs every effect twice.
+ *
  * `mobile-continuation.spec.ts` drives the workspace chip's manager branch, and
  * the directory browser inside it cannot be driven on the dev server: React's
  * StrictMode mounts, cleans up and re-mounts every component in development, and
@@ -20,7 +25,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e/workbench-general',
-  testMatch: ['**/mobile-continuation.spec.ts'],
+  testMatch: ['**/mobile-continuation.spec.ts', '**/setup-handoff.spec.ts'],
   outputDir: './e2e/.artifacts/workbench-general/run',
   workers: 1,
   retries: 0,

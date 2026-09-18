@@ -4,7 +4,7 @@ import { createInstance } from 'i18next';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const newSession = vi.hoisted(() => ({
@@ -61,13 +61,23 @@ vi.mock('./workbench/AgentRoutePicker', () => ({
 vi.mock('../lib/apiFetch', () => ({ apiFetch: vi.fn() }));
 // Only the producer seam is stubbed; the predicate and the banner stay real, so
 // these tests exercise the lifecycle the home actually runs.
-const readiness = vi.hoisted(() => ({ value: null as { backend: string; ready: boolean } | null }));
+const readiness = vi.hoisted(() => ({
+  value: null as { backend: 'claude' | 'codex' | 'opencode'; ready: boolean } | null,
+  /** What the home asked about, in order — the reader's own tests own the answering. */
+  questions: [] as Array<{ backend: string | null; asked: boolean }>,
+}));
 vi.mock('./workbench/backendReadiness', async (importOriginal) => ({
   ...await importOriginal<typeof import('./workbench/backendReadiness')>(),
-  useBackendReadiness: () => readiness.value,
+  useBackendReadiness: (backend: string | null, asked: boolean) => {
+    readiness.questions.push({ backend, asked });
+    return readiness.value;
+  },
 }));
 
 import { ToastProvider } from '../context/ToastProvider';
+import { SettingsOverlayRouteSurface } from './settings/SettingsOverlayRouteSurface';
+import { settingsOverlayNavigationState } from '../lib/settingsOverlay';
+import { forgetSetupHandoff } from './workbench/backendReadiness';
 import en from '../i18n/en.json';
 import { Workbench } from './Workbench';
 
@@ -86,15 +96,52 @@ const LocationState: React.FC = () => (
   <div data-testid="location-state">{JSON.stringify(useLocation().state ?? null)}</div>
 );
 
+/**
+ * The ways out of the home, as buttons so they add no links for the
+ * continuation-row cases to count: an ordinary departure and return, and
+ * Settings opened over the home carrying the same origin the shell's navigation
+ * boundary stamps on it.
+ */
+const WaysOut: React.FC = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" onClick={() => void navigate('/projects')}>leave-home</button>
+      <button type="button" onClick={() => void navigate('/')}>return-home</button>
+      <button type="button" onClick={() => void navigate(-1)}>go-back</button>
+      <button
+        type="button"
+        onClick={() => void navigate('/settings/general', {
+          state: settingsOverlayNavigationState({
+            destinationPathname: '/settings/general',
+            desktop: true,
+            source: location,
+            targetState: undefined,
+          }),
+        })}
+      >
+        open-settings
+      </button>
+    </>
+  );
+};
+
 const homeTree = (state?: unknown) => (
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
       <MemoryRouter initialEntries={[{ pathname: '/', state }]}>
-        <Routes>
+        <WaysOut />
+        {/* The real route surface, because how long the setup handoff lives is a
+            fact about the route: it has to outlive the guard remounting this home
+            in place and end when the user actually leaves, and this is the
+            component that knows which route is being shown. */}
+        <SettingsOverlayRouteSurface fallbackElement={<div>no-such-route</div>}>
           <Route path="/" element={<><Workbench /><LocationState /></>} />
           <Route path="/projects" element={<div>projects-page</div>} />
           <Route path="/chat/:sessionId" element={<div>chat-page</div>} />
-        </Routes>
+          <Route path="/settings/general" element={<div>settings-page</div>} />
+        </SettingsOverlayRouteSurface>
       </MemoryRouter>
     </ToastProvider>
   </I18nextProvider>
@@ -120,6 +167,9 @@ beforeEach(() => {
   authorization.capabilities.can_manage_projects = true;
   authorization.capabilities.can_manage_instance = true;
   readiness.value = null;
+  readiness.questions.length = 0;
+  // Each case is its own page load; the handoff a page holds is not shared.
+  forgetSetupHandoff();
 });
 
 afterEach(() => {
@@ -214,7 +264,8 @@ describe('Workbench first-task home', () => {
     renderHome({ onboardingCompleted: true });
 
     // The backend has not corroborated anything yet, so there is nothing true
-    // to say about it. See ReadyBanner's producer seam.
+    // to say about it — the claim is what makes the question worth asking, not
+    // an answer in itself.
     expect(screen.queryByText(/is ready to go/)).toBeNull();
     expect(screen.queryByRole('button', { name: en.workbench.home.readyDismiss })).toBeNull();
   });
@@ -286,15 +337,108 @@ describe('Workbench onboarding-completion event', () => {
     expect(banner()).toBeNull();
   });
 
+  it('asks the backend nothing on a visit where no completion can be announced', () => {
+    readiness.value = ready;
+    renderHome();
+
+    // Not a claim about the banner — the home never even asks. A visit that
+    // could not announce anything costs the backend no read.
+    expect(readiness.questions.length).toBeGreaterThan(0);
+    expect(readiness.questions.some((question) => question.asked)).toBe(false);
+    expect(banner()).toBeNull();
+  });
+
+  it('stops asking about the backend once the banner is dismissed', async () => {
+    readiness.value = ready;
+    const user = userEvent.setup();
+    renderHome({ onboardingCompleted: true });
+
+    await user.click(await screen.findByRole('button', { name: en.workbench.home.readyDismiss }));
+
+    expect(readiness.questions.some((question) => question.asked)).toBe(true);
+    expect(readiness.questions.at(-1)).toEqual({ backend: 'codex', asked: false });
+  });
+
+  it('still announces after the route guard remounts the home mid-handoff', async () => {
+    readiness.value = ready;
+    const first = renderHome({ onboardingCompleted: true });
+    await waitFor(() => expect(locationState()).toBeNull());
+    first.unmount();
+
+    // Crossing the setup boundary is exactly what makes the route guard
+    // re-validate, and the home is unmounted and remounted underneath while it
+    // does — by which time the entry has already been consumed. Same page, same
+    // announcement still owed: losing it here is losing it for good.
+    renderHome(null);
+
+    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
+  });
+
+  it('does not come back when that remount happens after a dismissal', async () => {
+    readiness.value = ready;
+    const user = userEvent.setup();
+    const first = renderHome({ onboardingCompleted: true });
+
+    await user.click(await screen.findByRole('button', { name: en.workbench.home.readyDismiss }));
+    first.unmount();
+    renderHome(null);
+
+    await waitFor(() => expect(screen.getByTestId('location-state')).toBeTruthy());
+    expect(banner()).toBeNull();
+    expect(readiness.questions.at(-1)).toEqual({ backend: 'codex', asked: false });
+  });
+
+  it('does not announce the consumed setup again after leaving the home and coming back', async () => {
+    readiness.value = ready;
+    const user = userEvent.setup();
+    renderHome(wizardArrival);
+    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
+    await waitFor(() => expect(locationState()).toEqual({ settingsBackgroundLocation: { pathname: '/chat/会话' } }));
+
+    // A real departure, unlike the guard's remount above: the home is gone
+    // because the user went somewhere else, and the visit the wizard handed off
+    // to is over with it.
+    await user.click(screen.getByText('leave-home'));
+    await waitFor(() => expect(screen.getByText('projects-page')).toBeTruthy());
+    expect(screen.queryByPlaceholderText(en.workbench.home.inputPlaceholder)).toBeNull();
+
+    await user.click(screen.getByText('return-home'));
+    await waitFor(() => expect(screen.getByPlaceholderText(en.workbench.home.inputPlaceholder)).toBeTruthy());
+    expect(banner()).toBeNull();
+    // Nothing left to announce, so the backend is not asked again either.
+    expect(readiness.questions.at(-1)).toEqual({ backend: 'codex', asked: false });
+  });
+
+  it('keeps the announcement through Settings opened over the home', async () => {
+    readiness.value = ready;
+    const user = userEvent.setup();
+    renderHome({ onboardingCompleted: true });
+    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
+
+    // Settings keeps this home mounted behind it — on a phone as much as on a
+    // desktop — so the user has not left, and the banner they have not answered
+    // yet is still theirs to answer when they come back out.
+    await user.click(screen.getByText('open-settings'));
+    expect(await screen.findByText('settings-page')).toBeTruthy();
+    expect(screen.getByPlaceholderText(en.workbench.home.inputPlaceholder)).toBeTruthy();
+
+    await user.click(screen.getByText('go-back'));
+    await waitFor(() => expect(screen.queryByText('settings-page')).toBeNull());
+    expect(banner()).toBeTruthy();
+  });
+
   it('does not re-announce the same setup on a reload or a return visit', async () => {
     readiness.value = ready;
     const first = renderHome(wizardArrival);
     await waitFor(() => expect(locationState()).toEqual({ settingsBackgroundLocation: { pathname: '/chat/会话' } }));
     const afterConsuming = locationState();
     first.unmount();
+    // A reload is a new page, which is what tells it apart from the remount
+    // above: nothing carries over but the history entry itself.
+    forgetSetupHandoff();
 
-    // A reload restores the history entry as it now stands — and it no longer
-    // claims a setup just finished, so the home says nothing about one.
+    // And that entry, as it now stands, no longer claims a setup just finished,
+    // so the home says nothing about one.
     renderHome(afterConsuming);
     await waitFor(() => expect(screen.getByTestId('location-state')).toBeTruthy());
     expect(banner()).toBeNull();
