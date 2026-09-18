@@ -122,7 +122,9 @@ destination. `gh` takes `[HOST/]OWNER/REPO` and fills a missing host from
 `GH_HOST`, an enterprise config, or whatever checkout you happen to be standing
 in, so the same argument can publish an approved report to an unrelated server
 under an unrelated account — and the read-back afterwards would confirm it
-landed there. Name the host on every call (see Submitting). Nothing inherited
+landed there. Pin the host on every call, by whatever means that particular tool
+provides (see Submitting) — it is a constraint on which server answers, not a
+prefix to bolt onto every argument. Nothing inherited
 from the environment or the local repository may select a host or a principal
 other than the authorized one.
 
@@ -186,29 +188,35 @@ Submit only through a channel that is actually available and already authorized
 for this user. Do not make someone install tooling or mint a token just to
 leave feedback.
 
-Target repository: `github.com/avibe-bot/avibe`. Spell the host out in every
-call this workflow makes — searching, creating, reading back, commenting, and
-reconciling after a timeout. Pass the repository as `github.com/avibe-bot/avibe`
-rather than `avibe-bot/avibe`, add `--hostname github.com` to a `gh api` call,
-and check the acting account with `gh auth status --active --hostname
-github.com`.
+The destination is `https://github.com/avibe-bot/avibe`, fixed for every call
+this workflow makes. That is a constraint on which server answers, not a string
+to prefix onto every argument: each tool spells the repository its own way, and
+the wrong form either fails or leaves the host unpinned.
+
+| Tool | Repository argument | Host pinned by |
+| --- | --- | --- |
+| `gh issue create` / `view` / `comment` | `--repo github.com/avibe-bot/avibe` | the documented `[HOST/]OWNER/REPO` form |
+| `gh api` | REST path `repos/avibe-bot/avibe/...` | `--hostname github.com` |
+| `gh search issues` | `--repo avibe-bot/avibe` — a `repo:` filter, which a host breaks | `GH_HOST=github.com` in that subprocess |
+| `wait_issue.py` | `--repo avibe-bot/avibe` | it calls `api.github.com` directly |
+
+Follow the help of whatever tool comes next rather than assuming this table
+covers it. Set `GH_HOST` for the single subprocess that needs it; never edit
+global `gh` config. Check the acting account with `gh auth status --active
+--hostname github.com`, in the same environment that will submit.
 
 **With an existing authorized GitHub connection.** When `gh` is installed, the
 effective github.com account has access to that repository, and that account is
 bound to this user per Publication authority, file the issue with `gh issue
 create --repo github.com/avibe-bot/avibe`.
 
-**A report-derived value is data, never syntax.** Title, body, and search query
-all come out of the report, and every context they travel through has syntax of
-its own. In a shell, a title containing `` `vibe status` `` or `$(...)` runs on
-this machine before `gh` ever sees it, and `--body-file` protects only the body:
-pass every such value as its own argv element with no shell in between — a
-non-shell invocation (`shell=False`) with the title read from a file, the body
-via `--body-file`, and the query as a plain argument. If a shell is unavoidable,
-the value must reach it as a quoted variable expansion read from a file, never
-as text spliced into the command. In a URL the same values need percent-encoding
-(see below). Apply the rule to whatever context comes next, not only to these
-two.
+**A report-derived value is data, never syntax.** Title, body, and query all
+come out of the report, and every context they pass through has syntax of its
+own — a title containing `` `vibe status` `` executes in a shell, and one
+containing `#` or `&` truncates a URL. Pass each value as its own argv element
+with no shell in between (`shell=False`, title read from a file, body via
+`--body-file`, query as a plain argument), percent-encode it in a URL, and apply
+the same rule to whatever context comes next.
 
 Issues read/write plus repository metadata is the entire scope this needs; no
 webhook, workflow, or admin permission is involved. (Separately tracking a PR or
@@ -249,28 +257,45 @@ this installation.
   confirmed
 - if a channel only acknowledged receipt, say "received", not "issue created"
 
-An unknown outcome stays unknown. Creating an issue and posting a comment are
-both non-idempotent and `gh` offers no idempotency key, so a timeout means the
-write may still be in flight rather than lost. Reconcile once and boundedly:
-search the pinned repository for a matching item from the effective account. A
-match is confirmation — read it back and report it. An empty result confirms
-nothing, because the write may still be processing or the index may lag, so do
-not read it as failure and do not retry on it. Keep the draft, say plainly that
-the outcome is unknown and what you checked, and let the user decide whether a
-later retry is worth the duplicate risk. Retry only a confirmed failure, within
-the authorization you already had. Never claim the report was filed exactly
-once, and never invent an idempotency key to pretend otherwise.
+**A timed-out write stays unknown until something ties an object to that
+attempt.** Creating an issue and posting a comment are both non-idempotent and
+`gh` offers no idempotency key, so a timeout means the write may still be in
+flight rather than lost. Reconcile once, boundedly, at the pinned destination
+under the effective account — for a comment, read that issue's comments; an
+issue search cannot return a comment receipt.
+
+Matching content is not a receipt. The item you find may be an older report of
+the same problem, so only operation-bound evidence confirms the attempt: an ID
+or URL the call itself returned, or an object that is new relative to what you
+saw before submitting, with a compatible creation time, the exact sanitized
+content, and the right author and destination. Do not build a repository
+snapshot, a nonce, or a local ledger to manufacture that baseline — without one,
+the outcome is simply unknown.
+
+Everything else is unknown too: an empty result (the write may still be
+processing, or the index may lag), an ambiguous match, and a match you cannot
+attribute — concurrent identical writes can defeat even ID and timing. Unknown
+means keep the draft, say what you checked, claim no URL as the new issue, and
+make no automatic retry; the duplicate risk is the user's call. An issue found
+this way can be offered as a related existing report, never as a receipt for
+this attempt. Retry only a confirmed failure, within the authorization you
+already had, and never claim the report was filed exactly once.
 
 ## Following up
 
 The issue is the record; nothing needs to be tracked locally. If the user asks
-to hear about later activity, load `use-avibe-harness` or
-`background-watch-hook`, and check `vibe watch list` for an existing watch on
-that repository before adding another.
+to hear about later activity, load `background-watch-hook` — it is the skill
+that bundles the `wait_issue.py` waiter. Load `use-avibe-harness` as well only
+when the follow-up needs wider orchestration; on its own it does not give you
+the waiter.
 
-The bundled `wait_issue.py` waiter observes new issues in a repository and new
-comments on a single issue. It does not observe issue close events, merges, or
-releases — do not promise those from a watch.
+Before adding a watch, check `vibe watch list` for one that already covers this
+concern — same session, same repository, same issue. Another watch on the same
+repository is not a duplicate of yours.
+
+That waiter observes new issues in a repository and new comments on a single
+issue. It does not observe issue close events, merges, or releases — do not
+promise those from a watch.
 
 Keep three states distinct when reporting progress: a PR is merged, the issue
 is closed, and a fix is released. Name a user-visible version only when a
