@@ -63,7 +63,7 @@ nearby prose alone cannot. Similarly, an explicit button block may be removed
 from text even on a destination that cannot render buttons; ordinary prose is
 the capability fallback.
 
-The opt-in local Incus regression command's switches protect different boundaries:
+The selected local Incus regression command's switches protect different boundaries:
 
 - `--target master` selects a target; it does not select the sender's checkout.
 - Git ignores do not govern rsync exclusions. Ignored local source can be copied

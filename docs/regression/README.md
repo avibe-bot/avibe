@@ -13,10 +13,11 @@ branches or tasks: preserve its current state, coordinate updates with its
 current use, and keep parallel work on its selected isolated target.
 
 Selecting a target does not itself request deployment, restart, reset, or a
-destructive test. The target owner must separately authorize mutation, and any
-instance-specific access or deployment procedure must already be established.
-Do not infer credentials or commands from a hostname. HTTP reachability and
-service health alone do not prove an E2E result.
+destructive test. Use authorization already granted for the selected workflow
+for routine writes it covers; obtain separate authorization for mutations that
+workflow does not cover. Any instance-specific access or deployment procedure
+must already be established. Do not infer credentials or commands from a
+hostname. HTTP reachability and service health alone do not prove an E2E result.
 
 ## Scope and State
 
@@ -29,8 +30,8 @@ or arbitrary cloud instances.
 
 Hermetic local unit, contract, and browser-fixture tests remain appropriate.
 Keep their entire write path in test-owned state; do not point fixture or
-reset-oriented suites at the shared acceptance instance just because it is the
-default manual regression target. Never restart the local `vibe` service for
+reset-oriented suites at a persistent shared target merely because that target
+was selected for manual acceptance. Never restart the local `vibe` service for
 routine verification; it may host the agent doing the work.
 
 ## Access and Deployment
@@ -74,9 +75,10 @@ For multi-step auth/setup journeys, update
 
 ## Explicit Local Incus Testing
 
-The existing runner remains available to contributors whose task or workspace
-explicitly selects an existing local Incus environment. [The local Incus
-runbook](local-incus.md) preserves setup, commands, lifecycle, metadata, and
-safety contracts. It is a selected developer workflow, not a universal target
-or a reason to recreate a retired environment; historical local test records
-remain valid records of the environments used at the time.
+The existing runner remains available when the developer, workspace, or task
+selects local Incus, including normal first-time setup, provisioning, and
+temporary worktree lifecycle. [The local Incus runbook](local-incus.md)
+preserves setup, commands, lifecycle, metadata, and safety contracts. It is a
+selected developer workflow, not a universal target or a reason to silently
+recreate a retired target; historical local test records remain valid records
+of the environments used at the time.

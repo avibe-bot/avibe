@@ -243,10 +243,11 @@ E2E pass.
 ### Authorized local regression updates
 
 The following procedure applies only when the developer, workspace, or task has
-explicitly selected an existing local Incus `master` environment for the
-update. It is not a universal Avibe target and does not authorize recreating a
-retired environment or interrupting another selected environment. Follow
-`docs/regression/local-incus.md` for the selected local runbook.
+explicitly selected an existing local Incus `master` environment for an
+in-place update. It does not silently provision or re-seed a missing target,
+recreate a specifically retired environment, or interrupt another selected
+environment. Follow `docs/regression/local-incus.md` for setup, provisioning,
+and other selected local workflows.
 
 1. Fetch origin and fast-forward the **primary** checkout with `--ff-only`;
    verify `master` equals the fetched `origin/master` SHA. Establish that the

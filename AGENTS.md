@@ -109,14 +109,14 @@ task to a shared environment.
   or access to other cloud, tenant, demo, or production environments.
 - Parallel branches and tasks keep their selected isolated environments. Do not
   overwrite another lane's deployed revision or state. Coordinate updates to a
-  shared target with its current use; do not add a new locking mechanism here.
+  shared target with its current use.
 - Follow [the regression guide](docs/regression/README.md) for target selection,
   access, deployment limitations, and acceptance evidence. HTTP reachability or
   service health alone is not an E2E pass.
-- Local Incus remains supported for an existing explicitly selected developer
-  workflow; see [the local runbook](docs/regression/local-incus.md). Do not
-  recreate a retired environment or interrupt another developer's selected
-  test environment.
+- Local Incus remains supported when selected by the developer, workspace, or
+  task, including its normal setup, provisioning, and worktree lifecycle; see
+  [the local runbook](docs/regression/local-incus.md). Do not silently recreate
+  a retired target or interrupt another developer's selected test environment.
 
 ## 4. Configuration and Routing Model
 

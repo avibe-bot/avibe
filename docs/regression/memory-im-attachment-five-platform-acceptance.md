@@ -3,8 +3,9 @@
 > **Safety boundary:** Select the current acceptance environment through
 > [the regression guide](README.md), using the explicit task or established
 > developer/workspace choice. Preserve the selected target's product state.
-> Updating it requires owner authorization and an established deployment
-> procedure; selecting the target alone does not request an update. Do not
+> Update it under the authorization already granted for the selected workflow
+> and its established deployment procedure; selecting the target alone does not
+> request an update. Do not
 > reset state or silently substitute another environment for this acceptance
 > check.
 

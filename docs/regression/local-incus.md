@@ -1,11 +1,11 @@
 # Local Incus Regression (Explicit Opt-In)
 
-This runbook preserves the existing local Incus tooling for contributors whose
-task or workspace explicitly selects an existing local environment. See [the
-current regression guide](README.md) for target selection. The commands below
-manage local Incus environments and must not be used to recreate an owner's
-retired environment, interrupt another developer's selected environment, or
-serve as a shared deployment sink for unrelated branches.
+This runbook preserves the existing local Incus tooling when the developer,
+workspace, or task selects local Incus. See [the current regression guide](README.md)
+for target selection. The normal setup below may provision a fresh local host,
+base image, or temporary worktree environment. Do not silently recreate a
+specifically retired target, interrupt another developer's selected environment,
+or use one environment as a shared deployment sink for unrelated branches.
 
 ## Runtime Model
 
@@ -107,8 +107,8 @@ and you can configure channels later from the Web UI.
 
 ## Usage
 
-Once an existing local environment is explicitly selected, the compatibility
-entry point is:
+Once the local Incus workflow is explicitly selected, the compatibility entry
+point is:
 
 ```bash
 ./scripts/run_regression.sh
@@ -183,11 +183,11 @@ python3 scripts/incus_regression.py reconcile
 python3 scripts/incus_regression.py reconcile --yes
 ```
 
-Delete temporary worktree environments only through the owner-authorized
-lifecycle for that environment. While an explicitly selected local `master`
-environment is in use, preserve its product state across normal source updates
-and coordinate updates with its current use. This does not require retaining
-an environment its owner has chosen to retire.
+Delete temporary worktree environments only through the documented,
+owner-authorized lifecycle for that environment. While an explicitly selected
+local `master` environment is in use, preserve its product state across normal
+source updates and coordinate updates with its current use. This does not
+silently recreate a specifically retired target.
 
 `reconcile` answers "what is actually still here?". It enumerates worktree
 environments from Incus rather than from the runner's metadata, so an
