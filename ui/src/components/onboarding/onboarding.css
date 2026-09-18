@@ -526,8 +526,18 @@
 /* Tablet portrait and below: the caption moves under the icon row so a full label
    wraps instead of shrinking to an unreadable size. */
 @media (max-width: 767px) {
+  /* One row owner for all three cards: a wrapped caption must grow its peers'
+     status rows too. Independent flex columns only aligned while every label
+     fit the same minimum height. Keep the skeleton as the flexible middle row. */
+  .onboarding-collaboration-cards { grid-template-rows: max-content minmax(0, 1fr) max-content; }
+  .onboarding-collaboration-card {
+    display: grid;
+    grid-row: 1 / -1;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: subgrid;
+  }
   .onboarding-story-status { flex-wrap: wrap; row-gap: 4px; min-height: 32px; align-content: flex-start; }
-  .onboarding-status-text { order: 3; width: 100%; white-space: normal; font-size: 11px; line-height: 13px; }
+  .onboarding-status-text { order: 3; width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 11px; line-height: 13px; }
   .onboarding-story-identity { flex-wrap: wrap; gap: 6px; }
   .onboarding-story-identity > span:last-child { margin-left: 0; width: 100%; }
   .onboarding-assistant-main { flex-wrap: wrap; }

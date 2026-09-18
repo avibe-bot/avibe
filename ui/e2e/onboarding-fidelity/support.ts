@@ -173,19 +173,23 @@ export async function settleEffects(page: Page, at = 1000) {
  * that `animation-play-state` can hold.
  */
 export function cssEffects(page: Page) {
-  return page.evaluate(() => document.getAnimations()
-    .filter((animation) => {
+  return page.evaluate(async () => {
+    const animations = document.getAnimations().filter((animation) => {
       if (!('animationName' in animation)) return false;
       // The onboarding's own motion, which is the whole of what its lifecycle owns.
       const target = (animation.effect as KeyframeEffect | null)?.target ?? null;
       return !!target?.closest('.onboarding-shell');
-    })
-    .map((animation) => ({
+    });
+    // playState can already say "paused" while the pause task is still pending.
+    // Sample the committed timeline, not its one-frame-early hold time.
+    await Promise.all(animations.map((animation) => animation.ready));
+    return animations.map((animation) => ({
       name: String((animation as unknown as { animationName: string }).animationName),
       state: animation.playState,
       at: Math.round(Number(animation.currentTime ?? 0)),
     }))
-    .sort((left, right) => `${left.name}${left.at}`.localeCompare(`${right.name}${right.at}`)));
+      .sort((left, right) => `${left.name}${left.at}`.localeCompare(`${right.name}${right.at}`));
+  });
 }
 
 /** Simulates the tab going to the background, which no Playwright API does directly. */
