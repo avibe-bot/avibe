@@ -2672,14 +2672,6 @@
       }
     }
   },
-  "setup": {
-    "remoteOwner": {
-      "title": "Setup runs on the machine itself",
-      "body": "You're connected through remote access, so Avibe skips the first-run wizard here.",
-      "hint": "Platforms, backends, and models are all in Settings. The wizard itself only runs on the machine running Avibe.",
-      "action": "Open Settings"
-    }
-  },
   "wizard": {
     "title": "Avibe Setup"
   },

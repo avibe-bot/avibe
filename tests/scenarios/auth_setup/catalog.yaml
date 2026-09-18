@@ -246,6 +246,16 @@ scenarios:
     layer: scenario
     backend: show_identity
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_limited_show_identity_closed_loop_installs_guest_lease
+  - id: AUTH-SETUP-405
+    name: Local and authenticated remote managers complete the same setup flow without changing pairing
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_uses_the_same_authorized_config_flow
+    supporting_tests:
+      - ui/src/App.remoteAuth.test.tsx
+      - ui/src/components/AppShell.test.tsx
   - id: AUTH-SETUP-210
     name: Lost Model Hub OAuth start response converges on one provider flow
     status: covered

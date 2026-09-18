@@ -86,6 +86,79 @@ def test_auth_setup_catalog_priorities_reference_live_scenarios():
     assert set(catalog.get("next_priority", [])) <= live_ids
 
 
+@pytest.mark.parametrize(
+    ("access", "role"),
+    [("local", "owner"), ("personal", "owner"), ("organization", "owner"), ("organization", "member")],
+)
+def test_setup_completion_uses_the_same_authorized_config_flow(monkeypatch, tmp_path, access, role):
+    """Scenario: AUTH-SETUP-405 — real auth, CSRF, config persistence and read-back."""
+    from config.v2_settings import SettingsStore
+    from vibe import internal_client
+
+    config = _save_config(tmp_path, paired=True, instance_kind="personal" if access == "local" else access)
+    pairing = config.remote_access
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda *_args: None)
+    reconcile = AsyncMock(return_value={"status_code": 200, "body": {"ok": True}})
+    monkeypatch.setattr(internal_client, "reconcile_platforms", reconcile)
+    # Any unintended runtime action must fail instead of starting a real process.
+    monkeypatch.setattr(remote_access, "reconcile", Mock(side_effect=AssertionError("pairing changed")))
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    client = app.test_client()
+    base_url = "http://localhost" if access == "local" else "https://alex.avibe.bot"
+    peer = {"REMOTE_ADDR": "127.0.0.1" if access == "local" else "203.0.113.44"}
+    if access != "local":
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(
+                config, "owner@example.com", "owner-1",
+                role=role,
+                access_source="owner" if role == "owner" else "organization_group",
+                organization_id="组织-甲" if access == "organization" else None,
+                organization_member_id="成员-甲" if access == "organization" else None,
+                organization_role=role if access == "organization" else None,
+                group_ids=["研发组"] if access == "organization" else None,
+            ),
+            domain="alex.avibe.bot",
+        )
+    headers = csrf_headers(client, base_url=base_url)
+    SettingsStore.reset_instance()
+    try:
+        session = client.get("/api/session", base_url=base_url, environ_base=peer).get_json()
+        assert session["remote"] is (access != "local")
+        assert session["capabilities"]["can_manage_instance"] is True
+        initial = client.get("/api/config", base_url=base_url, environ_base=peer)
+        assert initial.status_code == 200
+        assert initial.get_json()["setup_state"]["needs_setup"] is True
+        settings = client.get("/api/settings?platform=slack", base_url=base_url, environ_base=peer)
+        assert settings.status_code == 200
+
+        # Use the same narrow POSTs as the platform step and Summary.
+        for payload in (
+            {"slack": {"bot_token": "xoxb-setup-fixture", "app_token": "xapp-setup-fixture"}},
+            {"setup_completed": True, "update": {"auto_update": False}},
+        ):
+            response = client.post(
+                "/api/config", json=payload, headers=headers, base_url=base_url, environ_base=peer,
+            )
+            assert response.status_code == 200, response.get_json()
+        assert response.get_json()["setup_state"]["needs_setup"] is False
+
+        saved = V2Config.load()
+        assert saved.setup_completed is True
+        assert saved.slack.bot_token == "xoxb-setup-fixture"
+        assert saved.remote_access == pairing
+        assert saved.setup_state()["needs_setup"] is False
+        reread = client.get("/api/config", base_url=base_url, environ_base=peer)
+        assert reread.status_code == 200
+        assert reread.get_json()["setup_state"]["needs_setup"] is False
+        reconcile.assert_awaited()
+    finally:
+        SettingsStore.reset_instance()
+
+
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-404"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
