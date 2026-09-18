@@ -4,7 +4,12 @@ const matchesRoute = (pathname: string, route: string): boolean =>
 export const isMemorySettingsPath = (pathname: string): boolean =>
   matchesRoute(pathname, '/settings/memory');
 
-export const SETTINGS_LAST_PATH_KEY = 'avibe.settings.last-path';
+/**
+ * Ordinary Settings always opens General, irrespective of the last visited
+ * subsection. General is readable by every role, so the landing page needs no
+ * capability fallback; explicit deep links stay authoritative on their own.
+ */
+export const SETTINGS_LANDING_PATH = '/settings/general';
 
 /**
  * Destinations that require Instance Owner management capability.
@@ -45,33 +50,3 @@ export const isOwnerOnlyPath = (pathname: string): boolean =>
 
 export const isLocalOnlyMessagingField = (field: string): boolean =>
   LOCAL_ONLY_MESSAGING_FIELDS.has(field);
-
-const isValidSettingsPath = (pathname: string): boolean =>
-  pathname.startsWith('/settings/') &&
-  pathname !== '/settings/appearance' &&
-  pathname !== '/settings/account' &&
-  !pathname.startsWith('/settings/platforms/groups') &&
-  !pathname.startsWith('/settings/platforms/users');
-
-export const rememberSettingsPath = (pathname: string): void => {
-  if (typeof window === 'undefined' || !isValidSettingsPath(pathname)) return;
-  try {
-    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, pathname);
-  } catch {
-    // Storage is an optional convenience; routing keeps a deterministic fallback.
-  }
-};
-
-export const settingsLandingPath = (canManageInstance: boolean): string => {
-  let remembered: string | null = null;
-  if (typeof window !== 'undefined') {
-    try {
-      remembered = window.localStorage.getItem(SETTINGS_LAST_PATH_KEY);
-    } catch {
-      // Ignore unavailable storage.
-    }
-  }
-  if (!remembered || !isValidSettingsPath(remembered)) return '/settings/replies';
-  if (!canManageInstance && isOwnerOnlyPath(remembered)) return '/settings/replies';
-  return remembered;
-};

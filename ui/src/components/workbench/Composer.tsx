@@ -346,6 +346,11 @@ export interface ComposerProps {
   disabled?: boolean;
   /** Override the row container — e.g. a narrower max-width on the home canvas. */
   className?: string;
+  /** Caller-owned controls (Agent + workspace pickers on the home). Supplying
+   *  them moves the box to the two-row layout: input on top, then an action row
+   *  carrying these on the left and Send on the right. Callers that pass nothing
+   *  keep the single-row box the chat has always used. */
+  actions?: React.ReactNode;
   /** When set, enables file upload + voice input scoped to this session. The
    *  Workbench home leaves it unset → a plain text-only composer. */
   sessionId?: string;
@@ -372,6 +377,10 @@ export interface ComposerHandle {
    *  with a separating space when the composer is non-empty. No-op when the
    *  mention editor isn't active (the plain-textarea home composer). */
   appendText: (text: string) => void;
+  /** Replace the whole draft from outside and focus the input with the caret at
+   *  the end — the home's suggestion cards seed a starting task the user then
+   *  edits. It never sends, and refuses while voice capture owns the draft. */
+  setDraft: (text: string) => void;
   /** Handle the Chat page's configured voice chord. Starting may be gated by
    *  the page, while an active recording can always be completed. */
   handleVoiceShortcut: (event: KeyboardEvent, allowStart: boolean) => boolean;
@@ -391,6 +400,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   placeholder,
   disabled = false,
   className,
+  actions,
   sessionId,
   autoFocus = false,
   onSearchAgents,
@@ -418,6 +428,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const draftAppliedRef = useRef(false);
   // Blocks a same-tick double-submit before the optimistic clear re-renders.
   const pendingRef = useRef(false);
+  // Set by setDraft; consumed by the layout effect that focuses after the seeded
+  // text has rendered.
+  const seedFocusRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentFilesRef = useRef(new Map<string, File>());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -1322,8 +1335,33 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     appendText: (text: string) => {
       if (!voiceDraftLocked()) mentionRef.current?.append(text);
     },
+    setDraft: (text: string) => {
+      if (voiceDraftLocked()) return;
+      valueRef.current = text;
+      setHasText(text.trim().length > 0);
+      if (useMentions) mentionRef.current?.setText(text);
+      else setValue(text);
+      onDraftChange?.(text);
+      // Focus lands in the layout effect below, once the new text is in the DOM —
+      // focusing here would put the caret at the pre-seed offset (0) instead of
+      // after the text the user is meant to edit.
+      seedFocusRef.current = true;
+    },
     handleVoiceShortcut,
   }));
+
+  useLayoutEffect(() => {
+    if (!seedFocusRef.current) return;
+    seedFocusRef.current = false;
+    if (useMentions) {
+      mentionRef.current?.focus();
+      return;
+    }
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [value, useMentions]);
 
   useEffect(() => {
     if (!busyControls) {
@@ -1391,70 +1429,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   };
 
-  return (
-    <div
-      ref={composerRootRef}
-      className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
-    >
-      {mediaEnabled && attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {attachments.map((att) => (
-            <div
-              key={att.localId}
-              className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 py-1 pl-1.5 pr-1 text-[12px]"
-            >
-              {att.status === 'uploading' ? (
-                <span className="grid size-7 place-items-center rounded text-muted">
-                  <Loader2 className="size-4 animate-spin" />
-                </span>
-              ) : att.kind === 'image' && att.url ? (
-                <img src={att.url} alt="" className="size-7 rounded object-cover" />
-              ) : (
-                <span className="grid size-7 place-items-center rounded bg-cyan/15 text-cyan-ink">
-                  <Paperclip className="size-3.5" />
-                </span>
-              )}
-              <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink-ink' : 'text-foreground')}>
-                {att.name}
-              </span>
-              {att.status === 'error' && att.retryable && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={disabled || voiceDraftReadOnly}
-                  onClick={() => retryAttachment(att.localId)}
-                  aria-label={t('chat.compose.retryAttachment')}
-                  className="size-5 shrink-0 text-muted hover:text-foreground"
-                >
-                  <RotateCcw className="size-3.5" />
-                </Button>
-              )}
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => removeAttachment(att.localId)}
-                aria-label={t('chat.compose.removeAttachment')}
-                className="size-5 shrink-0 text-muted hover:text-foreground"
-              >
-                <X className="size-3.5" />
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {realtimeAnnouncement
-          ? `${t('chat.compose.voicePreview')}: ${realtimeAnnouncement}`
-          : ''}
-      </div>
-      <div
-        className={cn(
-          'flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
-          mediaEnabled ? 'pl-1.5' : 'pl-3.5',
-        )}
-      >
+  // The left-edge media cluster and the input itself, named so both box
+  // layouts below compose the same controls instead of duplicating them.
+  const mediaControls = (
+    <>
         {/* Attach stays in the first idle slot and voice starts in the second.
             Once a voice flow starts, the unrelated attachment control withdraws
             and the active voice action takes the left edge. */}
@@ -1579,6 +1557,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
           </div>
         )}
+    </>
+  );
+
+  const inputControl = (
+    <>
         {useMentions ? (
           <MentionEditor
             ref={mentionRef}
@@ -1642,8 +1625,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}
-        {/* A running agent turn keeps its Stop escape hatch even during voice
-            capture. Queue/Send withdraw while capture owns the draft. */}
+    </>
+  );
+
+  // Send / Stop / Queue / Discard — one cluster, so the two-row layout can put it
+  // at the end of the action row without either box owning a second copy.
+  //
+  // A running agent turn keeps its Stop escape hatch even during voice capture.
+  // Queue/Send withdraw while capture owns the draft.
+  const sendControls = (
+    <>
         {busyControls ? (
           <>
             {/* Sending while a turn runs is allowed — the backend enqueues it
@@ -1718,7 +1709,92 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <Trash2 className="size-4" />
           </Button>
         )}
+    </>
+  );
+
+  return (
+    <div
+      ref={composerRootRef}
+      className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
+    >
+      {mediaEnabled && attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {attachments.map((att) => (
+            <div
+              key={att.localId}
+              className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 py-1 pl-1.5 pr-1 text-[12px]"
+            >
+              {att.status === 'uploading' ? (
+                <span className="grid size-7 place-items-center rounded text-muted">
+                  <Loader2 className="size-4 animate-spin" />
+                </span>
+              ) : att.kind === 'image' && att.url ? (
+                <img src={att.url} alt="" className="size-7 rounded object-cover" />
+              ) : (
+                <span className="grid size-7 place-items-center rounded bg-cyan/15 text-cyan-ink">
+                  <Paperclip className="size-3.5" />
+                </span>
+              )}
+              <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink-ink' : 'text-foreground')}>
+                {att.name}
+              </span>
+              {att.status === 'error' && att.retryable && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={disabled || voiceDraftReadOnly}
+                  onClick={() => retryAttachment(att.localId)}
+                  aria-label={t('chat.compose.retryAttachment')}
+                  className="size-5 shrink-0 text-muted hover:text-foreground"
+                >
+                  <RotateCcw className="size-3.5" />
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => removeAttachment(att.localId)}
+                aria-label={t('chat.compose.removeAttachment')}
+                className="size-5 shrink-0 text-muted hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {realtimeAnnouncement
+          ? `${t('chat.compose.voicePreview')}: ${realtimeAnnouncement}`
+          : ''}
       </div>
+      {actions ? (
+        /* Two-row box (design TfqkD): the input on top, then an action row
+           carrying the caller's pickers on the left and Send on the right. */
+        <div className="flex w-full flex-col gap-[22px] rounded-2xl border border-border-strong bg-surface-2 p-[18px] shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
+          <div className="flex w-full items-end gap-1.5">
+            {mediaControls}
+            {inputControl}
+          </div>
+          <div className="flex w-full items-center justify-between gap-4">
+            <div className="flex min-w-0 items-center gap-4">{actions}</div>
+            <div className="flex shrink-0 items-center gap-1.5">{sendControls}</div>
+          </div>
+        </div>
+      ) : (
+        <div
+          className={cn(
+            'flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
+            mediaEnabled ? 'pl-1.5' : 'pl-3.5',
+          )}
+        >
+          {mediaControls}
+          {inputControl}
+          {sendControls}
+        </div>
+      )}
     </div>
   );
 });

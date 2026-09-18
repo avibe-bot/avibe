@@ -279,6 +279,7 @@
       "system": "System"
     },
     "sections": {
+      "general": "General",
       "backends": "Backends",
       "models": "Models",
       "memory": "Memory",
@@ -294,9 +295,23 @@
     },
     "navigationLabel": "Settings sections",
     "backToWorkbench": "Back to Workbench",
+    "backToApp": "Back to Avibe",
     "backToSections": "All settings",
     "backToSection": "Back to {{section}}",
     "close": "Close Settings",
+    "general": {
+      "title": "General",
+      "subtitle": "Choose the interface language and appearance",
+      "languageTitle": "Language",
+      "languageDescription": "Display language for the Avibe interface",
+      "appearanceTitle": "Appearance",
+      "appearanceDescription": "Follow the system, or pick a light or dark theme",
+      "appearanceSystem": "System",
+      "appearanceLight": "Light",
+      "appearanceDark": "Dark",
+      "autosaved": "Changes are saved automatically",
+      "languageSaveFailed": "The language changed here, but could not be saved for this instance"
+    },
     "shortcuts": {
       "title": "Shortcuts",
       "subtitle": "Choose the keyboard commands you use most often in Chat and Show Pages.",
@@ -2501,22 +2516,30 @@
     "eyebrow": "Workbench",
     "placeholderTitle": "Your AI workbench is coming together",
     "placeholderBody": "Agents, Skills, Harness, and Vaults will live here. For now, jump into the control panel to configure platforms and backends.",
-    "canvas": {
-      "heroTitle": "What should we build today?",
-      "heroBody": "Describe what you want and an agent will run it. Or start with one of the suggestions below.",
+    "home": {
+      "heroTitle": "What would you like to do?",
+      "heroBody": "Pick a starting point, or describe your own task",
       "suggestions": {
-        "newProject": "Open project",
-        "newProjectHint": "Pick a folder; sessions default to it",
-        "openAgents": "Manage agents",
-        "openAgentsHint": "Add or tweak available agents",
-        "openHarness": "Schedule background work",
-        "openHarnessHint": "Have an agent write the cron / watch"
+        "exploreTitle": "Explore a project",
+        "exploreBody": "Get to know your project's structure",
+        "exploreDraft": "Walk me through this project and how its main parts fit together",
+        "researchTitle": "Research a topic",
+        "researchBody": "Get a clear, practical overview",
+        "researchDraft": "Research this topic and summarize what matters in a short brief",
+        "planTitle": "Make a plan",
+        "planBody": "Turn your goal into a step-by-step plan",
+        "planDraft": "Help me turn this goal into a concrete step-by-step plan"
       },
-      "inputPlaceholder": "Tell the agent what you want…",
-      "noProjectForChat": "No projects yet — add one before starting a chat"
+      "inputPlaceholder": "Describe a task or ask a question...",
+      "chooseWorkspace": "Choose a workspace",
+      "workspaceAria": "Workspace: {{path}}",
+      "noProjectForChat": "No projects yet — add one before starting a chat",
+      "ready": "{{backend}} is ready to go",
+      "readyDismiss": "Dismiss",
+      "continueOnPhone": "Continue on your phone",
+      "connectChatApps": "Connect chat apps in <settings>Settings</settings>"
     },
     "openControlPanel": "Open Control Panel",
-    "capabilitiesLabel": "Capabilities",
     "projectsLabel": "Projects",
     "addProject": "Open project",
     "addSession": "New session in this project",
@@ -2553,7 +2576,7 @@
       "noReclaim": "No scheduled tasks or watches are linked to this session.",
       "confirm": "Archive permanently"
     },
-    "projectsEmpty": "No projects yet — add one to start a session.",
+    "projectsEmpty": "Add a project to get started",
     "projectsLoading": "Loading projects…",
     "projectsLoadError": "Couldn't load projects.",
     "sessionsLoading": "Loading sessions…",
@@ -2578,6 +2601,7 @@
     },
     "nav": {
       "inbox": "Inbox",
+      "newChat": "New chat",
       "agents": "Agents",
       "skills": "Skills",
       "harness": "Harness",

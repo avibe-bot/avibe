@@ -8,6 +8,7 @@ import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
+import { SETTINGS_LANDING_PATH } from '../../lib/adminNavigation';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { useShowPageInventory } from '../useShowPages';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
@@ -225,7 +226,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
             and 更多 open a small overflow sheet. Appearance lives inside 更多 so
             the three English labels fit without truncation. */}
         <div className="mt-4 flex items-stretch gap-2 border-t border-border pt-3">
-          <Link to="/settings" onClick={onClose} className={chipClass}>
+          <Link to={SETTINGS_LANDING_PATH} onClick={onClose} className={chipClass}>
             <Settings className="size-4 shrink-0" />
             <span className="truncate">{t('more.controlPanel')}</span>
           </Link>
