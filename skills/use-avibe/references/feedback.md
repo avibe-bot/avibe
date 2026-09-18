@@ -24,10 +24,14 @@ If the user also wants a fix attempt, that is a separate request.
 4. Ask only about material gaps — the facts that would change what a maintainer
    does. Unknown reproduction steps are acceptable; write "not reproduced yet".
    Missing optional metadata never blocks drafting or submission.
-5. Add environment facts you can read without new authorization: `vibe version`
-   for the installed version, `GET /status` or `vibe status` for service state,
-   the host OS, the surface the user is on (Web, Slack, Discord, Telegram,
-   Lark/Feishu, WeChat), and the agent backend in use.
+5. Fill in the environment from what this session already holds — the installed
+   version, the host OS, the surface the user is on (Web, Slack, Discord,
+   Telegram, Lark/Feishu, WeChat), the agent backend in use. A fact nobody
+   mentioned stays unknown; write it down as unknown instead of inspecting the
+   running installation to complete the form. A feature request needs no probe
+   at all. Read live service state only when it is material to a bug and the
+   user has already asked for that diagnosis — a request to file a report does
+   not start one.
 6. Draft the report in English using the template below, and sanitize it.
 7. Check for an existing issue (see Duplicates). Searching generic public
    product terms needs no extra permission — the task already authorizes it.
@@ -86,9 +90,8 @@ approach — those are the maintainers' decisions.
 A public issue is permanent and world-readable. Before anything leaves this
 machine:
 
-- collect narrowly through supported commands (`vibe version`, `vibe status`,
-  `POST /doctor`, a small `POST /logs` window); never attach a raw config file,
-  a full log bundle, a whole conversation transcript, or private source
+- carry only what this conversation already produced; never attach a raw config
+  file, a full log bundle, a whole conversation transcript, or private source
 - redact tokens, bind codes, pairing keys, tunnel URLs, proxy credentials,
   internal hostnames, absolute paths carrying a user or project name, and
   channel or user IDs the report does not need
@@ -114,10 +117,20 @@ After that yes, do not re-ask. Re-confirm only when the scope, destination, or
 content changes materially; a follow-up comment carrying new evidence is such a
 change, and an already authorized report is not.
 
+Destination is part of that authorization, and an owner/repository pair is not a
+destination. `gh` takes `[HOST/]OWNER/REPO` and fills a missing host from
+`GH_HOST`, an enterprise config, or whatever checkout you happen to be standing
+in, so the same argument can publish an approved report to an unrelated server
+under an unrelated account — and the read-back afterwards would confirm it
+landed there. Name the host on every call (see Submitting). Nothing inherited
+from the environment or the local repository may select a host or a principal
+other than the authorized one.
+
 Identity is part of that authorization, and a healthy CLI login is not consent.
-`gh auth status` proves an account is authenticated, never that it belongs to
-the person asking or that they delegated publishing to it — on a shared host or
-an installation operated for someone else it can be an unrelated identity. Use
+`gh auth status --hostname github.com` proves an account is authenticated there,
+never that it belongs to the person asking or that they delegated publishing to
+it — on a shared host or an installation operated for someone else it can be an
+unrelated identity. Use
 an existing trusted binding between this user and that account, or name the
 actual account in the approval. **Fail closed:** if the credential appears to
 belong to someone else and no binding says otherwise, do not post — hand the
@@ -166,12 +179,16 @@ Submit only through a channel that is actually available and already authorized
 for this user. Do not make someone install tooling or mint a token just to
 leave feedback.
 
-Target repository: `https://github.com/avibe-bot/avibe`
+Target repository: `github.com/avibe-bot/avibe`. Spell the host out in every
+call this workflow makes — searching, creating, reading back, commenting, and
+reconciling after a timeout. Pass the repository as `github.com/avibe-bot/avibe`
+rather than `avibe-bot/avibe`, add `--hostname github.com` to a `gh api` call,
+and check the acting account with `gh auth status --hostname github.com`.
 
-**With an existing authorized GitHub connection.** When `gh` is installed, an
-account has access to that repository, and that account is bound to this user
-per Publication authority, file the issue with `gh issue create --repo
-avibe-bot/avibe`.
+**With an existing authorized GitHub connection.** When `gh` is installed, a
+github.com account has access to that repository, and that account is bound to
+this user per Publication authority, file the issue with `gh issue create --repo
+github.com/avibe-bot/avibe`.
 
 **Never substitute a generated value into a shell command string.** Title, body,
 and search query are all report-derived: a title containing `` `vibe status` ``
