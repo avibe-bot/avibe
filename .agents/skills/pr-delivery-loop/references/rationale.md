@@ -15,8 +15,9 @@ default branch even after a conflict-free Git merge.
 
 An untracked contract creates a related failure: another lane cannot obtain it
 from the base branch, and the file may later block the primary checkout's
-fast-forward. Since regression synchronizes the invoking checkout, a blocked
-checkout can also become a stale deployment source.
+fast-forward. In the opt-in local Incus workflow, regression synchronizes the
+invoking checkout, so a blocked checkout can also become a stale deployment
+source.
 
 ## Review activity is not a verdict
 
@@ -62,7 +63,7 @@ nearby prose alone cannot. Similarly, an explicit button block may be removed
 from text even on a destination that cannot render buttons; ordinary prose is
 the capability fallback.
 
-The regression command's switches protect different boundaries:
+The opt-in local Incus regression command's switches protect different boundaries:
 
 - `--target master` selects a target; it does not select the sender's checkout.
 - Git ignores do not govern rsync exclusions. Ignored local source can be copied

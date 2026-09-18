@@ -194,7 +194,7 @@ Use the conversation language, English when unknown, and honor explicit labels:
 | Action | Chinese | English |
 | --- | --- | --- |
 | Merge | 合并PR | Merge PR |
-| Update local master regression | 更新回归 | Update master |
+| Update the designated regression environment | 更新回归 | Update regression |
 | Update and verify end to end | 更新并验证 | Update + E2E |
 
 **Bind every action to its target before mutation.** The callback submits only
@@ -209,9 +209,15 @@ or invent a payload format.
   open, non-draft, and `CLEAN`. Offering it is not authorization. After binding a
   click, re-fetch the head and gates; if the offered head changed or readiness
   was lost, report that change and refresh the offer instead of using stale approval.
-- After GitHub confirms the named PR is **MERGED**, replace Merge with both
-  regression choices and name the local target. Closed/unmerged is not merged.
-  State in the report that both choices update from master; keep labels short.
+- After GitHub confirms the named PR is **MERGED**, resolve the regression
+  target and update procedure from the current owner decision and repository
+  guidance. Closed/unmerged is not merged. Offer both regression choices only
+  when that exact target has an established update procedure and access; name
+  the environment and source revision in the report. If either is missing,
+  report the blocker instead of offering a runnable update or inventing a
+  command. Never substitute a local environment for a designated cloud target.
+  State that both choices update from the repository's default branch; keep
+  labels short.
   Update + E2E performs the same update, then relevant end-to-end verification.
   Both are separate opt-ins, not implied by merge. For Chinese reports:
 
@@ -220,11 +226,22 @@ or invent a payload format.
   [更新回归] | [更新并验证]
   ```
 
-### Authorized local regression updates
+### Authorized regression updates
 
 For Avibe, bind the action and recheck `MERGED`, then follow
-`docs/regression/README.md`. Other repos offer these choices only when their own
-documented local workflow applies; never invent a target.
+`docs/regression/README.md` and the current owner decision. Other repositories
+use their own documented workflow; this skill supplies no default environment
+or cloud deployment command. Target selection and merge do not authorize an
+update, restart, reset, or destructive scenario run. After a separately
+authorized update, verify the actual running revision and service health;
+report scenario results separately. HTTP reachability alone is not an E2E pass.
+
+### Explicitly selected local Incus updates
+
+The following procedure applies only when the owner has explicitly selected
+an existing local Incus `master` environment for the update. It is not the
+default Avibe acceptance path and does not authorize recreating a retired
+environment. Follow `docs/regression/local-incus.md` for the opt-in runbook.
 
 1. Fetch origin and fast-forward the **primary** checkout with `--ff-only`;
    verify `master` equals the fetched `origin/master` SHA. Establish that the
