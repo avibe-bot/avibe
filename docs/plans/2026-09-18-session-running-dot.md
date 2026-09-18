@@ -121,6 +121,38 @@ flips status through the product's own `session.status` event. Reverting the two
 product class changes fails 10 of its 11 cases, the alignment case reporting the
 exact 2px difference.
 
+## Review correction: hermetic-suite collection boundary
+
+PM review of head `64295b6bd` raised one integration defect: `ui/playwright.config.ts`
+also collected the new fixture suite. That config drives a **live** Avibe instance
+and deliberately has no `webServer`, so a fixture spec collected there asks the
+product backend for a fixture URL it does not serve.
+
+Measuring it first widened the finding. The live config collected 231 tests in 24
+files, of which only 95 in 14 files are its own: `badge-triggers`,
+`onboarding-fidelity`, `project-order`, `session-dot` and `workbench-general`
+were all leaking into a suite whose whole design refuses to start without an
+explicit base URL because it mutates the instance it points at. Four of those
+five predate this branch.
+
+The cause is the shape of the exclusion, not a missing entry in it. The repository
+already has an unambiguous rule — specs directly in `e2e/` are the live suite, and
+every subdirectory is shared support or a hermetic suite owning a
+`playwright.*.config.ts` — and `testIgnore` restated that rule as a hand-maintained
+list of directory names. Adding a fifth name would leave the same list one suite
+behind the next time. So the list is replaced by the rule it was copying:
+
+```
+testIgnore: ['**/e2e/*/**'],
+```
+
+Verified by collection on both sides: the live config goes from 231 tests in 24
+files to exactly its own 95 in 14, with zero specs collected from any
+subdirectory and `--list session-dot` collecting nothing; every one of the eight
+dedicated hermetic configs still collects its own suite unchanged, and
+`playwright.session-dot.config.ts` still collects 14 (7 cases x 2 device projects).
+No suite, dedicated config, package script, or test framework changed.
+
 ## Checklist
 
 - [x] Inspect current code and freeze the change contract.
