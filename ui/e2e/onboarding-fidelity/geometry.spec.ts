@@ -360,37 +360,66 @@ test.describe('capped fluid width', () => {
  * that do, and no label clipped or truncated to make that true.
  */
 test.describe('narrow identity alignment', () => {
-  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 768, height: 1024 }]) {
+  for (const viewport of [
+    { width: 320, height: 568 },
+    { width: 375, height: 667 },
+    { width: 390, height: 844 },
+    { width: 767, height: 1024 },
+    { width: 768, height: 1024 },
+  ]) {
     for (const lang of ['en', 'zh'] as const) {
       test(`${size(viewport)} ${lang} keeps the three cards on one grid`, async ({ page }, info) => {
         await page.setViewportSize(viewport);
         const denied = await serveProduct(page);
         await openOnboarding(page, { lang });
-        await freezeAt(page, PHASES['codex-working']);
+        await page.evaluate(() => document.fonts.ready);
+        let previous = 0;
+        for (const [phase, elapsed] of Object.entries(PHASES)) {
+          await test.step(phase, async () => {
+            // freezeAt advances the clock; these phase offsets are absolute.
+            await freezeAt(page, elapsed - previous);
+            previous = elapsed;
+            const statuses = await boxes(page, '.onboarding-story-status');
+            const skeletons = await boxes(page, '.onboarding-skeleton');
+            const identities = await boxes(page, '.onboarding-story-identity');
+            const cards = await boxes(page, '.onboarding-collaboration-card');
+            expect([statuses.length, identities.length]).toEqual([3, 3]);
+            // The header and footer boundaries belong to the row, not to whichever
+            // caption happens to be short enough at this point in the animation.
+            for (const row of [statuses, skeletons, identities]) {
+              expect(spread(row.map((one) => one.y))).toBeLessThanOrEqual(1);
+              expect(spread(row.map((one) => one.height))).toBeLessThanOrEqual(1);
+            }
+            for (let index = 0; index < cards.length; index++) {
+              for (const row of [statuses, skeletons, identities]) {
+                expect(row[index].x).toBeGreaterThanOrEqual(cards[index].x);
+                expect(row[index].x + row[index].width).toBeLessThanOrEqual(cards[index].x + cards[index].width);
+              }
+              expect(skeletons[index].height).toBeGreaterThan(0);
+              expect(statuses[index].y + statuses[index].height).toBeLessThanOrEqual(skeletons[index].y + 1);
+              expect(skeletons[index].y + skeletons[index].height).toBeLessThanOrEqual(identities[index].y + 1);
+              expect(identities[index].y + identities[index].height).toBeLessThanOrEqual(cards[index].y + cards[index].height);
+            }
 
-        const statuses = await boxes(page, '.onboarding-story-status');
-        const identities = await boxes(page, '.onboarding-story-identity');
-        expect([statuses.length, identities.length]).toEqual([3, 3]);
-        // The header row and the separator above the footer are the two lines the eye
-        // reads across the three cards, so both have to be one line, not three.
-        expect(spread(statuses.map((one) => one.y))).toBeLessThanOrEqual(1);
-        expect(spread(statuses.map((one) => one.height))).toBeLessThanOrEqual(1);
-        expect(spread(identities.map((one) => one.y))).toBeLessThanOrEqual(1);
-        expect(spread(identities.map((one) => one.height))).toBeLessThanOrEqual(1);
-
-        // Alignment must not have been bought by cutting the labels: every name, role
-        // and caption is fully inside its own box, with no ellipsis doing the fitting.
-        const clipped = await page.locator(
-          '.onboarding-story-identity strong, .onboarding-story-identity > span:last-child, .onboarding-status-text',
-        ).evaluateAll((nodes) => nodes
-          .filter((node) => {
-            const style = getComputedStyle(node);
-            return node.scrollWidth > node.clientWidth + 1
-              || node.scrollHeight > node.clientHeight + 1
-              || style.textOverflow === 'ellipsis';
-          })
-          .map((node) => node.textContent?.trim() ?? ''));
-        expect(clipped).toEqual([]);
+            // Equal rows must not be bought with clipping, truncation or overflow
+            // into an adjacent row/card. Check the actual visible label boxes.
+            const clipped = await page.locator(
+              '.onboarding-story-identity strong, .onboarding-story-identity > span:last-child, .onboarding-status-text',
+            ).evaluateAll((nodes) => nodes
+              .filter((node) => {
+                const style = getComputedStyle(node);
+                const label = node.getBoundingClientRect();
+                const row = node.closest('.onboarding-story-status, .onboarding-story-identity')!.getBoundingClientRect();
+                return node.scrollWidth > node.clientWidth + 1
+                  || node.scrollHeight > node.clientHeight + 1
+                  || style.textOverflow === 'ellipsis'
+                  || label.left < row.left - 1 || label.right > row.right + 1
+                  || label.top < row.top - 1 || label.bottom > row.bottom + 1;
+              })
+              .map((node) => node.textContent?.trim() ?? ''));
+            expect(clipped).toEqual([]);
+          });
+        }
         // …and the labels are still the product's own words at a readable size.
         const names = await page.locator('.onboarding-story-identity strong').allInnerTexts();
         expect(names.map((name) => name.replace(/\s+/g, ' ').trim())).toEqual(['Claude Code', 'Codex', 'OpenCode']);
