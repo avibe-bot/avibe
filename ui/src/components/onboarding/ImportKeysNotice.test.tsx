@@ -173,7 +173,7 @@ describe('ImportKeysNotice', () => {
     expect(within(dialog).getByRole('button', { name: /Import 3 items/ })).toBeTruthy();
   });
 
-  it('submits only the rows still ticked', async () => {
+  it('MH-MIG-004: submits only the rows still ticked', async () => {
     serve(FULL_SCAN);
     const onApplied = vi.fn();
     renderNotice(onApplied);

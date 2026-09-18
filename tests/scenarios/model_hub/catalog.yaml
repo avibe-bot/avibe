@@ -32,6 +32,11 @@ capability:
     - ui/src/components/settings/models/RouteChainDialog.test.tsx
     - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
     - ui/src/components/settings/models/AgentCard.test.tsx
+    # Migration: the setup key-import entry and the broader settings dialog it
+    # narrows, plus the one predicate that separates them.
+    - ui/src/components/settings/models/MigrationDialog.test.tsx
+    - ui/src/components/settings/models/migrationScan.test.ts
+    - ui/src/components/onboarding/ImportKeysNotice.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
@@ -704,6 +709,24 @@ scenarios:
     kind: migration
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
+  - id: MH-MIG-003
+    name: A scan row names the provider it belongs to without ever carrying a plaintext credential
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_scan_rows_name_their_provider_without_exposing_plaintext
+    related_tests:
+      - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_masked_credential_is_the_same_masking_the_detail_already_showed
+      - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone
+  - id: MH-MIG-004
+    name: Setup's key-import entry counts, offers and submits one and the same set, and leaves subscriptions and reauth rows to the settings migration
+    status: covered
+    kind: migration
+    layer: unit
+    test: "ui/src/components/onboarding/ImportKeysNotice.test.tsx::MH-MIG-004: submits only the rows still ticked"
+    related_tests:
+      - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
+      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies a keep_native row — it is a real action here, not a leftover
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered

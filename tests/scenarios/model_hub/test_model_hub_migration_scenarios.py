@@ -1311,9 +1311,11 @@ def _write_oauth_sources(home: Path) -> None:
     _write(home / ".codex" / "config.toml", 'cli_auth_credentials_store = "file"\n')
 
 
-def test_every_source_shape_carries_provider_metadata_without_exposing_plaintext(
+def test_mh_mig_003_scan_rows_name_their_provider_without_exposing_plaintext(
     tmp_path: Path,
 ) -> None:
+    """MH-MIG-003: every shape the scan produces carries the provider it belongs
+    to, and no shape carries a plaintext credential."""
     home = tmp_path / "keys"
     _write_key_sources(home)
     items = scan_native_configs(ModelHubConfig(), home=home, mask_credential=_mask_credential)
