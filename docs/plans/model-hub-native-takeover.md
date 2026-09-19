@@ -1,7 +1,7 @@
 # Model Hub native credential takeover
 
-Status: approved product contract; implementation and safety verification in
-progress. The implementation checkpoint is not release-ready.
+Status: approved product and custody contract. Acceptance requirements and
+remaining live-account verification boundaries are described below.
 
 ## Approved user flow
 

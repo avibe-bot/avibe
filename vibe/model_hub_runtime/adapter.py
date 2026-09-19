@@ -1847,15 +1847,11 @@ class CLIProxyEngineAdapter:
             if metadata.get("activation_state") == "staged":
                 raise EngineStateError("OAuth credential is not active")
             normalized_vendor = str(metadata.get("vendor") or "").strip().lower()
-            protocol = {
-                "anthropic": "anthropic",
-                "openai": "openai_responses",
-            }.get(normalized_vendor)
             expected_provider = {
                 "anthropic": "claude",
                 "openai": "codex",
             }.get(normalized_vendor)
-            if protocol is None or expected_provider is None:
+            if expected_provider is None:
                 raise EngineStateError("OAuth credential validation is unsupported")
             client = await run_owned_in_thread(self.supervisor.client)
             try:

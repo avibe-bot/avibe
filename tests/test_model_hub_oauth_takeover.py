@@ -447,6 +447,26 @@ async def test_startup_retry_reconciles_published_file_without_stale_upload(
     assert ("POST", "/auth-files") not in client.calls
 
 
+@pytest.mark.parametrize("vendor", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"object":"response"}',
+        '{"type":"message"}',
+        '{"error":{"message":"model is required"}}',
+        '{"account":{"uuid":"account-fixture"},"plan_type":"plus","error":null}',
+        '{"account":{"uuid":true},"plan_type":true}',
+        '{"account":{"uuid":5},"plan_type":5}',
+        '{"account":{"uuid":null},"plan_type":null}',
+        '{"account":{"uuid":"  "},"plan_type":"  "}',
+        'null',
+        '200',
+    ],
+)
+def test_control_plane_witness_never_accepts_inference_or_malformed_identity(vendor, body):
+    assert not runtime_adapter._parse_oauth_control_plane_witness(vendor, 200, body)
+
+
 @pytest.mark.asyncio
 async def test_validate_uses_credential_specific_control_plane_witness(
     tmp_path: Path,
