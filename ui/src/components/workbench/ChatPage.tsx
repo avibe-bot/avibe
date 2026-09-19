@@ -1259,10 +1259,11 @@ export const ChatPage: React.FC = () => {
 
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
-  const refreshQueue = useCallback(async () => {
+  const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return;
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
+      if (isCurrentRequest && !isCurrentRequest()) return;
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       setQueue(res.queued ?? []);
     } catch {
@@ -2305,6 +2306,8 @@ export const ChatPage: React.FC = () => {
     const sid = sessionId;
     if (!sid || queue.length === 0 || sendingQueueNow) return;
     const requestGeneration = ++queueSendGenerationRef.current;
+    const isCurrentRequest = () =>
+      requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current;
     // Give the click an immediate visual response while the request interrupts
     // the current turn. The queue stays visible until admission succeeds so a
     // failed or ambiguous request never hides work the user may need to retry.
@@ -2315,8 +2318,9 @@ export const ChatPage: React.FC = () => {
     markWorking();
     try {
       const res = await api.sendQueuedNow(sid, queue[0].id);
-      // Drop the response if the user switched chats mid-request (Codex P2).
-      if (sessionId !== sessionIdRef.current) return;
+      // Drop every effect from a request that lost ownership while it was in
+      // flight, including responses that arrive after a newer send starts.
+      if (!isCurrentRequest()) return;
       if (res && res.ok === false) {
         // stop_failed: the controller left the ORIGINAL turn running and the
         // queue intact — keep Stop visible so the user can still interrupt it
@@ -2333,16 +2337,16 @@ export const ChatPage: React.FC = () => {
         // Re-read the authoritative queue instead of assuming the whole visible
         // batch was flushed.
       }
-      await refreshQueue();
+      await refreshQueue(isCurrentRequest);
     } catch (err) {
-      // Same session guard as the success path: a rejection after a chat switch
-      // must not clear the new chat's working / stamp this error on it (Codex P2).
-      if (sessionId === sessionIdRef.current) {
+      // The same ownership guard applies to failures: an older request must not
+      // clear the new chat's working state or surface a stale error.
+      if (isCurrentRequest()) {
         setWorking(false);
         setError(errorMessage(err) ?? String(err));
       }
     } finally {
-      if (requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current) {
+      if (isCurrentRequest()) {
         setSendingQueueNow(false);
       }
     }
