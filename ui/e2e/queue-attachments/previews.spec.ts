@@ -139,6 +139,15 @@ test('a queued image is visible, 20px, centred, and costs the row no height', as
     .toBeGreaterThan(0);
 });
 
+test('a single-line queued message is vertically centred in its row', async ({ page }) => {
+  const queuedRow = await boxOf(row(page, 'q-text'), 'the text-only row');
+  const text = await boxOf(row(page, 'q-text').locator('div[role="button"]'), 'the queued message text');
+  const rowCentre = queuedRow.y + queuedRow.height / 2;
+  const textCentre = text.y + text.height / 2;
+
+  expect(Math.abs(textCentre - rowCentre)).toBeLessThanOrEqual(1);
+});
+
 test('an image-only queued message still says what it is', async ({ page }) => {
   await expect(row(page, 'q-image')).toContainText('annotation-region.png');
 });
