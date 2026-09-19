@@ -4,10 +4,9 @@ import { DESKTOP, NARROW, ORIGIN, WIDE, open, serveProduct } from './support';
 
 /**
  * The packet's geometry claims, measured in a browser rather than inferred from
- * class names. Two of them are fixed numbers (sidebar 248, settings rail 196)
- * and the rest are the opposite claim — that the content beside them is fluid,
- * which a capture at the 1200 staging width alone cannot distinguish from a
- * column that happens to be 856 or 924 wide.
+ * class names. Workbench keeps its adjustable 248px default/sidebar offset;
+ * standalone Settings has a 196px rail and a 944px outer content frame with
+ * 880px of common content at the desktop reference width.
  */
 
 const SIDEBAR = 'aside.fixed';
@@ -156,7 +155,7 @@ test.describe('workbench home geometry', () => {
 });
 
 test.describe('settings overlay geometry', () => {
-  test('opens at the sidebar edge and gives the home back its draft on close', async ({ page }) => {
+  test('opens as a standalone zero-offset surface and gives the home back its draft on close', async ({ page }) => {
     const denied = await serveProduct(page);
 
     await page.setViewportSize(DESKTOP);
@@ -176,18 +175,15 @@ test.describe('settings overlay geometry', () => {
     const overlay = page.locator('[data-settings-overlay="true"]');
     await expect(overlay).toBeVisible();
 
-    // The overlay covers the work area and stops exactly at the sidebar's own
-    // edge — measured off the sidebar rather than compared to a literal, so the
-    // two cannot drift apart the way a second hard-coded width did.
-    const sidebar = await page.locator(SIDEBAR).boundingBox();
+    // Standalone Settings owns the viewport at every sidebar width. The origin
+    // remains mounted behind the surface for draft/session/selection retention,
+    // but no Workbench offset is allowed to leak into the foreground.
     const surface = await overlay.boundingBox();
-    expect(sidebar!.x).toBe(0);
-    expect(surface!.x).toBe(sidebar!.x + sidebar!.width);
-    expect(surface!.width).toBe(DESKTOP.width - sidebar!.width);
-    // Covering the sidebar would be the same defect from the other side.
-    await expect(page.locator(SIDEBAR)).toBeVisible();
+    expect(surface!.x).toBe(0);
+    expect(surface!.width).toBe(DESKTOP.width);
+    await expect(page.locator(SIDEBAR)).toBeHidden();
 
-    await page.locator('aside [data-settings-toggle="true"]').click();
+    await page.getByRole('button', { name: 'Close Settings' }).click();
     await expect(page).toHaveURL(`${ORIGIN}/`);
     await expect(overlay).toHaveCount(0);
     await expect(page.getByPlaceholder('Describe a task or ask a question...')).toHaveValue(draft);
@@ -216,7 +212,7 @@ test.describe('page background family', () => {
 });
 
 test.describe('general settings geometry', () => {
-  test('keeps the rail at 196 and keeps the page fluid past the shared cap', async ({ page }) => {
+  test('keeps the rail at 196 and the common content at 880px', async ({ page }) => {
     const denied = await serveProduct(page);
 
     await page.setViewportSize(DESKTOP);
@@ -226,20 +222,15 @@ test.describe('general settings geometry', () => {
     expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
     const cardAtStaging = await widthOf(page, APPEARANCE_CARD);
 
-    // Wide enough to pass the shared 1180 reading column on purpose. Measuring
-    // below it could not tell a fluid page from a capped one, which is the whole
-    // question: the source draws General as content that fills whatever the rail
-    // leaves, so a cap of any size — inherited or not — contradicts it.
+    // The desktop Settings frame is 944px wide with 32px horizontal padding,
+    // leaving an 880px common content column.
     await page.setViewportSize(ULTRA);
     await page.waitForFunction(() => window.innerWidth === 1920);
 
     expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
     const cardAtUltra = await widthOf(page, APPEARANCE_CARD);
-    expect(cardAtUltra).toBeGreaterThan(1180);
-    expect(cardAtUltra - cardAtStaging).toBe(ULTRA.width - DESKTOP.width);
-
-    // eslint-disable-next-line no-console
-    console.log(`general card: ${cardAtStaging} @1200, ${cardAtUltra} @1920`);
+    expect(cardAtStaging).toBe(880);
+    expect(cardAtUltra).toBe(880);
     expect(denied).toEqual([]);
   });
 
@@ -263,23 +254,15 @@ test.describe('general settings geometry', () => {
     expect(await headingOf('/settings/shortcuts')).toEqual({ size: '28px', weight: '700' });
   });
 
-  // Assessed rather than inherited: the shell sidebar stays on a direct Settings
-  // route, where the source board draws a standalone window with none. The board
-  // is a native window (the same reason Web drops its titlebar and traffic
-  // lights); on Web, Settings is a route in the one shell, and the overlay path
-  // deliberately keeps the sidebar visible so the origin work stays in view.
-  // Hiding it only on the direct route would give one URL two chromes and jump
-  // the layout on close. What the source actually fixes is the frame beside the
-  // rail, and that is reproduced exactly at a real window width.
-  test('reaches the source content frame at a real desktop width', async ({ page }) => {
+  test('uses the same standalone frame for a direct URL at a real desktop width', async ({ page }) => {
     await serveProduct(page);
     await page.setViewportSize({ width: 1448, height: 900 });
     await open(page, '/settings/general');
     await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
 
-    // dqfES — the source's Settings content frame.
-    expect(await widthOf(page, SETTINGS_PAGE)).toBe(1004);
-    expect(await widthOf(page, SIDEBAR)).toBe(248);
+    // dqfES — the source's standalone Settings content frame.
+    expect(await widthOf(page, SETTINGS_CONTENT)).toBe(944);
+    await expect(page.locator(SIDEBAR)).toBeHidden();
   });
 
   // A rail label is the only thing that says where a row goes, and English has
@@ -313,15 +296,13 @@ test.describe('general settings geometry', () => {
     expect(new Set(rows).size).toBe(1);
   });
 
-  test('leaves the shared reading column on every other settings page', async ({ page }) => {
+  test('keeps the common 880px content width on every ordinary settings page', async ({ page }) => {
     await serveProduct(page);
     await page.setViewportSize(ULTRA);
     await open(page, '/settings/shortcuts');
     await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
 
-    // General opts out by route, so the pages that wanted the reading column
-    // still have it at a width where the difference is visible.
-    expect(await widthOf(page, SETTINGS_CONTENT)).toBe(1180);
+    expect(await widthOf(page, SETTINGS_CONTENT)).toBe(944);
   });
 
   test('draws the preference card, the selector and the selected choice to spec', async ({ page }) => {

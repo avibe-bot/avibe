@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { resolvePath, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { Navigator } from 'react-router-dom';
@@ -30,6 +30,17 @@ export const SettingsOverlayRouteSurface = ({
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
+  const lastFocusRef = useRef<HTMLElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement && !event.target.closest('[data-settings-overlay]')) {
+        lastFocusRef.current = event.target;
+      }
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => document.removeEventListener('focusin', onFocusIn);
+  }, []);
   // The route this surface renders behind any overlay — the retained origin
   // while Settings is open, the foreground route otherwise.
   const backgroundLocation = settingsSurfaceOpen ? origin.location : location;
@@ -58,7 +69,7 @@ export const SettingsOverlayRouteSurface = ({
   return (
     <>
       <div
-        className="contents"
+        className={settingsSurfaceOpen ? 'hidden' : 'contents'}
         aria-hidden={settingsSurfaceOpen || undefined}
         inert={settingsSurfaceOpen || undefined}
       >
@@ -83,36 +94,38 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
-              // The overlay covers the work area and stops at the shell sidebar,
-              // which is what keeps the origin project/session visible behind it.
-              // This overrides the primitive's historical 240 default with the
-              // sidebar's own live width: the dialog is portaled outside the
-              // shell's subtree, so that document-level custom property is what
-              // keeps the two edges together while the sidebar is being dragged.
-              //
-              // Below md the surface is the whole viewport, so the primitive's
-              // left border would draw a hairline down the screen edge and make
-              // Settings-from-home look different from a direct Settings link.
-              // There is no sidebar to divide from until the offset applies.
-              className="border-l-0 md:left-[var(--app-sidebar-w)] md:border-l"
+              // Settings owns the whole viewport. The retained Workbench origin
+              // remains mounted behind this portal for drafts and return state,
+              // but its sidebar is not part of the Settings surface at any width.
+              className="left-0 border-l-0 md:left-0 md:border-l-0"
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;
                 if (
                   target instanceof Element
-                  // The toggle closes the overlay itself, and the sidebar's
-                  // resize edge is not a dismissal at all: it moves this
-                  // surface's own left edge, so grabbing it must not close what
-                  // the drag is laying out.
-                  && target.closest('[data-settings-toggle="true"], [data-sidebar-resizer="true"]')
+                  && target.closest('[data-settings-toggle="true"]')
                 ) {
                   event.preventDefault();
                 }
               }}
+              onOpenAutoFocus={() => {
+                // Freeze the origin focus for this visit. Retained app windows
+                // may focus themselves on return, before Radix's deferred close
+                // callback runs; that must not replace the initiating control.
+                returnFocusRef.current = lastFocusRef.current;
+              }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
+                const target = returnFocusRef.current;
                 window.requestAnimationFrame(() => {
-                  document.querySelector<HTMLElement>('[data-settings-toggle="true"]')?.focus();
+                  if (target?.isConnected && !target.closest('[inert]')) {
+                    target.focus({ preventScroll: true });
+                    return;
+                  }
+                  const fallback = Array.from(
+                    document.querySelectorAll<HTMLElement>('[data-settings-toggle="true"]'),
+                  ).find((candidate) => !candidate.closest('[inert]'));
+                  fallback?.focus({ preventScroll: true });
                 });
               }}
             >

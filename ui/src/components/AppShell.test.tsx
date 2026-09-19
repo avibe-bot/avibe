@@ -3,8 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { closeSettingsOverlay, useSettingsOverlayOrigin } from '../lib/settingsOverlay';
 
 import { APP_TAB_PARAM } from '../apps/appLaunch';
 import {
@@ -129,6 +130,15 @@ vi.mock('react-i18next', () => ({
     i18n,
   }),
 }));
+
+const SettingsExit = ({ testId }: { testId: string }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const origin = useSettingsOverlayOrigin(location);
+  return <div data-testid={testId}>
+    <button onClick={() => { if (origin) closeSettingsOverlay(navigate, origin); }}>settings.close</button>
+  </div>;
+};
 
 beforeEach(() => {
   viewport.isDesktop = false;
@@ -458,20 +468,19 @@ describe('AppShell persistent Workbench chrome', () => {
           <Route element={<AppShell />}>
             <Route index element={<div data-testid="workbench" />} />
             <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
-            <Route path="settings/general" element={<div data-testid="settings" />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
     expect(await screen.findByTestId('chat')).toBeTruthy();
-    let settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
     expect(settingsToggle.getAttribute('href')).toBe('/settings/general');
     await user.click(settingsToggle);
 
     expect(await screen.findByTestId('settings')).toBeTruthy();
-    settingsToggle = screen.getByRole('button', { name: 'appShell.openControlPanel' });
-    await user.click(settingsToggle);
+    await user.click(screen.getByRole('button', { name: 'settings.close' }));
     expect(await screen.findByTestId('chat')).toBeTruthy();
   });
 
@@ -487,7 +496,7 @@ describe('AppShell persistent Workbench chrome', () => {
         <Routes>
           <Route element={<AppShell />}>
             <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
-            <Route path="settings/diagnostics" element={<div data-testid="diagnostics" />} />
+            <Route path="settings/diagnostics" element={<SettingsExit testId="diagnostics" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -496,7 +505,7 @@ describe('AppShell persistent Workbench chrome', () => {
     await user.click(await screen.findByRole('link', { name: 'configRecovery.action' }));
     expect(await screen.findByTestId('diagnostics')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'appShell.openControlPanel' }));
+    await user.click(screen.getByRole('button', { name: 'settings.close' }));
     expect(await screen.findByTestId('chat')).toBeTruthy();
   });
 });

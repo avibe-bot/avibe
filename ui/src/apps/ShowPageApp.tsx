@@ -6,6 +6,8 @@ import { bindShowPageFrameCloseShortcut } from '../components/apps/windowChords'
 import { useRequiredShowPageAnnotationHost } from '../components/workbench/ShowPageAnnotationHostContext';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
+import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
+import { useLatestRef } from '../lib/useLatestRef';
 
 // A pinned Show Page opened as a workbench app. The body always frames the
 // PRIVATE /show/<session_id>/ surface (authenticated workbench context, live
@@ -21,6 +23,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
   const { close, confirmClose } = useWindowManager();
   const { unpin } = useDock();
   const { annotation, src } = useRequiredShowPageAnnotationHost();
+  const routeSurfaceActiveRef = useLatestRef(useRouteSurfaceActive());
   const { setIframe: setAnnotationIframe, handleIframeLoad } = annotation;
   const shortcutCleanupRef = useRef<() => void>(() => undefined);
   const setIframe = useCallback(
@@ -30,10 +33,11 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
       setAnnotationIframe(iframe);
       if (!iframe) return;
       shortcutCleanupRef.current = bindShowPageFrameCloseShortcut(iframe, () => {
+        if (!routeSurfaceActiveRef.current) return;
         if (confirmClose(windowId)) close(windowId);
       });
     },
-    [close, confirmClose, setAnnotationIframe, windowId],
+    [close, confirmClose, routeSurfaceActiveRef, setAnnotationIframe, windowId],
   );
 
   const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : '';

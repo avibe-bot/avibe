@@ -5,9 +5,8 @@ import { DESKTOP, NARROW, open, serveProduct } from './support';
 
 /**
  * Sidebar resizing (#2044), measured in a real browser: the gesture uses actual
- * pointer capture, and the claim is about boxes — the sidebar, the content
- * offset and the Settings overlay's left edge all following ONE width — which no
- * class name or jsdom pointer event can answer.
+ * pointer capture, and the claim is about boxes — the sidebar and Workbench
+ * content offset follow ONE width, while standalone Settings keeps zero offset.
  */
 
 const SIDEBAR = 'aside.fixed';
@@ -217,32 +216,31 @@ test.describe('sidebar resizing', () => {
     expect(denied).toEqual([]);
   });
 
-  test('keeps the Settings overlay open and on the edge it is being dragged to', async ({ page }) => {
+  test('keeps standalone Settings zero-offset while preserving the Workbench width', async ({ page }) => {
     const denied = await serveProduct(page);
     await page.setViewportSize(DESKTOP);
     await open(page, '/');
+    await dragEdge(page, 160);
+    const before = await layout(page);
+    expect(before).toEqual({ sidebar: 408, contentLeft: 408 });
 
     await page.locator(SETTINGS_TOGGLE).click();
     const overlay = page.locator(OVERLAY);
     await expect(overlay).toBeVisible();
+    expect(await boxOf(overlay, 'settings')).toMatchObject({ x: 0, width: DESKTOP.width });
+    await expect(page.locator(SIDEBAR)).toBeHidden();
+    await expect(page.getByRole('separator')).toHaveCount(0);
+    await expect(page.locator(SIDEBAR)).toHaveAttribute('inert', '');
 
-    // The overlay is portaled outside the shell, so this is the case the shared
-    // document-level width exists for. Grabbing the edge must not dismiss it.
-    await dragEdge(page, 900);
-    await expect(overlay).toBeVisible();
-
-    const surface = await boxOf(overlay, 'settings overlay');
-    expect(await layout(page)).toEqual({ sidebar: MAX, contentLeft: MAX });
-    expect(surface.x).toBe(MAX);
-    expect(surface.width).toBe(DESKTOP.width - MAX);
-    await expect(page.locator(SIDEBAR)).toBeVisible();
-
-    // And back: the overlay follows the sidebar in, not just out.
-    await dragEdge(page, -900);
-    const narrowed = await boxOf(overlay, 'settings overlay');
-    expect(narrowed.x).toBe(MIN);
-    expect(narrowed.width).toBe(DESKTOP.width - MIN);
-
+    await overlay.getByRole('button', { name: 'Close Settings' }).click();
+    await expect(overlay).toHaveCount(0);
+    expect(await layout(page)).toEqual(before);
+    await expect(page.locator(SETTINGS_TOGGLE)).toBeFocused();
+    await dragEdge(page, 20);
+    expect(await layout(page)).toEqual({ sidebar: 428, contentLeft: 428 });
+    await page.locator(SEPARATOR).focus();
+    await page.keyboard.press('ArrowLeft');
+    expect(await layout(page)).toEqual({ sidebar: 412, contentLeft: 412 });
     expect(denied).toEqual([]);
   });
 

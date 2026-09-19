@@ -33,13 +33,17 @@ const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
 ];
 
 export const AppWindow: React.FC<{
+  /** Whether this retained window is the active shell surface. Inactive windows
+   * stay mounted so app bodies keep their in-memory state, but their chrome and
+   * event handlers must not compete with the foreground route. */
+  active?: boolean;
   win: WindowInstance;
   layerWidth: number;
   layerHeight: number;
   /** The Show Page icon's opaque cache token for a `showpage` window's title-bar
    *  chip, threaded from the WindowLayer inventory join (§7.1f/g). */
   iconVersion?: string | null;
-}> = ({ win, layerWidth, layerHeight, iconVersion }) => {
+}> = ({ active = true, win, layerWidth, layerHeight, iconVersion }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const navigate = useNavigate();
@@ -85,6 +89,15 @@ export const AppWindow: React.FC<{
   );
   const { capabilities } = useInstanceAuthorization();
 
+  useEffect(() => {
+    if (active) return;
+    // Radix popovers portal to document.body, outside the retained window's
+    // inert subtree. Close their local state when Settings takes foreground so
+    // stale app chrome cannot remain reachable through that portal.
+    setAnnotateOpen(false);
+    setShareOpen(false);
+  }, [active]);
+
   // Keep a visible window reachable when the geometry around it changes without a
   // drag: the layer shrinking, or the window being restored / un-maximized after the
   // layer shrank (the gesture clamps can't fire in those cases). Deliberately not
@@ -106,11 +119,11 @@ export const AppWindow: React.FC<{
   // window wouldn't receive ⌘W/⌘M. The `contains` guard avoids yanking focus from an
   // inner field the user just clicked (pointerdown already focuses those).
   useEffect(() => {
-    if (win.minimized || wm.focusedId !== win.id) return;
+    if (!active || win.minimized || wm.focusedId !== win.id) return;
     if (rootRef.current?.contains(document.activeElement)) return;
     rootRef.current?.focus({ preventScroll: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wm.focusedId, win.minimized]);
+  }, [active, wm.focusedId, win.minimized]);
 
   // One pointer gesture (move or resize). Capturing `win.bounds` at gesture start
   // keeps the math stable even as state updates re-render mid-drag.
@@ -124,7 +137,7 @@ export const AppWindow: React.FC<{
   // flicker). Cleanup is idempotent + runs on BOTH pointerup and lostpointercapture, so
   // a missed/stolen release can never leave the shield or listeners stuck.
   const startGesture = (e: React.PointerEvent, kind: 'move' | ResizeDir) => {
-    if (win.maximized) return;
+    if (!active || win.maximized) return;
     e.preventDefault();
     e.stopPropagation();
     wm.focus(win.id);
@@ -260,24 +273,28 @@ export const AppWindow: React.FC<{
       // Minimized windows stay mounted (to preserve their body state) but go fully
       // inert: hidden from assistive tech, out of the tab order, non-interactive —
       // and React/the browser moves focus out automatically.
-      inert={win.minimized}
+      aria-hidden={!active || undefined}
+      inert={!active || win.minimized}
       tabIndex={-1}
-      onKeyDown={annotationHost?.annotation.handleShortcutKeyDown}
+      onKeyDown={active ? annotationHost?.annotation.handleShortcutKeyDown : undefined}
       onPointerDownCapture={() => {
         // Capture runs before toolbar controls stop propagation, so every pointer
         // activation claims the window without stealing DOM focus from the target.
-        wm.focus(win.id);
+        if (active) wm.focus(win.id);
       }}
       onPointerDown={(e) => {
         // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus from
         // an inner control/editor/terminal the click lands in. FocusCapture below
         // then gives the same window foreground ownership and raises its z-order.
+        if (!active) return;
         const tgt = e.target as HTMLElement;
         if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor,.xterm')) {
           rootRef.current?.focus({ preventScroll: true });
         }
       }}
-      onFocusCapture={() => wm.focus(win.id)}
+      onFocusCapture={() => {
+        if (active) wm.focus(win.id);
+      }}
       onAnimationEnd={(e) => {
         // Only the root's own close animation drives the unmount (ignore the
         // entrance, and any child animation bubbling up). Minimize doesn't animate
@@ -352,7 +369,7 @@ export const AppWindow: React.FC<{
             open-in-new-tab — up to four size-6 controls plus gaps (108px), so both
             clusters reserve w-28 (112px) to keep them from crowding the title. */}
         <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-28' : 'w-[52px]')}>
-          {showpageSid && annotationHost?.src && !win.minimized && exitKind === null && (
+          {active && showpageSid && annotationHost?.src && !win.minimized && exitKind === null && (
             <div
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
@@ -370,7 +387,7 @@ export const AppWindow: React.FC<{
               />
             </div>
           )}
-          {chatHref && (
+          {active && chatHref && (
             <button
               type="button"
               title={t('apps.window.openChat')}
@@ -398,7 +415,7 @@ export const AppWindow: React.FC<{
               <MessageCircle className="size-3.5" />
             </button>
           )}
-          {showpageSid && annotationHost?.src && !win.minimized && exitKind === null
+          {active && showpageSid && annotationHost?.src && !win.minimized && exitKind === null
             && capabilities.can_use_show_pages && (
             <div
               onPointerDown={(e) => e.stopPropagation()}
@@ -444,12 +461,12 @@ export const AppWindow: React.FC<{
             transparent overlay so a gesture's pointer can't be stolen by the iframe and the
             cursor doesn't flicker over it — belt-and-braces with the gesture's pointer capture. */}
         <WindowBodyGestureShield active={shouldShieldWindowBody(wm.gestureActive, win.minimized)} />
-        {(annotateOpen || shareOpen) && annotationHost?.src && (
+        {active && (annotateOpen || shareOpen) && annotationHost?.src && (
           <div aria-hidden data-annotation-shield className="absolute inset-0 z-20" />
         )}
       </div>
 
-      {!win.maximized &&
+      {active && !win.maximized &&
         RESIZE_HANDLES.map((h) => (
           <div
             key={h.dir}

@@ -22,11 +22,13 @@ import {
   Plus,
   Search,
   Settings2,
-  SquarePen,
   WandSparkles,
 } from 'lucide-react';
 import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
+
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
+import { useLatestRef } from '../../lib/useLatestRef';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -266,6 +268,7 @@ export const SessionRow: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
+  const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
   const inputRef = useRef<HTMLInputElement | null>(null);
   // Guards a double commit: Enter (or click-away) commits, then the input
   // unmounts and its onBlur would fire commitRename again; Escape cancels and
@@ -298,6 +301,8 @@ export const SessionRow: React.FC<{
   }, [renaming]);
 
   const commitRename = async () => {
+    // Inerting the retained sidebar blurs its input; suspension is not a save.
+    if (!surfaceActiveRef.current) return;
     if (handledRef.current) return;
     handledRef.current = true;
     const trimmed = draft.trim();
@@ -479,6 +484,7 @@ const ProjectRow: React.FC<{
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(project.display_name);
+  const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
@@ -489,6 +495,8 @@ const ProjectRow: React.FC<{
   }, [renaming]);
 
   const commitRename = async () => {
+    // Inerting the retained sidebar blurs its input; suspension is not a save.
+    if (!surfaceActiveRef.current) return;
     const trimmed = renameDraft.trim();
     if (!trimmed || trimmed === project.display_name) {
       setRenaming(false);
@@ -795,12 +803,13 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // hover popover stays OUT of any overflow box below, so it is never clipped.
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {/* Brand row tLDP1 — identity on the left, Search and Inbox on the right.
-          Search and Inbox are siblings of the home link, not nested inside it. */}
-      <div className="flex shrink-0 items-center gap-2.5 py-2">
+      {/* Brand row tLDP1 — the whole brand opens the new-conversation home.
+          Search and Inbox live in full-width rows below it so the shell keeps one
+          clear reading order at every supported sidebar width. */}
+      <div className="flex shrink-0 items-center py-2">
         <Link
           to="/"
-          className="group flex min-w-0 flex-1 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+          className="group flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
         >
           {/* Decorative: the link's accessible name is the localized brand text
               beside it, so naming the image too would read the destination twice. */}
@@ -812,71 +821,69 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           />
           <div className="min-w-0 leading-tight">
             <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
-            {/* tLDP1 labels this row "Workbench", not the full "Agent OS ·
-                Workbench" the settings shell uses: at 248 with Search and Inbox
-                beside it, the longer line only ever renders truncated. */}
-            <div className="truncate text-[11px] text-muted">{t('workbench.eyebrow')}</div>
+            <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
           </div>
         </Link>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="size-8 shrink-0 rounded-lg text-muted hover:text-foreground"
-          aria-label={t('workbench.search.entry')}
-          onClick={onOpenSearch}
-        >
-          <Search className="size-[18px]" />
-        </Button>
-        {/* Inbox entry — hover opens the floating popover (portaled above the chat).
-            At zero unread there is no badge node at all and the icon stays muted;
-            both reads come from the same real counter. */}
-        <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
-          <PopoverAnchor asChild>
-            <div className="shrink-0" onMouseEnter={openPopover} onMouseLeave={queueClose}>
-              <NavLink
-                to="/inbox"
-                aria-label={t('workbench.nav.inbox')}
-                className="relative flex size-8 items-center justify-center rounded-lg transition-colors hover:bg-[var(--nav-hover-bg)]"
-              >
-                {({ isActive }) => (
-                  <>
-                    <Inbox
-                      className={clsx(
-                        'size-[18px]',
-                        badge ? 'text-cyan-ink' : isActive ? 'text-foreground' : 'text-muted',
-                      )}
-                    />
-                    {badge && (
-                      <span className="absolute right-0.5 top-0.5 inline-flex min-w-[14px] items-center justify-center rounded-full border border-surface bg-cyan px-[3px] font-mono text-[9px] font-bold leading-[12px] text-primary-foreground">
-                        {badge}
-                      </span>
-                    )}
-                  </>
-                )}
-              </NavLink>
-            </div>
-          </PopoverAnchor>
-          <InboxHoverPopover
-            sessions={inboxSessions}
-            unreadBySession={unreadBySession}
-            unreadSessions={unreadSessions}
-            totalUnread={totalUnread}
-            canMarkRead={canChat}
-            onItemClick={onItemClick}
-            onMarkAllRead={onMarkAllRead}
-            onMouseEnter={openPopover}
-            onMouseLeave={queueClose}
-          />
-        </Popover>
       </div>
 
-      {/* Navigation m8K59 — one always-expanded group. "New chat" is the home
-          itself, which is where a task is described and a session is created. */}
+      <Button
+        type="button"
+        variant="ghost"
+        className="h-9 w-full justify-start rounded-lg px-2.5 text-[13px] text-muted hover:text-foreground"
+        aria-label={t('workbench.search.entry')}
+        onClick={onOpenSearch}
+      >
+        <Search className="size-[17px]" />
+        <span>{t('workbench.search.entry')}</span>
+        <kbd className="ml-auto rounded border border-border-strong px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted">⌘K</kbd>
+      </Button>
+
+      {/* Inbox entry — hover opens the floating popover (portaled above the chat).
+          At zero unread there is no badge node at all and the icon stays muted;
+          both reads come from the same real counter. */}
+      <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
+        <PopoverAnchor asChild>
+          <div className="w-full" onMouseEnter={openPopover} onMouseLeave={queueClose}>
+            <NavLink
+              to="/inbox"
+              aria-label={t('workbench.nav.inbox')}
+              className="relative flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-[13px] transition-colors hover:bg-[var(--nav-hover-bg)]"
+            >
+              {({ isActive }) => (
+                <>
+                  <Inbox
+                    className={clsx(
+                      'size-[17px]',
+                      badge ? 'text-cyan-ink' : isActive ? 'text-foreground' : 'text-muted',
+                    )}
+                  />
+                  <span className={clsx(isActive ? 'font-semibold text-foreground' : 'font-medium text-muted')}>{t('workbench.nav.inbox')}</span>
+                  {badge && (
+                    <span className="ml-auto inline-flex min-w-[18px] items-center justify-center rounded-full border border-surface bg-cyan px-[4px] font-mono text-[9px] font-bold leading-[14px] text-primary-foreground">
+                      {badge}
+                    </span>
+                  )}
+                </>
+              )}
+            </NavLink>
+          </div>
+        </PopoverAnchor>
+        <InboxHoverPopover
+          sessions={inboxSessions}
+          unreadBySession={unreadBySession}
+          unreadSessions={unreadSessions}
+          totalUnread={totalUnread}
+          canMarkRead={canChat}
+          onItemClick={onItemClick}
+          onMarkAllRead={onMarkAllRead}
+          onMouseEnter={openPopover}
+          onMouseLeave={queueClose}
+        />
+      </Popover>
+
+      {/* Navigation m8K59 — the home brand is the new-conversation entry, so
+          capability destinations are the only rows in this group. */}
       <nav className="flex shrink-0 flex-col gap-0.5">
-        {canChat && (
-          <SidebarNavRow to="/" end icon={SquarePen} label={t('workbench.nav.newChat')} />
-        )}
         {capabilityNav.map(({ to, i18nKey, icon }) => (
           <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
         ))}

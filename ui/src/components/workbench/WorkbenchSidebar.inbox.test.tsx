@@ -87,7 +87,7 @@ describe('Workbench sidebar inbox counter', () => {
 
     const link = screen.getByRole('link', { name: en.workbench.nav.inbox });
     // A zero badge is still a badge — an empty inbox draws no attention at all.
-    expect(link.textContent).toBe('');
+    expect(link.textContent).toBe(en.workbench.nav.inbox);
     expect(inboxIcon().getAttribute('class')).toContain('text-muted');
     expect(inboxIcon().getAttribute('class')).not.toContain('text-cyan-ink');
   });
@@ -98,7 +98,7 @@ describe('Workbench sidebar inbox counter', () => {
     inbox.unreadBySession = { ses_a: 4, ses_b: 3 };
     renderSidebar();
 
-    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe('7');
+    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}7`);
     expect(inboxIcon().getAttribute('class')).toContain('text-cyan-ink');
   });
 
@@ -106,6 +106,6 @@ describe('Workbench sidebar inbox counter', () => {
     inbox.totalUnread = 150;
     renderSidebar();
 
-    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe('99+');
+    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}99+`);
   });
 });

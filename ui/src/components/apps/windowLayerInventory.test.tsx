@@ -7,8 +7,10 @@
 // what the document renders decides what is fetched.
 
 import { createInstance } from 'i18next';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
@@ -17,6 +19,7 @@ import type { WindowInstance } from '../../context/WindowManagerContext';
 import { WindowLayer } from './WindowLayer';
 
 const windowsRef = { current: [] as WindowInstance[] };
+const dockState = { order: [] as string[], pins: [] as unknown[] };
 const windowManager = vi.hoisted(() => ({
   close: vi.fn(),
   focus: vi.fn(),
@@ -29,7 +32,7 @@ const windowManager = vi.hoisted(() => ({
 }));
 
 vi.mock('../../context/DockContext', () => ({
-  useDock: () => ({ order: [], pins: [] }),
+  useDock: () => dockState,
 }));
 
 vi.mock('../../context/WindowManagerContext', () => ({
@@ -46,7 +49,20 @@ vi.mock('../../context/StandaloneAppTabContext', () => ({
 // Every window body is an app of its own (iframe, terminal, editor); the layer's
 // own fetch decision is what is under test, so the frame is stubbed out.
 vi.mock('./AppWindow', () => ({
-  AppWindow: () => <button type="button" data-testid="app-window" data-window-id="win_1" />,
+  AppWindow: ({ active = true }: { active?: boolean }) => {
+    const [draft, setDraft] = useState('initial app state');
+    return (
+      <div data-testid="app-window" data-window-id="win_1">
+        <input
+          aria-label="Unsaved app buffer"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <button type="button" aria-label="Close app window">Close</button>
+        <span data-testid="app-window-active">{String(active)}</span>
+      </div>
+    );
+  },
 }));
 vi.mock('../workbench/ShowPageAnnotationHost', () => ({
   ShowPageAnnotationHost: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -83,11 +99,13 @@ const appWindow = (): WindowInstance =>
     params: {},
   }) as unknown as WindowInstance;
 
-const renderLayer = () =>
+const renderLayer = (active = true) =>
   render(
-    <I18nextProvider i18n={i18n}>
-      <WindowLayer />
-    </I18nextProvider>,
+    <MemoryRouter>
+      <I18nextProvider i18n={i18n}>
+        <WindowLayer active={active} />
+      </I18nextProvider>
+    </MemoryRouter>,
   );
 
 describe('WindowLayer show-pages inventory', () => {
@@ -101,6 +119,8 @@ describe('WindowLayer show-pages inventory', () => {
       },
     );
     windowsRef.current = [];
+    dockState.order = [];
+    dockState.pins = [];
     api.getShowPages.mockReset();
     api.getShowPages.mockResolvedValue([] as ShowPage[]);
     api.getSessionResult.mockReset();
@@ -145,5 +165,44 @@ describe('WindowLayer show-pages inventory', () => {
     act(() => window.dispatchEvent(consumed));
 
     expect(windowManager.minimize).not.toHaveBeenCalled();
+  });
+
+  it('keeps a stateful app mounted but makes its controls and global chords inactive', async () => {
+    windowsRef.current = [appWindow()];
+    const view = renderLayer();
+    const buffer = await screen.findByRole('textbox', { name: 'Unsaved app buffer' });
+    fireEvent.change(buffer, { target: { value: '未保存的草稿' } });
+    expect((buffer as HTMLInputElement).value).toBe('未保存的草稿');
+    dockState.order = ['terminal'];
+
+    view.rerender(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <WindowLayer active={false} />
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('app-window')).toBeTruthy();
+    expect((screen.getByLabelText('Unsaved app buffer', { selector: 'input' }) as HTMLInputElement).value)
+      .toBe('未保存的草稿');
+    expect(screen.getByTestId('app-window-active').textContent).toBe('false');
+    expect(screen.getByTestId('app-window').parentElement?.getAttribute('inert')).toBe('');
+    expect(screen.getByTestId('app-window').parentElement?.getAttribute('aria-hidden')).toBe('true');
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'm', code: 'KeyM', metaKey: true, bubbles: true, cancelable: true,
+      }));
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'w', code: 'KeyW', metaKey: true, bubbles: true, cancelable: true,
+      }));
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: '1', code: 'Digit1', altKey: true, bubbles: true, cancelable: true,
+      }));
+    });
+    expect(windowManager.minimize).not.toHaveBeenCalled();
+    expect(windowManager.close).not.toHaveBeenCalled();
+    expect(windowManager.openApp).not.toHaveBeenCalled();
   });
 });

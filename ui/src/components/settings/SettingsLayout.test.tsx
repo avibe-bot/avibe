@@ -188,18 +188,17 @@ describe('SettingsLayout', () => {
     },
   );
 
-  // The source draws General as content that simply fills whatever the rail
-  // leaves, so the shared reading column would re-introduce a fixed width the
-  // design does not have. It opts out the way Model Hub already does — without
-  // Model Hub's `min-h-full`, which is a full-height pane, not a width.
+  // General and the other ordinary Settings sections share the standalone
+  // 944px outer frame (880px content after desktop padding). Model Hub adds
+  // `min-h-full` for its own full-height surface, not a different width.
   it.each(['/settings/general', '/settings/general/'])(
-    'lets General fill the route pane at %s',
+    'keeps General in the common standalone content column at %s',
     (path) => {
       renderLayout(path);
 
       const generalFrame = screen.getByText('general-body').parentElement;
-      expect(generalFrame?.className).not.toContain('mx-auto');
-      expect(generalFrame?.className).not.toContain('max-w-[1180px]');
+      expect(generalFrame?.className).toContain('mx-auto');
+      expect(generalFrame?.className).toContain('max-w-[944px]');
       expect(generalFrame?.className).not.toContain('min-h-full');
     },
   );
@@ -209,7 +208,7 @@ describe('SettingsLayout', () => {
 
     const standardFrame = screen.getByText('replies-body').parentElement;
     expect(standardFrame?.className).toContain('mx-auto');
-    expect(standardFrame?.className).toContain('max-w-[1180px]');
+    expect(standardFrame?.className).toContain('max-w-[944px]');
     expect(standardFrame?.className).not.toContain('min-h-full');
   });
 
