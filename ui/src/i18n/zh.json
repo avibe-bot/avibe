@@ -1616,7 +1616,8 @@
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
           "itemConflict": "原生配置已变化，请重新扫描。",
-          "configurationBlocked": "请先调整原生配置，再重新扫描。"
+          "configurationBlocked": "请先调整原生配置，再重新扫描。",
+          "credentialsInvalid": "认证已过期，请在模型网关中重新登录。"
         },
         "applied_one": "迁移完成",
         "applied_other": "迁移完成",

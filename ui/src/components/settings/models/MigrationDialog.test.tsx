@@ -254,6 +254,23 @@ describe('MigrationDialog — the settings default', () => {
   });
 
   it.each([
+    ['en', 'Authentication has expired. Sign in again in Model Hub.'],
+    ['zh', '认证已过期，请在模型网关中重新登录。'],
+  ] as const)('maps expired migration credentials to the %s Hub reauthentication action', async (language, message) => {
+    await i18n.changeLanguage(language);
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_credentials_invalid'));
+    renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    await user.click(within(dialog).getByRole('button', { name: language === 'en' ? 'Start migration' : '开始迁移' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(message, 'error'));
+  });
+
+  it.each([
     ['settings.models.migration.blocked.config', "Adjust this CLI's configuration, then scan again."],
     ['settings.models.migration.blocked.environment', 'Close the CLI or finish its current task, then retry.'],
     ['settings.models.migration.blocked.credential', 'Allow credential access, then retry.'],

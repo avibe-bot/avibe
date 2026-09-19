@@ -1616,7 +1616,8 @@
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
           "itemConflict": "The native configuration changed. Scan again.",
-          "configurationBlocked": "Adjust the native configuration, then scan again."
+          "configurationBlocked": "Adjust the native configuration, then scan again.",
+          "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub."
         },
         "applied_one": "Migration complete",
         "applied_other": "Migration complete",

@@ -102,6 +102,7 @@ const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
   migration_recovery_pending: 'settings.models.migration.errors.recoveryPending',
   migration_item_conflict: 'settings.models.migration.errors.itemConflict',
   migration_configuration_blocked: 'settings.models.migration.errors.configurationBlocked',
+  migration_credentials_invalid: 'settings.models.migration.errors.credentialsInvalid',
 };
 const BLOCKED_NOTE_KEYS = new Set([
   'settings.models.migration.blocked.config',
