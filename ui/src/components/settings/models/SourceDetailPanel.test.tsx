@@ -1052,16 +1052,24 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(screen.queryByText(/serves a route through it|它就会显示为使用中/i)).toBeNull());
   });
 
-  it.each(['en', 'zh'])('explains the saved connection status through its keyboard-accessible hint in %s', async (lng) => {
+  it.each((['en', 'zh'] as const).flatMap((lng) => [
+    { lng, kind: 'api_key', supply_channel: 'hub', hasTest: true },
+    { lng, kind: 'subscription', supply_channel: 'hub', hasTest: false },
+    { lng, kind: 'subscription', supply_channel: 'native_cli', hasTest: false },
+    { lng, kind: 'api_key', supply_channel: 'native_cli', hasTest: false },
+  ] as const))('explains saved $kind/$supply_channel status without promising a test entry in $lng', async ({ lng, kind, supply_channel, hasTest }) => {
     const locale = i18n.cloneInstance({ lng });
     render(<ToastProvider><I18nextProvider i18n={locale}>
-      <ReportOwnedPanel source={{ ...source, verification_pending: 'vp_fixture' }} trackMutation={immediateTrack} onReauth={noReauth} />
+      <ReportOwnedPanel source={{ ...source, kind, supply_channel, verification_pending: 'vp_fixture' }} trackMutation={immediateTrack} onReauth={noReauth} />
     </I18nextProvider></ToastProvider>);
     expect(screen.getByText(locale.t('settings.models.sourceDetail.status.saved'))).toBeTruthy();
+    expect(Boolean(screen.queryByRole('button', { name: locale.t('settings.models.sourceTest.open') }))).toBe(hasTest);
     const hint = screen.getByRole('button', { name: locale.t('settings.models.sourceDetail.status.savedHintLabel') });
     hint.focus();
     await userEvent.keyboard('{Enter}');
-    expect(await screen.findByText(locale.t('settings.models.sourceDetail.status.savedHint'))).toBeTruthy();
+    const explanation = await screen.findByText(locale.t('settings.models.sourceDetail.status.savedHint'));
+    expect(explanation.textContent).toMatch(/successful.*request|成功调用/);
+    expect(explanation.textContent).not.toMatch(/test|测试/i);
   });
 
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {

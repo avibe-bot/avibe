@@ -128,7 +128,10 @@ failure preserves manual entries and does not block saving. Custom Auto without 
 is rejected before credential provisioning. Manual models remain manual; no inventory
 is invented. The Source carries an opaque `verification_pending` marker, independently of its
 routing health, and may be configured and invoked. List/detail surfaces label it
-unverified, not healthy/in use. Successful inventory discovery never clears this flag.
+Saved / 已保存 in neutral styling, not unverified, healthy or in use; real error,
+needs-action and cooldown states retain precedence. The accessible hint describes
+stored configuration, not a guaranteed connection or a universally available Test action.
+Successful inventory discovery never clears this flag.
 A newly stored Hub credential starts pending unless an add-time observation
 authenticated it, so an explicit unverified save and a native-config import always
 start pending while an observed api-key create does not. A call captures the persisted marker before invocation; any

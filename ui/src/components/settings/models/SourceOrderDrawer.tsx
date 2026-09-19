@@ -250,7 +250,7 @@ export const SourceOrderDrawer: React.FC<{
         }
         const echoed = await modelsApi.putAgentSources(agent.backend, { order }).catch((error: unknown) => {
           const failure = apiFailure(error);
-          if (!failure?.serverNamed
+          if (!failure || mayHaveWritten(failure)
             || !['source_in_route_chain', 'source_last_supplier'].includes(failure.code)
             || !(failure.wouldRemoveHops.length || failure.wouldInterrupt.length)) throw error;
           // Saving the default order authorizes its inherited-route changes.

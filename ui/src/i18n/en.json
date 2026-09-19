@@ -1733,7 +1733,7 @@
           "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
           "saved": "Saved",
           "savedHintLabel": "About this connection",
-          "savedHint": "Your configuration is saved. This source has not completed a successful model request with its current configuration yet. You can test a model here, or use it normally; the status updates after a successful request.",
+          "savedHint": "Your configuration is saved. This source has not completed a successful model request with its current configuration yet. The status updates after a successful request.",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",
