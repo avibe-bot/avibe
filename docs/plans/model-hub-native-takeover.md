@@ -221,6 +221,25 @@ Keychain secrets on every scan or presenting preserved MCP data as a new login.
 These source contracts justify the synthetic success fixtures. Live-provider
 acceptance, refresh and inference still require separate authorized testing.
 
+## Backend connection ownership
+
+The existing backend connection observation must follow persisted supply mode.
+It exposes additive `supply_mode: "direct" | "hub"`; existing `auth`,
+`application`, `ready`, and `entry_eligible` fields retain their types.
+Direct observations retain native credential behavior. Hub observations use
+the configured backend-eligible Sources and their credential ownership, not
+the native stores that takeover deliberately cleared. A missing, disabled or
+unusable Hub supply must not fall back to an unrelated native login. Existing
+application/drain, backend enablement, installation and OpenCode permission
+gates remain effective. This is connection readiness, not an inference probe
+or a promise that every selected model is available.
+
+Setup and Settings consume `supply_mode` to offer Model Hub management before
+asking for a native login or key. Server ownership refusals remain the race-safe
+fallback. Opening Model Hub from setup preserves the wizard and all session,
+owner and capability authorization checks; returning refreshes connection
+observations so the cleared native store cannot strand setup.
+
 ## Writer-boundary review decision
 
 The integration audit found the same ownership-boundary class beyond login
