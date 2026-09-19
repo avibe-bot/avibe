@@ -1006,16 +1006,20 @@ async def _prepare_takeover(
     validate_base_url: Callable[[object], Optional[str]],
     consented: list[NativeMigrationItem] | None = None,
     project_roots: tuple[Path, ...] = (),
+    retained_source_ids: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Stage all grants and durable before/after images, still native-owned."""
     edits = plan_native_cleanup(selected, home=host.migration_home, project_roots=project_roots)
     updated = host._clone_config(previous)
     provisioned: list[dict[str, str]] = []
-    source_ids: list[str] = []
+    source_ids: list[str] = list(retained_source_ids or ())
     catalog = bundled_catalog_reasoning_efforts_by_model()
     journaled = False
     try:
-        for item in selected:
+        # A completed receipt can authorize cleanup of the exact old material
+        # reintroduced by an external writer. Its current Hub refs are already
+        # authoritative; never provision that old OAuth snapshot again.
+        for item in selected if retained_source_ids is None else ():
             protocol = item.protocol
             observation: SourceObservation | None = None
             existing = next((source for source in updated.sources if source.id == item.source_id), None)
@@ -1314,6 +1318,7 @@ async def apply_native_migration(
     if not item_ids:
         return 0, []
     async with host._migration_lock:
+        completed_record = None
         record = host.migration_journal.load() or host.migration_journal.completed()
         if record is not None:
             same_selection = {item["id"] for item in record["items"]} == set(item_ids)
@@ -1321,10 +1326,24 @@ async def apply_native_migration(
                 raise MigrationConflictError
             if same_selection:
                 if record["phase"] == "complete":
-                    return await _resume_takeover(host, record)
-                async with host.migration_guard(tuple(record["backends"])) as verify_idle:
-                    async with host._mutation_lock:
-                        return await _resume_takeover(host, record, verify_idle)
+                    async with host.migration_guard(tuple(record["backends"])) as verify_idle:
+                        async with host._mutation_lock:
+                            result = await _resume_takeover(host, record)
+                            await verify_idle()
+                            residual = await asyncio.to_thread(
+                                scan_native_configs, host.store.load(),
+                                mask_credential=mask_credential, home=host.migration_home,
+                                validate_base_url=validate_base_url,
+                                legacy_auth=_native_auth_snapshot(host, tuple(record["backends"])),
+                                project_roots=host.migration_project_roots(),
+                            )
+                            if not any(item.backend in record["backends"] for item in residual):
+                                return result
+                            completed_record = record
+                else:
+                    async with host.migration_guard(tuple(record["backends"])) as verify_idle:
+                        async with host._mutation_lock:
+                            return await _resume_takeover(host, record, verify_idle)
         available = await asyncio.to_thread(
             scan_native_configs, host.store.load(), mask_credential=mask_credential,
             home=host.migration_home,
@@ -1342,6 +1361,10 @@ async def apply_native_migration(
             raise MigrationConflictError
         async with host.migration_guard(backends) as verify_idle:
             async with host._mutation_lock:
+                if completed_record is not None:
+                    # The guards above and below are separate acquisitions:
+                    # recheck persisted ownership before a cleanup-only replay.
+                    await _resume_takeover(host, completed_record)
                 previous = host.store.load()
                 project_roots = host.migration_project_roots()
                 rescanned = await asyncio.to_thread(
@@ -1383,6 +1406,10 @@ async def apply_native_migration(
                     validate_base_url=validate_base_url,
                     consented=consented,
                     project_roots=project_roots,
+                    retained_source_ids=(
+                        tuple(completed_record["source_ids"])
+                        if completed_record is not None else None
+                    ),
                 )
                 return await _resume_takeover(host, record, verify_idle)
 

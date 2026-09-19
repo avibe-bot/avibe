@@ -90,6 +90,59 @@ def test_failure_after_possible_rotation_retains_current_owner_and_retries(monke
     assert service.migration_journal.load() is None
 
 
+@pytest.mark.parametrize("backend", ["opencode", "codex", "claude"])
+def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
+    monkeypatch, tmp_path, backend,
+):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    if backend == "opencode":
+        native = home / ".config/opencode/opencode.json"
+        _write(native, json.dumps({
+            "provider": {"openai": {"options": {"apiKey": "fixture-old-key"}}},
+            "mcp": {"keep": True},
+        }))
+    elif backend == "codex":
+        _write_codex_oauth(home)
+        native = home / ".codex/auth.json"
+    else:
+        _write_claude_oauth(home)
+        native = home / ".claude/.credentials.json"
+    original = native.read_bytes()
+    service, store, adapter = _service(tmp_path)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    current = store.config.to_payload()
+    provisions = (len(adapter.provisioned), len(adapter.oauth_provisioned))
+
+    # This is an external native writer, not an Avibe-owned auth operation.
+    native.write_bytes(original)
+    assert [row["id"] for row in service.migration_scan()["items"]] == ids
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert service.migration_scan()["items"] == []
+    assert store.config.to_payload() == current
+    assert (len(adapter.provisioned), len(adapter.oauth_provisioned)) == provisions
+    assert service.migration_journal.load() is None
+    assert adapter.revoked == []
+
+
+def test_completed_receipt_does_not_authorize_new_unconsented_native_key(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    native = home / ".config/opencode/opencode.json"
+    _write(native, '{"provider":{"openai":{"options":{"apiKey":"fixture-first"}}}}')
+    service, _, adapter = _service(tmp_path)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    asyncio.run(service.migration_apply(ids))
+    changed = '{"provider":{"openai":{"options":{"apiKey":"fixture-new"}}}}'
+    native.write_text(changed)
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.migration_apply(ids))
+    assert failure.value.code == "migration_item_conflict"
+    assert native.read_text() == changed
+    assert len(adapter.provisioned) == 1
+
+
 def test_restart_recovers_exposed_handoff_without_native_tokens(monkeypatch, tmp_path):
     home = tmp_path / "native"
     _write_claude_oauth(home)

@@ -162,7 +162,11 @@ cannot establish this terminal outcome.
 
 Shutdown joins the owned operation before stopping the runtime. Client
 cancellation cannot cancel credential custody. A retry after completion checks
-the retained source IDs and opaque credential references, not IDs alone.
+the retained source IDs, opaque credential references, and native inventory
+under the lifecycle guard, not IDs alone. If the exact consented native material
+has reappeared, a new durable cleanup retains the current Hub credentials;
+replaying an old receipt never republishes a stale OAuth snapshot. Changed or
+additional native credentials require fresh consent.
 
 ## Writer-boundary review decision
 
