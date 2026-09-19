@@ -971,33 +971,6 @@ def remove_opencode_provider_api_key(
     return _write_opencode_config(config, probe.path)
 
 
-def remove_opencode_provider_auth(
-    provider_id: str,
-    *,
-    home: Path | None = None,
-    logger_instance: Optional[logging.Logger] = None,
-) -> Optional[Path]:
-    """Remove one provider's API/OAuth entry from OpenCode auth.json."""
-
-    active_logger = logger_instance or logger
-    path = get_opencode_auth_path(home)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        active_logger.debug("OpenCode auth.json read failed during cleanup: %s", exc)
-        raise
-    if not isinstance(payload, dict):
-        raise ValueError("OpenCode auth.json must contain an object")
-    if provider_id in payload:
-        from config.atomic_io import write_atomic
-
-        payload.pop(provider_id, None)
-        write_atomic(path, json.dumps(payload, indent=2) + "\n")
-    return path
-
-
 def upsert_opencode_provider_base_url(
     provider_id: str,
     base_url: str,

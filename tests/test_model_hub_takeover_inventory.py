@@ -2,10 +2,15 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
-from core.handlers.model_hub.service import ModelHubError
+from config import paths
+from config.v2_config import V2Config
+from core.handlers.model_hub.migration import MigrationConflictError
+from core.handlers.model_hub.service import ModelHubError, V2ModelHubConfigStore
+from vibe.native_oauth_store import NativeOAuthSnapshot
 from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
     _isolate_native_home,
     _service,
@@ -86,6 +91,104 @@ def test_project_key_changed_after_consent_refuses_without_import(monkeypatch, t
         asyncio.run(service.migration_apply(ids))
     assert adapter.provisioned == []
     assert json.loads(path.read_text())["env"]["ANTHROPIC_API_KEY"] == "fixture-second"
+
+
+def test_keychain_container_consent_also_binds_routing_after_drain(monkeypatch, tmp_path):
+    from core.handlers.model_hub import migration
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    path = home / ".codex/config.toml"
+    config = '''
+model_provider = "fixture"
+[model_providers.fixture]
+name = "Fixture"
+base_url = "https://first.example/v1"
+wire_api = "responses"
+'''
+    _write(path, config)
+
+    def read(backend, *, home, allow_secret=False):
+        if backend != "codex":
+            return None
+        return NativeOAuthSnapshot(
+            backend="codex", revision="fixture-unchanged-container",
+            payload={"OPENAI_API_KEY": "fixture-key"} if allow_secret else {
+                "store": "keychain", "status": "metadata_only",
+            },
+            exportable=allow_secret,
+        )
+
+    monkeypatch.setattr(migration, "read_native_oauth", read)
+    service, store, adapter = _service(tmp_path)
+    store.config.agents["codex"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert len(ids) == 1
+
+    @asynccontextmanager
+    async def guard(backends):
+        path.write_text(config.replace("first.example", "other.example"))
+
+        async def verify():
+            pass
+
+        yield verify
+
+    service.migration_guard = guard
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.migration_apply(ids))
+    assert failure.value.code == "migration_item_conflict"
+    assert not adapter.provisioned and not adapter.oauth_provisioned
+    assert store.config.agents["codex"].mode == "direct"
+    assert "other.example" in path.read_text()
+    assert service.migration_journal.load() is None
+
+
+def test_existing_hub_key_still_clears_legacy_auth_when_hub_config_is_unchanged(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write(home / ".claude/settings.json", json.dumps({
+        "env": {"ANTHROPIC_API_KEY": "fixture-key"},
+    }))
+    service, memory, adapter = _service(tmp_path)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    asyncio.run(service.migration_apply(ids))
+    config_path = tmp_path / "avibe-config.json"
+    monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
+    config = V2Config.default()
+    config.model_hub = memory.config
+    config.agents.claude.auth_mode = "api_key"
+    config.agents.claude.api_key = "fixture-key"
+    config.save(config_path=config_path)
+    previous_hub = config.model_hub.to_payload()
+    service.store = V2ModelHubConfigStore()
+
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert len(ids) == 1
+    result = asyncio.run(service.migration_apply(ids))
+
+    assert result["applied"] == 1
+    loaded = V2Config.load(config_path=config_path)
+    assert loaded.model_hub.to_payload() == previous_hub
+    assert loaded.agents.claude.api_key is None
+    assert loaded.agents.claude.auth_mode == "oauth"
+    assert len(adapter.provisioned) == 1  # No duplicate credential or Source.
+    assert service.migration_journal.load() is None
+
+
+def test_config_takeover_cas_preserves_a_concurrent_hub_edit(monkeypatch, tmp_path):
+    config_path = tmp_path / "avibe-config.json"
+    monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
+    config = V2Config.default()
+    config.save(config_path=config_path)
+    expected = config.model_hub.to_payload()
+    config.model_hub.agents["codex"].mode = "direct"
+    config.save(config_path=config_path)
+    concurrent = config_path.read_bytes()
+    store = V2ModelHubConfigStore()
+    with pytest.raises(MigrationConflictError):
+        store.save_takeover(config.model_hub, {}, {}, expected_hub=(expected,))
+    assert config_path.read_bytes() == concurrent
 
 
 def test_codex_embedded_bearer_key_is_migrated_without_deleting_provider_preferences(monkeypatch, tmp_path):

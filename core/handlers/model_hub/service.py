@@ -95,7 +95,6 @@ from .migration import (
     MigrationConflictError,
     MigrationCredentialsInvalidError,
     apply_native_migration,
-    build_native_migration_source,
     recover_native_migration,
     scan_native_configs,
 )
@@ -317,11 +316,15 @@ class V2ModelHubConfigStore:
         model_hub: ModelHubConfig,
         expected: dict[str, dict],
         desired: dict[str, dict],
+        *,
+        expected_hub: tuple[dict, ...],
     ) -> None:
         from config.v2_config import config_write_transaction
 
         self.ensure_writable()
         with config_write_transaction() as config:
+            if config.model_hub.to_payload() not in expected_hub:
+                raise MigrationConflictError
             for backend, values in desired.items():
                 target = getattr(config.agents, backend)
                 actual = {name: getattr(target, name) for name in values}
@@ -831,7 +834,6 @@ class ModelHubService:
         native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
-        migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         migration_home: Optional[Path] = None,
         migration_project_roots: Callable[[], tuple[Path, ...]] | None = None,
         migration_guard: Any = None,
@@ -872,7 +874,6 @@ class ModelHubService:
         self.revocations = revocations or CredentialRevocationJournal(
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
-        self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.migration_home = migration_home
         self.migration_project_roots = migration_project_roots or (lambda: ())
         self.migration_journal = migration_journal or NativeTakeoverJournal(
@@ -1072,20 +1073,25 @@ class ModelHubService:
             pending = self.migration_journal.load()
         except (TakeoverStateError, OSError):
             raise ModelHubError("migration_item_conflict", status=409) from None
+        reverse = pending is not None and pending["phase"] == "reverting"
         if pending is not None and canonical.to_payload() not in (
-            pending.get("previous"), pending.get("updated"),
-            (pending.get("terminal") or {}).get("config"),
+            (pending["previous"],) if reverse else (
+                pending["updated"], (pending.get("terminal") or {}).get("config"),
+            )
         ):
             # The write-ahead decision must not overwrite intervening route
             # edits on recovery. Finish/revert that decision before new writes.
             raise ModelHubError("migration_item_conflict", status=409)
-        native_before = pending.get("native_before") if pending is not None else None
-        if native_before:
-            reverse = canonical.to_payload() == pending["previous"]
+        if pending is not None and isinstance(self.store, V2ModelHubConfigStore):
+            native_before = pending.get("native_before", {})
             self.store.save_takeover(
                 canonical,
-                pending["native_after"] if reverse else native_before,
-                native_before if reverse else pending["native_after"],
+                pending.get("native_after", {}) if reverse else native_before,
+                native_before if reverse else pending.get("native_after", {}),
+                expected_hub=tuple(value for value in (
+                    pending["previous"], pending["updated"],
+                    (pending.get("terminal") or {}).get("config"),
+                ) if value is not None),
             )
         else:
             self.store.save(canonical)
@@ -6289,7 +6295,6 @@ class ModelHubService:
                     config,
                     mask_credential=_mask_credential,
                     home=self.migration_home,
-                    claude_oauth_probe=self.migration_claude_oauth_probe,
                     validate_base_url=_validated_base_url,
                     project_roots=self.migration_project_roots(),
                     legacy_auth=(

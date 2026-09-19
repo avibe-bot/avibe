@@ -477,52 +477,6 @@ def apply_codex_auth(
     return {"notices": notices}
 
 
-def clear_codex_native_auth(
-    *,
-    home: Path | None = None,
-    active_provider_id: str | None = None,
-) -> None:
-    """Remove Codex credentials and Avibe-owned routing state after takeover.
-
-    User-authored provider sections remain available unless one is identified
-    as the active provider being replaced. In that case its section and the
-    top-level pointer are removed as well, so Codex cannot continue using the
-    old direct route after takeover.
-    """
-
-    config_path, auth_path = get_codex_config_paths(home)
-    auth_data = _load_auth(auth_path)
-    toml_data = _load_toml(config_path)
-    auth_data.pop("OPENAI_API_KEY", None)
-    auth_data.pop("tokens", None)
-    auth_data.pop("last_refresh", None)
-    auth_data.pop("auth_mode", None)
-
-    providers = toml_data.get("model_providers")
-    if isinstance(providers, dict):
-        providers.pop(MANAGED_PROVIDER_ID, None)
-        for legacy_id in LEGACY_MANAGED_PROVIDER_IDS:
-            providers.pop(legacy_id, None)
-        if isinstance(active_provider_id, str) and active_provider_id.strip():
-            providers.pop(active_provider_id.strip(), None)
-        if not providers:
-            toml_data.pop("model_providers", None)
-    current_provider = toml_data.get("model_provider")
-    removable_provider_ids = {
-        MANAGED_PROVIDER_ID,
-        *LEGACY_MANAGED_PROVIDER_IDS,
-        active_provider_id.strip()
-        if isinstance(active_provider_id, str) and active_provider_id.strip()
-        else "",
-    }
-    if isinstance(current_provider, str) and current_provider in removable_provider_ids:
-        toml_data.pop("model_provider", None)
-    toml_data.pop(CREDENTIALS_STORE_KEY, None)
-
-    write_atomic(auth_path, json.dumps(auth_data, indent=2) + "\n")
-    write_atomic(config_path, _dump_toml(toml_data))
-
-
 def read_codex_relay_marker(marker: object) -> Optional[Dict[str, str]]:
     """Normalize a persisted ``oauth_relay_marker`` value for consumption.
 

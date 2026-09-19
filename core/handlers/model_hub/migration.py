@@ -88,7 +88,6 @@ class MigrationHost(Protocol):
     adapter: Any
     _mutation_lock: Any
     now: Callable[[], datetime]
-    migration_claude_oauth_probe: Optional[Callable[[], bool]]
     migration_home: Optional[Path]
     migration_project_roots: Callable[[], tuple[Path, ...]]
     migration_journal: NativeTakeoverJournal
@@ -465,7 +464,6 @@ def _claude_items(
     *,
     home: Optional[Path],
     mask_credential: Callable[[str], str],
-    oauth_probe: Optional[Callable[[], bool]],
     allow_secret: bool = False,
     project_roots: tuple[Path, ...] = (),
 ) -> list[NativeMigrationItem]:
@@ -804,7 +802,6 @@ def scan_native_configs(
     *,
     mask_credential: Callable[[str], str],
     home: Optional[Path] = None,
-    claude_oauth_probe: Optional[Callable[[], bool]] = None,
     validate_base_url: Optional[Callable[[object], Optional[str]]] = None,
     legacy_auth: Mapping[str, Mapping[str, object]] | None = None,
     secret_backends: tuple[str, ...] = (),
@@ -816,7 +813,6 @@ def scan_native_configs(
         *_claude_items(
             home=home,
             mask_credential=mask_credential,
-            oauth_probe=claude_oauth_probe,
             allow_secret="claude" in secret_backends,
             project_roots=project_roots,
         ),
@@ -957,25 +953,6 @@ def _validated_source(
         "masked_credential": masked_credential,
     }
     return ModelHubSourceConfig.from_payload(payload)
-
-
-def build_native_migration_source(
-    item: NativeMigrationItem,
-    *,
-    now: datetime,
-    validate_base_url: Callable[[object], Optional[str]],
-) -> ModelHubSourceConfig:
-    """Build the Source represented by one recognized native-login item."""
-
-    if item.proposed_action != "keep_native":
-        raise MigrationConflictError
-    return _validated_source(
-        item,
-        now=now,
-        protocol=item.protocol,
-        validate_base_url=validate_base_url,
-        catalog_efforts_by_model=bundled_catalog_reasoning_efforts_by_model(),
-    )
 
 
 def _migration_rollback_id(source_id: str, credential_ref: str) -> str:
@@ -1317,7 +1294,7 @@ async def apply_native_migration(
                         return await _resume_takeover(host, record, verify_idle)
         available = await asyncio.to_thread(
             scan_native_configs, host.store.load(), mask_credential=mask_credential,
-            home=host.migration_home, claude_oauth_probe=host.migration_claude_oauth_probe,
+            home=host.migration_home,
             validate_base_url=validate_base_url,
             legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
             project_roots=host.migration_project_roots(),
@@ -1336,7 +1313,6 @@ async def apply_native_migration(
                 project_roots = host.migration_project_roots()
                 rescanned = await asyncio.to_thread(
                     scan_native_configs, previous, mask_credential=mask_credential, home=host.migration_home,
-                    claude_oauth_probe=host.migration_claude_oauth_probe,
                     validate_base_url=validate_base_url,
                     legacy_auth=_native_auth_snapshot(host, backends),
                     secret_backends=backends,
@@ -1355,6 +1331,12 @@ async def apply_native_migration(
                     ] if original.native_store_placeholder else [
                         item for item in rescanned if item.id == original.id
                     ]
+                    if original.native_store_placeholder and not any(
+                        item.id == original.id for item in resolved
+                    ):
+                        # Container revision alone does not bind the routing
+                        # target or an existing native Source selected by UI.
+                        raise MigrationConflictError
                     if not resolved or any(
                         item.proposed_action != "import" or item.native_store_placeholder
                         for item in resolved
