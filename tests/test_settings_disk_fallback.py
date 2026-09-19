@@ -31,6 +31,20 @@ import pytest
 from vibe.codex_config import read_codex_auth_state
 
 
+def _direct_config(**kwargs):
+    from config.v2_config import V2Config
+
+    config = V2Config(**kwargs) if kwargs else V2Config.default()
+    for supply in config.model_hub.agents.values():
+        supply.mode = "direct"
+    return config
+
+
+@pytest.fixture(autouse=True)
+def direct_native_auth():
+    _direct_config().save()
+
+
 def test_codex_reads_base_url_from_user_titlecase_provider(tmp_path: Path) -> None:
     """When the user points Codex at a relay via ``[model_providers.OpenAI]``
     (matching their on-disk config.toml literally), the Settings UI must
@@ -138,6 +152,7 @@ def claude_restart_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         return {"ok": True, "message": "refreshed"}
 
     monkeypatch.setattr("vibe.api.restart_backend", restart_backend)
+    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda *a, **kw: None)
     return calls
 
 
@@ -607,7 +622,7 @@ def test_save_claude_explicit_auth_token_clears_v2_secret(
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from vibe.api import get_claude_auth, save_claude_auth
 
-    cfg = V2Config(
+    cfg = _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -677,7 +692,7 @@ def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from vibe.api import save_claude_auth
 
-    V2Config(
+    _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -729,7 +744,7 @@ def test_save_claude_auth_restores_pending_oauth_backup_before_writing_new_key(
         }
     )
 
-    V2Config(
+    _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -786,7 +801,7 @@ def test_save_claude_explicit_api_key_is_independent_from_base_url(
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from vibe.api import save_claude_auth
 
-    V2Config(
+    _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -838,7 +853,7 @@ def test_save_claude_base_url_update_preserves_credential_type(
     from vibe.api import save_claude_auth
     from vibe.claude_config import read_claude_settings_env
 
-    config = V2Config(
+    config = _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -899,7 +914,7 @@ def test_save_claude_credential_type_switch_reuses_stored_value(
     from vibe.api import save_claude_auth
     from vibe.claude_config import read_claude_settings_env
 
-    config = V2Config(
+    config = _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -963,7 +978,7 @@ def test_save_claude_auth_keeps_settings_token_over_legacy_v2_key(
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from vibe.api import save_claude_auth
 
-    cfg = V2Config(
+    cfg = _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -1011,7 +1026,7 @@ def test_remove_claude_api_key_refreshes_cached_runtime(
     from vibe.api import remove_backend_api_key
     from vibe.claude_config import read_claude_settings_env
 
-    config = V2Config(
+    config = _direct_config(
         mode="self_host",
         version="v2",
         slack=SlackConfig(bot_token=""),
@@ -1081,6 +1096,7 @@ def test_save_claude_auth_fails_without_overwriting_malformed_settings(
 ) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    _direct_config().save()
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()

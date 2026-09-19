@@ -54,6 +54,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
 from core.memory_loader import probe_memory_runtime_entrypoint
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.install_integrity import verify_python_environment
@@ -134,6 +135,71 @@ _PLATFORM_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "wechat": ("bot_token",),
 }
 _GATEWAY_SECRET_FIELDS = ("workspace_token", "client_secret")
+
+
+def _native_write_blocked(error: NativeMigrationBlockedError) -> dict:
+    result = {"ok": False, "error": error.reason}
+    if error.backends:
+        result["backends"] = list(error.backends)
+    if error.reason == "native_auth_hub_owned":
+        result["reauth_channel"] = "hub"
+    return result
+
+
+def _native_auth_write(
+    backend: str | None = None, *, pass_lease: bool = False, authentication: bool = True
+):
+    """Own the whole native RMW and its cancellation tail across instances.
+
+    Model/permission-only edits need the same lease: rewriting a stale document
+    can resurrect credentials after takeover. Only auth writers require native
+    custody; non-auth edits remain usable with Hub routing.
+    """
+    from functools import wraps
+
+    def decorate(function):
+        def acquire(args, kwargs):
+            target = str(backend or kwargs.get("backend") or (args[0] if args else "")).strip().lower()
+            if target not in {"claude", "codex", "opencode"}:
+                raise NativeMigrationBlockedError("unsupported_backend", ())
+            lease = NativeCredentialLease((target,)).acquire()
+            try:
+                if authentication:
+                    lease.assert_auth_custody(target)
+                return lease
+            except BaseException:
+                lease.release()
+                raise
+
+        if asyncio.iscoroutinefunction(function):
+            @wraps(function)
+            async def asynchronous(*args, **kwargs):
+                try:
+                    lease = acquire(args, kwargs)
+                except NativeMigrationBlockedError as error:
+                    return _native_write_blocked(error)
+                try:
+                    if pass_lease:
+                        kwargs["_native_lease"] = lease
+                    return await finish_native_operation(function(*args, **kwargs))
+                finally:
+                    lease.release()
+            return asynchronous
+
+        @wraps(function)
+        def synchronous(*args, **kwargs):
+            try:
+                lease = acquire(args, kwargs)
+            except NativeMigrationBlockedError as error:
+                return _native_write_blocked(error)
+            try:
+                if pass_lease:
+                    kwargs["_native_lease"] = lease
+                return function(*args, **kwargs)
+            finally:
+                lease.release()
+        return synchronous
+    return decorate
 
 
 def _parse_agent_import_file(path: Path, *, backend: str):
@@ -6637,6 +6703,7 @@ def opencode_permission_status() -> dict:
     }
 
 
+@_native_auth_write("opencode", authentication=False)
 def setup_opencode_permission() -> dict:
     """Set OpenCode permission to 'allow' in config file.
 
@@ -11237,6 +11304,8 @@ async def start_oauth_web_async(
                 backend=backend,
             ),
         }
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web OAuth start failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "start_failed", "detail": str(exc)}
@@ -11302,6 +11371,8 @@ async def remove_backend_auth_async(backend: str) -> dict:
     service = _get_oauth_service()
     try:
         return await service.remove_web_auth(backend)
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web auth remove failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "remove_failed", "detail": str(exc)}
@@ -11315,6 +11386,8 @@ async def remove_claude_oauth_credentials_async() -> dict:
     service = _get_oauth_service()
     try:
         return await service.clear_claude_oauth_credentials_only()
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Claude OAuth credentials cleanup failed: %s", exc, exc_info=True)
         return {"ok": False, "error": "remove_failed", "detail": str(exc)}
@@ -11322,55 +11395,6 @@ async def remove_claude_oauth_credentials_async() -> dict:
 
 def remove_claude_oauth_credentials() -> dict:
     return _submit_oauth_coro(remove_claude_oauth_credentials_async(), timeout=30.0)
-
-
-def _native_auth_write(backend: str | None = None, *, pass_lease: bool = False):
-    """Own native writes across Web/Controller instances, including async tails."""
-    from functools import wraps
-    from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
-
-    def decorate(function):
-        def acquire(args, kwargs):
-            target = str(backend or kwargs.get("backend") or (args[0] if args else "")).strip().lower()
-            if target not in {"claude", "codex", "opencode"}:
-                raise NativeMigrationBlockedError("unsupported_backend", ())
-            return NativeCredentialLease((target,)).acquire()
-
-        def blocked(error):
-            result = {"ok": False, "error": error.reason}
-            if error.backends:
-                result["backends"] = list(error.backends)
-            return result
-
-        if asyncio.iscoroutinefunction(function):
-            @wraps(function)
-            async def asynchronous(*args, **kwargs):
-                try:
-                    lease = acquire(args, kwargs)
-                except NativeMigrationBlockedError as error:
-                    return blocked(error)
-                try:
-                    if pass_lease:
-                        kwargs["_native_lease"] = lease
-                    return await finish_native_operation(function(*args, **kwargs))
-                finally:
-                    lease.release()
-            return asynchronous
-
-        @wraps(function)
-        def synchronous(*args, **kwargs):
-            try:
-                lease = acquire(args, kwargs)
-            except NativeMigrationBlockedError as error:
-                return blocked(error)
-            try:
-                if pass_lease:
-                    kwargs["_native_lease"] = lease
-                return function(*args, **kwargs)
-            finally:
-                lease.release()
-        return synchronous
-    return decorate
 
 
 def _clear_claude_oauth_credentials_after_api_key_save(service=None, *, lease=None) -> dict:
@@ -11516,6 +11540,8 @@ async def test_backend_auth_async(backend: str, model: Optional[str] = None) -> 
     service = _get_oauth_service()
     try:
         return await service.test_web_auth(backend, model=model)
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web auth test failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "test_failed", "detail": str(exc)}
@@ -11540,6 +11566,8 @@ async def test_opencode_provider_async(provider_id: str, model: Optional[str] = 
     service = _get_oauth_service()
     try:
         return await service.test_opencode_provider(provider_id, model=model)
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "OpenCode provider test failed for %s: %s",
@@ -13164,6 +13192,7 @@ def delete_opencode_custom_provider(provider_id: str) -> dict:
     return run_coroutine_blocking(delete_opencode_custom_provider_async(provider_id))
 
 
+@_native_auth_write("opencode", authentication=False)
 async def save_opencode_provider_model_async(provider_id: str, payload: dict) -> dict:
     """Add or update a user-managed OpenCode model under one provider."""
 
@@ -13258,6 +13287,7 @@ def delete_opencode_provider_model(provider_id: str, model_id: str) -> dict:
     return run_coroutine_blocking(delete_opencode_provider_model_async(provider_id, model_id))
 
 
+@_native_auth_write("opencode", authentication=False)
 async def delete_opencode_provider_model_async(provider_id: str, model_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}

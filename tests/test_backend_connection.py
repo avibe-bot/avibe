@@ -210,6 +210,7 @@ def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatc
     config = V2Config.default()
     for name in ("claude", "codex", "opencode"):
         getattr(config.agents, name).enabled = name == backend
+        config.model_hub.agents[name].mode = "direct"
     config.save()
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: "/fixture/bin/assistant")
     monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)

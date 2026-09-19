@@ -115,6 +115,39 @@ class NativeCredentialLease:
         if backend not in self.backends or len(self._handles) != len(self.backends):
             raise RuntimeError("Native credential operation has no ownership")
 
+    def assert_auth_custody(self, backend: str, *, source_id: str | None = None) -> None:
+        """Authorize a native writer from durable routing, while holding its lease.
+
+        Runtime enablement is not credential ownership. A Hub backend may
+        maintain only the explicitly bound, retained native subscription;
+        generic Settings/IM login and API-key writes must use Hub instead.
+        Read without load-time migration writes: this is an admission check.
+        """
+        from config.v2_config import V2Config
+
+        self.assert_owned(backend)
+        try:
+            config = V2Config.load(persist_migrations=False)
+        except FileNotFoundError:
+            config = V2Config.default()
+        except (OSError, TypeError, ValueError):
+            raise NativeMigrationBlockedError("config_recovery", (backend,)) from None
+        if config.load_warnings:
+            raise NativeMigrationBlockedError("config_recovery", (backend,))
+        hub = config.model_hub
+        if hub.agents[backend].mode == "direct":
+            return
+        vendor = {"claude": "anthropic", "codex": "openai"}.get(backend)
+        if source_id is not None and vendor is not None and any(
+            source.id == source_id
+            and source.vendor == vendor
+            and source.kind == "subscription"
+            and source.supply_channel == "native_cli"
+            for source in hub.sources
+        ):
+            return
+        raise NativeMigrationBlockedError("native_auth_hub_owned", (backend,))
+
     def release(self) -> None:
         # Closing the descriptor releases the OS lock, including on Windows.
         while self._handles:

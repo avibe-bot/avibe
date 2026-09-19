@@ -358,6 +358,8 @@ class AgentAuthFlow:
     expires_at_iso: str | None = None
     native_lease: NativeCredentialLease | None = field(default=None, repr=False)
     cancel_requested: bool = field(default=False, repr=False)
+    submission_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    native_closing: bool = field(default=False, repr=False)
 
     @property
     def flow_key(self) -> str:
@@ -433,6 +435,8 @@ class WebAuthFlow:
     native_cli: bool = False
     native_lease: NativeCredentialLease | None = field(default=None, repr=False)
     cancel_requested: bool = field(default=False, repr=False)
+    submission_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    native_closing: bool = field(default=False, repr=False)
 
 
 class AuthFlowRegistry:
@@ -498,10 +502,12 @@ class AgentAuthService:
             clients.append(flow.claude_client)
         return clients
 
-    def _acquire_native_lease(self, backend: str) -> NativeCredentialLease:
+    def _acquire_native_lease(self, backend: str, *, source_id: str | None = None) -> NativeCredentialLease:
         try:
-            return NativeCredentialLease((backend,)).acquire()
-        except NativeMigrationBlockedError:
+            lease = NativeCredentialLease((backend,)).acquire()
+        except NativeMigrationBlockedError as error:
+            if error.reason != "native_auth_in_progress":
+                raise
             owner = next((
                 flow for flow in self._flows_by_id.values()
                 if flow.backend == backend and flow.native_lease is not None
@@ -511,6 +517,12 @@ class AgentAuthService:
                 owner_ref=getattr(owner, "source_id", None),
                 flow_id=getattr(owner, "flow_id", None),
             ) from None
+        try:
+            lease.assert_auth_custody(backend, source_id=source_id)
+            return lease
+        except BaseException:
+            lease.release()
+            raise
 
     @staticmethod
     def _cancel_flow_waiter(flow: AgentAuthFlow | WebAuthFlow) -> None:
@@ -521,8 +533,32 @@ class AgentAuthService:
             flow.cancel_requested = True
             flow.waiter_task.cancel()
 
+    async def _run_flow_submission(
+        self, flow: AgentAuthFlow | WebAuthFlow, operation: Coroutine[Any, Any, Any]
+    ) -> Any:
+        """Join request-owned callbacks before the flow can surrender its lease."""
+        if flow.native_closing or (flow.submission_task is not None and not flow.submission_task.done()):
+            operation.close()
+            raise RuntimeError("native_auth_submission_unavailable")
+        task = asyncio.create_task(operation)
+        flow.submission_task = task
+        try:
+            return await finish_native_operation(task)
+        finally:
+            if task.done():
+                flow.submission_task = None
+
+    async def _join_flow_submission(self, flow: AgentAuthFlow | WebAuthFlow) -> None:
+        flow.native_closing = True
+        task = flow.submission_task
+        if task is not None:
+            # The submitter owns its result/error. Cleanup owns joining it,
+            # including a failed or cancelled HTTP request's threaded tail.
+            await finish_native_operation(asyncio.gather(task, return_exceptions=True))
+
     async def _cleanup_native_flow(self, flow: AgentAuthFlow | WebAuthFlow) -> None:
         """Release credential ownership only after every native writer is gone."""
+        await self._join_flow_submission(flow)
         if flow.reader_task and flow.reader_task is not asyncio.current_task():
             if not flow.reader_task.done():
                 flow.reader_task.cancel()
@@ -927,6 +963,18 @@ class AgentAuthService:
         if flow.initiator_user_id != context.user_id:
             await self._send_message(context, f"❌ {self._t('command.setup.notFlowOwner')}")
             return
+        try:
+            await self._run_flow_submission(flow, self._submit_code_owned(flow, context, code))
+        finally:
+            if (
+                flow.backend == "opencode"
+                and self._supports_direct_opencode_api_key_setup(flow.provider)
+                and not flow.awaiting_code
+            ):
+                await finish_native_operation(self._cleanup_native_flow(flow))
+                self._drop_flow(flow)
+
+    async def _submit_code_owned(self, flow: AgentAuthFlow, context: MessageContext, code: str) -> None:
         if flow.backend == "claude":
             if flow.claude_client is None:
                 await self._send_message(context, f"❌ {self._t('command.setup.codeNotSupported')}")
@@ -955,7 +1003,6 @@ class AgentAuthService:
             await self._refresh_backend_runtime("opencode")
             await self._clear_backend_sessions_for_context("opencode", context)
             await self._send_message(context, f"✅ {self._t('command.setup.success', backend=flow.backend)}")
-            self._drop_flow(flow)
             return
         if flow.pty_master_fd is None:
             await self._send_message(context, f"❌ {self._t('command.setup.codeNotSupported')}")
@@ -1259,7 +1306,7 @@ class AgentAuthService:
                 if existing is not None:
                     await self._terminate_flow(existing)
 
-            lease = self._acquire_native_lease(backend)
+            lease = self._acquire_native_lease(backend, source_id=owner_ref)
             try:
                 provider = provider_id
                 if backend == "opencode" and context is not None:
@@ -2401,7 +2448,7 @@ class AgentAuthService:
             )
         except asyncio.CancelledError:
             raise
-        except BackendLoginInProgressError:
+        except (BackendLoginInProgressError, NativeMigrationBlockedError):
             raise
         except Exception as err:  # noqa: BLE001
             logger.error("Web auth start failed for %s: %s", backend, err, exc_info=True)
@@ -2421,6 +2468,18 @@ class AgentAuthService:
         flow = self._web_flows.get(flow_id)
         if flow is None:
             return {"ok": False, "error": "flow_not_found"}
+        if flow.native_closing or (flow.submission_task is not None and not flow.submission_task.done()):
+            return {"ok": False, "error": "not_awaiting_code"}
+        if flow.backend == "opencode" and flow.callback_kind == "code":
+            if self._remaining_flow_timeout(flow) <= 0:
+                await self._terminate_web_flow(flow, final_state="failed", error="timed_out")
+                return {"ok": False, "error": "timed_out"}
+            # This branch only resolves the start-time waiter's future, with
+            # no I/O or yield. Keep cancel-before-dispatch admission atomic.
+            return await self._submit_web_code_owned(flow, code)
+        return await self._run_flow_submission(flow, self._submit_web_code_owned(flow, code))
+
+    async def _submit_web_code_owned(self, flow: WebAuthFlow, code: str) -> dict[str, Any]:
         if flow.backend == "opencode":
             if flow.callback_kind == "code":
                 if (
@@ -2431,9 +2490,6 @@ class AgentAuthService:
                 raw = (code or "").strip()
                 if not raw:
                     return {"ok": False, "error": "invalid_format"}
-                if self._remaining_flow_timeout(flow) <= 0:
-                    await self._terminate_web_flow(flow, final_state="failed", error="timed_out")
-                    return {"ok": False, "error": "timed_out"}
                 # The start-time waiter keeps the same deadline and ownership.
                 # Resolving once before any await excludes duplicate submissions.
                 flow.awaiting_code = False
@@ -2995,6 +3051,23 @@ class AgentAuthService:
         )
 
     async def test_opencode_provider(
+        self,
+        provider_id: str,
+        *,
+        model: str | None = None,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        # A native connectivity probe can refresh subscription credentials.
+        # Hold the same ownership as login until its session cleanup settles.
+        lease = self._acquire_native_lease("opencode")
+        try:
+            return await finish_native_operation(
+                self._test_opencode_provider_owned(provider_id, model=model, timeout=timeout)
+            )
+        finally:
+            lease.release()
+
+    async def _test_opencode_provider_owned(
         self,
         provider_id: str,
         *,
@@ -3809,11 +3882,12 @@ class AgentAuthService:
         self, *, lease: NativeCredentialLease | None = None
     ) -> None:
         if lease is not None:
-            lease.assert_owned("claude")
+            lease.assert_auth_custody("claude")
             self._recover_interrupted_claude_oauth_settings_backup_owned()
             return
         try:
-            with NativeCredentialLease(("claude",)):
+            with NativeCredentialLease(("claude",)) as owned:
+                owned.assert_auth_custody("claude")
                 self._recover_interrupted_claude_oauth_settings_backup_owned()
         except NativeMigrationBlockedError:
             # Another process owns a live flow, or takeover recovery owns the
@@ -4012,8 +4086,8 @@ class AgentAuthService:
     ) -> dict[str, Any]:
         owned = lease is None
         lease = self._acquire_native_lease("claude") if owned else lease
-        lease.assert_owned("claude")
         try:
+            lease.assert_auth_custody("claude")
             return await finish_native_operation(self._clear_claude_oauth_credentials_owned())
         finally:
             if owned:
@@ -4261,6 +4335,7 @@ class AgentAuthService:
         final_state: WebFlowState,
         error: str | None = None,
     ) -> None:
+        await self._join_flow_submission(flow)
         if flow.waiter_task is not None and flow.waiter_task is not asyncio.current_task():
             if not flow.waiter_task.done():
                 self._cancel_flow_waiter(flow)

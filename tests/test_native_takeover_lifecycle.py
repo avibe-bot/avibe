@@ -347,7 +347,12 @@ async def test_cancelled_thread_writer_keeps_lease_until_worker_finishes():
 
 def auth_service(monkeypatch):
     from core.agent_auth_service import AgentAuthService
+    from config.v2_config import V2Config
 
+    config = V2Config.default()
+    for supply in config.model_hub.agents.values():
+        supply.mode = "direct"
+    config.save()
     monkeypatch.setattr(AgentAuthService, "_recover_interrupted_claude_oauth_settings_backup", lambda self: None)
     return AgentAuthService(SimpleNamespace(config=SimpleNamespace()))
 
@@ -483,7 +488,7 @@ async def test_api_cancel_waits_for_writer_before_releasing():
     started = asyncio.Event()
     complete = asyncio.Event()
 
-    @_native_auth_write("opencode")
+    @_native_auth_write("opencode", authentication=False)
     async def write():
         started.set()
         await complete.wait()

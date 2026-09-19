@@ -35,6 +35,12 @@ class _IsolatedClaudeConfigDirMixin:
         self._avibe_home_tmp = tempfile.TemporaryDirectory()
         self._previous_avibe_home = os.environ.get("AVIBE_HOME")
         os.environ["AVIBE_HOME"] = self._avibe_home_tmp.name
+        from config.v2_config import V2Config
+
+        config = V2Config.default()
+        for supply in config.model_hub.agents.values():
+            supply.mode = "direct"
+        config.save()
 
     def tearDown(self):
         if self._previous_claude_config_dir is None:

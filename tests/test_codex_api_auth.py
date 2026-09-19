@@ -17,9 +17,20 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def direct_native_auth():
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
+    config.model_hub.agents["codex"].mode = "direct"
+    config.save()
 
 
 def _seed_disk(home: Path, *, api_key: str | None, store: str | None) -> None:
@@ -42,6 +53,7 @@ def _seed_v2_codex(monkeypatch, tmp_path: Path, **codex_fields) -> None:
     from config.v2_config import V2Config
 
     cfg = V2Config.default()
+    cfg.model_hub.agents["codex"].mode = "direct"
     for key, value in codex_fields.items():
         setattr(cfg.agents.codex, key, value)
     cfg.save()
