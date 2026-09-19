@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,7 @@ from vibe import native_oauth_store as store
 class FakeKeychain:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], tuple[str, str]] = {}
+        self.mdates: dict[tuple[str, str], float] = {}
         self.metadata_denied = False
         self.read_denied = False
         self.delete_denied = False
@@ -28,26 +32,81 @@ class FakeKeychain:
         item = self.items.get((service, account))
         if item is None:
             return store._KeychainMetadata("not_found", "absent")
-        return store._KeychainMetadata("found", item[1], {"acct": account, "svce": service})
+        mdate = self.mdates.setdefault((service, account), 1.0)
+        return store._KeychainMetadata(
+            "found",
+            item[1],
+            {"acct": account, "svce": service, "mdat": mdate},
+            f"fake:{service}:{account}",
+            mdate,
+        )
 
-    def read(self, service: str, account: str) -> store._KeychainRead:
+    def read(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: store._KeychainRead | None = None,
+    ) -> store._KeychainRead:
         self.read_calls.append((service, account))
         if self.read_denied:
             raise store._KeychainDenied("denied")
         item = self.items.get((service, account))
         if item is None:
             raise store._KeychainNotFound("missing")
-        return store._KeychainRead(item[0], item[1])
+        mdate = self.mdates.setdefault((service, account), 1.0)
+        if expected is not None and (
+            expected.persistent_reference != f"fake:{service}:{account}"
+            or expected.modification_date != mdate
+        ):
+            raise store._KeychainNotFound("changed")
+        return store._KeychainRead(
+            item[0],
+            item[1],
+            f"fake:{service}:{account}",
+            mdate,
+        )
 
-    def write(self, service: str, account: str, value: str) -> None:
+    def write(
+        self,
+        service: str,
+        account: str,
+        value: str,
+        *,
+        expected: store._KeychainRead | None = None,
+    ) -> None:
+        current = self.items.get((service, account))
+        mdate = self.mdates.setdefault((service, account), 1.0)
+        if expected is not None and (
+            current is None
+            or expected.persistent_reference != f"fake:{service}:{account}"
+            or expected.modification_date != mdate
+        ):
+            raise store._KeychainNotFound("changed")
         self.write_calls.append((service, account, value))
         self.items[(service, account)] = (value, f"write-{len(self.write_calls)}")
+        self.mdates[(service, account)] = mdate + 1
 
-    def delete(self, service: str, account: str) -> None:
+    def delete(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: store._KeychainRead,
+    ) -> None:
         self.delete_calls.append((service, account))
         if self.delete_denied or account in self.fail_on_delete_accounts:
             raise store._KeychainDenied("denied")
+        current = self.items.get((service, account))
+        mdate = self.mdates.setdefault((service, account), 1.0)
+        if (
+            current is None
+            or expected.persistent_reference != f"fake:{service}:{account}"
+            or expected.modification_date != mdate
+        ):
+            raise store._KeychainNotFound("changed")
         self.items.pop((service, account), None)
+        self.mdates.pop((service, account), None)
 
 
 class FakeCoreFoundation:
@@ -75,7 +134,14 @@ class FakeCoreFoundation:
     def CFRelease(self, _ref: int) -> None:
         return None
 
-    def CFStringCreateWithBytes(self, _allocator, buffer, length, _encoding) -> int:
+    def CFStringCreateWithBytes(
+        self,
+        _allocator,
+        buffer,
+        length,
+        _encoding,
+        _is_external_representation,
+    ) -> int:
         return self.ref("string", bytes(buffer[:length]).decode("utf-8"))
 
     def CFStringGetTypeID(self) -> int:
@@ -106,6 +172,9 @@ class FakeCoreFoundation:
     def CFDataCreate(self, _allocator, buffer, length) -> int:
         return self.ref("data", bytes(buffer[:length]))
 
+    def CFDateCreate(self, _allocator, value) -> int:
+        return self.ref("date", float(value))
+
     def CFDateGetTypeID(self) -> int:
         return 3
 
@@ -132,6 +201,7 @@ class FakeCoreFoundation:
             "number": 4,
             "boolean": 5,
             "dictionary": 6,
+            "array": 7,
         }[self.kind(ref)]
 
     def CFDictionaryCreateMutable(self, _allocator, _capacity, _keys, _values) -> int:
@@ -143,13 +213,26 @@ class FakeCoreFoundation:
     def CFDictionaryGetValue(self, dictionary: int, key: int) -> int | None:
         return self.get(dictionary).get(key)
 
+    def CFDictionaryGetTypeID(self) -> int:
+        return 6
+
+    def CFArrayCreate(self, _allocator, values, length, _callbacks) -> int:
+        return self.ref("array", [self.key(values[index]) for index in range(length)])
+
+    def CFArrayGetCount(self, array: int) -> int:
+        return len(self.get(array))
+
+    def CFArrayGetValueAtIndex(self, array: int, index: int) -> int:
+        return self.get(array)[index]
+
 
 class FakeSecurityBindings:
     def __init__(self) -> None:
         self.cf = FakeCoreFoundation()
         self.security = self
-        self.key_callbacks = store._CFDictionaryCallbacks()
-        self.value_callbacks = store._CFDictionaryCallbacks()
+        self.key_callbacks = store._CFDictionaryKeyCallbacks()
+        self.value_callbacks = store._CFDictionaryValueCallbacks()
+        self.array_callbacks = store._CFArrayCallbacks()
         self.constants = {
             name: self.cf.ref("string", name)
             for name in (
@@ -159,15 +242,20 @@ class FakeSecurityBindings:
                 "kSecAttrAccount",
                 "kSecAttrCreationDate",
                 "kSecAttrModificationDate",
+                "kSecAttrPersistentReference",
                 "kSecAttrService",
                 "kSecClass",
                 "kSecClassGenericPassword",
+                "kSecMatchItemList",
                 "kSecMatchLimit",
                 "kSecMatchLimitOne",
                 "kSecReturnAttributes",
                 "kSecReturnData",
+                "kSecReturnPersistentRef",
                 "kSecUseAuthenticationUI",
+                "kSecUseAuthenticationUIAllow",
                 "kSecUseAuthenticationUIFail",
+                "kSecValuePersistentRef",
                 "kSecValueData",
             )
         }
@@ -175,6 +263,8 @@ class FakeSecurityBindings:
         self.cf.objects[self.constants["kCFBooleanTrue"]] = ("boolean", True)
         self.items: dict[tuple[str, str], dict[int, int]] = {}
         self.queries: list[int] = []
+        self.interaction_allowed = True
+        self.interaction_calls: list[bool] = []
 
     def constant(self, name: str) -> int:
         return self.constants[name]
@@ -185,6 +275,10 @@ class FakeSecurityBindings:
             self.constant("kSecAttrAccount"): self.cf.ref("string", account),
             self.constant("kSecAttrCreationDate"): self.cf.ref("date", mdat - 1),
             self.constant("kSecAttrModificationDate"): self.cf.ref("date", mdat),
+            self.constant("kSecValuePersistentRef"): self.cf.ref(
+                "data",
+                f"persistent:{service}:{account}".encode(),
+            ),
             self.constant("kSecValueData"): self.cf.ref("data", value.encode()),
         }
         self.items[(service, account)] = attrs
@@ -193,6 +287,27 @@ class FakeSecurityBindings:
         values = self.cf.get(query)
         service = self.cf.get(values[self.constant("kSecAttrService")])
         account = self.cf.get(values[self.constant("kSecAttrAccount")])
+        item = self.items.get((service, account))
+        item_list = values.get(self.constant("kSecMatchItemList"))
+        if item_list is not None:
+            references = self.cf.get(item_list)
+            item_persistent = (
+                item.get(self.constant("kSecValuePersistentRef")) if item else None
+            )
+            if (
+                item is None
+                or not references
+                or item_persistent is None
+                or self.cf.get(item_persistent) != self.cf.get(references[0])
+            ):
+                return service, f"{account}:stale"
+        expected_date = values.get(self.constant("kSecAttrModificationDate"))
+        if expected_date is not None and (
+            item is None
+            or self.cf.get(item[self.constant("kSecAttrModificationDate")])
+            != self.cf.get(expected_date)
+        ):
+            return service, f"{account}:stale"
         return service, account
 
     def SecItemCopyMatching(self, query: int, output) -> int:
@@ -206,7 +321,8 @@ class FakeSecurityBindings:
             for key, value in item.items()
             if key != self.constant("kSecValueData")
         }
-        if self.cf.get(query_values[self.constant("kSecReturnData")]):
+        return_data = query_values.get(self.constant("kSecReturnData"))
+        if return_data is not None and self.cf.get(return_data):
             result_values[self.constant("kSecValueData")] = item[
                 self.constant("kSecValueData")
             ]
@@ -229,11 +345,40 @@ class FakeSecurityBindings:
         values = self.cf.get(item)
         service = self.cf.get(values[self.constant("kSecAttrService")])
         account = self.cf.get(values[self.constant("kSecAttrAccount")])
-        self.items[(service, account)] = dict(values)
+        if (service, account) in self.items:
+            return -25299
+        now = 20.0 + len(self.items)
+        values = dict(values)
+        values.setdefault(
+            self.constant("kSecAttrCreationDate"),
+            self.cf.ref("date", now),
+        )
+        values.setdefault(
+            self.constant("kSecAttrModificationDate"),
+            self.cf.ref("date", now),
+        )
+        values.setdefault(
+            self.constant("kSecValuePersistentRef"),
+            self.cf.ref("data", f"persistent:{service}:{account}".encode()),
+        )
+        self.items[(service, account)] = values
         return 0
 
     def SecItemDelete(self, query: int) -> int:
-        self.items.pop(self._locator(query), None)
+        locator = self._locator(query)
+        if locator not in self.items:
+            return -25300
+        self.items.pop(locator)
+        return 0
+
+    def SecKeychainGetUserInteractionAllowed(self, output) -> int:
+        self.interaction_calls.append(True)
+        output._obj.value = self.interaction_allowed
+        return 0
+
+    def SecKeychainSetUserInteractionAllowed(self, value) -> int:
+        self.interaction_calls.append(bool(value))
+        self.interaction_allowed = bool(value)
         return 0
 
 
@@ -353,6 +498,96 @@ def test_codex_keychain_metadata_scan_never_reads_secret(
     assert secret_snapshot.revision == metadata_snapshot.revision
 
 
+def test_fixture_home_never_selects_real_keychain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "keyring"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(store, "_KEYCHAIN_STORE", store._DEFAULT_KEYCHAIN_STORE)
+    monkeypatch.setattr(
+        store,
+        "_security_bindings",
+        lambda: pytest.fail("fixture home selected the real Keychain"),
+    )
+
+    assert store.read_native_oauth("codex", home=tmp_path) is None
+
+
+def test_secret_keychain_read_denial_is_permission_placeholder(
+    tmp_path: Path,
+    fake_keychain: FakeKeychain,
+) -> None:
+    codex_home = (tmp_path / ".codex").resolve()
+    account = f"cli|{store._sha256(str(codex_home).encode('utf-8'))[:16]}"
+    fake_keychain.items[("Codex Auth", account)] = (
+        json.dumps(_codex_payload()),
+        "native-v1",
+    )
+    (codex_home / "config.toml").parent.mkdir()
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "keyring"\n',
+        encoding="utf-8",
+    )
+    metadata = store.read_native_oauth("codex", home=tmp_path)
+    fake_keychain.read_denied = True
+
+    secret = store.read_native_oauth("codex", home=tmp_path, allow_secret=True)
+
+    assert metadata is not None
+    assert secret is not None
+    assert secret.exportable is False
+    assert secret.revision == metadata.revision
+    assert secret.payload["status"] == "permission_needed"
+
+
+def test_secret_read_returns_changed_placeholder_when_scan_revision_is_stale(
+    tmp_path: Path,
+    fake_keychain: FakeKeychain,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = (tmp_path / ".codex").resolve()
+    account = f"cli|{store._sha256(str(codex_home).encode('utf-8'))[:16]}"
+    fake_keychain.items[("Codex Auth", account)] = (
+        json.dumps(_codex_payload()),
+        "native-v1",
+    )
+    (codex_home / "config.toml").parent.mkdir()
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "keyring"\n',
+        encoding="utf-8",
+    )
+    original_metadata = fake_keychain.metadata
+    metadata_values: list[store._KeychainMetadata] = []
+
+    def metadata_then_change(service: str, item_account: str) -> store._KeychainMetadata:
+        metadata_value = original_metadata(service, item_account)
+        metadata_values.append(metadata_value)
+        fake_keychain.items[(service, item_account)] = (
+            json.dumps(_codex_payload()),
+            "native-v2",
+        )
+        return metadata_value
+
+    monkeypatch.setattr(fake_keychain, "metadata", metadata_then_change)
+
+    secret = store.read_native_oauth("codex", home=tmp_path, allow_secret=True)
+
+    assert secret is not None
+    assert secret.exportable is False
+    assert secret.revision != store._keychain_revision(
+        "codex",
+        "Codex Auth",
+        account,
+        metadata_values[0].revision,
+    )
+    assert secret.payload["status"] == "changed"
+
+
 def test_denied_keychain_read_returns_permission_placeholder(
     tmp_path: Path,
     fake_keychain: FakeKeychain,
@@ -393,16 +628,33 @@ def test_security_framework_keychain_uses_metadata_without_data_and_tracks_mdat(
 
     assert metadata.state == "found"
     assert metadata.attributes["mdat"] == 10.0
+    assert metadata.persistent_reference is not None
     assert read.value == json.dumps(_codex_payload())
     assert read.revision == metadata.revision
+    assert read.persistent_reference == metadata.persistent_reference
     metadata_query = fake_security_bindings.cf.get(fake_security_bindings.queries[0])
     read_query = fake_security_bindings.cf.get(fake_security_bindings.queries[1])
     assert fake_security_bindings.cf.get(
         metadata_query[fake_security_bindings.constant("kSecReturnAttributes")]
     )
-    assert not fake_security_bindings.cf.get(
-        metadata_query[fake_security_bindings.constant("kSecReturnData")]
+    assert fake_security_bindings.constant("kSecReturnData") not in metadata_query
+    assert (
+        fake_security_bindings.cf.get(
+            metadata_query[fake_security_bindings.constant("kSecUseAuthenticationUI")]
+        )
+        == fake_security_bindings.cf.get(
+            fake_security_bindings.constant("kSecUseAuthenticationUIFail")
+        )
     )
+    assert (
+        fake_security_bindings.cf.get(
+            read_query[fake_security_bindings.constant("kSecUseAuthenticationUI")]
+        )
+        == fake_security_bindings.cf.get(
+            fake_security_bindings.constant("kSecUseAuthenticationUIAllow")
+        )
+    )
+    assert fake_security_bindings.interaction_calls == [True, False, True]
     assert fake_security_bindings.cf.get(
         read_query[fake_security_bindings.constant("kSecReturnData")]
     )
@@ -423,15 +675,325 @@ def test_security_framework_update_preserves_unrelated_attributes_and_delete(
     fake_security_bindings.items[("Codex Auth", "account")][unrelated_key] = unrelated_value
     native = store._SecurityKeychainStore()
 
-    native.write("Codex Auth", "account", "after")
+    metadata = native.metadata("Codex Auth", "account")
+    assert metadata.persistent_reference is not None
+    native.write(
+        "Codex Auth",
+        "account",
+        "after",
+        expected=native.read("Codex Auth", "account"),
+    )
+    update_query = fake_security_bindings.cf.get(fake_security_bindings.queries[-1])
+    assert (
+        fake_security_bindings.cf.get(
+            update_query[fake_security_bindings.constant("kSecUseAuthenticationUI")]
+        )
+        == fake_security_bindings.cf.get(
+            fake_security_bindings.constant("kSecUseAuthenticationUIAllow")
+        )
+    )
 
     item = fake_security_bindings.items[("Codex Auth", "account")]
     assert fake_security_bindings.cf.get(item[unrelated_key]) == "preserve"
     assert fake_security_bindings.cf.get(item[fake_security_bindings.constant("kSecValueData")]) == (
         b"after"
     )
-    native.delete("Codex Auth", "account")
+    native.delete(
+        "Codex Auth",
+        "account",
+        expected=native.read("Codex Auth", "account"),
+    )
+    delete_query = fake_security_bindings.cf.get(fake_security_bindings.queries[-1])
+    assert (
+        fake_security_bindings.cf.get(
+            delete_query[fake_security_bindings.constant("kSecUseAuthenticationUI")]
+        )
+        == fake_security_bindings.cf.get(
+            fake_security_bindings.constant("kSecUseAuthenticationUIAllow")
+        )
+    )
     assert ("Codex Auth", "account") not in fake_security_bindings.items
+
+
+def test_security_framework_reverse_restore_after_delete_is_idempotent(
+    fake_security_bindings: FakeSecurityBindings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_security_bindings.add_item("Codex Auth", "account", "before", mdat=10.0)
+    native = store._SecurityKeychainStore()
+    monkeypatch.setattr(store, "_KEYCHAIN_STORE", native)
+    metadata = native.metadata("Codex Auth", "account")
+    assert metadata.persistent_reference is not None
+    edit = {
+        "version": 1,
+        "operations": [
+            {
+                "kind": "keychain",
+                "service": "Codex Auth",
+                "account": "account",
+                "persistent_reference": metadata.persistent_reference,
+                "modification_date": 10.0,
+                "before": {
+                    "exists": True,
+                    "value": "before",
+                    "revision": metadata.revision,
+                },
+                "after": {"exists": False},
+            }
+        ],
+    }
+
+    store.apply_keychain_edit(edit)
+    assert ("Codex Auth", "account") not in fake_security_bindings.items
+    store.apply_keychain_edit(edit, reverse=True)
+    store.apply_keychain_edit(edit, reverse=True)
+    assert (
+        fake_security_bindings.cf.get(
+            fake_security_bindings.items[("Codex Auth", "account")][
+                fake_security_bindings.constant("kSecValueData")
+            ]
+        )
+        == b"before"
+    )
+
+
+def test_apply_rechecks_each_operation_immediately_before_mutation(
+    fake_keychain: FakeKeychain,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_keychain.items[("service", "first")] = ("first", "v1")
+    fake_keychain.items[("service", "second")] = ("second", "v2")
+    edit = {
+        "version": 1,
+        "operations": [
+            {
+                "kind": "keychain",
+                "service": "service",
+                "account": "first",
+                "before": {"exists": True, "value": "first", "revision": "v1"},
+                "after": {"exists": True, "value": "first-new"},
+            },
+            {
+                "kind": "keychain",
+                "service": "service",
+                "account": "second",
+                "before": {"exists": True, "value": "second", "revision": "v2"},
+                "after": {"exists": True, "value": "second-new"},
+            },
+        ],
+    }
+    original_live = store._live_keychain_state
+    calls = 0
+
+    def live_with_concurrent_login(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            fake_keychain.items[("service", "second")] = ("new-login", "v2-new")
+        return original_live(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_live_keychain_state", live_with_concurrent_login)
+
+    with pytest.raises(store.NativeOAuthRevisionError):
+        store.apply_keychain_edit(edit)
+
+    assert fake_keychain.items[("service", "first")][0] == "first-new"
+    assert fake_keychain.items[("service", "second")] == ("new-login", "v2-new")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="CoreFoundation smoke requires macOS")
+def test_core_foundation_ffi_smoke_without_security_item_access() -> None:
+    foundation_path = ctypes.util.find_library("CoreFoundation") or (
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
+    cf = ctypes.CDLL(foundation_path)
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFRelease.restype = None
+    cf.CFGetTypeID.argtypes = [ctypes.c_void_p]
+    cf.CFGetTypeID.restype = ctypes.c_ulong
+    cf.CFStringCreateWithBytes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ubyte),
+        ctypes.c_long,
+        ctypes.c_uint32,
+        ctypes.c_bool,
+    ]
+    cf.CFStringCreateWithBytes.restype = ctypes.c_void_p
+    cf.CFStringGetTypeID.argtypes = []
+    cf.CFStringGetTypeID.restype = ctypes.c_ulong
+    cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
+    cf.CFStringGetLength.restype = ctypes.c_long
+    cf.CFStringGetMaximumSizeForEncoding.argtypes = [ctypes.c_long, ctypes.c_uint32]
+    cf.CFStringGetMaximumSizeForEncoding.restype = ctypes.c_long
+    cf.CFStringGetCString.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_long,
+        ctypes.c_uint32,
+    ]
+    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFDataCreate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ubyte),
+        ctypes.c_long,
+    ]
+    cf.CFDataCreate.restype = ctypes.c_void_p
+    cf.CFDataGetLength.argtypes = [ctypes.c_void_p]
+    cf.CFDataGetLength.restype = ctypes.c_long
+    cf.CFDataGetBytePtr.argtypes = [ctypes.c_void_p]
+    cf.CFDataGetBytePtr.restype = ctypes.POINTER(ctypes.c_ubyte)
+    cf.CFDateCreate.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    cf.CFDateCreate.restype = ctypes.c_void_p
+    cf.CFArrayCreate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_long,
+        ctypes.POINTER(store._CFArrayCallbacks),
+    ]
+    cf.CFArrayCreate.restype = ctypes.c_void_p
+    cf.CFDictionaryCreateMutable.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_long,
+        ctypes.POINTER(store._CFDictionaryKeyCallbacks),
+        ctypes.POINTER(store._CFDictionaryValueCallbacks),
+    ]
+    cf.CFDictionaryCreateMutable.restype = ctypes.c_void_p
+    cf.CFDictionarySetValue.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    cf.CFDictionarySetValue.restype = None
+    cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+
+    constants = {
+        "kCFAllocatorDefault": ctypes.c_void_p.in_dll(cf, "kCFAllocatorDefault").value,
+        "kCFBooleanFalse": ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value,
+        "kCFBooleanTrue": ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value,
+    }
+    bindings = SimpleNamespace(
+        cf=cf,
+        constants=constants,
+        key_callbacks=store._CFDictionaryKeyCallbacks.in_dll(
+            cf,
+            "kCFTypeDictionaryKeyCallBacks",
+        ),
+        value_callbacks=store._CFDictionaryValueCallbacks.in_dll(
+            cf,
+            "kCFTypeDictionaryValueCallBacks",
+        ),
+        array_callbacks=store._CFArrayCallbacks.in_dll(
+            cf,
+            "kCFTypeArrayCallBacks",
+        ),
+        constant=lambda name: constants[name],
+    )
+    assert not hasattr(bindings, "security")
+    security_constant_names = (
+        "kSecAttrAccount",
+        "kSecAttrCreationDate",
+            "kSecAttrModificationDate",
+            "kSecAttrPersistentReference",
+            "kSecAttrService",
+            "kSecClass",
+            "kSecClassGenericPassword",
+            "kSecMatchItemList",
+            "kSecMatchLimit",
+        "kSecMatchLimitOne",
+        "kSecReturnAttributes",
+        "kSecReturnData",
+        "kSecReturnPersistentRef",
+        "kSecUseAuthenticationUI",
+        "kSecUseAuthenticationUIAllow",
+        "kSecUseAuthenticationUIFail",
+        "kSecValuePersistentRef",
+        "kSecValueData",
+    )
+    for name in security_constant_names:
+        constants[name] = store._cf_string(bindings, name)
+    unicode_ref = store._cf_string(bindings, "服务🚀")
+    data_ref = store._cf_data(bindings, "opaque-test-data")
+    key_ref = store._cf_string(bindings, "key")
+    query, owned = store._keychain_query(
+        bindings,
+        "服务",
+        "账户",
+        return_attributes=True,
+        return_data=False,
+    )
+    interactive_query, interactive_owned = store._keychain_query(
+        bindings,
+        "服务",
+        "账户",
+        return_attributes=False,
+        return_data=True,
+        allow_interaction=True,
+    )
+    dictionary = store._cf_dictionary(bindings, {key_ref: unicode_ref})
+    bound_query = None
+    bound_owned: list[int] = []
+    try:
+        found = cf.CFDictionaryGetValue(dictionary, key_ref)
+        assert store._cf_string_value(bindings, found) == "服务🚀"
+        found_query_service = cf.CFDictionaryGetValue(
+            query,
+            constants["kSecAttrService"],
+        )
+        assert store._cf_string_value(bindings, found_query_service) == "服务"
+        query_values = cf.CFDictionaryGetValue(
+            query,
+            constants["kSecUseAuthenticationUI"],
+        )
+        assert query_values == constants["kSecUseAuthenticationUIFail"]
+        interactive_values = cf.CFDictionaryGetValue(
+            interactive_query,
+            constants["kSecUseAuthenticationUI"],
+        )
+        assert interactive_values == constants["kSecUseAuthenticationUIAllow"]
+        data_length = cf.CFDataGetLength(data_ref)
+        data_pointer = cf.CFDataGetBytePtr(data_ref)
+        assert bytes(data_pointer[:data_length]) == b"opaque-test-data"
+        observed = store._KeychainRead(
+            value="",
+            revision="",
+            persistent_reference=store._persistent_reference_from_cf_data(
+                bindings,
+                data_ref,
+            ),
+            modification_date=123.0,
+        )
+        bound_query, bound_owned = store._keychain_query(
+            bindings,
+            "服务",
+            "账户",
+            return_attributes=False,
+            return_data=False,
+            expected=observed,
+        )
+        assert cf.CFDictionaryGetValue(
+            bound_query,
+            constants["kSecMatchItemList"],
+        )
+        assert cf.CFDictionaryGetValue(
+            bound_query,
+            constants["kSecAttrModificationDate"],
+        )
+    finally:
+        store._release(
+            bindings,
+            dictionary,
+            query,
+            interactive_query,
+            bound_query,
+            unicode_ref,
+            data_ref,
+            key_ref,
+            *owned,
+            *interactive_owned,
+            *bound_owned,
+            *[constants[name] for name in security_constant_names],
+        )
 
 
 def test_codex_secrets_backend_is_unsupported_and_does_not_use_stale_file(
@@ -540,12 +1102,14 @@ def test_claude_keychain_and_file_cleanup_preserve_unrelated_fields(
     assert len(snapshot.keychain_edit["operations"]) == 2
 
     store.apply_keychain_edit(snapshot.keychain_edit)
+    store.apply_keychain_edit(snapshot.keychain_edit)
 
     keychain_after = json.loads(fake_keychain.items[("Claude Code-credentials", account)][0])
     file_after = json.loads(credentials_path.read_text(encoding="utf-8"))
     assert keychain_after == {"mcpOAuth": {"provider": "keep-me"}}
     assert file_after == {"mcpOAuth": {"provider": "keep-me"}}
 
+    store.apply_keychain_edit(snapshot.keychain_edit, reverse=True)
     store.apply_keychain_edit(snapshot.keychain_edit, reverse=True)
     assert json.loads(fake_keychain.items[("Claude Code-credentials", account)][0]) == _claude_payload()
     assert json.loads(credentials_path.read_text(encoding="utf-8")) == _claude_payload()
@@ -557,6 +1121,7 @@ def test_claude_locator_uses_secure_root_suffix_and_sanitized_account(
 ) -> None:
     secure_root = (tmp_path / "secure-root").resolve()
     monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(secure_root))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("USER", "bad/user")
 
     resolved_root, service, account = store._claude_locator(None)
@@ -578,6 +1143,17 @@ def test_claude_empty_secure_env_keeps_unsuffixed_service(
     assert account == "valid.user-1"
 
 
+def test_claude_no_config_env_keeps_unsuffixed_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    _, service, _ = store._claude_locator(None)
+
+    assert service == "Claude Code-credentials"
+
+
 def test_claude_config_env_adds_suffix_when_secure_env_is_absent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -590,6 +1166,34 @@ def test_claude_config_env_adds_suffix_when_secure_env_is_absent(
 
     assert resolved_root == config_root
     assert service == f"Claude Code-credentials-{store._sha256(str(config_root).encode())[:8]}"
+
+
+def test_claude_nonempty_secure_env_hashes_when_config_env_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secure_root = (tmp_path / "secure-root").resolve()
+    config_root = (tmp_path / "config-root").resolve()
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(secure_root))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_root))
+
+    resolved_root, service, _ = store._claude_locator(None)
+
+    assert resolved_root == secure_root
+    assert service == f"Claude Code-credentials-{store._sha256(str(secure_root).encode())[:8]}"
+
+
+def test_claude_empty_secure_env_suppresses_suffix_even_when_config_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_root = (tmp_path / "config-root").resolve()
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_root))
+
+    _, service, _ = store._claude_locator(None)
+
+    assert service == "Claude Code-credentials"
 
 
 def test_claude_keychain_and_different_fallback_account_are_not_exportable(
@@ -621,6 +1225,60 @@ def test_claude_keychain_and_different_fallback_account_are_not_exportable(
         "account": "test-user",
     }
     assert json.loads(credentials_path.read_text(encoding="utf-8")) == fallback
+
+
+def test_claude_keychain_and_fallback_same_refresh_grant_without_identity_are_exportable(
+    tmp_path: Path,
+    fake_keychain: FakeKeychain,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "test-user")
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    keychain_payload = _claude_payload()
+    fallback_payload = _claude_payload()
+    keychain_payload["claudeAiOauth"].pop("accountUuid")
+    fallback_payload["claudeAiOauth"].pop("accountUuid")
+    credentials_path = claude_home / ".credentials.json"
+    credentials_path.write_text(json.dumps(fallback_payload), encoding="utf-8")
+    fake_keychain.items[("Claude Code-credentials", "test-user")] = (
+        json.dumps(keychain_payload),
+        "claude-v1",
+    )
+
+    snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+
+    assert snapshot is not None
+    assert snapshot.exportable is True
+    assert snapshot.keychain_edit is not None
+    assert len(snapshot.keychain_edit["operations"]) == 2
+
+
+def test_claude_keychain_and_different_refresh_grants_without_identity_conflict(
+    tmp_path: Path,
+    fake_keychain: FakeKeychain,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "test-user")
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    keychain_payload = _claude_payload()
+    fallback_payload = _claude_payload()
+    keychain_payload["claudeAiOauth"].pop("accountUuid")
+    fallback_payload["claudeAiOauth"].pop("accountUuid")
+    fallback_payload["claudeAiOauth"]["refreshToken"] = "different-refresh"
+    credentials_path = claude_home / ".credentials.json"
+    credentials_path.write_text(json.dumps(fallback_payload), encoding="utf-8")
+    fake_keychain.items[("Claude Code-credentials", "test-user")] = (
+        json.dumps(keychain_payload),
+        "claude-v1",
+    )
+
+    snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+
+    assert snapshot is not None
+    assert snapshot.exportable is False
+    assert snapshot.payload["status"] == "conflict"
 
 
 def test_changed_keychain_revision_blocks_cleanup_without_mutation(
@@ -670,7 +1328,14 @@ def test_check_keychain_edit_exposes_before_and_after_cas_checks(
 
     assert store.check_keychain_edit(snapshot.keychain_edit) is True
     store.apply_keychain_edit(snapshot.keychain_edit)
+    assert store.check_keychain_edit(snapshot.keychain_edit, reverse=True) is True
     assert store.check_keychain_edit(snapshot.keychain_edit, applied=True) is True
+    store.apply_keychain_edit(snapshot.keychain_edit, reverse=True)
+    assert store.check_keychain_edit(
+        snapshot.keychain_edit,
+        applied=True,
+        reverse=True,
+    ) is True
 
 
 def test_apply_does_not_rollback_prior_operations_when_a_later_one_fails(

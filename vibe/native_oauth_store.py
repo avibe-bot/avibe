@@ -10,18 +10,35 @@ path.
 before/after credential states needed for a compare-and-swap cleanup or
 reverse, so callers must keep it in the migration journal and never put it on
 the scan response.
+
+Metadata scans use ``kSecUseAuthenticationUIFail`` and temporarily disable the
+legacy process-wide Keychain interaction switch. The explicit-consent
+``allow_secret`` read and subsequent mutations use
+``kSecUseAuthenticationUIAllow`` so the OS can complete its normal approval
+flow. Fixture homes never select the real OS Keychain.
+
+Mutations require the caller's cooperative credential lease and external CLI
+drain. They recheck immediately, bind the observed item and modification date,
+and read back. Apple's SecItem API is not an atomic value-CAS against an
+uncooperative writer updating the same item inside its query/update window.
+Recovery belongs to the durable controller journal, not this module.
 """
 
 from __future__ import annotations
 
+import base64
+import ctypes
+import ctypes.util
 import getpass
+import hmac
 import hashlib
 import json
+import math
 import os
 import re
 import sys
-import ctypes
-import ctypes.util
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -108,26 +125,49 @@ class NativeOAuthSnapshot:
 class _KeychainMetadata:
     state: str
     revision: str
-    attributes: dict[str, str] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
+    persistent_reference: str | None = None
+    modification_date: float | None = None
 
 
 @dataclass(frozen=True)
 class _KeychainRead:
-    value: str
+    value: str = field(repr=False)
     revision: str
+    persistent_reference: str | None = None
+    modification_date: float | None = None
 
 
 class _KeychainStore(Protocol):
     def metadata(self, service: str, account: str) -> _KeychainMetadata:
         ...
 
-    def read(self, service: str, account: str) -> _KeychainRead:
+    def read(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: _KeychainRead | None = None,
+    ) -> _KeychainRead:
         ...
 
-    def write(self, service: str, account: str, value: str) -> None:
+    def write(
+        self,
+        service: str,
+        account: str,
+        value: str,
+        *,
+        expected: _KeychainRead | None,
+    ) -> None:
         ...
 
-    def delete(self, service: str, account: str) -> None:
+    def delete(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: _KeychainRead,
+    ) -> None:
         ...
 
 
@@ -286,11 +326,30 @@ def _claude_same_account(
 ) -> bool:
     primary_identity = _claude_identity(primary)
     fallback_identity = _claude_identity(fallback)
-    if not primary_identity or not fallback_identity:
-        return False
     shared_keys = primary_identity.keys() & fallback_identity.keys()
-    return bool(shared_keys) and all(
-        primary_identity[key] == fallback_identity[key] for key in shared_keys
+    if any(primary_identity[key] != fallback_identity[key] for key in shared_keys):
+        return False
+    if shared_keys:
+        return True
+
+    def refresh_grant(payload: Mapping[str, Any]) -> str | None:
+        nested = payload.get("claudeAiOauth")
+        sources: list[Mapping[str, Any]] = [payload]
+        if isinstance(nested, dict):
+            sources.insert(0, nested)
+        for source in sources:
+            for key in ("refresh_token", "refreshToken"):
+                value = source.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        return None
+
+    primary_refresh = refresh_grant(primary)
+    fallback_refresh = refresh_grant(fallback)
+    return bool(
+        primary_refresh
+        and fallback_refresh
+        and hmac.compare_digest(primary_refresh, fallback_refresh)
     )
 
 
@@ -353,8 +412,10 @@ def _keychain_operation(
     after: dict[str, Any],
     *,
     isolated: bool,
+    persistent_reference: str | None = None,
+    modification_date: float | None = None,
 ) -> dict[str, Any]:
-    return {
+    operation = {
         "kind": "keychain",
         "service": service,
         "account": account,
@@ -362,6 +423,11 @@ def _keychain_operation(
         "after": after,
         "store_scope": "fixture" if isolated else "native",
     }
+    if persistent_reference is not None:
+        operation["persistent_reference"] = persistent_reference
+    if modification_date is not None:
+        operation["modification_date"] = modification_date
+    return operation
 
 
 def _codex_home(home: Path | None) -> Path:
@@ -397,7 +463,11 @@ def _claude_locator(home: Path | None) -> tuple[Path, str, str]:
                 if secure_env
                 else (Path.home() / ".claude").resolve()
             )
-            suffix = ""
+            suffix = (
+                ""
+                if not secure_env or "CLAUDE_CONFIG_DIR" not in os.environ
+                else f"-{_sha256(str(secure_root).encode('utf-8'))[:8]}"
+            )
         else:
             config_defined = "CLAUDE_CONFIG_DIR" in os.environ
             config_env = os.environ.get("CLAUDE_CONFIG_DIR", "")
@@ -473,7 +543,7 @@ _CFStringEncoding = ctypes.c_uint32
 _CFDictionaryCallback = ctypes.c_void_p
 
 
-class _CFDictionaryCallbacks(ctypes.Structure):
+class _CFDictionaryKeyCallbacks(ctypes.Structure):
     _fields_ = [
         ("version", _CFIndex),
         ("retain", _CFDictionaryCallback),
@@ -484,12 +554,33 @@ class _CFDictionaryCallbacks(ctypes.Structure):
     ]
 
 
+class _CFDictionaryValueCallbacks(ctypes.Structure):
+    _fields_ = [
+        ("version", _CFIndex),
+        ("retain", _CFDictionaryCallback),
+        ("release", _CFDictionaryCallback),
+        ("copy_description", _CFDictionaryCallback),
+        ("equal", _CFDictionaryCallback),
+    ]
+
+
+class _CFArrayCallbacks(ctypes.Structure):
+    _fields_ = _CFDictionaryValueCallbacks._fields_
+
+
 class _SecurityBindings:
+    """SDK-typed bindings; construction loads symbols but calls no Sec* API.
+
+    ABI reference: Apple's CFString.h, CFDictionary.h, CFArray.h, SecItem.h
+    and SecKeychain.h. Opaque handles are Python integers (or None for NULL),
+    never c_void_p objects used as Python dictionary keys.
+    """
+
     def __init__(self, security: Any, core_foundation: Any) -> None:
         self.security = security
         self.cf = core_foundation
         self.constants = {
-            name: ctypes.c_void_p.in_dll(library, name)
+            name: ctypes.c_void_p.in_dll(library, name).value
             for library, names in (
                 (
                     core_foundation,
@@ -510,24 +601,29 @@ class _SecurityBindings:
                         "kSecClassGenericPassword",
                         "kSecMatchLimit",
                         "kSecMatchLimitOne",
+                        "kSecMatchItemList",
                         "kSecReturnAttributes",
                         "kSecReturnData",
+                        "kSecReturnPersistentRef",
                         "kSecUseAuthenticationUI",
+                        "kSecUseAuthenticationUIAllow",
                         "kSecUseAuthenticationUIFail",
+                        "kSecValuePersistentRef",
                         "kSecValueData",
                     ),
                 ),
             )
             for name in names
         }
-        self.key_callbacks = _CFDictionaryCallbacks.in_dll(
+        self.key_callbacks = _CFDictionaryKeyCallbacks.in_dll(
             core_foundation,
             "kCFTypeDictionaryKeyCallBacks",
         )
-        self.value_callbacks = _CFDictionaryCallbacks.in_dll(
+        self.value_callbacks = _CFDictionaryValueCallbacks.in_dll(
             core_foundation,
             "kCFTypeDictionaryValueCallBacks",
         )
+        self.array_callbacks = _CFArrayCallbacks.in_dll(core_foundation, "kCFTypeArrayCallBacks")
         self._configure()
 
     def _configure(self) -> None:
@@ -541,6 +637,7 @@ class _SecurityBindings:
             ctypes.POINTER(ctypes.c_ubyte),
             _CFIndex,
             _CFStringEncoding,
+            ctypes.c_ubyte,
         ]
         cf.CFStringCreateWithBytes.restype = _CFTypeRef
         cf.CFStringGetTypeID.argtypes = []
@@ -575,6 +672,8 @@ class _SecurityBindings:
         cf.CFDateGetTypeID.restype = ctypes.c_ulong
         cf.CFDateGetAbsoluteTime.argtypes = [_CFTypeRef]
         cf.CFDateGetAbsoluteTime.restype = ctypes.c_double
+        cf.CFDateCreate.argtypes = [_CFTypeRef, ctypes.c_double]
+        cf.CFDateCreate.restype = _CFTypeRef
         cf.CFNumberGetTypeID.argtypes = []
         cf.CFNumberGetTypeID.restype = ctypes.c_ulong
         cf.CFNumberGetValue.argtypes = [
@@ -590,8 +689,8 @@ class _SecurityBindings:
         cf.CFDictionaryCreateMutable.argtypes = [
             _CFTypeRef,
             _CFIndex,
-            ctypes.POINTER(_CFDictionaryCallbacks),
-            ctypes.POINTER(_CFDictionaryCallbacks),
+            ctypes.POINTER(_CFDictionaryKeyCallbacks),
+            ctypes.POINTER(_CFDictionaryValueCallbacks),
         ]
         cf.CFDictionaryCreateMutable.restype = _CFTypeRef
         cf.CFDictionarySetValue.argtypes = [
@@ -602,6 +701,17 @@ class _SecurityBindings:
         cf.CFDictionarySetValue.restype = None
         cf.CFDictionaryGetValue.argtypes = [_CFTypeRef, _CFTypeRef]
         cf.CFDictionaryGetValue.restype = _CFTypeRef
+        cf.CFDictionaryGetTypeID.argtypes = []
+        cf.CFDictionaryGetTypeID.restype = ctypes.c_ulong
+        cf.CFArrayCreate.argtypes = [
+            _CFTypeRef, ctypes.POINTER(_CFTypeRef), _CFIndex,
+            ctypes.POINTER(_CFArrayCallbacks),
+        ]
+        cf.CFArrayCreate.restype = _CFTypeRef
+        cf.CFArrayGetCount.argtypes = [_CFTypeRef]
+        cf.CFArrayGetCount.restype = _CFIndex
+        cf.CFArrayGetValueAtIndex.argtypes = [_CFTypeRef, _CFIndex]
+        cf.CFArrayGetValueAtIndex.restype = _CFTypeRef
         self.security.SecItemCopyMatching.argtypes = [
             _CFTypeRef,
             ctypes.POINTER(_CFTypeRef),
@@ -613,16 +723,22 @@ class _SecurityBindings:
         self.security.SecItemUpdate.restype = ctypes.c_int32
         self.security.SecItemDelete.argtypes = [_CFTypeRef]
         self.security.SecItemDelete.restype = ctypes.c_int32
+        self.security.SecKeychainGetUserInteractionAllowed.argtypes = [ctypes.POINTER(ctypes.c_ubyte)]
+        self.security.SecKeychainGetUserInteractionAllowed.restype = ctypes.c_int32
+        self.security.SecKeychainSetUserInteractionAllowed.argtypes = [ctypes.c_ubyte]
+        self.security.SecKeychainSetUserInteractionAllowed.restype = ctypes.c_int32
 
-    def constant(self, name: str) -> _CFTypeRef:
+    def constant(self, name: str) -> int | None:
         return self.constants[name]
 
 
 _SECURITY_BINDINGS: _SecurityBindings | None = None
 _ERR_SEC_SUCCESS = 0
 _ERR_SEC_ITEM_NOT_FOUND = -25300
+_ERR_SEC_DUPLICATE_ITEM = -25299
 _UTF8 = 0x08000100
 _CF_NUMBER_DOUBLE = 6
+_KEYCHAIN_INTERACTION_LOCK = threading.RLock()
 
 
 def _security_bindings() -> _SecurityBindings:
@@ -654,14 +770,15 @@ def _cf_string(bindings: _SecurityBindings, value: str) -> _CFTypeRef:
         buffer,
         len(raw),
         _UTF8,
+        False,
     )
     if not result:
         raise _KeychainUnavailable("native keychain string allocation failed")
-    return result
+    return result.value if isinstance(result, ctypes.c_void_p) else result
 
 
 def _cf_data(bindings: _SecurityBindings, value: str) -> _CFTypeRef:
-    raw = value.encode("utf-8")
+    raw = value.encode("utf-8") if isinstance(value, str) else value
     buffer = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
     result = bindings.cf.CFDataCreate(
         bindings.constant("kCFAllocatorDefault"),
@@ -670,7 +787,7 @@ def _cf_data(bindings: _SecurityBindings, value: str) -> _CFTypeRef:
     )
     if not result:
         raise _KeychainUnavailable("native keychain data allocation failed")
-    return result
+    return result.value if isinstance(result, ctypes.c_void_p) else result
 
 
 def _cf_dictionary(
@@ -691,7 +808,7 @@ def _cf_dictionary(
     except BaseException:
         bindings.cf.CFRelease(dictionary)
         raise
-    return dictionary
+    return dictionary.value if isinstance(dictionary, ctypes.c_void_p) else dictionary
 
 
 def _release(bindings: _SecurityBindings, *objects: _CFTypeRef) -> None:
@@ -701,12 +818,14 @@ def _release(bindings: _SecurityBindings, *objects: _CFTypeRef) -> None:
 
 
 def _cf_string_value(bindings: _SecurityBindings, value: _CFTypeRef) -> str:
+    if not value or bindings.cf.CFGetTypeID(value) != bindings.cf.CFStringGetTypeID():
+        raise _KeychainUnavailable("native keychain returned invalid attributes")
     length = bindings.cf.CFStringGetLength(value)
     maximum = bindings.cf.CFStringGetMaximumSizeForEncoding(length, _UTF8) + 1
     buffer = ctypes.create_string_buffer(maximum)
     if not bindings.cf.CFStringGetCString(value, buffer, maximum, _UTF8):
-        return ""
-    return buffer.value.decode("utf-8", errors="replace")
+        raise _KeychainUnavailable("native keychain returned invalid attributes")
+    return buffer.value.decode("utf-8")
 
 
 def _cf_safe_value(bindings: _SecurityBindings, value: _CFTypeRef) -> Any:
@@ -729,6 +848,37 @@ def _cf_safe_value(bindings: _SecurityBindings, value: _CFTypeRef) -> Any:
     return f"cf-type-{type_id}"
 
 
+def _cf_data_bytes(bindings: _SecurityBindings, value: _CFTypeRef) -> bytes:
+    if not value or bindings.cf.CFGetTypeID(value) != bindings.cf.CFDataGetTypeID():
+        raise _KeychainUnavailable("native keychain returned invalid data")
+    length = bindings.cf.CFDataGetLength(value)
+    pointer = bindings.cf.CFDataGetBytePtr(value)
+    return bytes(pointer[:length]) if pointer and length else b""
+
+
+def _persistent_reference_from_cf_data(
+    bindings: _SecurityBindings,
+    value: _CFTypeRef | None,
+) -> str | None:
+    if not value:
+        return None
+    raw = _cf_data_bytes(bindings, value)
+    return base64.urlsafe_b64encode(raw).decode("ascii") if raw else None
+
+
+def _persistent_reference_to_cf_data(
+    bindings: _SecurityBindings,
+    value: str,
+) -> _CFTypeRef:
+    try:
+        raw = base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
+    except (ValueError, UnicodeError):
+        raise ValueError("invalid keychain persistent reference") from None
+    if not raw:
+        raise ValueError("invalid keychain persistent reference")
+    return _cf_data(bindings, raw)
+
+
 def _keychain_query(
     bindings: _SecurityBindings,
     service: str,
@@ -736,29 +886,70 @@ def _keychain_query(
     *,
     return_attributes: bool,
     return_data: bool,
+    expected: _KeychainRead | None = None,
+    allow_interaction: bool = False,
 ) -> tuple[_CFTypeRef, list[_CFTypeRef]]:
-    service_ref = _cf_string(bindings, service)
-    account_ref = _cf_string(bindings, account)
-    values = {
-        bindings.constant("kSecClass"): bindings.constant("kSecClassGenericPassword"),
-        bindings.constant("kSecAttrService"): service_ref,
-        bindings.constant("kSecAttrAccount"): account_ref,
-        bindings.constant("kSecMatchLimit"): bindings.constant("kSecMatchLimitOne"),
-        bindings.constant("kSecReturnAttributes"): (
-            bindings.constant("kCFBooleanTrue")
-            if return_attributes
-            else bindings.constant("kCFBooleanFalse")
-        ),
-        bindings.constant("kSecReturnData"): (
-            bindings.constant("kCFBooleanTrue")
-            if return_data
-            else bindings.constant("kCFBooleanFalse")
-        ),
-        bindings.constant("kSecUseAuthenticationUI"): bindings.constant(
-            "kSecUseAuthenticationUIFail"
-        ),
-    }
-    return _cf_dictionary(bindings, values), [service_ref, account_ref]
+    owned: list[int] = []
+    try:
+        owned.append(_cf_string(bindings, service))
+        owned.append(_cf_string(bindings, account))
+        values = {
+            bindings.constant("kSecClass"): bindings.constant("kSecClassGenericPassword"),
+            bindings.constant("kSecAttrService"): owned[0],
+            bindings.constant("kSecAttrAccount"): owned[1],
+            bindings.constant("kSecUseAuthenticationUI"): bindings.constant(
+                "kSecUseAuthenticationUIAllow"
+                if allow_interaction
+                else "kSecUseAuthenticationUIFail"
+            ),
+        }
+        if return_attributes or return_data:
+            values[bindings.constant("kSecMatchLimit")] = bindings.constant("kSecMatchLimitOne")
+        if return_attributes:
+            values[bindings.constant("kSecReturnAttributes")] = bindings.constant("kCFBooleanTrue")
+            values[bindings.constant("kSecReturnPersistentRef")] = bindings.constant("kCFBooleanTrue")
+        if return_data:
+            values[bindings.constant("kSecReturnData")] = bindings.constant("kCFBooleanTrue")
+        query = _cf_dictionary(bindings, values)
+        try:
+            if expected is not None:
+                _bind_observed_item(bindings, query, expected)
+        except BaseException:
+            _release(bindings, query)
+            raise
+        return query, owned
+    except BaseException:
+        _release(bindings, *owned)
+        raise
+
+
+def _bind_observed_item(
+    bindings: _SecurityBindings,
+    query: int,
+    observed: _KeychainRead,
+) -> None:
+    """macOS SecItem.h requires kSecMatchItemList for persistent references."""
+
+    if not observed.persistent_reference or observed.modification_date is None:
+        raise _KeychainUnavailable("native keychain mutation requires item metadata")
+    owned: list[int] = []
+    try:
+        reference = _persistent_reference_to_cf_data(bindings, observed.persistent_reference)
+        owned.append(reference)
+        array = bindings.cf.CFArrayCreate(
+            None, (_CFTypeRef * 1)(reference), 1, ctypes.byref(bindings.array_callbacks),
+        )
+        if not array:
+            raise _KeychainUnavailable("native keychain query allocation failed")
+        owned.append(array)
+        date = bindings.cf.CFDateCreate(None, observed.modification_date)
+        if not date:
+            raise _KeychainUnavailable("native keychain query allocation failed")
+        owned.append(date)
+        bindings.cf.CFDictionarySetValue(query, bindings.constant("kSecMatchItemList"), array)
+        bindings.cf.CFDictionarySetValue(query, bindings.constant("kSecAttrModificationDate"), date)
+    finally:
+        _release(bindings, *reversed(owned))
 
 
 def _metadata_from_result(
@@ -768,6 +959,8 @@ def _metadata_from_result(
     service: str,
     account: str,
 ) -> _KeychainMetadata:
+    if bindings.cf.CFGetTypeID(result) != bindings.cf.CFDictionaryGetTypeID():
+        raise _KeychainUnavailable("native keychain returned invalid attributes")
     safe_attributes: dict[str, Any] = {}
     for name, key in (
         ("acct", "kSecAttrAccount"),
@@ -776,8 +969,27 @@ def _metadata_from_result(
         ("mdat", "kSecAttrModificationDate"),
     ):
         value = bindings.cf.CFDictionaryGetValue(result, bindings.constant(key))
-        if value:
-            safe_attributes[name] = _cf_safe_value(bindings, value)
+        if name in {"acct", "svce"}:
+            safe_attributes[name] = _cf_string_value(bindings, value)
+        elif value and bindings.cf.CFGetTypeID(value) == bindings.cf.CFDateGetTypeID():
+            date = bindings.cf.CFDateGetAbsoluteTime(value)
+            if not math.isfinite(date):
+                raise _KeychainUnavailable("native keychain returned invalid timestamps")
+            safe_attributes[name] = date
+        else:
+            raise _KeychainUnavailable("native keychain returned incomplete timestamps")
+    if safe_attributes["acct"] != account or safe_attributes["svce"] != service:
+        raise _KeychainUnavailable("native keychain returned a different item")
+    persistent_reference = _persistent_reference_from_cf_data(
+        bindings,
+        bindings.cf.CFDictionaryGetValue(
+            result,
+            bindings.constant("kSecValuePersistentRef"),
+        ),
+    )
+    if persistent_reference is None:
+        raise _KeychainUnavailable("native keychain returned no item reference")
+    safe_attributes["pref"] = persistent_reference
     native_revision = _sha256(
         json.dumps(
             safe_attributes,
@@ -789,19 +1001,51 @@ def _metadata_from_result(
     attributes = {
         key: value
         for key, value in safe_attributes.items()
-        if isinstance(value, (str, int, float, bool))
+        if key != "pref"
     }
     attributes.setdefault("acct", account)
     attributes.setdefault("svce", service)
-    return _KeychainMetadata("found", native_revision, attributes)
+    return _KeychainMetadata(
+        "found",
+        native_revision,
+        attributes,
+        persistent_reference,
+        safe_attributes["mdat"],
+    )
 
 
 def _keychain_status(status: int, *, action: str) -> NativeOAuthError:
     if status == _ERR_SEC_ITEM_NOT_FOUND:
         return _KeychainNotFound("native keychain item was not found")
+    if status == _ERR_SEC_DUPLICATE_ITEM:
+        return NativeOAuthRevisionError("native keychain item already exists")
     if status in {-25293, -25308, -25291, -25292}:
         return _KeychainDenied(f"native keychain {action} was denied")
     return _KeychainUnavailable(f"native keychain {action} failed")
+
+
+@contextmanager
+def _without_keychain_ui(bindings: _SecurityBindings):
+    """Legacy macOS Keychain also needs its documented interaction switch.
+
+    kSecUseAuthenticationUIFail alone is not implemented by every legacy path.
+    Serialize our callers and restore the process setting on every exit.
+    """
+
+    with _KEYCHAIN_INTERACTION_LOCK:
+        previous = ctypes.c_ubyte()
+        status = bindings.security.SecKeychainGetUserInteractionAllowed(ctypes.byref(previous))
+        if status != _ERR_SEC_SUCCESS:
+            raise _keychain_status(status, action="interaction check")
+        status = bindings.security.SecKeychainSetUserInteractionAllowed(False)
+        if status != _ERR_SEC_SUCCESS:
+            raise _keychain_status(status, action="interaction control")
+        try:
+            yield
+        finally:
+            status = bindings.security.SecKeychainSetUserInteractionAllowed(previous.value)
+            if status != _ERR_SEC_SUCCESS:
+                raise _keychain_status(status, action="interaction restore") from None
 
 
 class _SecurityKeychainStore:
@@ -812,6 +1056,8 @@ class _SecurityKeychainStore:
         *,
         return_attributes: bool,
         return_data: bool,
+        expected: _KeychainRead | None = None,
+        allow_interaction: bool = False,
     ) -> tuple[_SecurityBindings, _CFTypeRef]:
         bindings = _security_bindings()
         query, owned = _keychain_query(
@@ -820,13 +1066,20 @@ class _SecurityKeychainStore:
             account,
             return_attributes=return_attributes,
             return_data=return_data,
+            expected=expected,
+            allow_interaction=allow_interaction,
         )
         result = _CFTypeRef()
         try:
-            status = bindings.security.SecItemCopyMatching(query, ctypes.byref(result))
+            if allow_interaction:
+                status = bindings.security.SecItemCopyMatching(query, ctypes.byref(result))
+            else:
+                with _without_keychain_ui(bindings):
+                    status = bindings.security.SecItemCopyMatching(query, ctypes.byref(result))
         finally:
             _release(bindings, query, *owned)
         if status != _ERR_SEC_SUCCESS:
+            _release(bindings, result)
             raise _keychain_status(status, action="read")
         if not result:
             raise _KeychainUnavailable("native keychain returned no result")
@@ -856,12 +1109,20 @@ class _SecurityKeychainStore:
         finally:
             _release(bindings, result)
 
-    def read(self, service: str, account: str) -> _KeychainRead:
+    def read(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: _KeychainRead | None = None,
+    ) -> _KeychainRead:
         bindings, result = self._copy_matching(
             service,
             account,
             return_attributes=True,
             return_data=True,
+            expected=expected,
+            allow_interaction=True,
         )
         try:
             metadata = _metadata_from_result(
@@ -876,57 +1137,93 @@ class _SecurityKeychainStore:
             )
             if not data:
                 raise _KeychainDenied("native keychain value was unavailable")
-            length = bindings.cf.CFDataGetLength(data)
-            pointer = bindings.cf.CFDataGetBytePtr(data)
-            raw = bytes(pointer[:length]) if pointer and length else b""
+            raw = _cf_data_bytes(bindings, data)
             if not raw:
                 raise _KeychainDenied("native keychain value was empty")
             try:
                 value = raw.decode("utf-8")
             except UnicodeError as exc:
                 raise _KeychainDenied("native keychain value was not UTF-8") from exc
-            return _KeychainRead(value=value, revision=metadata.revision)
+            return _KeychainRead(
+                value=value,
+                revision=metadata.revision,
+                persistent_reference=metadata.persistent_reference,
+                modification_date=metadata.modification_date,
+            )
         finally:
             _release(bindings, result)
 
-    def write(self, service: str, account: str, value: str) -> None:
+    def write(
+        self,
+        service: str,
+        account: str,
+        value: str,
+        *,
+        expected: _KeychainRead | None = None,
+    ) -> None:
         bindings = _security_bindings()
-        query, query_owned = _keychain_query(
-            bindings,
-            service,
-            account,
-            return_attributes=False,
-            return_data=False,
-        )
-        data = _cf_data(bindings, value)
-        attributes = _cf_dictionary(
-            bindings,
-            {bindings.constant("kSecValueData"): data},
-        )
+        query: _CFTypeRef | None = None
+        query_owned: list[int] = []
+        data: _CFTypeRef | None = None
+        attributes: _CFTypeRef | None = None
+        item: _CFTypeRef | None = None
+        item_owned: list[int] = []
         try:
-            status = bindings.security.SecItemUpdate(query, attributes)
-            if status == _ERR_SEC_ITEM_NOT_FOUND:
+            data = _cf_data(bindings, value)
+            if expected is None:
+                service_ref = _cf_string(bindings, service)
+                item_owned.append(service_ref)
+                account_ref = _cf_string(bindings, account)
+                item_owned.append(account_ref)
                 item = _cf_dictionary(
                     bindings,
                     {
                         bindings.constant("kSecClass"): bindings.constant(
                             "kSecClassGenericPassword"
                         ),
-                        bindings.constant("kSecAttrService"): query_owned[0],
-                        bindings.constant("kSecAttrAccount"): query_owned[1],
+                        bindings.constant("kSecAttrService"): service_ref,
+                        bindings.constant("kSecAttrAccount"): account_ref,
                         bindings.constant("kSecValueData"): data,
                     },
                 )
-                try:
-                    status = bindings.security.SecItemAdd(item, None)
-                finally:
-                    _release(bindings, item)
+                status = bindings.security.SecItemAdd(item, None)
+            else:
+                query, query_owned = _keychain_query(
+                    bindings,
+                    service,
+                    account,
+                    return_attributes=False,
+                    return_data=False,
+                    expected=expected,
+                    allow_interaction=True,
+                )
+                attributes = _cf_dictionary(
+                    bindings,
+                    {bindings.constant("kSecValueData"): data},
+                )
+                status = bindings.security.SecItemUpdate(query, attributes)
             if status != _ERR_SEC_SUCCESS:
                 raise _keychain_status(status, action="write")
         finally:
-            _release(bindings, query, attributes, data, *query_owned)
+            _release(
+                bindings,
+                query,
+                attributes,
+                data,
+                item,
+                *query_owned,
+                *item_owned,
+            )
 
-    def delete(self, service: str, account: str) -> None:
+    def delete(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: _KeychainRead,
+    ) -> None:
+        if expected is None:
+            raise ValueError("native keychain delete requires an observed item")
         bindings = _security_bindings()
         query, owned = _keychain_query(
             bindings,
@@ -934,6 +1231,8 @@ class _SecurityKeychainStore:
             account,
             return_attributes=False,
             return_data=False,
+            expected=expected,
+            allow_interaction=True,
         )
         try:
             status = bindings.security.SecItemDelete(query)
@@ -949,13 +1248,32 @@ class _FixtureKeychainStore:
     def metadata(self, service: str, account: str) -> _KeychainMetadata:
         return _KeychainMetadata("not_found", "fixture-absent")
 
-    def read(self, service: str, account: str) -> _KeychainRead:
+    def read(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: _KeychainRead | None = None,
+    ) -> _KeychainRead:
         raise _KeychainNotFound("fixture keychain item was not found")
 
-    def write(self, service: str, account: str, value: str) -> None:
+    def write(
+        self,
+        service: str,
+        account: str,
+        value: str,
+        *,
+        expected: _KeychainRead | None = None,
+    ) -> None:
         raise _KeychainUnavailable("fixture keychain is not writable")
 
-    def delete(self, service: str, account: str) -> None:
+    def delete(
+        self,
+        service: str,
+        account: str,
+        *,
+        expected: _KeychainRead,
+    ) -> None:
         raise _KeychainUnavailable("fixture keychain is not writable")
 
 
@@ -1018,7 +1336,16 @@ def _read_keychain_snapshot(
         )
 
     try:
-        read = store.read(service, account)
+        read = store.read(
+            service,
+            account,
+            expected=_KeychainRead(
+                value="",
+                revision=metadata.revision,
+                persistent_reference=metadata.persistent_reference,
+                modification_date=metadata.modification_date,
+            ),
+        )
     except _KeychainNotFound:
         return _placeholder(
             backend,
@@ -1085,6 +1412,16 @@ def _read_keychain_snapshot(
         {"exists": True, "value": read.value, "revision": metadata.revision},
         after_state,
         isolated=isolated,
+        persistent_reference=(
+            read.persistent_reference
+            if read.persistent_reference is not None
+            else metadata.persistent_reference
+        ),
+        modification_date=(
+            read.modification_date
+            if read.modification_date is not None
+            else metadata.modification_date
+        ),
     )
     return NativeOAuthSnapshot(
         backend=backend,
@@ -1318,18 +1655,99 @@ def _state_matches(live: Mapping[str, Any], expected: Mapping[str, Any]) -> bool
     return False
 
 
-def _live_keychain_state(store: _KeychainStore, operation: Mapping[str, Any]) -> dict[str, Any]:
+def _state_without_revision(state: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(state)
+    result.pop("revision", None)
+    return result
+
+
+def _desired_state_matches(
+    live: Mapping[str, Any],
+    desired: Mapping[str, Any],
+    *,
+    reverse: bool,
+) -> bool:
+    if _state_matches(live, desired):
+        return True
+    return reverse and _state_matches(live, _state_without_revision(desired))
+
+
+def _live_keychain_state(
+    store: _KeychainStore,
+    operation: Mapping[str, Any],
+    *,
+    bind_persistent_reference: bool = True,
+) -> dict[str, Any]:
     service = operation.get("service")
     account = operation.get("account")
     if not isinstance(service, str) or not isinstance(account, str):
         raise ValueError("invalid keychain edit locator")
+    persistent_reference = (
+        operation.get("persistent_reference") if bind_persistent_reference else None
+    )
+    if persistent_reference is not None and not isinstance(persistent_reference, str):
+        raise ValueError("invalid keychain edit persistent reference")
+    modification_date = operation.get("modification_date")
+    if modification_date is not None and not isinstance(modification_date, (int, float)):
+        raise ValueError("invalid keychain edit modification date")
+    expected = None
+    if bind_persistent_reference and persistent_reference is not None:
+        if modification_date is None:
+            raise ValueError("native keychain edit is missing modification date")
+        expected = _KeychainRead(
+            value="",
+            revision="",
+            persistent_reference=persistent_reference,
+            modification_date=float(modification_date),
+        )
     try:
-        read = store.read(service, account)
+        read = store.read(
+            service,
+            account,
+            expected=expected,
+        )
     except _KeychainNotFound:
         return {"exists": False}
     except (_KeychainDenied, _KeychainUnavailable) as exc:
         raise NativeOAuthPermissionError("native keychain could not be read") from exc
-    return {"exists": True, "value": read.value, "revision": read.revision}
+    return {
+        "exists": True,
+        "value": read.value,
+        "revision": read.revision,
+        "persistent_reference": read.persistent_reference,
+        "modification_date": read.modification_date,
+    }
+
+
+def _live_keychain_state_for_apply(
+    store: _KeychainStore,
+    operation: Mapping[str, Any],
+    *,
+    reverse: bool,
+) -> dict[str, Any]:
+    if reverse:
+        # The cleanup mutation may have changed mdat. Reverse therefore reads
+        # by the stable service/account locator, then binds the mutation to
+        # the exact item and fresh metadata returned by this read.
+        return _live_keychain_state(
+            store,
+            operation,
+            bind_persistent_reference=False,
+        )
+    live = _live_keychain_state(store, operation)
+    if not live.get("exists") and operation.get("persistent_reference"):
+        # A successful prior update changes mdat, so its original bound query
+        # is intentionally stale on an idempotent retry. Re-read by locator
+        # only to distinguish the desired post-state from a replacement item;
+        # any mutation below is still bound to the fresh observation.
+        locator_live = _live_keychain_state(
+            store,
+            operation,
+            bind_persistent_reference=False,
+        )
+        if locator_live.get("exists"):
+            return locator_live
+    return live
 
 
 def _live_file_state(operation: Mapping[str, Any]) -> dict[str, Any]:
@@ -1365,22 +1783,57 @@ def _apply_keychain_state(
     store: _KeychainStore,
     operation: Mapping[str, Any],
     desired: Mapping[str, Any],
+    *,
+    observed: Mapping[str, Any],
 ) -> None:
     service = operation.get("service")
     account = operation.get("account")
     if not isinstance(service, str) or not isinstance(account, str):
         raise ValueError("invalid keychain edit locator")
     exists, value = _state_value(desired)
+    observed_exists = bool(observed.get("exists"))
+    observed_read = None
+    if observed_exists:
+        persistent_reference = observed.get("persistent_reference")
+        modification_date = observed.get("modification_date")
+        if not isinstance(persistent_reference, str) or not isinstance(
+            modification_date,
+            (int, float),
+        ):
+            raise NativeOAuthRevisionError("native keychain item metadata was incomplete")
+        observed_read = _KeychainRead(
+            value=str(observed.get("value", "")),
+            revision=str(observed.get("revision", "")),
+            persistent_reference=persistent_reference,
+            modification_date=float(modification_date),
+        )
     try:
         if exists:
             if not isinstance(value, str):
                 raise ValueError("invalid keychain edit state")
-            store.write(service, account, value)
+            store.write(
+                service,
+                account,
+                value,
+                expected=observed_read,
+            )
         else:
-            store.delete(service, account)
+            if observed_read is None:
+                raise NativeOAuthRevisionError("native keychain item disappeared")
+            store.delete(
+                service,
+                account,
+                expected=observed_read,
+            )
+    except _KeychainNotFound as exc:
+        raise NativeOAuthRevisionError("native keychain item changed") from exc
     except (_KeychainDenied, _KeychainUnavailable) as exc:
         raise NativeOAuthPermissionError("native keychain mutation was denied") from exc
-    live = _live_keychain_state(store, operation)
+    live = _live_keychain_state(
+        store,
+        operation,
+        bind_persistent_reference=False,
+    )
     readback_expected = dict(desired)
     readback_expected.pop("revision", None)
     if not _state_matches(live, readback_expected):
@@ -1413,6 +1866,7 @@ def _check_edit(
     edit: Mapping[str, Any],
     *,
     target_key: str,
+    reverse: bool,
 ) -> bool:
     operations = _normalize_operations(edit)
     keychain_store = _KEYCHAIN_STORE
@@ -1421,7 +1875,13 @@ def _check_edit(
         if kind == "keychain":
             if operation.get("store_scope") == "fixture" and keychain_store is _DEFAULT_KEYCHAIN_STORE:
                 raise NativeOAuthPermissionError("fixture keychain is not available")
-            live = _live_keychain_state(keychain_store, operation)
+            live = _live_keychain_state(
+                keychain_store,
+                operation,
+                bind_persistent_reference=(
+                    not reverse and target_key == "before"
+                ),
+            )
         elif kind == "file":
             live = _live_file_state(operation)
         else:
@@ -1429,17 +1889,31 @@ def _check_edit(
         expected = operation.get(target_key)
         if not isinstance(expected, dict):
             raise ValueError("invalid native OAuth edit state")
-        if not _state_matches(live, expected):
+        matches = (
+            _desired_state_matches(live, expected, reverse=True)
+            if reverse
+            else _state_matches(live, expected)
+        )
+        if not matches:
             raise NativeOAuthRevisionError("native OAuth store changed")
     return True
 
 
-def check_keychain_edit(edit: dict[str, Any], *, applied: bool = False) -> bool:
-    """Check that a journal edit is still unapplied or already applied."""
+def check_keychain_edit(
+    edit: dict[str, Any],
+    *,
+    applied: bool = False,
+    reverse: bool = False,
+) -> bool:
+    """Check a journal edit before or after forward/reverse recovery."""
 
     if not isinstance(edit, dict) or edit.get("version") not in {None, 1}:
         raise ValueError("invalid native OAuth edit")
-    return _check_edit(edit, target_key="after" if applied else "before")
+    if reverse:
+        target_key = "before" if applied else "after"
+    else:
+        target_key = "after" if applied else "before"
+    return _check_edit(edit, target_key=target_key, reverse=reverse)
 
 
 def apply_keychain_edit(edit: dict[str, Any], *, reverse: bool = False) -> None:
@@ -1456,14 +1930,18 @@ def apply_keychain_edit(edit: dict[str, Any], *, reverse: bool = False) -> None:
         raise ValueError("invalid native OAuth edit")
     operations = _normalize_operations(edit)
     keychain_store = _KEYCHAIN_STORE
-    planned: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool, bool]] = []
+    planned: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]] = []
 
     for operation in operations:
         kind = operation.get("kind")
         if kind == "keychain":
             if operation.get("store_scope") == "fixture" and keychain_store is _DEFAULT_KEYCHAIN_STORE:
                 raise NativeOAuthPermissionError("fixture keychain is not available")
-            live = _live_keychain_state(keychain_store, operation)
+            live = _live_keychain_state_for_apply(
+                keychain_store,
+                operation,
+                reverse=reverse,
+            )
             is_keychain = True
         elif kind == "file":
             live = _live_file_state(operation)
@@ -1476,19 +1954,44 @@ def apply_keychain_edit(edit: dict[str, Any], *, reverse: bool = False) -> None:
         desired = operation.get(desired_key)
         if not isinstance(expected, dict) or not isinstance(desired, dict):
             raise ValueError("invalid native OAuth edit state")
-        if _state_matches(live, desired):
-            planned.append((operation, desired, expected, is_keychain, False))
+        if _desired_state_matches(live, desired, reverse=reverse):
+            planned.append((operation, desired, expected, is_keychain))
             continue
-        if not _state_matches(live, expected):
+        matches = (
+            _desired_state_matches(live, expected, reverse=True)
+            if reverse
+            else _state_matches(live, expected)
+        )
+        if not matches:
             raise NativeOAuthRevisionError("native OAuth store changed")
-        planned.append((operation, desired, expected, is_keychain, True))
+        planned.append((operation, desired, expected, is_keychain))
 
     try:
-        for operation, desired, _original, is_keychain, should_apply in planned:
-            if not should_apply:
-                continue
+        for operation, desired, expected, is_keychain in planned:
             if is_keychain:
-                _apply_keychain_state(keychain_store, operation, desired)
+                live = _live_keychain_state_for_apply(
+                    keychain_store,
+                    operation,
+                    reverse=reverse,
+                )
+            else:
+                live = _live_file_state(operation)
+            if _desired_state_matches(live, desired, reverse=reverse):
+                continue
+            matches = (
+                _desired_state_matches(live, expected, reverse=True)
+                if reverse
+                else _state_matches(live, expected)
+            )
+            if not matches:
+                raise NativeOAuthRevisionError("native OAuth store changed")
+            if is_keychain:
+                _apply_keychain_state(
+                    keychain_store,
+                    operation,
+                    desired,
+                    observed=live,
+                )
             else:
                 _apply_file_state(operation, desired)
                 if not _state_matches(_live_file_state(operation), desired):
