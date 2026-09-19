@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import type { MigrationItem } from '@/components/settings/models/types';
+import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 
 const showToast = vi.hoisted(() => vi.fn());
 const capability = vi.hoisted(() => ({ value: true as boolean | null }));
@@ -145,6 +146,26 @@ afterEach(() => {
 });
 
 describe('ImportKeysNotice', () => {
+  it('rescans on return from Settings without remounting the setup notice', async () => {
+    serve([CLAUDE_KEY]);
+    const notice = (active: boolean) => (
+      <I18nextProvider i18n={i18n}>
+        <RouteSurfaceActiveContext.Provider value={active}>
+          <ImportKeysNotice />
+        </RouteSurfaceActiveContext.Provider>
+      </I18nextProvider>
+    );
+    const view = render(notice(true));
+    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+    view.rerender(notice(false));
+    stored = [];
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+    view.rerender(notice(true));
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Review and migrate' })).toBeNull());
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+  });
+
   it('counts the importable keys — not the rows the scan returned', async () => {
     serve(FULL_SCAN);
     renderNotice();

@@ -20,6 +20,7 @@ import { importableKeys, isImportableKey, scanMigrationWhenEnabled } from '@/com
 import type { MigrationItem } from '@/components/settings/models/types';
 import { useModelHubCapability } from '@/components/settings/models/useModelHubCapability';
 import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 
 export const ImportKeysNotice: React.FC<{
   /** Bubble the applied count so the host step can refresh assistants/sources. */
@@ -27,6 +28,7 @@ export const ImportKeysNotice: React.FC<{
 }> = ({ onApplied }) => {
   const { t } = useTranslation();
   const modelHubEnabled = useModelHubCapability();
+  const routeSurfaceActive = useRouteSurfaceActive();
 
   const [candidates, setCandidates] = React.useState<MigrationItem[]>([]);
   const [imported, setImported] = React.useState(0);
@@ -46,6 +48,9 @@ export const ImportKeysNotice: React.FC<{
       setCandidates([]);
       return;
     }
+    // Settings retains the wizard. Refresh its offer when it becomes visible
+    // again, including migrations performed outside this notice's dialog.
+    if (!routeSurfaceActive) return;
     let cancelled = false;
     scanMigrationWhenEnabled(true)
       .then((scan) => {
@@ -65,7 +70,7 @@ export const ImportKeysNotice: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [modelHubEnabled, scanToken]);
+  }, [modelHubEnabled, routeSurfaceActive, scanToken]);
 
   const remaining = candidates.length;
   if (modelHubEnabled !== true || dismissed) return null;
