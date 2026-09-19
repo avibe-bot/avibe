@@ -97,6 +97,15 @@ explicitly authorized acceptance check.
 - `EngineAdapter.validate_oauth_credential(credential_ref) -> None` requires
   credential-specific upstream acceptance, without inference. The existing
   `observe_source` protocol pin is insufficient for imported grants.
+  Validation uses CPA's credential-scoped `/api-call` with a bodyless GET to
+  Claude's `/api/oauth/profile` or Codex's `/backend-api/wham/usage`. Only a
+  2xx upstream response with the provider's account/usage shape is an
+  authentication witness: a nonempty string `account.uuid` for Claude or
+  `plan_type` for Codex. Unknown nonempty plan names remain forward-compatible;
+  quota/entitlement fields do not decide authentication. Error envelopes,
+  malformed payloads and non-2xx responses remain inconclusive. No inference
+  endpoint, model catalog, or direct refresh is used. This proves current
+  access-token acceptance, not inference entitlement or future refresh success.
 - `ModelHubService.migration_guard` is a callable taking
   `tuple[BackendName, ...]` and returning an asynchronous context manager.
   Entering it closes managed native admission, waits for active work (without
@@ -193,6 +202,24 @@ Completed receipts also retain metadata-only revisions of verified clean
 native stores containing unrelated material. Scans suppress only those exact
 placeholders; a changed revision becomes a candidate again. This avoids reading
 Keychain secrets on every scan or presenting preserved MCP data as a new login.
+
+### Authentication witness evidence
+
+- Pinned CPA commit `2a6b87aca083a5bf498ac1f68a1b636c500d7aaa`,
+  `internal/auth/claude/anthropic_auth.go`: `ProfileURL`,
+  `fetchOAuthControlPlaneJSON`, and `FetchOAuthProfile`.
+- Official Codex `rust-v0.154.0`, commit
+  `6b9826e3aa83b1a5947db50f4332cb9c65f1b340`:
+  `codex-rs/backend-client/src/client/rate_limit_resets.rs` and
+  `codex-rs/codex-backend-openapi-models/src/models/rate_limit_status_payload.rs`.
+  The usage decoder requires `plan_type` and accepts unknown enum names;
+  missing quota windows and `allowed: false` do not negate authentication.
+- Pinned CPA `internal/api/handlers/management/api_tools.go`: `/api-call`
+  substitutes `$TOKEN$` from the selected current engine record. Its outer
+  HTTP success is not the inner upstream acceptance.
+
+These source contracts justify the synthetic success fixtures. Live-provider
+acceptance, refresh and inference still require separate authorized testing.
 
 ## Writer-boundary review decision
 
