@@ -2322,13 +2322,13 @@ export const ChatPage: React.FC = () => {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
         setWorking(false);
-        void refreshQueue();
       } else {
-        // The successful admission retires the whole queue as one merged turn.
-        // Clear it locally before queue.updated arrives so the UI confirms the
-        // click immediately instead of waiting for the event round trip.
-        setQueue([]);
+        // A successful admission may only claim the compatible prefix (for
+        // example, attachment rows can remain queued behind an active turn).
+        // Re-read the authoritative queue instead of assuming the whole visible
+        // batch was flushed.
       }
+      await refreshQueue();
     } catch (err) {
       // Same session guard as the success path: a rejection after a chat switch
       // must not clear the new chat's working / stamp this error on it (Codex P2).
