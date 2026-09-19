@@ -11,7 +11,7 @@ import pytest
 from core.handlers.model_hub.migration_journal import NativeFileEdit, NativeTakeoverJournal
 from core.handlers.model_hub.service import ModelHubError
 from config.v2_config import ModelHubConfig
-from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
+from core.handlers.model_hub.adapter import OAuthCredentialRejectedError, OAuthFlowState
 from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
     _isolate_native_home,
     _service,
@@ -292,6 +292,74 @@ def test_rejected_refresh_finishes_custody_without_claiming_success(monkeypatch,
     assert len(adapter.validated) == 2
     # Normal Hub config/auth repair is not trapped behind the migration gate.
     service._save_config(service._clone_config(store.config))
+
+
+@pytest.mark.parametrize("crash_before_receipt", [False, True])
+def test_explicit_hub_reauth_can_repair_inconclusive_exposed_takeover(
+    monkeypatch, tmp_path, crash_before_receipt,
+):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_codex_oauth(home)
+    service, store, adapter = _service(tmp_path)
+    ids = [item["id"] for item in service.migration_scan()["items"]]
+
+    async def inconclusive(ref):
+        adapter.validated.append(ref)
+        raise RuntimeError("fixture CPA status: token expired; no refresh provenance")
+
+    adapter.validate_oauth_credential = inconclusive
+    with pytest.raises(ModelHubError) as pending:
+        asyncio.run(service.migration_apply(ids))
+    assert pending.value.code == "migration_recovery_pending"
+    source = store.config.sources[0]
+    retained_ref = source.credential_ref
+    starts = []
+
+    async def start(source_id, vendor):
+        assert service.migration_journal.load() is None
+        assert not service.migration_blocked_backends
+        assert store.config.sources[0].credential_ref == retained_ref
+        starts.append(source_id)
+        return OAuthFlowState(
+            flow_id="oaf_fixture123", source_id=source_id, vendor=vendor,
+            state="awaiting_action", auth_url="https://fixture.example/authorize",
+            device_code=None, expects=None, instructions_key=None, error_key=None,
+            expires_at_iso="2099-01-01T00:00:00+00:00", credential_ref=None,
+        )
+
+    adapter.start_oauth = start
+    # The escape is an existing explicitly acknowledged reauthentication, not
+    # an implicit interpretation of a 401/503 or a migration cancellation.
+    with pytest.raises(ModelHubError) as unacknowledged:
+        asyncio.run(service.reauth_source(source.id, {}))
+    assert unacknowledged.value.code == "reauth_confirmation_required"
+    assert service.migration_journal.load()["phase"] == "exposed"
+
+    complete = service.migration_journal.complete
+    if crash_before_receipt:
+        def disk_unavailable(record):
+            raise OSError("fixture crash before receipt")
+
+        service.migration_journal.complete = disk_unavailable
+        with pytest.raises(ModelHubError):
+            asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))
+        assert service.migration_journal.load()["terminal"]["reason"] == "reauth_requested"
+        assert starts == []
+        service.migration_journal.complete = complete
+        asyncio.run(service.recover_runtime_intent())
+    result = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))
+    assert result["flow"]["channel"] == "hub"
+    assert result["flow"]["intent"] == "reauth"
+    assert starts == [source.id]
+    assert service.migration_journal.completed()["outcome"] == "reauth_requested"
+    assert adapter.revoked == []
+    assert len(adapter.validated) == 1
+    assert not (home / ".codex/auth.json").exists()
+    assert store.config.sources[0].state.status == "needs_action"
+    with pytest.raises(ModelHubError) as replay:
+        asyncio.run(service.migration_apply(ids))
+    assert replay.value.code != "migration_credentials_invalid"
 
 
 @pytest.mark.parametrize("boundary", ["terminal_config", "receipt"])

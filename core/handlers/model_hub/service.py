@@ -95,6 +95,7 @@ from .migration import (
     MigrationConflictError,
     MigrationCredentialsInvalidError,
     apply_native_migration,
+    prepare_takeover_reauthentication,
     recover_native_migration,
     scan_native_configs,
 )
@@ -5770,6 +5771,19 @@ class ModelHubService:
             or payload.get("acknowledge_irreversible") is not True
         ):
             raise ModelHubError("reauth_confirmation_required", status=409)
+
+        from core.backend_restart import NativeMigrationBlockedError
+        from vibe.native_oauth_store import NativeOAuthError
+
+        try:
+            await await_owned_task(asyncio.create_task(
+                prepare_takeover_reauthentication(self, source_id),
+                name="model-hub-takeover-reauthentication",
+            ))
+        except NativeMigrationBlockedError:
+            raise ModelHubError("migration_native_busy", status=409) from None
+        except (MigrationConflictError, TakeoverStateError, NativeOAuthError, OSError):
+            raise ModelHubError("migration_recovery_pending", status=409) from None
 
         async with self._mutation_lock:
             config = self.store.load()

@@ -215,7 +215,8 @@ class NativeTakeoverJournal:
                 if (
                     payload["phase"] != "exposed"
                     or not isinstance(terminal, dict)
-                    or set(terminal) != {"invalid_source_ids", "config"}
+                    or set(terminal) - {"invalid_source_ids", "config", "reason"}
+                    or terminal.get("reason", "rejected") not in {"rejected", "reauth_requested"}
                     or not isinstance(terminal["invalid_source_ids"], list)
                     or not terminal["invalid_source_ids"]
                     or any(
@@ -239,7 +240,7 @@ class NativeTakeoverJournal:
                         ).to_payload()
                 if actual != expected:
                     raise TakeoverStateError("invalid takeover terminal configuration")
-        elif payload.get("outcome", "success") not in {"success", "needs_auth"}:
+        elif payload.get("outcome", "success") not in {"success", "needs_auth", "reauth_requested"}:
             raise TakeoverStateError("invalid takeover receipt")
         return payload
 
@@ -268,7 +269,11 @@ class NativeTakeoverJournal:
             "items": record["items"],
             "backends": record["backends"],
             "source_ids": record["source_ids"],
-            "outcome": "needs_auth" if record.get("terminal") else "success",
+            "outcome": (
+                "reauth_requested"
+                if (record.get("terminal") or {}).get("reason") == "reauth_requested"
+                else "needs_auth" if record.get("terminal") else "success"
+            ),
             "source_credentials": {
                 source["id"]: source["credential_ref"]
                 for source in record["updated"]["sources"]

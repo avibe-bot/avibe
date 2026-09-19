@@ -618,8 +618,15 @@ async def test_validate_distinguishes_definitive_invalid_grant_from_unknown_deni
 
 
 @pytest.mark.asyncio
-async def test_validate_raises_canonical_rejection_only_for_cpa_refresh_state(
-    tmp_path: Path,
+@pytest.mark.parametrize("status_message", [
+    "token expired",
+    "unauthorized",
+    "invalid_grant",
+    'token refresh failed with status 400: {"error":"invalid_grant","code":"refresh_token_reused"}',
+    'bad response status code 400, message: {"error":"invalid_grant"}',
+])
+async def test_inventory_without_refresh_provenance_cannot_terminalize(
+    tmp_path: Path, status_message: str,
 ) -> None:
     store = EngineStateStore(tmp_path / "engine")
     client = _FakeEngineClient()
@@ -636,13 +643,16 @@ async def test_validate_raises_canonical_rejection_only_for_cpa_refresh_state(
     client.files[0].update(
         {
             "status": "error",
-            "status_message": "invalid_grant",
+            "status_message": status_message,
             "unavailable": True,
         }
     )
 
-    with pytest.raises(OAuthCredentialRejectedError) as caught:
+    client.api_call_status_code = 401
+    client.api_call_response = '{"error":{"type":"invalid_token"}}'
+    with pytest.raises(EngineStateError) as caught:
         await adapter.validate_oauth_credential(ref)
+    assert not isinstance(caught.value, OAuthCredentialRejectedError)
     assert "refresh-token-fixture" not in str(caught.value)
 
 

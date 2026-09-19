@@ -1195,6 +1195,8 @@ async def _resume_takeover(
             raise MigrationConflictError
         if record.get("outcome") == "needs_auth":
             raise MigrationCredentialsInvalidError
+        if record.get("outcome") == "reauth_requested":
+            raise MigrationConflictError
         return len(record["items"]), [
             position for source_id in record["source_ids"] for position in host._added_to(source_id)
         ]
@@ -1428,4 +1430,50 @@ async def recover_native_migration(host: MigrationHost) -> None:
                 except MigrationCredentialsInvalidError:
                     # The durable Source state is the repair entry point.
                     # No native credential or admission gate remains owned.
+                    pass
+
+
+async def prepare_takeover_reauthentication(host: MigrationHost, source_id: str) -> None:
+    """Honor explicit Hub reauthentication without guessing refresh validity.
+
+    This is not a migration-success path. The user has acknowledged replacing
+    authentication in Hub; release only the completed native withdrawal, keep
+    every current engine grant, and let the existing Hub OAuth flow repair it.
+    """
+    async with host._migration_lock:
+        record = host.migration_journal.load()
+        if record is None:
+            return
+        if record["phase"] != "exposed":
+            raise MigrationConflictError
+        oauth_ids = [
+            credential["source_id"] for credential in record["credentials"]
+            if credential["kind"] == "oauth"
+        ]
+        if source_id not in oauth_ids:
+            raise MigrationConflictError
+        async with host.migration_guard(tuple(record["backends"])) as verify_idle:
+            async with host._mutation_lock:
+                if not record.get("terminal"):
+                    updated = ModelHubConfig.from_payload(record["updated"])
+                    if host.store.load().to_payload() != updated.to_payload():
+                        raise MigrationConflictError
+                    terminal = host._clone_config(updated)
+                    for source in terminal.sources:
+                        if source.id in oauth_ids:
+                            source.state = ModelHubSourceStateConfig(
+                                status="needs_action",
+                                detail_key="models.source.needs_action.oauth_expired",
+                            )
+                    record["terminal"] = {
+                        "invalid_source_ids": oauth_ids,
+                        "config": terminal.to_payload(),
+                        "reason": "reauth_requested",
+                    }
+                    host.migration_journal.save(record)
+                try:
+                    # Reuses strict file/store cleanup checks, persisted config
+                    # identity, and idle verification before removing any gate.
+                    await _resume_takeover(host, record, verify_idle)
+                except MigrationCredentialsInvalidError:
                     pass

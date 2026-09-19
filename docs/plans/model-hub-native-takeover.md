@@ -160,6 +160,22 @@ flow remains usable. Crash recovery replays the terminal decision without
 repeating a rejected refresh. An expired access token or generic 401 alone
 cannot establish this terminal outcome.
 
+The pinned CPA version does not expose refresh-specific error provenance:
+scheduled refresh failures can become `token expired`, while request errors
+can populate the same inventory status string. The concrete adapter therefore
+does not infer authoritative rejection from that inventory. No runtime upgrade
+or heuristic classification is part of this change.
+
+An inconclusive exposed takeover remains retryable. The user's existing,
+explicitly acknowledged Hub reauthentication action is also a repair path:
+under the same lifecycle/credential guard, persist a terminal decision with
+`reason: reauth_requested`, verify native withdrawal and the current Hub refs,
+mark the unresolved OAuth Sources as needing sign-in, and finish custody
+before starting the existing Hub flow. Keep the engine's current grants;
+never restore native material. The receipt records `reauth_requested`, not
+success or proof of expiration. Recovery replays this decision after a crash
+without another upstream validation or automatically starting a browser flow.
+
 Shutdown joins the owned operation before stopping the runtime. Client
 cancellation cannot cancel credential custody. A retry after completion checks
 the retained source IDs, opaque credential references, and native inventory

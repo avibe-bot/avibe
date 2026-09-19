@@ -22,7 +22,6 @@ from core.handlers.model_hub.adapter import (
     EngineStatus,
     ObservationDiscovery,
     ObservationOutcome,
-    OAuthCredentialRejectedError,
     OAuthFlowState,
     OriginNotAllowedError,
     RawCallOutcome,
@@ -500,8 +499,8 @@ def _oauth_rejection_is_definitive(
 
     This helper is intentionally not sufficient on its own for takeover
     validation: the protocol probe is an upstream request, not a refresh
-    endpoint. The authoritative verdict comes from CPA's auth inventory after
-    its own refresh/conductor state records an invalid grant.
+    endpoint. The pinned CPA inventory does not expose refresh provenance and
+    cannot turn these words into an authoritative grant-rejection verdict.
     """
 
     if status not in {*_REQUEST_ERROR_STATUSES, *_AUTHENTICATION_ERROR_STATUSES}:
@@ -635,8 +634,8 @@ def _parse_protocol_authenticated_evidence(
         return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             # The management probe is not CPA's refresh endpoint. Even an
-            # ``invalid_grant``-shaped upstream response is inconclusive until
-            # CPA records refresh invalidation in its auth inventory.
+            # ``invalid_grant``-shaped upstream response is inconclusive. The
+            # pinned inventory also has no refresh-specific error provenance.
             authentication=_AuthenticationEvidence.UNKNOWN,
         )
 
@@ -786,14 +785,6 @@ class _AuthRecord:
     status: str = ""
     status_message: str = ""
     unavailable: bool = False
-
-
-def _oauth_auth_record_requires_reauthentication(auth: _AuthRecord) -> bool:
-    """Use only CPA's recorded refresh-invalidating state as terminal evidence."""
-
-    if not auth.unavailable and auth.status not in {"error", "failed"}:
-        return False
-    return _normalized_identifier(auth.status_message) in _REFRESH_INVALIDATION_IDENTIFIERS
 
 
 def _response_shape_proves_protocol(
@@ -1797,8 +1788,9 @@ class CLIProxyEngineAdapter:
             ]
             if len(matches) != 1:
                 raise EngineStateError("OAuth credential validation is inconclusive")
-            if _oauth_auth_record_requires_reauthentication(matches[0]):
-                raise OAuthCredentialRejectedError("oauth credential requires reauthentication")
+            # CPA v7.2.149 loses refresh failure details ("token expired") and
+            # also puts request failures in status_message. None of those
+            # inventory strings proves that a refresh grant was rejected.
             try:
                 evidence = await run_owned_in_thread(
                     _probe_oauth_protocol_response,
