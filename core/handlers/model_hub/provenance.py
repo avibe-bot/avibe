@@ -562,6 +562,7 @@ class ProcessScope:
     prepared_routes: dict[str, "PreparedGatewayRoute"] = field(default_factory=dict)
     routing_conflicts: set[str] = field(default_factory=set)
     untracked_use: bool = False
+    request_scoped: bool = False
     # The credential each route launched from this scope authenticates with,
     # one per distinct route rather than one per launch. `token` identifies
     # the process; these identify a route within it, which is what routing
@@ -604,10 +605,14 @@ class GatewayTurnTerminalizer:
         *,
         backend: str,
         token: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> None:
         self._registry = registry
         self._backend = backend
         self._token = token
+        self._request_metadata = (
+            dict(request_metadata) if isinstance(request_metadata, Mapping) else None
+        )
         # One gateway request, one identity. Every attempt this terminalizer
         # records is filed under it, so concurrent requests on one turn cannot
         # overwrite each other's provenance.
@@ -616,6 +621,7 @@ class GatewayTurnTerminalizer:
             backend=backend,
             token=token,
             request_id=self._request_id,
+            request_metadata=self._request_metadata,
         )
         self._stream_started = False
         self._attempt_started = False
@@ -644,6 +650,7 @@ class GatewayTurnTerminalizer:
             prepared_turn_id=self.turn_id,
             request_id=self._request_id,
             gateway_model_id=gateway_model_id,
+            request_metadata=self._request_metadata,
         )
         self.turn_id = routing.owner_turn_id
         if self.turn_id is None and self.on_attribution_released is not None:
@@ -944,11 +951,43 @@ class TurnCorrelationRegistry:
             raise ValueError("process scope is required")
         return backend, normalized  # type: ignore[return-value]
 
+    @staticmethod
+    def _request_identity(
+        request_metadata: Mapping[str, str] | None,
+    ) -> tuple[str, str] | None:
+        if not isinstance(request_metadata, Mapping):
+            return None
+        route_id = request_metadata.get("avibe_route_id")
+        turn_id = request_metadata.get("avibe_turn_id")
+        if (
+            not isinstance(route_id, str)
+            or not route_id.strip()
+            or not isinstance(turn_id, str)
+            or not turn_id.strip()
+        ):
+            return None
+        return route_id, turn_id
+
+    @staticmethod
+    def _register_explicit_turn(
+        *,
+        key: ScopeKey,
+        scope: ProcessScope,
+        turn_id: str | None,
+        turn_scopes: dict[str, set[ScopeKey]],
+    ) -> None:
+        if turn_id is None:
+            return
+        scope.active_turns.add(turn_id)
+        turn_scopes.setdefault(turn_id, set()).add(key)
+
     def credentials(
         self,
         backend: str,
         process_scope: str,
         turn_id: Optional[str],
+        *,
+        request_scoped: bool = False,
     ) -> str:
         key = self._scope_key(backend, process_scope)
         normalized_turn_id = str(turn_id or "").strip() or None
@@ -958,6 +997,28 @@ class TurnCorrelationRegistry:
                 scope = ProcessScope(token=secrets.token_urlsafe(32))
                 self._scopes[key] = scope
                 self._credentials[scope.token] = GatewayCredential(scope_key=key)
+
+            if backend == "codex" and request_scoped and not scope.request_scoped:
+                for active_turn_id in scope.active_turns:
+                    trace = self._traces.get(active_turn_id)
+                    if trace is not None and scope.untracked_use:
+                        trace.ambiguous = True
+                scope.request_scoped = True
+                scope.untracked_use = False
+                for route_token in scope.route_tokens.values():
+                    self._credentials.pop(route_token, None)
+
+            # Explicit Codex scopes never infer ownership from a sole active
+            # turn. Trusted dispatcher calls still register their own turn;
+            # HTTP requests must carry the route and turn metadata.
+            if backend == "codex" and scope.request_scoped:
+                self._register_explicit_turn(
+                    key=key,
+                    scope=scope,
+                    turn_id=normalized_turn_id,
+                    turn_scopes=self._turn_scopes,
+                )
+                return scope.token
 
             # Frozen v3 has no discriminator for the shared OpenCode server.
             if normalized_turn_id is None or backend == "opencode":
@@ -1016,8 +1077,56 @@ class TurnCorrelationRegistry:
         if token is None:
             token = secrets.token_urlsafe(32)
             scope.route_tokens[route] = token
-            self._credentials[token] = GatewayCredential(scope_key=key, route=route)
+            if not scope.request_scoped:
+                self._credentials[token] = GatewayCredential(
+                    scope_key=key,
+                    route=route,
+                )
         return token
+
+    def _explicit_route(
+        self,
+        *,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None,
+    ) -> tuple[ScopeKey, ProcessScope, PreparedGatewayRoute, str] | None:
+        credential = self._credential(backend, token)
+        if credential is None:
+            return None
+        key = credential.scope_key
+        scope = self._scopes.get(key)
+        if scope is None or not scope.request_scoped:
+            return None
+        identity = self._request_identity(request_metadata)
+        if identity is None:
+            return None
+        route_id, _turn_id = identity
+        route = next(
+            (
+                candidate
+                for candidate, candidate_id in scope.route_tokens.items()
+                if candidate_id == route_id
+            ),
+            None,
+        )
+        if route is None:
+            return None
+        return key, scope, route, route_id
+
+    @staticmethod
+    def _explicit_turn_owns_route(
+        scope: ProcessScope,
+        *,
+        turn_id: str,
+        route: PreparedGatewayRoute,
+    ) -> bool:
+        return (
+            turn_id in scope.active_turns
+            and turn_id not in scope.ambiguous_turns
+            and turn_id not in scope.routing_conflicts
+            and scope.prepared_routes.get(turn_id) == route
+        )
 
     def retire_scope(
         self,
@@ -1041,10 +1150,15 @@ class TurnCorrelationRegistry:
                 trace = self._traces.get(turn_id)
                 terminal_is_exact = (
                     trace is not None
-                    and (turn_id == normalized_terminal_turn_id or trace.admission_closed)
+                    and (
+                        scope.request_scoped or scope.active_turns == {turn_id}
+                    )
+                    and (
+                        turn_id == normalized_terminal_turn_id
+                        or trace.admission_closed
+                    )
                     and not trace.ambiguous
                     and not scope.untracked_use
-                    and scope.active_turns == {turn_id}
                     and turn_id not in scope.ambiguous_turns
                     and bool(trace.failed_attempts or trace.terminal_error or (trace.admission_closed and trace.served))
                 )
@@ -1060,7 +1174,9 @@ class TurnCorrelationRegistry:
         if credential is None:
             return None
         key = credential.scope_key
-        scope = self._scopes[key]
+        scope = self._scopes.get(key)
+        if scope is None or scope.request_scoped:
+            return None
         if scope.untracked_use or len(scope.active_turns) != 1:
             for turn_id in scope.active_turns:
                 trace = self._traces.get(turn_id)
@@ -1074,6 +1190,32 @@ class TurnCorrelationRegistry:
         if trace is not None and (trace.ambiguous or trace.admission_closed):
             return None
         return turn_id, key
+
+    def _trusted_turn(
+        self,
+        *,
+        backend: str,
+        token: str,
+        turn_id: str,
+    ) -> tuple[str, ScopeKey] | None:
+        """Resolve a dispatcher-owned turn without HTTP turn inference."""
+
+        credential = self._credential(backend, token)
+        if credential is None:
+            return None
+        key = credential.scope_key
+        scope = self._scopes.get(key)
+        if scope is None:
+            return None
+        if scope.request_scoped:
+            if turn_id not in scope.active_turns or turn_id in scope.ambiguous_turns:
+                return None
+            trace = self._traces.get(turn_id)
+            if trace is not None and (trace.ambiguous or trace.admission_closed):
+                return None
+            return turn_id, key
+        exact = self._exact_turn(backend, token)
+        return exact if exact is not None and exact[0] == turn_id else None
 
     def begin_gateway_request(
         self,
@@ -1108,6 +1250,64 @@ class TurnCorrelationRegistry:
                 return None
             return turn_id
 
+    def _register_prepared_gateway_route(
+        self,
+        *,
+        scope: ProcessScope,
+        turn_id: str,
+        route: PreparedGatewayRoute,
+    ) -> bool:
+        existing = scope.prepared_routes.get(turn_id)
+        if existing is not None and existing != route:
+            scope.prepared_routes.pop(turn_id, None)
+            scope.routing_conflicts.add(turn_id)
+            return False
+        if turn_id in scope.routing_conflicts:
+            return False
+        scope.prepared_routes[turn_id] = route
+        return True
+
+    def _record_prepared_gateway_trace(
+        self,
+        *,
+        key: ScopeKey,
+        scope: ProcessScope,
+        turn_id: str,
+        route: PreparedGatewayRoute,
+    ) -> bool:
+        trace = self._traces.setdefault(
+            turn_id,
+            TurnTrace(
+                turn_id=turn_id,
+                agent=key[0],
+                requested_model_id=route.requested_model_id,
+                scope_key=key,
+            ),
+        )
+        if (
+            trace.requested_model_id != route.requested_model_id
+            or (
+                trace.gateway_source_id is not None
+                and trace.gateway_source_id != route.source_id
+            )
+            or (
+                trace.gateway_request_model_id is not None
+                and trace.gateway_request_model_id
+                != route.gateway_request_model_id
+            )
+            or (
+                trace.gateway_model_id is not None
+                and trace.gateway_model_id != route.resolved_model_id
+            )
+        ):
+            trace.ambiguous = True
+            scope.ambiguous_turns.add(turn_id)
+            return False
+        trace.gateway_source_id = route.source_id
+        trace.gateway_request_model_id = route.gateway_request_model_id
+        trace.gateway_model_id = route.resolved_model_id
+        return True
+
     def prepare_gateway_turn(
         self,
         *,
@@ -1120,23 +1320,44 @@ class TurnCorrelationRegistry:
         via_mapping: bool,
         gateway_request_model_id: str | None = None,
     ) -> str:
-        """Bind a credential to this route, independently of attribution.
-
-        Returns the credential the launch must authenticate with. Routing is
-        answered from the credential, so the launch has to use this one rather
-        than the scope credential it passed in — a scope credential names only
-        the process, and an upstream model id is not unique across the routes
-        a process runs. Falls back to the given token when there is no route
-        to bind it to, so a caller can always use the return value.
-        """
+        """Register a route and return its legacy credential or explicit handle."""
 
         with self._lock:
             credential = self._credential(backend, token)
             if credential is None:
                 return token
             key = credential.scope_key
-            scope = self._scopes[key]
+            scope = self._scopes.get(key)
+            if scope is None:
+                return token
             normalized_turn_id = str(turn_id or "").strip()
+            request_model_id = gateway_request_model_id or resolved_model_id
+            prepared = PreparedGatewayRoute(
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                source_id=source_id,
+                gateway_request_model_id=request_model_id,
+            )
+
+            if scope.request_scoped:
+                launch_token = self._route_credential(key, scope, prepared)
+                if (
+                    normalized_turn_id
+                    and normalized_turn_id in scope.active_turns
+                ):
+                    self._register_prepared_gateway_route(
+                        scope=scope,
+                        turn_id=normalized_turn_id,
+                        route=prepared,
+                    )
+                    self._record_prepared_gateway_trace(
+                        key=key,
+                        scope=scope,
+                        turn_id=normalized_turn_id,
+                        route=prepared,
+                    )
+                return launch_token
+
             if normalized_turn_id:
                 if normalized_turn_id not in scope.active_turns:
                     return token
@@ -1146,58 +1367,57 @@ class TurnCorrelationRegistry:
                 if exact is None:
                     return token
                 route_turn_id = exact[0]
-            request_model_id = gateway_request_model_id or resolved_model_id
-            prepared = PreparedGatewayRoute(
-                requested_model_id=requested_model_id,
-                resolved_model_id=resolved_model_id,
-                source_id=source_id,
-                gateway_request_model_id=request_model_id,
-            )
             launch_token = self._route_credential(key, scope, prepared)
-            existing = scope.prepared_routes.get(route_turn_id)
-            if existing is not None and existing != prepared:
-                scope.prepared_routes.pop(route_turn_id, None)
-                scope.routing_conflicts.add(route_turn_id)
-            elif route_turn_id not in scope.routing_conflicts:
-                scope.prepared_routes[route_turn_id] = prepared
-
-            exact = self._exact_turn(backend, token)
-            if exact is None:
-                return launch_token
-            exact_turn_id, key = exact
-            if exact_turn_id != route_turn_id:
-                return launch_token
-            trace = self._traces.setdefault(
-                exact_turn_id,
-                TurnTrace(
-                    turn_id=exact_turn_id,
-                    agent=key[0],
-                    requested_model_id=requested_model_id,
-                    scope_key=key,
-                ),
+            self._register_prepared_gateway_route(
+                scope=scope,
+                turn_id=route_turn_id,
+                route=prepared,
             )
-            if (
-                trace.requested_model_id != requested_model_id
-                or (
-                    trace.gateway_source_id is not None
-                    and trace.gateway_source_id != source_id
-                )
-                or (
-                    trace.gateway_request_model_id is not None
-                    and trace.gateway_request_model_id != request_model_id
-                )
-                or (
-                    trace.gateway_model_id is not None
-                    and trace.gateway_model_id != resolved_model_id
-                )
-            ):
-                trace.ambiguous = True
-                self._scopes[key].ambiguous_turns.add(exact_turn_id)
+            exact = self._exact_turn(backend, token)
+            if exact is None or exact[0] != route_turn_id:
                 return launch_token
-            trace.gateway_source_id = source_id
-            trace.gateway_request_model_id = request_model_id
-            trace.gateway_model_id = resolved_model_id
+            self._record_prepared_gateway_trace(
+                key=key,
+                scope=scope,
+                turn_id=route_turn_id,
+                route=prepared,
+            )
             return launch_token
+
+    def gateway_request_metadata(
+        self,
+        *,
+        backend: str,
+        token: str,
+        turn_id: Optional[str],
+    ) -> dict[str, str]:
+        """Return the explicit route and turn identity for a prepared launch."""
+
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return {}
+        with self._lock:
+            credential = self._credential(backend, token)
+            if credential is None:
+                return {}
+            scope = self._scopes.get(credential.scope_key)
+            if (
+                scope is None
+                or not scope.request_scoped
+                or normalized_turn_id not in scope.active_turns
+                or normalized_turn_id in scope.routing_conflicts
+            ):
+                return {}
+            route = scope.prepared_routes.get(normalized_turn_id)
+            if route is None:
+                return {}
+            route_id = scope.route_tokens.get(route)
+            if route_id is None:
+                return {}
+            return {
+                "avibe_route_id": route_id,
+                "avibe_turn_id": normalized_turn_id,
+            }
 
     def claim_gateway_request(
         self,
@@ -1207,6 +1427,7 @@ class TurnCorrelationRegistry:
         prepared_turn_id: Optional[str],
         request_id: str = TURN_REQUEST,
         gateway_model_id: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> GatewayRouting:
         """Route one gateway request and settle its attribution atomically.
 
@@ -1228,8 +1449,33 @@ class TurnCorrelationRegistry:
                 backend=backend,
                 token=token,
                 gateway_model_id=gateway_model_id,
+                request_metadata=request_metadata,
             )
             if prepared_turn_id is None:
+                return GatewayRouting(caller_model_id, None)
+            credential = self._credential(backend, token)
+            scope = (
+                self._scopes.get(credential.scope_key)
+                if credential is not None
+                else None
+            )
+            if scope is not None and scope.request_scoped:
+                trace = self._traces.get(prepared_turn_id)
+                if (
+                    claimed
+                    and trace is not None
+                    and not trace.ambiguous
+                    and request_id in trace.pending_attempts
+                    and gateway_model_id
+                    in {trace.gateway_request_model_id, trace.gateway_model_id}
+                ):
+                    # Admission may close after this request opened. Its
+                    # ownership remains valid through the bounded drain.
+                    return GatewayRouting(caller_model_id, prepared_turn_id)
+                self.clear_prepared_attempt(
+                    prepared_turn_id,
+                    request_id=request_id,
+                )
                 return GatewayRouting(caller_model_id, None)
             if claimed:
                 trace = self._traces.get(prepared_turn_id)
@@ -1267,6 +1513,7 @@ class TurnCorrelationRegistry:
         backend: str,
         token: str,
         gateway_model_id: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> tuple[Optional[str], bool]:
         """Resolve where this gateway request goes; call under `_lock`.
 
@@ -1284,7 +1531,38 @@ class TurnCorrelationRegistry:
         credential = self._credential(backend, token)
         if credential is None:
             return None, False
-        scope = self._scopes[credential.scope_key]
+        scope = self._scopes.get(credential.scope_key)
+        if scope is None:
+            return None, False
+        if scope.request_scoped:
+            explicit = self._explicit_route(
+                backend=backend,
+                token=token,
+                request_metadata=request_metadata,
+            )
+            if explicit is None:
+                return None, False
+            _key, _scope, route, _route_id = explicit
+            if gateway_model_id not in {
+                route.gateway_request_model_id,
+                route.resolved_model_id,
+            }:
+                return None, False
+            identity = self._request_identity(request_metadata)
+            assert identity is not None
+            _route_id, turn_id = identity
+            if turn_id in scope.active_turns:
+                if not self._explicit_turn_owns_route(
+                    scope,
+                    turn_id=turn_id,
+                    route=route,
+                ):
+                    return None, False
+                return route.requested_model_id, True
+            # Completed turn IDs are intentionally not retained. A valid
+            # process-owned route handle can route a late continuation, but it
+            # cannot claim a newer active turn.
+            return route.requested_model_id, False
         route = credential.route
         if route is None:
             # No route was known when this credential was minted: the shared
@@ -1323,11 +1601,13 @@ class TurnCorrelationRegistry:
         *,
         backend: str,
         token: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> GatewayTurnTerminalizer:
         return GatewayTurnTerminalizer(
             self,
             backend=backend,
             token=token,
+            request_metadata=request_metadata,
         )
 
     def _open_prepared_gateway_turn(
@@ -1336,6 +1616,7 @@ class TurnCorrelationRegistry:
         backend: str,
         token: str,
         request_id: str = TURN_REQUEST,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> Optional[str]:
         """Arm the launch identity for one gateway request.
 
@@ -1347,6 +1628,46 @@ class TurnCorrelationRegistry:
         """
 
         with self._lock:
+            credential = self._credential(backend, token)
+            scope = (
+                self._scopes.get(credential.scope_key)
+                if credential is not None
+                else None
+            )
+            if scope is not None and scope.request_scoped:
+                explicit = self._explicit_route(
+                    backend=backend,
+                    token=token,
+                    request_metadata=request_metadata,
+                )
+                if explicit is None:
+                    return None
+                _key, scope, route, _route_id = explicit
+                identity = self._request_identity(request_metadata)
+                assert identity is not None
+                _route_id, turn_id = identity
+                if not self._explicit_turn_owns_route(
+                    scope,
+                    turn_id=turn_id,
+                    route=route,
+                ):
+                    return None
+                trace = self._traces.get(turn_id)
+                if (
+                    trace is None
+                    or trace.ambiguous
+                    or trace.admission_closed
+                    or trace.gateway_source_id is None
+                    or trace.gateway_model_id is None
+                ):
+                    return None
+                trace.pending_attempts[request_id] = AttemptIdentity(
+                    source_id=trace.gateway_source_id,
+                    resolved_model_id=trace.gateway_model_id,
+                    channel="hub",
+                )
+                return turn_id
+
             exact = self._exact_turn(backend, token)
             if exact is None:
                 return None
@@ -1468,7 +1789,11 @@ class TurnCorrelationRegistry:
         if not normalized_turn_id:
             return
         with self._lock:
-            exact = self._exact_turn(backend, token)
+            exact = self._trusted_turn(
+                backend=backend,
+                token=token,
+                turn_id=normalized_turn_id,
+            )
             if exact is None or exact[0] != normalized_turn_id:
                 return
             trace = self._traces.setdefault(
@@ -1502,7 +1827,11 @@ class TurnCorrelationRegistry:
         if not normalized_turn_id:
             return
         with self._lock:
-            exact = self._exact_turn(backend, token)
+            exact = self._trusted_turn(
+                backend=backend,
+                token=token,
+                turn_id=normalized_turn_id,
+            )
             if exact is None or exact[0] != normalized_turn_id:
                 return
             trace = self._traces.setdefault(
