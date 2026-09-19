@@ -1839,14 +1839,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       {actions ? (
         /* Two-row box (design TfqkD): the input on top, then an action row
            carrying the caller's pickers on the left and Send on the right. */
-        <div className="flex w-full flex-col gap-[22px] rounded-2xl border border-border-strong bg-surface-2 p-[18px] shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
+        <div className="flex w-full flex-col gap-3 rounded-2xl border border-border-strong bg-surface-2 p-3 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
           <div className="flex w-full items-end gap-1.5">{inputControl}</div>
           <div className="flex w-full items-end justify-between gap-2">
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-              {mediaControls}
               {actions}
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">{sendControls}</div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {mediaControls}
+              {sendControls}
+            </div>
           </div>
         </div>
       ) : (

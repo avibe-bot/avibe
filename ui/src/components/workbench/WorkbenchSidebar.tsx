@@ -745,6 +745,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(true);
 
   // Small open/close delays so the popover doesn't flicker as the cursor
   // brushes through the inbox row on its way somewhere else, and survives
@@ -794,7 +795,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // project list) scrolls; the brand row and navigation stay pinned. The Inbox
   // hover popover stays OUT of any overflow box below, so it is never clipped.
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       {/* Brand row tLDP1 — identity on the left, Search and Inbox on the right.
           Search and Inbox are siblings of the home link, not nested inside it. */}
       <div className="flex shrink-0 items-center gap-2.5 py-2">
@@ -871,15 +872,38 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </Popover>
       </div>
 
-      {/* Navigation m8K59 — one always-expanded group. "New chat" is the home
-          itself, which is where a task is described and a session is created. */}
-      <nav className="flex shrink-0 flex-col gap-0.5">
+      {/* Navigation m8K59 — the home entry is separate from the collapsible
+          capability group. "New chat" is the home itself, which is where a task
+          is described and a session is created. */}
+      <nav className="flex shrink-0 flex-col gap-1">
         {canChat && (
           <SidebarNavRow to="/" end icon={SquarePen} label={t('workbench.nav.newChat')} />
         )}
-        {capabilityNav.map(({ to, i18nKey, icon }) => (
-          <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
-        ))}
+        {capabilityNav.length > 0 && (
+          <div className="flex flex-col gap-0.5">
+            <button
+              type="button"
+              aria-expanded={capabilitiesOpen}
+              aria-controls="workbench-capability-nav"
+              onClick={() => setCapabilitiesOpen((open) => !open)}
+              className="group flex h-7 items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
+            >
+              {capabilitiesOpen ? (
+                <ChevronDown className="size-3 shrink-0" aria-hidden="true" />
+              ) : (
+                <ChevronRight className="size-3 shrink-0" aria-hidden="true" />
+              )}
+              <span>{t('nav.capabilities')}</span>
+            </button>
+            {capabilitiesOpen && (
+              <div id="workbench-capability-nav" className="flex flex-col gap-0.5">
+                {capabilityNav.map(({ to, i18nKey, icon }) => (
+                  <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </nav>
 
       {/* Projects section t7o96 — the label on the left and the create

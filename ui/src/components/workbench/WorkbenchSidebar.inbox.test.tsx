@@ -2,6 +2,7 @@
 
 import { createInstance } from 'i18next';
 import { cleanup, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -107,5 +108,25 @@ describe('Workbench sidebar inbox counter', () => {
     renderSidebar();
 
     expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe('99+');
+  });
+});
+
+describe('Workbench sidebar capability navigation', () => {
+  it('can collapse and restore the capability links', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+
+    const toggle = screen.getByRole('button', { name: en.nav.capabilities });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('Agent OS')).toBeTruthy();
+    expect(screen.getByRole('link', { name: en.workbench.nav.agents })).toBeTruthy();
+
+    await user.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('link', { name: en.workbench.nav.agents })).toBeNull();
+
+    await user.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('link', { name: en.workbench.nav.agents })).toBeTruthy();
   });
 });

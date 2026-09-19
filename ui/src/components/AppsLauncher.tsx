@@ -164,7 +164,7 @@ export const AppsLauncher: React.FC = () => {
         aria-expanded={visible}
         aria-pressed={pinned}
         className={clsx(
-          'group flex w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-2.5 text-[13px] font-bold text-foreground transition-colors',
+          'group flex h-[39px] w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-0 text-[13px] font-bold text-foreground transition-colors',
           visible
             ? 'border-cyan shadow-glow-md-cyan'
             : 'border-cyan/45 shadow-glow-sm-cyan hover:border-cyan/70',
