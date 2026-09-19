@@ -75,6 +75,77 @@ function ProviderRow({ entry, label, onPick }: PickerRow & { onPick: () => void 
   );
 }
 
+// Which of the two layouts in `connection.css` the room can actually hold.
+//
+// Five fixed rows work until the room is smaller than what those rows cost plus
+// something worth putting between them. Stopping at the rows alone would only
+// move the defect: a middle of one pixel is as unusable as a middle of none, and
+// a scroll container with no height scrolls nothing, so the fields inside it
+// become unreachable rather than merely small. The floor is therefore the four
+// fixed rows, the gaps between them, the padding on both sides — and one more
+// control row, the height this dialog already gives every control it owns, so
+// that the middle can show a whole field rather than a slice of one.
+//
+// CSS cannot ask the question: media queries read the layout viewport, which is
+// the very measurement a soft keyboard leaves wrong. So it is asked here, from
+// the metrics the stylesheet resolved for the band actually in force, and the
+// answer is written back as an attribute. Every term is a plain length in the
+// stylesheet, so this needs nothing of the browser beyond reading them.
+//
+// Both sides of the comparison are independent of what the body holds: the
+// metrics belong to the band, and the height belongs to the room. A method
+// switch or an error cannot flip the layout — the same guarantee the fixed frame
+// exists to give.
+const ROOM_FLOOR: ReadonlyArray<readonly [string, number]> = [
+  ['--connection-head', 1], ['--connection-desc', 1], ['--connection-footer', 1],
+  ['--connection-gap', 4], ['--connection-pad', 2],
+  // Twice: the method row, and one more for the middle to show a whole control in.
+  ['--connection-controls', 2],
+];
+
+function useRoomFloor() {
+  const stop = useRef<(() => void) | undefined>(undefined);
+  // A callback ref, not an effect: the frame is rendered through a portal that
+  // arrives a commit later than this component, so an effect would run while the
+  // ref was still empty and never measure anything. This runs exactly when the
+  // frame attaches, and again with `null` when it goes away.
+  return useCallback((node: HTMLDivElement | null) => {
+    stop.current?.();
+    stop.current = undefined;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const style = getComputedStyle(node);
+      let floor = 0;
+      for (const [name, count] of ROOM_FLOOR) floor += (parseFloat(style.getPropertyValue(name)) || 0) * count;
+      // `clientHeight` is the padding box, which is what the rows, the gaps and
+      // the padding have to fit inside; the frame's border sits outside both, so
+      // neither side counts it.
+      const tight = floor > node.clientHeight;
+      if (tight === (node.dataset.room === 'tight')) return;
+      if (tight) node.dataset.room = 'tight'; else delete node.dataset.room;
+    };
+    measure();
+    // The observer catches every room the frame is resized into — a rotation, a
+    // window resize, the band changing underneath it. The visual viewport catches
+    // the one thing that resizes nothing: a soft keyboard, which leaves the layout
+    // viewport exactly as it was.
+    //
+    // Neither can feed back. The attribute changes which row absorbs the middle,
+    // not the frame's box, so the observer is not re-armed by its own answer, and
+    // a repeat answer returns above without touching the DOM at all.
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', measure);
+    vv?.addEventListener('scroll', measure);
+    stop.current = () => {
+      observer.disconnect();
+      vv?.removeEventListener('resize', measure);
+      vv?.removeEventListener('scroll', measure);
+    };
+  }, []);
+}
+
 export function BackendConnectionDialog({ backend, method, onClose, onConnected, onWriteState }: {
   backend: BackendId;
   method: 'oauth' | 'api_key';
@@ -83,11 +154,15 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   onWriteState: (pending: boolean) => void;
 }) {
   const api = useApi(); const { t } = useTranslation();
-  // The frame is sized to the USABLE viewport, which on a phone is what the soft
-  // keyboard leaves. `dvh` cannot see that on iOS — only the visual viewport
-  // shrinks — and this route is the setup wizard, not the app shell that
-  // normally keeps `--app-vvh` current, so the dialog keeps it current itself.
+  // The frame is bound and centred in the USABLE viewport — a rectangle, not a
+  // height: on a phone that is what the soft keyboard leaves, and iOS also pans
+  // it sideways to keep a focused field in sight. `dvh` and `vw` cannot see
+  // either, and this route is the setup wizard rather than the app shell that
+  // normally keeps those four variables current, so the dialog keeps them
+  // current itself. It is not the only consumer, and the hook is written for
+  // that: both may be mounted at once.
   useViewportHeightVar();
+  const frame = useRoomFloor();
   const [providers, setProviders] = useState<OpencodeProvider[]>([]);
   const [provider, setProvider] = useState<OpencodeProvider>();
   const [loading, setLoading] = useState(backend === 'opencode');
@@ -202,7 +277,7 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   }, [providers, method, query]);
 
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-    <DialogContent className="connection-dialog" data-backend={backend} closeLabel={t('common.close')}>
+    <DialogContent ref={frame} className="connection-dialog" data-backend={backend} closeLabel={t('common.close')}>
       <div className="connection-heading"><div className="connection-logo"><BackendIcon backend={backend} variant="brand" brandFit="mark" size={28} aria-hidden="true" /></div>
         <div><DialogTitle>{title}</DialogTitle><p>{t(`onboarding.setup.${backend}Description`)}</p></div>
       </div>
