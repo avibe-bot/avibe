@@ -213,8 +213,10 @@ def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatc
     config.save()
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: "/fixture/bin/assistant")
     monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
-    monkeypatch.setattr(api, "_get_oauth_service", lambda: SimpleNamespace())
-    monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda *_: {"ok": True})
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: SimpleNamespace(
+        _recover_interrupted_claude_oauth_settings_backup=Mock(),
+    ))
+    monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda *_, **kw: {"ok": True})
     monkeypatch.setattr(api, "_refresh_opencode_provider_catalog_async", AsyncMock(return_value={"ok": True}))
     monkeypatch.setattr(api, "_backend_apply_receipts", {})
     monkeypatch.setattr(runtime, "service_process_running", lambda: True)

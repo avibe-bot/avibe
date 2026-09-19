@@ -507,9 +507,13 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller = _StubController()
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
-        mock_client = SimpleNamespace()
+        mock_client = SimpleNamespace(disconnect=AsyncMock())
         service._start_claude_control_flow = AsyncMock(return_value=(mock_client, "https://platform.claude.com/oauth/code", None))
-        service._wait_for_claude_completion = AsyncMock()
+
+        async def pending_flow(_flow):
+            await asyncio.Event().wait()
+
+        service._wait_for_claude_completion = pending_flow
 
         await service.start_setup(context, backend="claude", force_reset=True, claude_login_method="console")
 
@@ -517,6 +521,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             context,
             force_reset=True,
             login_with_claude_ai=False,
+            owner_flow=ANY,
         )
         self.assertEqual(len(controller.im_client.sent_messages), 2)
         self.assertIn("https://platform.claude.com/oauth/code", controller.im_client.sent_messages[1][1])

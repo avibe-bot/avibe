@@ -11324,14 +11324,66 @@ def remove_claude_oauth_credentials() -> dict:
     return _submit_oauth_coro(remove_claude_oauth_credentials_async(), timeout=30.0)
 
 
-def _clear_claude_oauth_credentials_after_api_key_save(service=None) -> dict:
+def _native_auth_write(backend: str | None = None, *, pass_lease: bool = False):
+    """Own native writes across Web/Controller instances, including async tails."""
+    from functools import wraps
+    from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
+
+    def decorate(function):
+        def acquire(args, kwargs):
+            target = str(backend or kwargs.get("backend") or (args[0] if args else "")).strip().lower()
+            if target not in {"claude", "codex", "opencode"}:
+                raise NativeMigrationBlockedError("unsupported_backend", ())
+            return NativeCredentialLease((target,)).acquire()
+
+        def blocked(error):
+            result = {"ok": False, "error": error.reason}
+            if error.backends:
+                result["backends"] = list(error.backends)
+            return result
+
+        if asyncio.iscoroutinefunction(function):
+            @wraps(function)
+            async def asynchronous(*args, **kwargs):
+                try:
+                    lease = acquire(args, kwargs)
+                except NativeMigrationBlockedError as error:
+                    return blocked(error)
+                try:
+                    if pass_lease:
+                        kwargs["_native_lease"] = lease
+                    return await finish_native_operation(function(*args, **kwargs))
+                finally:
+                    lease.release()
+            return asynchronous
+
+        @wraps(function)
+        def synchronous(*args, **kwargs):
+            try:
+                lease = acquire(args, kwargs)
+            except NativeMigrationBlockedError as error:
+                return blocked(error)
+            try:
+                if pass_lease:
+                    kwargs["_native_lease"] = lease
+                return function(*args, **kwargs)
+            finally:
+                lease.release()
+        return synchronous
+    return decorate
+
+
+def _clear_claude_oauth_credentials_after_api_key_save(service=None, *, lease=None) -> dict:
     service = service or _get_oauth_service()
     return _submit_oauth_coro(
-        service.clear_claude_oauth_credentials_only(),
-        timeout=30.0,
+        service.clear_claude_oauth_credentials_only(**({"lease": lease} if lease is not None else {})),
+        # The outer writer owns this explicit lease until cleanup truly exits;
+        # a Future.result timeout would leave that writer running unprotected.
+        timeout=None if lease is not None else 30.0,
     )
 
 
+@_native_auth_write()
 def remove_backend_api_key(backend: str) -> dict:
     """Clear the stored API key for Claude / Codex without touching OAuth.
 
@@ -11626,6 +11678,7 @@ def get_codex_auth() -> dict:
     }
 
 
+@_native_auth_write("codex")
 def save_codex_auth(payload: dict) -> dict:
     """Persist Codex auth: V2Config + ``~/.codex/{config.toml,auth.json}``.
 
@@ -12007,7 +12060,8 @@ def get_claude_auth() -> dict:
     }
 
 
-def save_claude_auth(payload: dict) -> dict:
+@_native_auth_write("claude", pass_lease=True)
+def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
     """Persist Claude auth into Claude Code's own ``settings.json``.
 
     V2Config records only non-secret intent/legacy cleanup state. It must
@@ -12066,6 +12120,12 @@ def save_claude_auth(payload: dict) -> dict:
     if recovery_message:
         return {"ok": False, "error": "config_recovery", "message": recovery_message}
 
+    oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
+    if oauth_cleanup_service is not None:
+        # Construction may defer recovery because this outer operation already
+        # owns the lease. Adopt it explicitly before reading/writing new settings.
+        oauth_cleanup_service._recover_interrupted_claude_oauth_settings_backup(lease=_native_lease)
+
     settings_env: dict[str, str] = {}
     existing_credential_type: str | None = None
     existing_credential: str | None = None
@@ -12115,8 +12175,6 @@ def save_claude_auth(payload: dict) -> dict:
                 except Exception:
                     effective_base_url = None
 
-    oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
-
     from vibe.claude_config import apply_claude_auth
 
     try:
@@ -12161,7 +12219,7 @@ def save_claude_auth(payload: dict) -> dict:
     if auth_mode == "api_key":
         try:
             oauth_cleanup_result = _clear_claude_oauth_credentials_after_api_key_save(
-                oauth_cleanup_service
+                oauth_cleanup_service, lease=_native_lease,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to clear Claude OAuth credentials after API-key save: %s", exc)
@@ -12930,6 +12988,7 @@ def _normalize_custom_provider_payload(payload: dict) -> tuple[str, str, str, st
     return provider_id.strip(), name.strip(), adapter.strip(), base_url.strip(), api_key_value
 
 
+@_native_auth_write("opencode")
 async def save_opencode_custom_provider_async(payload: dict) -> dict:
     try:
         provider_id, name, adapter, base_url, api_key = _normalize_custom_provider_payload(payload)
@@ -13033,6 +13092,7 @@ def save_opencode_custom_provider(payload: dict) -> dict:
     return run_coroutine_blocking(save_opencode_custom_provider_async(payload))
 
 
+@_native_auth_write("opencode")
 async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
@@ -13357,6 +13417,7 @@ def save_opencode_provider_auth(provider_id: str, payload: dict) -> dict:
     return run_coroutine_blocking(save_opencode_provider_auth_async(provider_id, payload))
 
 
+@_native_auth_write("opencode")
 async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> dict:
     """Persist a single OpenCode provider's API key (and optional base URL).
 
@@ -13517,6 +13578,7 @@ def delete_opencode_provider_auth(provider_id: str) -> dict:
     return run_coroutine_blocking(delete_opencode_provider_auth_async(provider_id))
 
 
+@_native_auth_write("opencode")
 async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     """Drop a single provider's stored credentials.
 

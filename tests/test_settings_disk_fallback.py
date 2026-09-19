@@ -601,7 +601,7 @@ def test_save_claude_explicit_auth_token_clears_v2_secret(
     cleanup_calls: list[bool] = []
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda _service=None: cleanup_calls.append(True) or {"ok": True},
+        lambda _service=None, **_ownership: cleanup_calls.append(True) or {"ok": True},
     )
 
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
@@ -666,7 +666,7 @@ def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
     monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda _service=None: {
+        lambda _service=None, **_ownership: {
             "ok": True,
             "partial": True,
             "warning": "oauth_cleanup_failed",
@@ -740,7 +740,7 @@ def test_save_claude_auth_restores_pending_oauth_backup_before_writing_new_key(
     cleanup_calls: list[object] = []
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda service=None: cleanup_calls.append(service) or {"ok": True},
+        lambda service=None, **_ownership: cleanup_calls.append(service) or {"ok": True},
     )
 
     result = save_claude_auth(
@@ -780,7 +780,7 @@ def test_save_claude_explicit_api_key_is_independent_from_base_url(
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda _service=None: {"ok": True},
+        lambda _service=None, **_ownership: {"ok": True},
     )
 
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
@@ -830,7 +830,7 @@ def test_save_claude_base_url_update_preserves_credential_type(
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda _service=None: {"ok": True},
+        lambda _service=None, **_ownership: {"ok": True},
     )
     _write_claude_settings(tmp_path, {"ANTHROPIC_API_KEY": "sk-ant-preserved"})
 
@@ -885,7 +885,7 @@ def test_save_claude_credential_type_switch_reuses_stored_value(
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda _service=None: {"ok": True},
+        lambda _service=None, **_ownership: {"ok": True},
     )
     _write_claude_settings(
         tmp_path,

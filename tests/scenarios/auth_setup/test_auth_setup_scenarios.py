@@ -849,7 +849,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         cleanup_calls = []
         restart_calls = []
 
-        def clear_oauth(service=None):
+        def clear_oauth(service=None, *, lease=None):
+            lease.assert_owned("claude")
             cleanup_calls.append(service)
             credentials_path.unlink()
             return {"ok": True}
@@ -969,7 +970,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         cleanup_calls = []
         restart_calls = []
 
-        def clear_oauth(cleanup_service=None):
+        def clear_oauth(cleanup_service=None, *, lease=None):
+            lease.assert_owned("claude")
             cleanup_calls.append(cleanup_service)
             credentials_path.unlink()
             return {"ok": True}
@@ -2092,7 +2094,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_claude_wrong_user_cannot_submit_callback_into_active_flow(self):
         """Scenario: AUTH-SETUP-103"""
         harness = AuthSetupScenarioHarness()
-        fake_client = object()
+        fake_client = SimpleNamespace(disconnect=AsyncMock())
         runner = ScenarioRunner(harness)
         callback_payloads = []
         harness.service._start_claude_control_flow = AsyncMock(
@@ -2137,7 +2139,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_callback_submission_and_fallback_command_do_not_double_consume_claude_flow(self):
         """Scenario: AUTH-SETUP-105"""
         harness = AuthSetupScenarioHarness()
-        fake_client = object()
+        fake_client = SimpleNamespace(disconnect=AsyncMock())
         completion_released = asyncio.Event()
         callback_payloads = []
         runner = ScenarioRunner(harness)
@@ -2200,7 +2202,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_claude_manual_callback_scenario_accepts_plain_reply_and_completes(self):
         """Scenario: AUTH-SETUP-002"""
         harness = AuthSetupScenarioHarness()
-        fake_client = object()
+        fake_client = SimpleNamespace(disconnect=AsyncMock())
         completion_released = asyncio.Event()
         callback_payloads = []
         runner = ScenarioRunner(harness)
@@ -2249,7 +2251,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(callback_payloads, [("auth-code", "oauth-state")])
         harness.service._refresh_backend_runtime.assert_awaited_once_with("claude")
-        harness.service._disconnect_claude_client.assert_awaited_once_with(fake_client)
+        harness.service._disconnect_claude_client.assert_awaited_once_with(fake_client, strict=True)
         ScenarioExpect.step_history(runner, ["start_setup", "submit_callback_reply"])
         ScenarioExpect.text_contains(harness, "starting claude", index=0)
         ScenarioExpect.text_contains(harness, "https://platform.claude.com/oauth/code/callback", index=1)
@@ -2260,7 +2262,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_claude_malformed_callback_keeps_flow_active_and_instructs_retry(self):
         """Scenario: AUTH-SETUP-102"""
         harness = AuthSetupScenarioHarness()
-        fake_client = object()
+        fake_client = SimpleNamespace(disconnect=AsyncMock())
         runner = ScenarioRunner(harness)
         harness.service._start_claude_control_flow = AsyncMock(
             return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
@@ -2292,7 +2294,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_setup_flows_route_replies_to_the_matching_backend(self):
         """Scenario: AUTH-SETUP-205"""
         harness = AuthSetupScenarioHarness()
-        fake_client = object()
+        fake_client = SimpleNamespace(disconnect=AsyncMock())
         completion_released = asyncio.Event()
         callback_payloads = []
         runner = ScenarioRunner(harness)
@@ -2365,7 +2367,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_claude_timeout_emits_recoverable_terminal_state(self):
         """Scenario: AUTH-SETUP-203"""
         harness = AuthSetupScenarioHarness()
-        fake_client = object()
+        fake_client = SimpleNamespace(disconnect=AsyncMock())
         runner = ScenarioRunner(harness)
         completion_started = asyncio.Event()
         release_completion = asyncio.Event()
@@ -2406,7 +2408,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.text_contains(harness, "timed out")
         ScenarioExpect.button_callback_contains(harness, "auth_setup:claude")
         ScenarioExpect.flow_missing(harness, "C1:claude")
-        harness.service._disconnect_claude_client.assert_awaited_once_with(fake_client)
+        harness.service._disconnect_claude_client.assert_awaited_once_with(fake_client, strict=True)
 
     async def test_opencode_direct_key_scenario_installs_key_and_refreshes_runtime(self):
         """Scenario: AUTH-SETUP-003"""
@@ -3478,8 +3480,10 @@ def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, 
     from vibe import claude_config
     native_dir = tmp_path / "test-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(native_dir))
-    monkeypatch.setattr(api, "_get_oauth_service", lambda: object())
-    monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda service: {"ok": True})
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: SimpleNamespace(
+        _recover_interrupted_claude_oauth_settings_backup=Mock(),
+    ))
+    monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda service, **kw: {"ok": True})
     monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
     monkeypatch.setattr(claude_config, "read_claude_oauth_signed_in", lambda: False)
     refreshed = []

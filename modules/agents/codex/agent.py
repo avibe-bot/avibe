@@ -818,6 +818,24 @@ class CodexAgent(BaseAgent):
         cwd = self._session_mgr.get_cwd(base_session_id)
         return f"{base_session_id}:{cwd}" if cwd else base_session_id
 
+    async def retire_for_native_migration(self) -> None:
+        """Retire every idle app-server generation or refuse credential mutation."""
+        for cwd, transport in list(self._transports.items()):
+            async with self._transport_locks.setdefault(cwd, asyncio.Lock()):
+                detached = await self._stop_and_detach_transport_generation(
+                    cwd,
+                    transport,
+                    final_predicate=lambda: self._transport_replacement_is_safe(cwd, transport),
+                    require_process_exit=True,
+                )
+                if not detached:
+                    raise RuntimeError("Codex runtime retirement was refused")
+                self._retire_model_hub_process_scope(cwd)
+        for base_session_id in self._session_mgr.all_base_sessions():
+            self._session_mgr.invalidate_thread(base_session_id)
+            self._turn_registry.clear_session(base_session_id)
+            self._clear_thread_developer_instructions(base_session_id)
+
     async def refresh_auth_state(self) -> None:
         """Drop app-server runtime state so future turns pick up fresh auth."""
         if not hasattr(self, "_transport_last_activity"):
@@ -1240,6 +1258,7 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         *,
         final_predicate: Callable[[], Awaitable[bool]] | None = None,
+        require_process_exit: bool = False,
     ) -> bool:
         """Stop one exact generation, retaining it if validation or stop fails."""
 
@@ -1250,7 +1269,12 @@ class CodexAgent(BaseAgent):
             if final_predicate is not None and not await final_predicate():
                 self._finish_transport_retirement(reserved, retire=False)
                 return False
+            process = getattr(transport, "_process", None)
             await transport.stop()
+            if require_process_exit and process is not None and process.returncode is None:
+                await asyncio.wait_for(process.wait(), timeout=5)
+                if process.returncode is None:
+                    raise RuntimeError("Codex native process did not exit")
         except BaseException:
             self._finish_transport_retirement(reserved, retire=False)
             raise

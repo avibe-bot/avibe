@@ -996,6 +996,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """Adopt persisted server state before the shared drain snapshot."""
         await self._get_server()
 
+    async def retire_for_native_migration(self) -> None:
+        server = self._client_manager._server_manager
+        if server is not None:
+            await server.retire_for_native_migration()
+
     def runtime_has_active_turns(self) -> bool:
         if any(not task.done() for task in self._active_requests.values()):
             return True

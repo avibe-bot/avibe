@@ -775,7 +775,7 @@ class _FakeOpencodeServer:
     def __init__(self) -> None:
         self.next_authorize: dict = {}
         self.auth_map: dict = {}
-        self.wait_future: asyncio.Future = asyncio.get_event_loop_policy().new_event_loop().create_future()
+        self.wait_future: asyncio.Future | None = None
         self.start_calls: list[tuple[str, int, dict]] = []
         self.wait_calls: list[tuple[str, int, dict]] = []
         self.catalog: dict = {}
@@ -835,6 +835,8 @@ class _FakeOpencodeServer:
 
     async def wait_provider_oauth(self, provider_id, *, method, prompt_answers, timeout):
         self.wait_calls.append((provider_id, method, prompt_answers))
+        if self.wait_future is None:
+            self.wait_future = asyncio.get_running_loop().create_future()
         return await self.wait_future
 
 
