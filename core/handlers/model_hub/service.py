@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -94,8 +95,10 @@ from .migration import (
     MigrationConflictError,
     apply_native_migration,
     build_native_migration_source,
+    recover_native_migration,
     scan_native_configs,
 )
+from .migration_journal import NativeTakeoverJournal, TakeoverStateError
 from .oauth import (
     NativeOAuthAdapter,
     NativeOAuthUnavailableError,
@@ -290,6 +293,43 @@ class ModelHubConfigStore(Protocol):
 
 
 class V2ModelHubConfigStore:
+    _NATIVE_AUTH_FIELDS = {
+        "claude": ("auth_mode", "api_key", "base_url", "auth_mode_set"),
+        "codex": ("auth_mode", "api_key", "base_url", "oauth_relay_marker"),
+    }
+
+    def native_auth_snapshot(self, backends: tuple[str, ...]) -> dict[str, dict]:
+        try:
+            config = V2Config.load()
+        except FileNotFoundError:
+            return {}
+        return {
+            backend: {
+                name: getattr(getattr(config.agents, backend), name)
+                for name in self._NATIVE_AUTH_FIELDS[backend]
+            }
+            for backend in backends if backend in self._NATIVE_AUTH_FIELDS
+        }
+
+    def save_takeover(
+        self,
+        model_hub: ModelHubConfig,
+        expected: dict[str, dict],
+        desired: dict[str, dict],
+    ) -> None:
+        from config.v2_config import config_write_transaction
+
+        self.ensure_writable()
+        with config_write_transaction() as config:
+            for backend, values in desired.items():
+                target = getattr(config.agents, backend)
+                actual = {name: getattr(target, name) for name in values}
+                if actual not in (expected.get(backend), values):
+                    raise MigrationConflictError
+                for name, value in values.items():
+                    setattr(target, name, value)
+            config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+
     def load(self) -> ModelHubConfig:
         try:
             return V2Config.load().model_hub
@@ -367,6 +407,18 @@ class UnavailableEngineAdapter:
         vendor: str,
         material: Mapping[str, object],
     ) -> str:
+        raise EngineUnavailableError
+
+    async def activate_oauth_credential(self, credential_ref: str) -> None:
+        raise EngineUnavailableError
+
+    async def validate_oauth_credential(self, credential_ref: str) -> None:
+        raise EngineUnavailableError
+
+    async def matches_api_key_credential(
+        self, credential_ref: str, vendor: str, protocol: str,
+        secret: str, base_url: str | None,
+    ) -> bool:
         raise EngineUnavailableError
 
     async def provision_transient_credential(self, vendor: str, secret: str, base_url: str | None) -> str:
@@ -780,6 +832,8 @@ class ModelHubService:
         revocations: Optional[CredentialRevocationJournal] = None,
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         migration_home: Optional[Path] = None,
+        migration_guard: Any = None,
+        migration_journal: NativeTakeoverJournal | None = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         named_agents_override: Optional[
@@ -818,6 +872,13 @@ class ModelHubService:
         )
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.migration_home = migration_home
+        self.migration_journal = migration_journal or NativeTakeoverJournal(
+            events.path.parent / "native-takeover" / "current.json"
+        )
+        self.migration_blocked_backends: set[str] = set()
+        self.migration_guard = migration_guard or self._unavailable_migration_guard
+        self._migration_lock = asyncio.Lock()
+        self._migration_task: asyncio.Task | None = None
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
@@ -845,6 +906,15 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
+
+    @staticmethod
+    @asynccontextmanager
+    async def _unavailable_migration_guard(backends):
+        # A stand-alone UI service cannot retire Controller-owned credentials.
+        # Tests explicitly inject a fixture-only guard; production is wired by
+        # the Controller's shared backend lifecycle coordinator.
+        raise ModelHubError("mode_switch_blocked", status=409)
+        yield  # pragma: no cover - required async context-manager shape
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -994,7 +1064,26 @@ class ModelHubService:
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
         canonical = ModelHubConfig.from_payload(config.to_payload())
-        self.store.save(canonical)
+        try:
+            pending = self.migration_journal.load()
+        except (TakeoverStateError, OSError):
+            raise ModelHubError("migration_item_conflict", status=409) from None
+        if pending is not None and canonical.to_payload() not in (
+            pending.get("previous"), pending.get("updated")
+        ):
+            # The write-ahead decision must not overwrite intervening route
+            # edits on recovery. Finish/revert that decision before new writes.
+            raise ModelHubError("migration_item_conflict", status=409)
+        native_before = pending.get("native_before") if pending is not None else None
+        if native_before:
+            reverse = canonical.to_payload() == pending["previous"]
+            self.store.save_takeover(
+                canonical,
+                pending["native_after"] if reverse else native_before,
+                native_before if reverse else pending["native_after"],
+            )
+        else:
+            self.store.save(canonical)
         self.recovery.reconcile(canonical)
         self.recovery.notify()
         return canonical
@@ -1208,6 +1297,13 @@ class ModelHubService:
     async def recover_runtime_intent(self) -> None:
         """Restore the runtime only when the user left it enabled."""
 
+        try:
+            await recover_native_migration(self)
+        except (TakeoverStateError, OSError):
+            # Unknown recovery state cannot authorize any native credential
+            # writer or native launch. Controller recovery preserves this gate.
+            self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
+            raise ModelHubError("migration_item_conflict", status=409) from None
         async with self._runtime_lifecycle_lock:
             await self.reconcile_runtime_installation()
             if not self.store.load().enabled:
@@ -1228,6 +1324,15 @@ class ModelHubService:
         )
 
     async def stop(self) -> None:
+        task = self._migration_task
+        if task is not None and not task.done():
+            try:
+                # A disconnected requester does not own the handoff lifetime.
+                # Retire the runtime only once custody has settled or a durable
+                # recovery record has captured the failure.
+                await await_owned_task(task)
+            except Exception:
+                logger.warning("Native takeover remains pending during shutdown")
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 
@@ -1583,30 +1688,6 @@ class ModelHubService:
             vendor,
             material,
         )
-
-    async def _observe_oauth_credential(
-        self,
-        vendor: str,
-        credential_ref: str,
-        protocol: str,
-    ) -> SourceObservation:
-        observation = await self._observe_provisioned_credential(
-            vendor,
-            None,
-            credential_ref,
-            (protocol,),
-        )
-        if (
-            observation.outcome is not ObservationOutcome.OBSERVED
-            or observation.protocol != protocol
-            or observation.authenticated is False
-        ):
-            raise ModelHubError(
-                "discovery_failed",
-                status=422,
-                data={"observation": self._observation_payload(observation)},
-            )
-        return observation
 
     async def observe_source(self, payload: object) -> dict:
         if not isinstance(payload, dict):
@@ -6187,6 +6268,14 @@ class ModelHubService:
                 return _runtime_payload(status, enabled=False)
 
     def migration_scan(self) -> dict:
+        try:
+            pending = self.migration_journal.load()
+        except (TakeoverStateError, OSError):
+            raise ModelHubError("migration_item_conflict", status=409) from None
+        if pending is not None:
+            # Resume the selected operation even though native credentials
+            # have already been withdrawn. Never expose the private journal.
+            return {"items": pending["items"]}
         config = self.store.load()
         return {
             "items": [
@@ -6197,19 +6286,28 @@ class ModelHubService:
                     home=self.migration_home,
                     claude_oauth_probe=self.migration_claude_oauth_probe,
                     validate_base_url=_validated_base_url,
+                    legacy_auth=(
+                        self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
+                        if isinstance(self.store, V2ModelHubConfigStore) else None
+                    ),
                 )
             ]
         }
 
     async def migration_apply(self, item_ids: object) -> dict:
+        from vibe.native_oauth_store import NativeOAuthError
+
         try:
-            applied, added_to = await apply_native_migration(
-                self,
-                item_ids,
-                mask_credential=_mask_credential,
+            task = self._migration_task
+            if task is not None and not task.done():
+                raise ModelHubError("mode_switch_blocked", status=409)
+            task = asyncio.create_task(apply_native_migration(
+                self, item_ids, mask_credential=_mask_credential,
                 validate_base_url=_validated_base_url,
-            )
-        except MigrationConflictError:
+            ), name="model-hub-native-takeover")
+            self._migration_task = task
+            applied, added_to = await await_owned_task(task)
+        except (MigrationConflictError, TakeoverStateError, NativeOAuthError, OSError):
             raise ModelHubError("migration_item_conflict", status=409)
         except ModelHubError as exc:
             if exc.code != "discovery_failed":

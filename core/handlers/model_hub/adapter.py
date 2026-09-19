@@ -486,6 +486,17 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    async def matches_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        secret: str,
+        base_url: str | None,
+    ) -> bool:
+        """Compare transient native material inside custody; return no secrets."""
+        ...
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import threading
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -19,6 +20,9 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    EngineEnsureResult,
+    EngineHealth,
+    EngineStatus,
     ObservationDiscovery,
     ObservationOutcome,
     SourceObservation,
@@ -80,6 +84,25 @@ class MigrationAdapter:
         self.synced: list[tuple[object, ...]] = []
         self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
+        self.activated: list[str] = []
+        self.validated: list[str] = []
+        self.keys: dict[str, tuple[str, str, str, str | None]] = {}
+
+    async def start(self):
+        return EngineStatus(EngineHealth.OK, "fixture", True, "127.0.0.1", 32199, None)
+
+    async def ensure_installed(self, **kwargs):
+        return EngineEnsureResult(await self.start(), False)
+
+    async def activate_oauth_credential(self, credential_ref):
+        self.activated.append(credential_ref)
+
+    async def validate_oauth_credential(self, credential_ref):
+        assert credential_ref in self.activated
+        self.validated.append(credential_ref)
+
+    async def matches_api_key_credential(self, credential_ref, vendor, protocol, secret, base_url):
+        return self.keys.get(credential_ref) == (vendor, protocol, secret, base_url)
 
     async def provision_transient_credential(
         self,
@@ -126,6 +149,7 @@ class MigrationAdapter:
     ) -> str:
         credential_ref = f"cred_migration_{len(self.provisioned) + 1}"
         self.provisioned.append((vendor, len(secret), credential_ref))
+        self.keys[credential_ref] = (vendor, protocol, secret, base_url)
         return credential_ref
 
     async def provision_oauth_credential(
@@ -166,12 +190,18 @@ def _service(tmp_path: Path) -> tuple[ModelHubService, MemoryStore, MigrationAda
     store = MemoryStore()
     adapter = MigrationAdapter()
     state = tmp_path / "avibe-state"
+
+    async def verify_fixture_idle():
+        return None
+
     service = ModelHubService(
         store=store,
         adapter=adapter,
         events=BoundedEventLog(state / "events.json"),
         oauth_flows=OAuthFlowRegistry(state / "oauth.json"),
         revocations=CredentialRevocationJournal(state / "revocations.json"),
+        migration_home=Path.home(),
+        migration_guard=lambda backends: nullcontext(verify_fixture_idle),
         now=lambda: datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc),
     )
     return service, store, adapter

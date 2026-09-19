@@ -121,3 +121,36 @@ explicitly authorized acceptance check.
   scan never serializes it. This function never performs remote logout/revoke.
   A Keychain candidate's selection revision must match between metadata-only
   scan and its secret-bearing apply read.
+- `check_keychain_edit(edit, *, applied=False)` checks the exact before/after
+  value without mutation. The Controller journals a bundle of keychain
+  operations, and folds file operations into one `NativeFileEdit` per path.
+  Store helpers never silently roll back: the durable transaction owns recovery.
+- A metadata-only Keychain candidate may request consent without claiming its
+  value is exportable. The selected container revision is checked after drain;
+  only then are its supported API-key and OAuth components expanded. A denied
+  read or unsupported component leaves native ownership intact.
+
+## Durable transaction
+
+The private `native-takeover/current.json` envelope has `version: 1`,
+`phase: prepared | withdrawn | exposed | reverting`, and a nonempty
+`backends: string[]`. A pending journal blocks conflicting native auth writers
+and selected backend launches across Controller/Web processes. Completed work
+writes a sanitized idempotency receipt and removes the pending journal.
+
+The prepared record contains selected public rows, opaque source/credential
+identities, previous/target Hub config, legacy native-auth before/after values,
+and private native file/store edits. The containing directory is mode 0700;
+the record is mode 0600. These snapshots are never response or log payloads.
+
+Prepare and API-key validation precede cleanup. After cleanup, Source/Routes/
+backend mode and legacy auth fields are committed without calling the runtime.
+The `exposed` marker is durable before activation **or engine projection**.
+Recovery explicitly reconciles the projection even when saved config is
+already identical. OAuth completion additionally requires credential-specific
+upstream validation; an invalid or unavailable grant after possible exposure
+remains a pending takeover, not a restored native login.
+
+Shutdown joins the owned operation before stopping the runtime. Client
+cancellation cannot cancel credential custody. A retry after completion checks
+the retained source IDs and opaque credential references, not IDs alone.
