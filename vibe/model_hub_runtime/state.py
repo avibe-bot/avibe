@@ -12,7 +12,7 @@ import stat
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
@@ -164,6 +164,7 @@ class EngineStateStore:
         vendor: str = "custom",
         protocol: str = "openai_chat",
         base_url: str | None = None,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         if not isinstance(value, str) or not value:
             raise EngineStateError("credential is empty")
@@ -175,16 +176,31 @@ class EngineStateStore:
         normalized_base_url = _validated_base_url(base_url)
         with self._lock:
             credential_ref = f"cred_{secrets.token_hex(16)}"
-            self._secure_write_json(
-                self._credential_path(credential_ref),
-                {
-                    "kind": "api_key",
-                    "vendor": normalized_vendor,
-                    "protocol": protocol,
-                    "base_url": normalized_base_url,
-                    "value": value,
-                },
+            credential_path, credential_tmp, stage_path, stage_tmp = (
+                self._reserve_credential_namespace(credential_ref)
             )
+            try:
+                if on_reserved is not None:
+                    on_reserved(credential_ref)
+                self._write_reserved_json(
+                    credential_path,
+                    {
+                        "kind": "api_key",
+                        "vendor": normalized_vendor,
+                        "protocol": protocol,
+                        "base_url": normalized_base_url,
+                        "value": value,
+                    },
+                    temporary_path=credential_tmp,
+                    credential_ref=credential_ref,
+                )
+                self._remove_private_file_if_present(stage_path)
+                self._remove_private_file_if_present(stage_tmp)
+            except BaseException:
+                self._cleanup_private_paths(
+                    (credential_path, credential_tmp, stage_path, stage_tmp)
+                )
+                raise
             return credential_ref
 
     def bind_oauth_credential(self, source_id: str, vendor: str, auth_name: str) -> str:
@@ -226,6 +242,7 @@ class EngineStateStore:
         vendor: str,
         auth_name: str,
         payload: dict[str, Any],
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Persist an OAuth grant outside the engine's watched auth directory."""
 
@@ -251,12 +268,21 @@ class EngineStateStore:
             expected_provider = _oauth_provider_for_vendor(normalized_vendor)
             if str(staged_payload.get("type") or "").strip().lower() != expected_provider:
                 raise EngineStateError("OAuth auth payload provider does not match vendor")
-            stage_path = self._oauth_stage_path(credential_ref)
+            credential_path, credential_tmp, stage_path, stage_tmp = (
+                self._reserve_credential_namespace(credential_ref)
+            )
             try:
-                self._secure_write_json(stage_path, staged_payload)
+                if on_reserved is not None:
+                    on_reserved(credential_ref)
+                self._write_reserved_json(
+                    stage_path,
+                    staged_payload,
+                    temporary_path=stage_tmp,
+                    credential_ref=credential_ref,
+                )
                 stage_revision = self._file_revision(stage_path)
-                self._secure_write_json(
-                    self._credential_path(credential_ref),
+                self._write_reserved_json(
+                    credential_path,
                     {
                         "kind": "oauth",
                         "source_id": source_id,
@@ -270,12 +296,13 @@ class EngineStateStore:
                         "published_revision": None,
                         "published_identity": None,
                     },
+                    temporary_path=credential_tmp,
+                    credential_ref=credential_ref,
                 )
-            except (EngineStateError, OSError, TypeError, ValueError) as exc:
-                try:
-                    stage_path.unlink()
-                except OSError:
-                    pass
+            except BaseException as exc:
+                self._cleanup_private_paths(
+                    (credential_path, credential_tmp, stage_path, stage_tmp)
+                )
                 raise EngineStateError("unable to stage OAuth credential") from exc
             return credential_ref
 
@@ -578,6 +605,8 @@ class EngineStateStore:
                 raise EngineStateError("credential permissions are unsafe")
             payload = self._read_json(path)
             kind = payload.get("kind") if payload else None
+            if kind == "reservation" and payload.get("credential_ref") == credential_ref:
+                return None
             if kind not in {"api_key", "oauth"}:
                 raise EngineStateError("credential is unavailable")
             return payload
@@ -668,18 +697,14 @@ class EngineStateStore:
     def revoke_credential(self, credential_ref: str) -> None:
         with self._lock:
             self.assert_credential_unbound(credential_ref)
-            path = self._credential_path(credential_ref)
-            if not path.exists():
-                return
-            metadata = self.credential_metadata(credential_ref)
-            if metadata.get("kind") == "oauth":
-                try:
-                    self._oauth_stage_path(credential_ref).unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    raise EngineStateError("unable to remove staged OAuth credential") from exc
-            path.unlink()
+            path, temporary_path, stage_path, stage_temporary_path = (
+                self._credential_namespace_paths(credential_ref)
+            )
+            self.credential_metadata_if_present(credential_ref)
+            self._remove_private_file_if_present(stage_path)
+            self._remove_private_file_if_present(stage_temporary_path)
+            self._remove_private_file_if_present(temporary_path)
+            self._remove_private_file_if_present(path)
 
     def clear_runtime_configs(self) -> None:
         """Remove persisted engine configs after any credential is revoked."""
@@ -731,14 +756,7 @@ class EngineStateStore:
         normalized = _validated_oauth_auth_name(auth_name)
         with self._lock:
             self.audit_auth_permissions(enforce=True)
-            path = self.auth_dir / normalized
-            try:
-                mode = path.lstat().st_mode
-            except FileNotFoundError:
-                return
-            if not stat.S_ISREG(mode):
-                raise EngineStateError("engine auth credential path is unsafe")
-            path.unlink()
+            self._remove_private_file_if_present(self.auth_dir / normalized)
 
     def audit_auth_permissions(self, *, enforce: bool = False) -> None:
         self._ensure_private_dir(self.root)
@@ -766,6 +784,41 @@ class EngineStateStore:
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         return credentials_dir / f"{credential_ref}.json"
+
+    def _credential_namespace_paths(
+        self,
+        credential_ref: str,
+    ) -> tuple[Path, Path, Path, Path]:
+        credential_path = self._credential_path(credential_ref)
+        stage_path = self._oauth_stage_path(credential_ref)
+        return (
+            credential_path,
+            credential_path.with_name(f".{credential_path.name}.tmp"),
+            stage_path,
+            stage_path.with_name(f".{stage_path.name}.tmp"),
+        )
+
+    def _reserve_credential_namespace(
+        self,
+        credential_ref: str,
+    ) -> tuple[Path, Path, Path, Path]:
+        paths = self._credential_namespace_paths(credential_ref)
+        reserved: list[Path] = []
+        try:
+            for path in paths:
+                self._reserve_path(path, credential_ref)
+                reserved.append(path)
+        except BaseException:
+            try:
+                self._cleanup_private_paths(tuple(reserved))
+            except BaseException:
+                logger.warning(
+                    "Unable to discard provisional credential reservations for %s",
+                    credential_ref,
+                    exc_info=True,
+                )
+            raise
+        return paths
 
     def _oauth_stage_path(self, credential_ref: str) -> Path:
         if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
@@ -852,6 +905,97 @@ class EngineStateStore:
         # concern, since it holds the engine's secrets alongside its state.
         cls._ensure_private_dir(path.parent)
         write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")
+
+    @classmethod
+    def _reserve_path(cls, path: Path, credential_ref: str) -> None:
+        """Create a no-secret, no-replace reservation for one exact path."""
+
+        cls._ensure_private_dir(path.parent)
+        payload = json.dumps(
+            {"kind": "reservation", "credential_ref": credential_ref},
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise EngineStateError("credential reference collision") from exc
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            cls._fsync_directory(path.parent)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @classmethod
+    def _write_reserved_json(
+        cls,
+        path: Path,
+        payload: dict[str, Any],
+        *,
+        temporary_path: Path,
+        credential_ref: str,
+    ) -> None:
+        """Write complete bytes to a deterministic per-ref temp before rename."""
+
+        cls._ensure_private_dir(path.parent)
+        serialized = json.dumps(payload, sort_keys=True).encode("utf-8") + b"\n"
+        reservation = {"credential_ref": credential_ref, "kind": "reservation"}
+        if cls._read_json(path) != reservation or cls._read_json(temporary_path) != reservation:
+            raise EngineStateError("credential reference collision")
+        descriptor = -1
+        try:
+            descriptor = os.open(temporary_path, os.O_WRONLY | os.O_TRUNC)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            cls._fsync_directory(path.parent)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @classmethod
+    def _remove_private_file_if_present(cls, path: Path) -> bool:
+        try:
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                # A prior unlink may have succeeded before its directory fsync
+                # failed. Retrying an absent path must still establish the
+                # directory durability boundary before cleanup can converge.
+                cls._fsync_directory(path.parent)
+                return False
+            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                raise EngineStateError("engine state path is unsafe")
+            path.unlink()
+            cls._fsync_directory(path.parent)
+            return True
+        except EngineStateError:
+            raise
+        except OSError as exc:
+            raise EngineStateError("unable to remove engine state file") from exc
+
+    @classmethod
+    def _cleanup_private_paths(cls, paths: Sequence[Path]) -> None:
+        first_error: BaseException | None = None
+        for path in paths:
+            try:
+                cls._remove_private_file_if_present(path)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _file_revision(path: Path) -> str:
@@ -948,13 +1092,7 @@ class EngineStateStore:
         }
 
     def _remove_oauth_stage_if_present(self, credential_ref: str) -> None:
-        stage_path = self._oauth_stage_path(credential_ref)
-        try:
-            stage_path.unlink()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise EngineStateError("unable to finalize OAuth staging") from exc
+        self._remove_private_file_if_present(self._oauth_stage_path(credential_ref))
 
     @staticmethod
     def _ensure_private_dir(path: Path) -> None:

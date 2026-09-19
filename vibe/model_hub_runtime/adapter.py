@@ -1723,13 +1723,16 @@ class CLIProxyEngineAdapter:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
-        return await asyncio.to_thread(
+        return await run_owned_in_thread(
             self.state_store.store_api_key,
             secret,
             vendor=vendor,
             protocol=protocol,
             base_url=base_url,
+            on_reserved=on_reserved,
         )
 
     async def provision_oauth_credential(
@@ -1737,6 +1740,8 @@ class CLIProxyEngineAdapter:
         source_id: str,
         vendor: str,
         material: Mapping[str, object],
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         normalized_vendor = vendor.strip().lower()
         auth_type = {"anthropic": "claude", "openai": "codex"}.get(normalized_vendor)
@@ -1753,6 +1758,7 @@ class CLIProxyEngineAdapter:
             normalized_vendor,
             auth_name,
             payload,
+            on_reserved=on_reserved,
         )
 
     async def activate_oauth_credential(self, credential_ref: str) -> None:
@@ -1942,6 +1948,8 @@ class CLIProxyEngineAdapter:
         vendor: str,
         secret: str,
         base_url: str | None,
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Store an unbound observation key until the observation settles.
 
@@ -1951,12 +1959,13 @@ class CLIProxyEngineAdapter:
         marker as a protocol conclusion.
         """
 
-        return await asyncio.to_thread(
+        return await run_owned_in_thread(
             self.state_store.store_api_key,
             secret,
             vendor=vendor,
             protocol="openai_chat",
             base_url=base_url,
+            on_reserved=on_reserved,
         )
 
     async def revoke_credential(self, credential_ref: str) -> None:
@@ -1965,10 +1974,14 @@ class CLIProxyEngineAdapter:
             credential_ref,
         )
         metadata = await asyncio.to_thread(
-            self.state_store.credential_metadata,
+            self.state_store.credential_metadata_if_present,
             credential_ref,
         )
-        auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
+        auth_name = (
+            metadata.get("auth_name")
+            if metadata is not None and metadata.get("kind") == "oauth"
+            else None
+        )
         if auth_name:
             if metadata.get("activation_state") != "staged":
                 client = await asyncio.to_thread(self.supervisor.client_if_running)
@@ -1981,8 +1994,10 @@ class CLIProxyEngineAdapter:
                             query={"name": str(auth_name)},
                             timeout=1.0,
                         )
-                    except EngineClientError:
-                        pass
+                    except EngineClientError as exc:
+                        raise EngineStateError(
+                            "unable to remove OAuth auth file"
+                        ) from exc
                 await asyncio.to_thread(
                     self.state_store.delete_oauth_auth_file,
                     str(auth_name),
@@ -2010,8 +2025,26 @@ class CLIProxyEngineAdapter:
         # absent ref proves cleanup already converged, including never-created
         # refs whose postcondition held vacuously.
         if metadata is None:
+            try:
+                await asyncio.to_thread(
+                    self.state_store.revoke_credential,
+                    credential_ref,
+                )
+            except EngineStateError:
+                return False
             return True
-        auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
+        if metadata.get("kind") != "oauth":
+            return False
+        if metadata.get("activation_state") == "staged":
+            try:
+                await asyncio.to_thread(
+                    self.state_store.revoke_credential,
+                    credential_ref,
+                )
+            except EngineStateError:
+                return False
+            return True
+        auth_name = metadata.get("auth_name")
         if not isinstance(auth_name, str) or not auth_name:
             return False
         client = await asyncio.to_thread(self.supervisor.client_if_running)
