@@ -11,6 +11,7 @@ import pytest
 from core.handlers.model_hub.migration_journal import NativeFileEdit, NativeTakeoverJournal
 from core.handlers.model_hub.service import ModelHubError
 from config.v2_config import ModelHubConfig
+from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
 from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
     _isolate_native_home,
     _service,
@@ -200,3 +201,85 @@ def test_invalid_journal_does_not_start_engine_or_admit_native_backends(monkeypa
         asyncio.run(service.recover_runtime_intent())
     assert service.migration_blocked_backends == {"claude", "codex", "opencode"}
     assert adapter.activated == []
+
+
+def test_rejected_refresh_finishes_custody_without_claiming_success(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _write_claude_oauth(home)
+    _write_codex_oauth(home)
+    _isolate_native_home(monkeypatch, home)
+    service, store, adapter = _service(tmp_path)
+    ids = [item["id"] for item in service.migration_scan()["items"]]
+    validate = adapter.validate_oauth_credential
+
+    async def reject_claude(ref):
+        await validate(ref)
+        claude = next(source for source in store.config.sources if source.vendor == "anthropic")
+        if ref == claude.credential_ref:
+            raise OAuthCredentialRejectedError()
+
+    adapter.validate_oauth_credential = reject_claude
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.migration_apply(ids))
+    assert failure.value.code == "migration_credentials_invalid"
+    assert len(adapter.validated) == 2
+    assert service.migration_journal.load() is None
+    assert not service.migration_blocked_backends
+    assert not (home / ".claude/.credentials.json").exists()
+    assert not (home / ".codex/auth.json").exists()
+    assert adapter.revoked == []
+    claude = next(source for source in store.config.sources if source.vendor == "anthropic")
+    codex = next(source for source in store.config.sources if source.vendor == "openai")
+    assert claude.state.status == "needs_action"
+    assert codex.state.status != "needs_action"
+    assert service.migration_journal.completed()["outcome"] == "needs_auth"
+    with pytest.raises(ModelHubError) as repeated:
+        asyncio.run(service.migration_apply(ids))
+    assert repeated.value.code == "migration_credentials_invalid"
+    assert len(adapter.validated) == 2
+    # Normal Hub config/auth repair is not trapped behind the migration gate.
+    service._save_config(service._clone_config(store.config))
+
+
+@pytest.mark.parametrize("boundary", ["terminal_config", "receipt"])
+def test_rejected_grant_terminal_decision_recovers_after_crash(monkeypatch, tmp_path, boundary):
+    home = tmp_path / "native"
+    _write_claude_oauth(home)
+    _isolate_native_home(monkeypatch, home)
+    service, store, adapter = _service(tmp_path)
+    ids = [item["id"] for item in service.migration_scan()["items"]]
+
+    async def rejected(ref):
+        adapter.validated.append(ref)
+        raise OAuthCredentialRejectedError()
+
+    adapter.validate_oauth_credential = rejected
+    save = store.save
+    complete = service.migration_journal.complete
+
+    def fail_terminal(config):
+        if any(source.state.status == "needs_action" for source in config.sources):
+            raise OSError("synthetic persistence failure")
+        save(config)
+
+    def fail_receipt(record):
+        raise OSError("synthetic receipt failure")
+
+    if boundary == "terminal_config":
+        store.save = fail_terminal
+    else:
+        service.migration_journal.complete = fail_receipt
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    record = service.migration_journal.load()
+    assert record["phase"] == "exposed"
+    assert record["terminal"]["invalid_source_ids"]
+    assert service.migration_blocked_backends == {"claude"}
+    store.save = save
+    service.migration_journal.complete = complete
+    asyncio.run(service.recover_runtime_intent())
+    assert len(adapter.validated) == 1
+    assert service.migration_journal.load() is None
+    assert not service.migration_blocked_backends
+    assert store.config.sources[0].state.status == "needs_action"
+    assert adapter.revoked == []

@@ -1,7 +1,8 @@
 """Private write-ahead state for native credential ownership transitions.
 
-This document is never an API payload. Native snapshots live only until the
-reversible phase ends; the completed receipt contains opaque IDs, not secrets.
+This document is never an API payload. Native snapshots are retained for
+compare-before-write recovery until custody settles, never for rollback after
+CPA exposure. The completed receipt contains opaque IDs, not secrets.
 """
 
 from __future__ import annotations
@@ -209,6 +210,37 @@ class NativeTakeoverJournal:
                     )
                 ):
                     raise TakeoverStateError("invalid takeover credential store")
+            terminal = payload.get("terminal")
+            if terminal is not None:
+                if (
+                    payload["phase"] != "exposed"
+                    or not isinstance(terminal, dict)
+                    or set(terminal) != {"invalid_source_ids", "config"}
+                    or not isinstance(terminal["invalid_source_ids"], list)
+                    or not terminal["invalid_source_ids"]
+                    or any(
+                        not isinstance(value, str) or value not in payload["source_ids"]
+                        for value in terminal["invalid_source_ids"]
+                    )
+                ):
+                    raise TakeoverStateError("invalid takeover terminal decision")
+                try:
+                    expected = ModelHubConfig.from_payload(payload["updated"]).to_payload()
+                    actual = ModelHubConfig.from_payload(terminal["config"]).to_payload()
+                except (KeyError, TypeError, ValueError):
+                    raise TakeoverStateError("invalid takeover terminal configuration") from None
+                for source in expected["sources"]:
+                    if source["id"] in terminal["invalid_source_ids"]:
+                        from config.v2_config import ModelHubSourceStateConfig
+
+                        source["state"] = ModelHubSourceStateConfig(
+                            status="needs_action",
+                            detail_key="models.source.needs_action.oauth_expired",
+                        ).to_payload()
+                if actual != expected:
+                    raise TakeoverStateError("invalid takeover terminal configuration")
+        elif payload.get("outcome", "success") not in {"success", "needs_auth"}:
+            raise TakeoverStateError("invalid takeover receipt")
         return payload
 
     def save(self, payload: dict[str, Any]) -> None:
@@ -236,6 +268,7 @@ class NativeTakeoverJournal:
             "items": record["items"],
             "backends": record["backends"],
             "source_ids": record["source_ids"],
+            "outcome": "needs_auth" if record.get("terminal") else "success",
             "source_credentials": {
                 source["id"]: source["credential_ref"]
                 for source in record["updated"]["sources"]

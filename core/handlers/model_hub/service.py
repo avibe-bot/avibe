@@ -93,6 +93,7 @@ from .errors import ModelDiscoveryError
 from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
 from .migration import (
     MigrationConflictError,
+    MigrationCredentialsInvalidError,
     apply_native_migration,
     build_native_migration_source,
     recover_native_migration,
@@ -1072,7 +1073,8 @@ class ModelHubService:
         except (TakeoverStateError, OSError):
             raise ModelHubError("migration_item_conflict", status=409) from None
         if pending is not None and canonical.to_payload() not in (
-            pending.get("previous"), pending.get("updated")
+            pending.get("previous"), pending.get("updated"),
+            (pending.get("terminal") or {}).get("config"),
         ):
             # The write-ahead decision must not overwrite intervening route
             # edits on recovery. Finish/revert that decision before new writes.
@@ -6320,6 +6322,8 @@ class ModelHubService:
                 self._migration_task = task
                 self._migration_item_ids = selection
             applied, added_to = await await_owned_task(task)
+        except MigrationCredentialsInvalidError:
+            raise ModelHubError("migration_credentials_invalid", status=409) from None
         except NativeMigrationBlockedError:
             raise ModelHubError("migration_native_busy", status=409) from None
         except (NativeOAuthPermissionError, PermissionError):
@@ -6329,7 +6333,11 @@ class ModelHubService:
         except (MigrationConflictError, OSError):
             raise ModelHubError("migration_item_conflict", status=409)
         except ModelHubError as exc:
-            pending = self.migration_journal.load()
+            try:
+                pending = self.migration_journal.load()
+            except (TakeoverStateError, OSError):
+                self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
+                raise ModelHubError("migration_configuration_blocked", status=409) from None
             if pending is not None and pending["phase"] == "exposed":
                 raise ModelHubError("migration_recovery_pending", status=409) from None
             if exc.code != "discovery_failed":

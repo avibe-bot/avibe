@@ -149,7 +149,16 @@ The `exposed` marker is durable before activation **or engine projection**.
 Recovery explicitly reconciles the projection even when saved config is
 already identical. OAuth completion additionally requires credential-specific
 upstream validation; an invalid or unavailable grant after possible exposure
-remains a pending takeover, not a restored native login.
+is never restored as a native login. Unavailable or inconclusive validation
+keeps takeover pending. Authoritative refresh-grant rejection instead records
+a terminal decision in the exposed journal, marks affected Sources
+`needs_action` / `models.source.needs_action.oauth_expired`, and finishes custody
+without reporting migration success. The receipt records `outcome: needs_auth`;
+apply and identical retries return `migration_credentials_invalid`. The pending
+journal and admission block are removed so the existing Hub reauthentication
+flow remains usable. Crash recovery replays the terminal decision without
+repeating a rejected refresh. An expired access token or generic 401 alone
+cannot establish this terminal outcome.
 
 Shutdown joins the owned operation before stopping the runtime. Client
 cancellation cannot cancel credential custody. A retry after completion checks

@@ -17,11 +17,13 @@ from config.v2_config import (
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     ObservationDiscovery,
     ObservationOutcome,
+    OAuthCredentialRejectedError,
     SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
@@ -75,6 +77,10 @@ _OPENCODE_UNSUPPORTED_NATIVE_IDS = {"alibaba-cn", "poe"}
 
 class MigrationConflictError(ValueError):
     pass
+
+
+class MigrationCredentialsInvalidError(RuntimeError):
+    """Custody transferred, but one or more grants require Hub reauthentication."""
 
 
 class MigrationHost(Protocol):
@@ -1173,6 +1179,8 @@ async def _resume_takeover(
             }
         ):
             raise MigrationConflictError
+        if record.get("outcome") == "needs_auth":
+            raise MigrationCredentialsInvalidError
         return len(record["items"]), [
             position for source_id in record["source_ids"] for position in host._added_to(source_id)
         ]
@@ -1194,7 +1202,11 @@ async def _resume_takeover(
         previous = ModelHubConfig.from_payload(record["previous"])
         updated = ModelHubConfig.from_payload(record["updated"])
         current = host.store.load()
-        if current.to_payload() not in (previous.to_payload(), updated.to_payload()):
+        terminal = record.get("terminal")
+        if current.to_payload() not in (
+            previous.to_payload(), updated.to_payload(),
+            terminal.get("config") if terminal else None,
+        ):
             raise MigrationConflictError
         if record["phase"] == "withdrawn":
             # Save the decision without projecting staged grants into CPA.
@@ -1215,6 +1227,8 @@ async def _resume_takeover(
             for edit in record["keychain"]:
                 await asyncio.to_thread(check_keychain_edit, edit, applied=True)
         await verify_idle()
+        if terminal:
+            return _finish_rejected_takeover(host, record)
         for credential in record["credentials"]:
             if credential["kind"] == "oauth":
                 await host._engine_call(host.adapter.activate_oauth_credential(credential["credential_ref"]))
@@ -1224,9 +1238,35 @@ async def _resume_takeover(
         await host._sync_sources(updated)
         host._engine_synced = True
         await host._engine_call(host.adapter.start())
+        invalid_source_ids = []
         for credential in record["credentials"]:
             if credential["kind"] == "oauth":
-                await host._engine_call(host.adapter.validate_oauth_credential(credential["credential_ref"]))
+                async def validate(ref: str) -> bool:
+                    try:
+                        await host.adapter.validate_oauth_credential(ref)
+                    except OAuthCredentialRejectedError:
+                        return False
+                    return True
+
+                if not await host._engine_call(validate(credential["credential_ref"])):
+                    invalid_source_ids.append(credential["source_id"])
+        if invalid_source_ids:
+            terminal_config = host._clone_config(updated)
+            for source in terminal_config.sources:
+                if source.id in invalid_source_ids:
+                    source.state = ModelHubSourceStateConfig(
+                        status="needs_action",
+                        detail_key="models.source.needs_action.oauth_expired",
+                    )
+            # Persist the terminal decision before its config write. A crash
+            # between either write and the receipt must finish custody, never
+            # restore the original grant or repeat a rejected refresh.
+            record["terminal"] = {
+                "invalid_source_ids": invalid_source_ids,
+                "config": terminal_config.to_payload(),
+            }
+            host.migration_journal.save(record)
+            return _finish_rejected_takeover(host, record)
         host.migration_journal.complete(record)
         host.migration_blocked_backends.difference_update(record["backends"])
         return len(record["items"]), [
@@ -1236,6 +1276,15 @@ async def _resume_takeover(
         if record["phase"] in {"prepared", "withdrawn"}:
             await _revert_takeover(host, record)
         raise
+
+
+def _finish_rejected_takeover(
+    host: MigrationHost, record: dict[str, Any],
+) -> tuple[int, list[dict]]:
+    host._save_config(ModelHubConfig.from_payload(record["terminal"]["config"]))
+    host.migration_journal.complete(record)
+    host.migration_blocked_backends.difference_update(record["backends"])
+    raise MigrationCredentialsInvalidError
 
 
 async def apply_native_migration(
@@ -1332,4 +1381,9 @@ async def recover_native_migration(host: MigrationHost) -> None:
     async with host._migration_lock:
         async with host.migration_guard(tuple(record["backends"])) as verify_idle:
             async with host._mutation_lock:
-                await _resume_takeover(host, record, verify_idle)
+                try:
+                    await _resume_takeover(host, record, verify_idle)
+                except MigrationCredentialsInvalidError:
+                    # The durable Source state is the repair entry point.
+                    # No native credential or admission gate remains owned.
+                    pass

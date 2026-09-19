@@ -62,6 +62,14 @@ class RuntimePlatformUnsupportedError(RuntimeError):
     """The pinned managed runtime has no asset for the server host."""
 
 
+class OAuthCredentialRejectedError(RuntimeError):
+    """Authoritative rejection of a refresh grant, requiring new authorization.
+
+    An expired access token, generic 401, or profile-only permission failure
+    does not establish this outcome. Exceptions must carry no secret material.
+    """
+
+
 @dataclass(frozen=True)
 class SourceBinding:
     """Engine-side registration of one hub-channel source (projection of config)."""
