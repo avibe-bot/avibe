@@ -1316,6 +1316,9 @@ export type WorkbenchMessage = {
   parent_native_message_id: string | null;
   // Server-owned read projection. Durable Message rows never carry this field.
   projection?: 'claimed_delivery' | null;
+  // Server-owned queued Delivery recovery projection, not Message metadata.
+  requires_explicit_retry?: boolean;
+  retry_reason?: string | null;
   text: string;
   content: Record<string, unknown>;
   metadata: Record<string, unknown>;

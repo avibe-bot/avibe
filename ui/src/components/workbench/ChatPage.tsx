@@ -3357,18 +3357,20 @@ export const QueueStrip: React.FC<{
 }> = ({ queue, onRemove, onRecall, onSendNow }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
+  const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
   return (
     <div className="shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
         <div className="flex items-center justify-between px-1 pb-1.5">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-cyan-ink">
             <Clock className="size-3" />
-            {t('chat.queue.title', { count: queue.length })}
+            {t(retryRequired ? 'chat.queue.retryRequired' : 'chat.queue.title', { count: queue.length })}
           </span>
           <Button type="button" variant="ghost" size="sm" onClick={onSendNow} className="h-6 px-2 text-[11px] text-cyan-ink">
             {t('chat.queue.sendNow')}
           </Button>
         </div>
+        {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
         <div
           data-queue-batch="true"
           className="flex max-h-32 flex-col overflow-y-auto rounded-lg bg-surface-2"

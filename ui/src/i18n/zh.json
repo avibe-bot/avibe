@@ -4342,6 +4342,8 @@
       "opDelete": "删除"
     },
     "queue": {
+      "retryRequired": "等待手动重试 · {{count}}",
+      "retryHint": "启动失败，自动重试已停止，原输入已保留。排查错误后，点击“立即发送”或失败提示上的“重试”。",
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "recall": "撤回到输入框",

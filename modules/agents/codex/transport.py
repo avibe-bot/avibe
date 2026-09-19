@@ -87,6 +87,14 @@ class CodexRPCError(RuntimeError):
         return self.code in {-32600, -32601, -32602}
 
 
+class CodexResponseTooLargeError(RuntimeError):
+    """The shared stdout reader cannot accept a protocol frame of this size."""
+
+    def __init__(self, limit: int = STREAM_BUFFER_LIMIT) -> None:
+        self.limit = limit
+        super().__init__(f"Codex app-server response exceeds the {limit}-byte stdout line limit")
+
+
 class CodexTransport:
     """Manages a persistent ``codex app-server`` subprocess.
 
@@ -433,12 +441,14 @@ class CodexTransport:
     async def _reader_loop(self) -> None:
         """Read stdout line-by-line and dispatch JSON-RPC messages."""
         assert self._process and self._process.stdout
+        failure: Exception = ConnectionError("Codex app-server stdout closed")
         try:
             while True:
                 try:
                     raw = await self._process.stdout.readline()
                 except (asyncio.LimitOverrunError, ValueError) as err:
                     logger.error("Codex stdout buffer error: %s", err)
+                    failure = CodexResponseTooLargeError()
                     break
                 if not raw:
                     break  # EOF
@@ -461,7 +471,7 @@ class CodexTransport:
             # Process ended — fail pending futures
             for fut in self._pending.values():
                 if not fut.done():
-                    fut.set_exception(ConnectionError("Codex app-server stdout closed"))
+                    fut.set_exception(failure)
             self._pending.clear()
 
     async def _dispatch(self, msg: dict[str, Any]) -> None:

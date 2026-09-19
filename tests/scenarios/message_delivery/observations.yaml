@@ -1,6 +1,23 @@
 version: 1
 capability: message_delivery
 observations:
+  - id: OBS-MESSAGE-DELIVERY-009
+    source: issue_2049_and_hermetic_native_reproduction
+    related_scenarios:
+      - MESSAGE-DELIVERY-031
+      - MESSAGE-DELIVERY-032
+      - MESSAGE-DELIVERY-033
+      - MESSAGE-DELIVERY-034
+    summary: Large Codex resume responses caused unlimited prewrite retries and collateral shared-process restarts.
+    previous_assumption: A no-write receipt proved that another automatic retry would succeed and every connection error justified process replacement.
+    observed_behavior: Resume exceeded the 128 MiB stdout frame limit, lost its failure identity, and repeatedly restarted other accepted turns in the same cwd.
+    required_updates:
+      - exclude unused response turns without truncating stored or model-visible context
+      - retain typed framing failures and hold definite resume failures for explicit recovery
+      - bound generic prewrite attempts using durable history and preserve original queued input
+      - do not spend or reset that budget on concurrency refusal
+      - gate failure replacement on existing durable ownership and forbid ambiguous input replay
+      - project the existing explicit-retry hold to CLI and the Web queue strip
   - id: OBS-MESSAGE-DELIVERY-008
     source: user_feedback_and_read_only_runtime_diagnosis
     related_scenarios:

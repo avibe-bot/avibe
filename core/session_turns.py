@@ -210,6 +210,7 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 _NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
+_MAX_PREWRITE_START_ATTEMPTS = 3
 _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
     "Before any irreversible action, check whether the work is already complete.]\n\n"
@@ -4601,6 +4602,7 @@ class SessionTurnManager:
         replayed_unknown_start = False
         unknown_start_exhausted = False
         unknown_start_run_ids: list[str] = []
+        requeued_input = False
         forced_retire_ids = retire_unwritten_delivery_ids or set()
         start_deferred = False
         linked_activation_deferred = False
@@ -4735,6 +4737,16 @@ class SessionTurnManager:
                                 )
                     elif outcome == "not_written":
                         for initial in initial_batch:
+                            receipt = {"kind": evidence_kind, **(evidence or {})}
+                            if (
+                                evidence_kind == "definitive_prewrite_failure"
+                                and receipt.get("reason") == SETTLED_BY_NO_TERMINAL_RESULT
+                                and delivery_store.consecutive_prewrite_start_failures(initial) + 1
+                                >= _MAX_PREWRITE_START_ATTEMPTS
+                            ):
+                                # Batch membership does not transfer one input's
+                                # exhausted retry budget to newer inputs.
+                                receipt["requires_explicit_retry"] = True
                             retire_unwritten = str(initial["id"]) in forced_retire_ids
                             owned_run_terminal = False
                             run_ids = (
@@ -4777,12 +4789,13 @@ class SessionTurnManager:
                                 ),
                                 next_state=next_state,
                                 next_priority="p3",
-                                receipt={"kind": evidence_kind, **(evidence or {})},
+                                receipt=receipt,
                             )
                             if definitive is None:
                                 raise RuntimeError(
                                     "terminal no-write evidence lost a Delivery batch CAS"
                                 )
+                            requeued_input = requeued_input or next_state == "queued"
                     else:
                         accepted = delivery_store.materialize_start_acceptance(
                             conn,
@@ -5054,6 +5067,8 @@ class SessionTurnManager:
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
+            if requeued_input:
+                self._publish_queue_update(session_id)
             self._publish_terminal_inbox_update(session_id)
         if status_changed and projected_status is not None:
             from core.inbox_events import bus
