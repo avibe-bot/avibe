@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../context/ApiContext';
 import { useWorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
 import type { ApiContextType, VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
 import { sortProjectsByRecent } from './projectOrder';
+import { apiFetch } from './apiFetch';
+import { uploadWorkbenchAttachment, workbenchUploadErrorTranslationKey, WorkbenchUploadError, type WorkbenchUploadResult } from './workbenchUpload';
+import type { ComposerAttachment } from '../components/workbench/Composer';
+import { useRouteSurfaceActive } from './routeSurfaceActivity';
+import type { TranslationKey } from '../i18n/types';
 
 interface UseNewSessionOptions {
   /** Re-run the per-open reset on the rising edge — sheets pass their `open`. Default true. */
@@ -11,6 +16,8 @@ interface UseNewSessionOptions {
   /** Pre-translated copy: the hook stays i18n-free, callers pass t(...) strings. */
   loadErrorText: string;
   createFailedText: string;
+  /** Media/send errors use the same localized policy as the chat composer. */
+  errorText?: (key: TranslationKey) => string;
 }
 
 // The agent/model/effort selection (agent route). Empty = the server default
@@ -31,6 +38,7 @@ export interface NewSessionState {
   loaded: boolean;
   error: string | null;
   sending: boolean;
+  uncertainSessionId: string | null;
   selectedId: string | null;
   setSelected: (id: string) => void;
   target: WorkbenchProject | null;
@@ -43,9 +51,9 @@ export interface NewSessionState {
   effectiveDefaultAgentName: string | null;
   agentRoute: AgentRouteSelection;
   setAgentRoute: (patch: AgentRouteSelection) => void;
-  /** Creates a session under `target` (with the picked agent route, if any) and returns the
-   *  nav target; null if it couldn't start. The hook never navigates — the caller does. */
-  send: (text: string) => Promise<{ sessionId: string; initialMessage: string } | null>;
+  /** Creates the selected session, uploads staged files, submits once, then
+   * returns the navigation target. Failures leave the caller's draft intact. */
+  send: (text: string, attachments?: ComposerAttachment[]) => Promise<{ sessionId: string } | null>;
   upsertSelectProject: (project: WorkbenchProject) => void;
 }
 
@@ -122,8 +130,9 @@ export function createLatestAgentProjectionLoader(
 // selections (project + agent route), the transient sending/error state, and
 // target resolution. Navigation + draft + the sheet's open/close lifecycle stay
 // in the consumer.
-export function useNewSession({ active = true, loadErrorText, createFailedText }: UseNewSessionOptions): NewSessionState {
+export function useNewSession({ active = true, loadErrorText, createFailedText, errorText }: UseNewSessionOptions): NewSessionState {
   const api = useApi();
+  const surfaceActive = useRouteSurfaceActive();
   // `active` already gates the agent projection below; pass it to the tree too.
   // NewSessionSheet is mounted shell-wide, so an unconditional read would make
   // the tree bootstrap on every route again — exactly what activation prevents.
@@ -135,6 +144,24 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [uncertainSessionId, setUncertainSessionId] = useState<string | null>(null);
+  const uncertainRef = useRef<string | null>(null);
+  const lifetime = useRef({ mounted: true, active, authorization: 0, generation: 0 });
+  lifetime.current.active = active && surfaceActive;
+  useEffect(() => {
+    const current = lifetime.current;
+    current.mounted = true;
+    return () => { current.mounted = false; };
+  }, []);
+  // Only failed submissions keep a session. A retry under the same selection
+  // reuses its upload scope; a different selection gets a new scope and uploads
+  // the original files again. No session exists before the first explicit Send.
+  const pendingSessionRef = useRef<{
+    selection: string;
+    id: string;
+    uploads: Map<string, WorkbenchUploadResult>;
+  } | null>(null);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [agentProjectionLoaded, setAgentProjectionLoaded] = useState(false);
@@ -178,6 +205,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     void loader.load();
     const disconnect = api.connectWorkbenchEvents({
       onAuthorizationChanged: () => {
+        lifetime.current.authorization += 1;
         void loader.load();
       },
     });
@@ -187,11 +215,16 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     };
   }, [active, api]);
 
-  // Clear transient state when the sheet (re)opens so a prior submit / error
-  // doesn't leak into the next open. The home passes active=true (runs once).
+  // A sheet open owns one submission lifetime. Closing discards that lifetime;
+  // late responses cannot lock or navigate a later fresh sheet. Settings only
+  // changes surfaceActive, so its retained home draft keeps the same lifetime.
   useEffect(() => {
-    if (!active) return;
+    lifetime.current.generation += 1;
+    sendingRef.current = false;
+    pendingSessionRef.current = null;
+    uncertainRef.current = null;
     setSending(false);
+    setUncertainSessionId(null);
     setError(null);
   }, [active]);
 
@@ -279,10 +312,18 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     : defaultAgentName;
 
   const send = useCallback(
-    async (text: string): Promise<{ sessionId: string; initialMessage: string } | null> => {
+    async (text: string, attachments: ComposerAttachment[] = []): Promise<{ sessionId: string } | null> => {
       const trimmed = text.trim();
       // Never create from a stale/empty/in-flight state; no target → caller opens New Project.
-      if (!trimmed || sending || !loaded || !target) return null;
+      if (uncertainRef.current) return null;
+      const authorization = lifetime.current.authorization;
+      const generation = lifetime.current.generation;
+      const currentAttempt = () => lifetime.current.mounted && lifetime.current.generation === generation;
+      const stillAuthorized = () => currentAttempt() && lifetime.current.active
+        && lifetime.current.authorization === authorization;
+      const files = attachments;
+      if (!stillAuthorized() || (!trimmed && files.length === 0) || sendingRef.current || !loaded || !target) return null;
+      sendingRef.current = true;
       setSending(true);
       setError(null);
       // routeForCreate pins a user pick or a project default; the bare global
@@ -301,15 +342,86 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
       }
       if (routeForCreate.model) overrides.model = routeForCreate.model;
       if (routeForCreate.reasoning_effort) overrides.reasoning_effort = routeForCreate.reasoning_effort;
-      const session = await createSessionForProject(target.id, overrides);
-      setSending(false);
-      if (!session) {
-        setError(createFailedText);
+      const selection = JSON.stringify([target.id, overrides]);
+      try {
+        let pending = pendingSessionRef.current;
+        if (!pending || pending.selection !== selection) {
+          const session = await createSessionForProject(target.id, overrides);
+          if (!currentAttempt()) return null;
+          if (!session) throw new Error(createFailedText);
+          pending = { selection, id: session.id, uploads: new Map() };
+          pendingSessionRef.current = pending;
+        }
+        if (!stillAuthorized()) return null;
+        const uploaded: WorkbenchUploadResult[] = [];
+        for (const attachment of files) {
+          if (!stillAuthorized()) return null;
+          // A home attachment always carries its original file, never a token
+          // from some other session. Upload IDs make same-scope retries safe.
+          if (!attachment.file) throw new Error(createFailedText);
+          let result = pending.uploads.get(attachment.localId);
+          if (!result) {
+            result = await uploadWorkbenchAttachment(pending.id, attachment.file, attachment.localId);
+            pending.uploads.set(attachment.localId, result);
+          }
+          uploaded.push(result);
+        }
+        if (!stillAuthorized()) return null;
+        // Ordinary message POST has no caller-supplied idempotency key. A
+        // lost response or dispatch_pending can already have started a turn;
+        // keep the draft and require inspection instead of offering resend.
+        const uncertain = () => {
+          if (!currentAttempt()) return;
+          uncertainRef.current = pending.id;
+          setUncertainSessionId(pending.id);
+          setError(errorText?.('newSession.sendUncertain') ?? createFailedText);
+        };
+        let response: Response;
+        try {
+          response = await apiFetch(`/api/sessions/${encodeURIComponent(pending.id)}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: trimmed, ...(uploaded.length ? { content: { text: trimmed, attachments: uploaded } } : {}) }),
+          });
+        } catch {
+          uncertain();
+          return null;
+        }
+        if (!currentAttempt()) return null;
+        if (!response.ok) {
+          const body = await response.json().catch(() => null);
+          if (!currentAttempt()) return null;
+          const rejected = body?.state === 'retired'
+            || ([400, 403, 404, 409, 422].includes(response.status) && body?.dispatch_error !== 'dispatch_pending');
+          if (!rejected) {
+            uncertain();
+            return null;
+          }
+          if ([403, 404, 409].includes(response.status)) pendingSessionRef.current = null;
+          throw new Error(createFailedText);
+        }
+        const sessionId = pending.id;
+        pendingSessionRef.current = null;
+        return { sessionId };
+      } catch (error) {
+        if (!currentAttempt()) return null;
+        // Retryable failures retain successful upload progress. A terminal
+        // session boundary requires a new scope while the caller keeps Files.
+        if (error instanceof WorkbenchUploadError && (
+          error.code === 'session_not_found' || [403, 404, 409].includes(error.status ?? 0)
+        )) pendingSessionRef.current = null;
+        setError(error instanceof WorkbenchUploadError && errorText
+          ? errorText(workbenchUploadErrorTranslationKey(error))
+          : createFailedText);
         return null;
+      } finally {
+        if (currentAttempt()) {
+          sendingRef.current = false;
+          setSending(false);
+        }
       }
-      return { sessionId: session.id, initialMessage: trimmed };
     },
-    [sending, loaded, target, routeForCreate, agents, createSessionForProject, createFailedText],
+    [loaded, target, routeForCreate, agents, createSessionForProject, createFailedText, errorText],
   );
 
   // The dialog already committed the row through the provider (fenced against a
@@ -327,6 +439,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     loaded,
     error: visibleError,
     sending,
+    uncertainSessionId,
     selectedId,
     setSelected: setSelectedId,
     target,

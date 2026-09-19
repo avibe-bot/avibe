@@ -12,6 +12,8 @@ const newSession = vi.hoisted(() => ({
   target: undefined as { id: string; display_name: string; folder_path: string } | undefined,
   setSelected: vi.fn(),
   sending: false,
+  loaded: true,
+  uncertainSessionId: null,
   agents: [{ name: 'codex', backend: 'codex' }],
   agentRoute: { agent_name: 'codex', agent_backend: 'codex' } as Record<string, unknown>,
   setAgentRoute: vi.fn(),
@@ -26,6 +28,7 @@ const authorization = vi.hoisted(() => ({
     can_chat: true,
     can_manage_projects: true,
     can_manage_instance: true,
+    can_manage_agents: true,
   },
 }));
 vi.hoisted(() => {
@@ -45,12 +48,13 @@ vi.mock('../lib/sessionInfo', () => ({
 // The real dialog opens the directory browser as its own first phase; here we
 // only need to see that the chip reaches it and that closing it changes nothing.
 vi.mock('./workbench/NewProjectDialog', () => ({
-  NewProjectDialog: ({ onClose }: { onClose: () => void }) => (
-    <div role="dialog" aria-label="directory-browser">
+  NewProjectDialog: ({ onClose, initialPath }: { onClose: () => void; initialPath?: string }) => (
+    <div role="dialog" aria-label="directory-browser" data-path={initialPath}>
       <button type="button" onClick={onClose}>cancel-folder</button>
     </div>
   ),
 }));
+vi.mock('./workbench/CreateViaChatDialog', () => ({ CreateViaChatDialog: ({ onClose }: { onClose: () => void }) => <div role="dialog" aria-label="create-task"><button onClick={onClose}>cancel-task</button></div> }));
 vi.mock('./workbench/AgentRoutePicker', () => ({
   AgentRoutePicker: ({ onChange }: { onChange: (patch: Record<string, unknown>) => void }) => (
     <button type="button" onClick={() => onChange({ agent_name: 'claude', agent_backend: 'claude' })}>
@@ -58,7 +62,7 @@ vi.mock('./workbench/AgentRoutePicker', () => ({
     </button>
   ),
 }));
-vi.mock('../lib/apiFetch', () => ({ apiFetch: vi.fn() }));
+vi.mock('../lib/apiFetch', () => ({ apiFetch: vi.fn().mockResolvedValue({ ok: true, json: async () => ({ available: false }) }) }));
 // Only the producer seam is stubbed; the predicate and the banner stay real, so
 // these tests exercise the lifecycle the home actually runs.
 const readiness = vi.hoisted(() => ({
@@ -138,6 +142,7 @@ const homeTree = (state?: unknown) => (
             component that knows which route is being shown. */}
         <SettingsOverlayRouteSurface fallbackElement={<div>no-such-route</div>}>
           <Route path="/" element={<><Workbench /><LocationState /></>} />
+          <Route path="/agents" element={<div>agents-page</div>} />
           <Route path="/projects" element={<div>projects-page</div>} />
           <Route path="/chat/:sessionId" element={<div>chat-page</div>} />
           <Route path="/settings/general" element={<div>settings-page</div>} />
@@ -178,40 +183,29 @@ afterEach(() => {
 });
 
 describe('Workbench first-task home', () => {
-  it('seeds a starting task into the draft and focuses it, without sending', async () => {
+  it('opens real starting actions without sending or overwriting a draft', async () => {
     const user = userEvent.setup();
     renderHome();
-
-    await user.click(screen.getByText(en.workbench.home.suggestions.researchTitle));
-
-    await waitFor(() => expect(input().value).toBe(en.workbench.home.suggestions.researchDraft));
-    expect(document.activeElement).toBe(input());
-    expect(input().selectionStart).toBe(en.workbench.home.suggestions.researchDraft.length);
+    await user.type(input(), '保留草稿');
+    await user.click(screen.getByText(en.workbench.home.openProject));
+    expect(screen.getByRole('dialog').getAttribute('data-path')).toBe(项目.folder_path);
+    await user.click(screen.getByText('cancel-folder'));
+    await user.click(screen.getByText(en.workbench.home.createTask));
+    expect(screen.getByRole('dialog', { name: 'create-task' })).toBeTruthy();
+    await user.click(screen.getByText('cancel-task'));
+    expect(input().value).toBe('保留草稿');
     expect(newSession.send).not.toHaveBeenCalled();
+    await user.click(screen.getByText(en.workbench.home.manageAgents));
+    expect(await screen.findByText('agents-page')).toBeTruthy();
   });
 
-  it('lets the seeded task be edited before it is sent', async () => {
+  it('navigates only after submission, without passing a replayable initial message', async () => {
     const user = userEvent.setup();
     renderHome();
-
-    await user.click(screen.getByText(en.workbench.home.suggestions.planTitle));
-    await waitFor(() => expect(input().value).toBe(en.workbench.home.suggestions.planDraft));
-    await user.type(input(), '：先做中文文档');
+    await user.type(input(), '先做中文文档');
     await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-
-    expect(newSession.send).toHaveBeenCalledWith(`${en.workbench.home.suggestions.planDraft}：先做中文文档`);
+    expect(newSession.send).toHaveBeenCalledWith('先做中文文档', []);
     expect(await screen.findByText('chat-page')).toBeTruthy();
-  });
-
-  it('replaces the draft when a second starting point is picked', async () => {
-    const user = userEvent.setup();
-    renderHome();
-
-    await user.click(screen.getByText(en.workbench.home.suggestions.exploreTitle));
-    await waitFor(() => expect(input().value).toBe(en.workbench.home.suggestions.exploreDraft));
-    await user.click(screen.getByText(en.workbench.home.suggestions.planTitle));
-    await waitFor(() => expect(input().value).toBe(en.workbench.home.suggestions.planDraft));
-    expect(newSession.send).not.toHaveBeenCalled();
   });
 
   it('opens the folder picker straight from the workspace chip and keeps the draft when it is cancelled', async () => {
@@ -479,6 +473,6 @@ describe('Workbench continuation row', () => {
 
     await user.type(input(), '继续用聊天');
     await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-    expect(newSession.send).toHaveBeenCalledWith('继续用聊天');
+    expect(newSession.send).toHaveBeenCalledWith('继续用聊天', []);
   });
 });

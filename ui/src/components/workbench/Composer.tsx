@@ -55,6 +55,7 @@ import {
   type VoiceRealtimeFinal,
 } from '../../lib/voiceRealtime';
 import {
+  MAX_WORKBENCH_ATTACHMENT_BYTES,
   isWorkbenchUploadRetryable,
   uploadWorkbenchAttachment,
   workbenchUploadErrorTranslationKey,
@@ -83,7 +84,9 @@ export type ComposerAttachment = {
   // reserves the image box and loading never shifts the transcript.
   width?: number;
   height?: number;
-  status: 'uploading' | 'ready' | 'error';
+  status: 'staged' | 'uploading' | 'ready' | 'error';
+  /** Original file for a home draft; uploaded only after explicit Send. */
+  file?: File;
   retryable?: boolean;
 };
 
@@ -344,6 +347,8 @@ export interface ComposerProps {
   /** Disable sending (e.g. while the caller creates a session + navigates).
    *  Also suppresses every live-turn control — see ``busyControls``. */
   disabled?: boolean;
+  /** Keep a retained draft editable while an uncertain send is inspected. */
+  sendDisabled?: boolean;
   /** Override the row container — e.g. a narrower max-width on the home canvas. */
   className?: string;
   /** Caller-owned controls (Agent + workspace pickers on the home). Supplying
@@ -351,9 +356,10 @@ export interface ComposerProps {
    *  carrying these on the left and Send on the right. Callers that pass nothing
    *  keep the single-row box the chat has always used. */
   actions?: React.ReactNode;
-  /** When set, enables file upload + voice input scoped to this session. The
-   *  Workbench home leaves it unset → a plain text-only composer. */
+  /** Upload + retained voice scope for an existing chat session. */
   sessionId?: string;
+  /** Home drafts stage local files and transcribe voice without a server session. */
+  stageMedia?: boolean;
   /** Focus the textarea on mount (desktop only — skipped on touch devices so it
    *  never pops the on-screen keyboard). The chat composer remounts per session,
    *  so this also covers opening / switching sessions. */
@@ -399,9 +405,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onDraftChange,
   placeholder,
   disabled = false,
+  sendDisabled = false,
   className,
   actions,
   sessionId,
+  stageMedia = false,
   autoFocus = false,
   onSearchAgents,
   onSearchSessions,
@@ -412,6 +420,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const voiceShortcutHint = t('chat.compose.voiceShortcutHint', { shortcut: voiceShortcutLabel });
   const { showToast } = useToast();
   const [value, setValue] = useState('');
+  const [homeVoiceKey] = useState(() => `draft:${newLocalId()}`);
+  const voiceKey = sessionId ?? (stageMedia ? homeVoiceKey : undefined);
+  const stagedUrlsRef = useRef(new Set<string>());
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
   // keystroke into ``value`` there — a fast third-party IME (e.g. a voice
   // keyboard like Typeless) inserts text in bursts, and re-rendering on each
@@ -439,7 +450,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [restoringRecording, setRestoringRecording] = useState(() => (
-    sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
+    voiceKey != null && voiceSessionLocksDraft(voiceSessionsById.get(voiceKey))
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [realtimeAnnouncement, setRealtimeAnnouncement] = useState('');
@@ -458,9 +469,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const unmountedRef = useRef(false);
   const disabledRef = useRef(disabled);
 
-  // Upload + voice are scoped to a session (the upload endpoint needs one); the
-  // home composer leaves them off.
-  const mediaEnabled = Boolean(sessionId);
+  const mediaEnabled = Boolean(sessionId) || stageMedia;
   const voiceDraftReadOnly = recordingStarting || recording || restoringRecording || transcribing;
 
   useLayoutEffect(() => {
@@ -580,11 +589,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setRealtimeAnnouncement('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
-      sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
+      voiceKey != null && voiceSessionLocksDraft(voiceSessionsById.get(voiceKey)),
     );
-  }, [sessionId]);
+  }, [sessionId, voiceKey]);
+
+  useEffect(() => () => {
+    for (const url of stagedUrlsRef.current) URL.revokeObjectURL(url);
+    // A home draft has no durable chat to restore into after a real departure.
+    const voice = voiceSessionsById.get(homeVoiceKey);
+    voice?.abortController.abort();
+    voiceSessionsById.delete(homeVoiceKey);
+  }, [homeVoiceKey]);
 
   const removeAttachment = (localId: string) => {
+    const url = attachments.find((attachment) => attachment.localId === localId)?.url;
+    if (url && stagedUrlsRef.current.delete(url)) URL.revokeObjectURL(url);
     attachmentFilesRef.current.delete(localId);
     setAttachments((cur) => cur.filter((a) => a.localId !== localId));
   };
@@ -640,6 +659,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // update so the user sees the full batch at once, then upload with bounded
   // concurrency so a big drop of large files doesn't flood memory / the endpoint.
   const uploadFiles = async (files: File[]) => {
+    if (!mediaEnabled || disabledRef.current || pendingRef.current || voiceDraftLocked()) return;
+    if (stageMedia && !sessionId) {
+      const staged: ComposerAttachment[] = [];
+      for (const file of files) {
+        if (!file.size || file.size > MAX_WORKBENCH_ATTACHMENT_BYTES) {
+          showToast(t(file.size ? 'chat.compose.attachmentTooLarge' : 'chat.compose.attachmentEmpty'), 'error');
+          continue;
+        }
+        const url = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
+        if (url) stagedUrlsRef.current.add(url);
+        staged.push({ localId: newLocalId(), file, token: '', name: file.name,
+          mime: file.type || 'application/octet-stream', size: file.size,
+          kind: file.type.startsWith('image/') ? 'image' : 'file', url, status: 'staged' });
+      }
+      setAttachments((cur) => [...cur, ...staged]);
+      return;
+    }
     if (!sessionId) return;
     const sid = sessionId;
     const staged = files.map((file) => ({ file, localId: newLocalId() }));
@@ -676,8 +712,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     || recordingSessionRef.current !== null
     || transcribingRef.current
     || (
-      sessionId != null
-      && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
+      voiceKey != null
+      && voiceSessionLocksDraft(voiceSessionsById.get(voiceKey))
     )
   );
   const captureVoiceInsertion = useCallback((): VoiceInsertionSnapshot => {
@@ -806,7 +842,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
     const activeHere = (
       !unmountedRef.current
-      && sessionId === session.sessionId
+      && voiceKey === session.sessionId
       && voiceSessionsById.get(session.sessionId) === session
     );
     if (session.status === 'ready' && session.transcript) {
@@ -835,10 +871,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       retainSettledVoiceSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
-  }, [insertVoiceTranscript, retainSettledVoiceSession, sessionId, showToast, t]);
+  }, [insertVoiceTranscript, retainSettledVoiceSession, voiceKey, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
-    const activeHere = !unmountedRef.current && sessionId === session.sessionId;
+    const activeHere = !unmountedRef.current && voiceKey === session.sessionId;
     if (activeHere) {
       transcribingRef.current = true;
       setTranscribing(true);
@@ -857,7 +893,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const finishRealtimeVoiceSession = async (session: VoiceRecordingSession) => {
-    const activeHere = !unmountedRef.current && sessionId === session.sessionId;
+    const activeHere = !unmountedRef.current && voiceKey === session.sessionId;
     if (activeHere) {
       transcribingRef.current = true;
       setTranscribing(true);
@@ -930,12 +966,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [showToast, t]);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!voiceKey) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const restore = () => {
       if (!alive) return;
-      const session = voiceSessionsById.get(sessionId);
+      const session = voiceSessionsById.get(voiceKey);
       if (!session) {
         setRestoringRecording(false);
         return;
@@ -965,13 +1001,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       alive = false;
       if (timer != null) clearTimeout(timer);
     };
-  }, [presentVoiceSession, sessionId]);
+  }, [presentVoiceSession, voiceKey]);
 
   const startRecording = async (capturedInsertion?: VoiceInsertionSnapshot) => {
     if (
-      !sessionId
+      !voiceKey
       || recordingStartRef.current
-      || voiceSessionsById.has(sessionId)
+      || voiceSessionsById.has(voiceKey)
     ) {
       return;
     }
@@ -1001,7 +1037,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const abortController = new AbortController();
       const dictationId = newVoiceDictationId();
       const session: VoiceRecordingSession = {
-        sessionId,
+        sessionId: voiceKey,
         dictationId,
         abortController,
         segments: [],
@@ -1093,7 +1129,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             session.realtime?.abort();
             restoreRealtimePreview(session);
             reportVoiceFinalization(session, 'empty');
-            if (!unmountedRef.current && sessionId === session.sessionId) {
+            if (!unmountedRef.current && voiceKey === session.sessionId) {
               showToast(t('chat.compose.voiceEmpty'), 'error');
             }
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
@@ -1131,14 +1167,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const startedAt = Date.now();
       session.startedAt = startedAt;
 
-      const previous = voiceSessionsById.get(sessionId);
+      const previous = voiceSessionsById.get(voiceKey);
       if (previous) {
         // A retained batch may have settled while microphone setup was pending.
         // Preserve it until the user explicitly retries or discards it.
         pipeline.abort();
         return;
       }
-      voiceSessionsById.set(sessionId, session);
+      voiceSessionsById.set(voiceKey, session);
       setVoiceRetainedSession(null);
       setRecordingSeconds(0);
       recordingTickerRef.current = setInterval(() => {
@@ -1198,7 +1234,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, recording);
 
   const trimmed = value.trim();
-  const readyAttachments = attachments.filter((a) => a.status === 'ready');
+  const readyAttachments = attachments.filter((a) => a.status === 'ready' || a.status === 'staged');
   const uploading = attachments.some((a) => a.status === 'uploading');
   // The mention path doesn't mirror its text into ``value`` (see onChange), so
   // its "is there text?" signal comes from ``hasText``; the textarea path reads
@@ -1210,6 +1246,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const canSubmit =
     (hasComposerText || readyAttachments.length > 0)
     && !uploading
+    && !sendDisabled
     && !disabled
     && !voiceDraftReadOnly;
   // ``busy && disabled`` is an incoherent pair for ANY caller: ``disabled`` means
@@ -1321,6 +1358,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     voiceShortcutAvailable,
   ]);
 
+  // Home has no ChatPage shortcut owner. Scope its chord to the retained route
+  // so Settings and foreground picker dialogs keep their own keyboard input.
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    handleVoiceShortcut(event, true);
+  }, stageMedia);
+
   // ChatPage owns the window listener because the shortcut applies across that
   // page, while the composer remains the sole owner of voice state and actions.
   // No deps array keeps every exposed operation on the latest render state.
@@ -1399,7 +1442,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     try {
       // If the caller reports the send couldn't start (home no-project nudge),
       // restore the prompt + attachments for retry — unless the user typed anew.
-      const started = await onSend(submitted, sent, useMentions ? sentRefs : undefined);
+      let started: boolean | void;
+      try {
+        started = await onSend(submitted, sent, useMentions ? sentRefs : undefined);
+      } catch {
+        showToast(t('chat.compose.sendFailed'), 'error');
+        started = false;
+      }
       if (started === false) {
         if (!unmountedRef.current) {
           setAttachments((cur) => (cur.length ? cur : sent));
@@ -1422,6 +1471,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             }
           }
           onDraftChange?.(submitted);
+        }
+      } else {
+        for (const attachment of sent) {
+          if (stagedUrlsRef.current.delete(attachment.url)) URL.revokeObjectURL(attachment.url);
         }
       }
     } finally {
@@ -1459,7 +1512,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onClick={() => fileInputRef.current?.click()}
                 disabled={disabled}
                 aria-label={t('chat.compose.attach')}
-                className="h-9 w-7 shrink-0"
+                className={actions ? 'size-7 shrink-0' : 'h-9 w-7 shrink-0'}
               >
                 <Plus className="size-4" />
               </Button>
@@ -1490,7 +1543,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 )}
                 aria-label={t('chat.compose.voice')}
                 title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
-                className="size-9 shrink-0"
+                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
               >
                 <Mic className="size-4" />
               </Button>
@@ -1516,7 +1569,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 size="icon"
                 disabled
                 aria-label={t('chat.compose.voiceProcessing')}
-                className="size-9 shrink-0"
+                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
               >
                 <Loader2 className="size-4 animate-spin" />
               </Button>
@@ -1529,7 +1582,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onClick={() => void retryVoiceSession(voiceRetainedSession)}
                 aria-label={t('chat.compose.voiceRetry')}
                 title={t('chat.compose.voiceRetry')}
-                className="size-9 shrink-0"
+                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
               >
                 <RotateCcw className="size-4" />
               </Button>
@@ -1542,7 +1595,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onClick={() => void copyReadyVoiceTranscript(voiceRetainedSession)}
                 aria-label={t('chat.compose.voiceCopyTranscript')}
                 title={t('chat.compose.voiceCopyTranscript')}
-                className="size-9 shrink-0"
+                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
               >
                 <Copy className="size-4" />
               </Button>
@@ -1605,6 +1658,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ref={textareaRef}
             value={value}
             onChange={(e) => update(e.target.value)}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.files);
+              if (mediaEnabled && files.length && !disabled && !voiceDraftReadOnly) {
+                event.preventDefault();
+                void uploadFiles(files);
+              }
+            }}
+            onDragOver={(event) => { if (mediaEnabled && event.dataTransfer.types.includes('Files')) event.preventDefault(); }}
+            onDrop={(event) => {
+              if (!mediaEnabled || !event.dataTransfer.files.length) return;
+              event.preventDefault();
+              void uploadFiles(Array.from(event.dataTransfer.files));
+            }}
             onKeyDown={(e) => {
               // Enter sends, Shift+Enter newline — EXCEPT while the on-screen
               // keyboard is open (mobile), where Enter inserts a newline and Send is
@@ -1622,7 +1688,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             disabled={disabled}
             readOnly={voiceDraftReadOnly}
             placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
-            className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
+            className="max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}
     </>
@@ -1650,7 +1716,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onClick={submit}
                 aria-label={t('chat.compose.queueSend')}
                 title={t('chat.compose.queueSend')}
-                className="size-9 shrink-0"
+                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
               >
                 <span className="relative inline-flex">
                   <Send className="size-4" />
@@ -1668,7 +1734,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onClick={onStop}
               disabled={!stopArmed}
               aria-label={t('chat.compose.stop')}
-              className="size-9 shrink-0"
+              className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
             >
               <Square className="size-4" />
             </Button>
@@ -1681,7 +1747,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onClick={submit}
             disabled={!canSubmit}
             aria-label={t('chat.compose.send')}
-            className="size-9 shrink-0"
+            className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
           >
             <Send className="size-4" />
           </Button>
@@ -1704,7 +1770,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 ? 'chat.compose.cancelRecording'
                 : 'chat.compose.voiceDiscard',
             )}
-            className="size-9 shrink-0"
+            className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
           >
             <Trash2 className="size-4" />
           </Button>
@@ -1774,12 +1840,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         /* Two-row box (design TfqkD): the input on top, then an action row
            carrying the caller's pickers on the left and Send on the right. */
         <div className="flex w-full flex-col gap-[22px] rounded-2xl border border-border-strong bg-surface-2 p-[18px] shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
-          <div className="flex w-full items-end gap-1.5">
-            {mediaControls}
-            {inputControl}
-          </div>
-          <div className="flex w-full items-center justify-between gap-4">
-            <div className="flex min-w-0 items-center gap-4">{actions}</div>
+          <div className="flex w-full items-end gap-1.5">{inputControl}</div>
+          <div className="flex w-full items-end justify-between gap-2">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+              {mediaControls}
+              {actions}
+            </div>
             <div className="flex shrink-0 items-center gap-1.5">{sendControls}</div>
           </div>
         </div>

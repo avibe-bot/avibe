@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { ChevronDown, FolderOpen, ListChecks, Search, Smartphone } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
+import { Bot, ChevronDown, Clock, FolderOpen, Smartphone } from 'lucide-react';
 
+import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 import { useNewSession } from '../lib/useNewSession';
 import { NewProjectDialog } from './workbench/NewProjectDialog';
-import { Composer, type ComposerHandle } from './workbench/Composer';
+import { Composer, type ComposerAttachment } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
 import { ReadyBanner } from './workbench/ReadyBanner';
@@ -15,51 +15,19 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../lib/sessionInfo';
 import logoImg from '../assets/logo.png';
-import type { TranslationKey } from '../i18n/types';
+import { CreateViaChatDialog } from './workbench/CreateViaChatDialog';
+import { Button } from './ui/button';
 
-// The three starting points the home offers (design LDlvV). Each one seeds the
-// draft and focuses the input — it never sends, so the user edits a concrete
-// sentence instead of staring at an empty box.
-const SUGGESTIONS: {
-  key: string;
-  icon: LucideIcon;
-  titleKey: TranslationKey;
-  bodyKey: TranslationKey;
-  draftKey: TranslationKey;
-}[] = [
-  {
-    key: 'explore',
-    icon: FolderOpen,
-    titleKey: 'workbench.home.suggestions.exploreTitle',
-    bodyKey: 'workbench.home.suggestions.exploreBody',
-    draftKey: 'workbench.home.suggestions.exploreDraft',
-  },
-  {
-    key: 'research',
-    icon: Search,
-    titleKey: 'workbench.home.suggestions.researchTitle',
-    bodyKey: 'workbench.home.suggestions.researchBody',
-    draftKey: 'workbench.home.suggestions.researchDraft',
-  },
-  {
-    key: 'plan',
-    icon: ListChecks,
-    titleKey: 'workbench.home.suggestions.planTitle',
-    bodyKey: 'workbench.home.suggestions.planBody',
-    draftKey: 'workbench.home.suggestions.planDraft',
-  },
-];
-
-// The first-task home (design SfdNo + TfqkD + CRERw): one question, three
-// starting points, and the shared chat Composer carrying the Agent and workspace
-// pickers on its own action row. Sending creates a session under the selected
-// workspace with the selected Agent and routes to /chat/<id> with the typed
-// message pre-seeded; no workspace surfaces the project dialog so the user gets
-// unstuck in place. The create flow lives in the shared useNewSession hook — one
-// source of truth with the mobile NewSessionSheet.
+// The home owns one unsent draft. Files and voice stay in its Composer until
+// explicit Send binds the selected project/Agent and commits the first message.
 export const Workbench: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const surfaceActive = useRouteSurfaceActive();
+  const [sentSessionId, setSentSessionId] = useState<string | null>(null);
+  useEffect(() => {
+    if (surfaceActive && sentSessionId) navigate(`/chat/${encodeURIComponent(sentSessionId)}`);
+  }, [navigate, sentSessionId, surfaceActive]);
   const location = useLocation();
   const { capabilities } = useInstanceAuthorization();
   const canCreateProject = canCreateLocalProject(capabilities);
@@ -67,10 +35,11 @@ export const Workbench: React.FC = () => {
     active: capabilities.can_chat,
     loadErrorText: t('newSession.loadError'),
     createFailedText: t('newSession.createFailed'),
+    errorText: t,
   });
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const composerRef = useRef<ComposerHandle>(null);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
 
   // The wizard hands `{ onboardingCompleted: true }` to this route. That is an
   // event, not a property of the location — history state survives a reload, so
@@ -109,25 +78,22 @@ export const Workbench: React.FC = () => {
     dismissed: bannerDismissed,
   });
 
-  // Returns whether the send actually started, so the Composer only clears the
-  // box on a real start — a no-project nudge or a transient create error keeps
-  // the typed prompt for retry. Navigation stays here (the hook is router-free).
-  const send = async (text: string): Promise<boolean> => {
-    const result = await ns.send(text);
+  const send = async (text: string, attachments: ComposerAttachment[] = []): Promise<boolean> => {
+    const result = await ns.send(text, attachments);
     if (result) {
-      // Hand the typed message to ChatPage as router state; it replays it
-      // through the fire-and-forget compose path so the agent turn starts.
-      navigate(`/chat/${encodeURIComponent(result.sessionId)}`, { state: { initialMessage: result.initialMessage } });
+      // The first POST has completed. Navigation only opens its transcript;
+      // handing initialMessage to ChatPage here would start a duplicate turn.
+      setSentSessionId(result.sessionId);
       return true;
     }
-    if (text.trim() && ns.needsProject) setNewProjectOpen(true);
+    if ((text.trim() || attachments.length) && ns.needsProject && canCreateProject) setNewProjectOpen(true);
     return false;
   };
 
   if (!capabilities.can_chat) return <Navigate to="/projects" replace />;
 
   const workspaceLabel = ns.target?.display_name ?? t('workbench.home.chooseWorkspace');
-  const workspaceChipClass = 'flex h-7 min-w-0 max-w-[220px] items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-50';
+  const workspaceChipClass = 'flex h-7 min-w-0 max-w-full sm:max-w-[220px] items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50';
   const workspaceChipBody = (
     <>
       <span className="min-w-0 truncate">{workspaceLabel}</span>
@@ -200,37 +166,23 @@ export const Workbench: React.FC = () => {
           <p className="max-w-[520px] text-[14px] leading-[1.5] text-muted">{t('workbench.home.heroBody')}</p>
         </div>
 
-        {/* Three starting points (design LDlvV): equal columns on desktop, stacked
-            on a phone where 277-wide cards would be unreadable. */}
-        <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-3">
-          {SUGGESTIONS.map(({ key, icon: Icon, titleKey, bodyKey, draftKey }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => composerRef.current?.setDraft(t(draftKey))}
-              className="flex flex-col items-start gap-3 rounded-xl border border-border bg-surface-2 p-[18px] text-left transition-colors hover:border-border-strong hover:bg-foreground/[0.03]"
-            >
-              <Icon className="size-[19px] shrink-0 text-mint-ink" />
-              <span className="flex flex-col gap-1">
-                <span className="text-[13px] font-semibold text-foreground">{t(titleKey)}</span>
-                <span className="text-[12px] leading-[1.5] text-muted">{t(bodyKey)}</span>
-              </span>
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <Button variant="outline" size="sm" disabled={ns.sending}
+            onClick={() => canCreateProject ? setNewProjectOpen(true) : setWorkspaceMenuOpen(true)}>
+            <FolderOpen className="size-4" />{t('workbench.home.openProject')}
+          </Button>
+          {capabilities.can_manage_agents && (
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/agents"><Bot className="size-4" />{t('workbench.home.manageAgents')}</Link>
+            </Button>
+          )}
+          <Button variant="outline" size="sm" disabled={ns.sending} onClick={() => setNewTaskOpen(true)}>
+            <Clock className="size-4" />{t('workbench.home.createTask')}
+          </Button>
         </div>
       </div>
 
-      {/* On a phone the page is taller than the screen (hero + three stacked
-          cards + this block), so at rest its last ~80px sit under the fixed tab
-          bar — and that is exactly where the composer's Agent, workspace and
-          Send controls are: measured at 390x844, Send's centre hit-tests to the
-          nav, so the button is dead until the user happens to scroll. Pinning
-          this block to the bottom of the scroll area, one nav clearance above
-          the bar, keeps the primary control reachable at any viewport height
-          instead of trimming the rhythm above it to fit one phone. It stays a
-          sticky child of the scrolling column rather than a fixed bar, so iOS
-          keyboard panning still moves it with the page. Desktop is untouched:
-          the column already fills the viewport and nothing overlaps it. */}
+      {/* Keep the action row above the mobile tab bar while the content scrolls. */}
       <div className="flex flex-col gap-4 pb-2 max-md:sticky max-md:bottom-[var(--mobile-nav-clearance)] max-md:z-10 max-md:bg-background max-md:pt-3">
         {/* A card that scrolls behind an opaque block reads as cut in half. The
             short fade above it says "passing behind", which is what happens. */}
@@ -239,10 +191,11 @@ export const Workbench: React.FC = () => {
           className="pointer-events-none absolute inset-x-0 -top-4 h-4 bg-gradient-to-t from-background to-transparent md:hidden"
         />
         <Composer
-          ref={composerRef}
+          stageMedia
           onSend={send}
           placeholder={t('workbench.home.inputPlaceholder')}
-          disabled={ns.sending}
+          disabled={ns.sending || !ns.loaded}
+          sendDisabled={Boolean(ns.uncertainSessionId)}
           actions={
             <>
               <AgentRoutePicker
@@ -254,7 +207,7 @@ export const Workbench: React.FC = () => {
                   : t('newSession.defaultAgent')}
                 disabled={ns.sending}
                 align="start"
-                triggerClassName="h-7 max-w-[240px] rounded-md px-2 py-0"
+                triggerClassName="h-7 min-w-0 max-w-full sm:max-w-[240px] rounded-md border-transparent bg-transparent px-2 py-0 hover:bg-foreground/[0.06]"
               />
               {workspaceChip}
             </>
@@ -266,6 +219,12 @@ export const Workbench: React.FC = () => {
         {ns.error && (
           <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {ns.error}
+            {ns.uncertainSessionId && (
+              <Link className="ml-2 underline underline-offset-2" target="_blank" rel="noopener noreferrer"
+                to={`/chat/${encodeURIComponent(ns.uncertainSessionId)}`}>
+                {t('newSession.inspectSession')}
+              </Link>
+            )}
           </div>
         )}
 
@@ -296,8 +255,10 @@ export const Workbench: React.FC = () => {
         )}
       </div>
 
+      {newTaskOpen && <CreateViaChatDialog kind="task" onClose={() => setNewTaskOpen(false)} />}
       {newProjectOpen && canCreateProject && (
         <NewProjectDialog
+          initialPath={ns.target?.folder_path}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {
             setNewProjectOpen(false);

@@ -10,6 +10,7 @@ import { Input } from '../ui/input';
 import { errorMessage } from '@/lib/errorMessage';
 
 interface NewProjectDialogProps {
+  initialPath?: string;
   onClose: () => void;
   /** The project is already in the shared tree by the time this fires — the
    *  provider owns that commit so it can fence it against an authorization
@@ -23,7 +24,7 @@ interface NewProjectDialogProps {
 // then a compact confirm card lets the user override the display name and
 // fire the create call. The backend defaults display_name to the folder
 // basename — keep the input empty to accept that default.
-export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onCreated }) => {
+export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onCreated, initialPath }) => {
   const { t } = useTranslation();
   const { createProject } = useWorkbenchProjectsActions();
   const [phase, setPhase] = useState<'pick' | 'confirm'>('pick');
@@ -35,6 +36,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
   if (phase === 'pick') {
     return (
       <DirectoryBrowser
+        initialPath={folderPath || initialPath}
         onClose={onClose}
         onSelect={(path) => {
           setFolderPath(path);
