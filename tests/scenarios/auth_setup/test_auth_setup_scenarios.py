@@ -48,7 +48,7 @@ from core.handlers.model_hub.service import (
 )
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
-from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
+from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess, save_direct_auth_config
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from storage import remote_access_authorization_service
@@ -77,6 +77,26 @@ from vibe.model_hub_runtime.adapter import (
     _OAUTH_OBSERVABLE_VENDORS,
     hub_subscription_serving_protocol,
 )
+
+
+@pytest.fixture(autouse=True)
+def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
+    """Scenario transports must be fakes, even when the suite runs on its own."""
+    import subprocess
+
+    import psutil
+
+    from vibe import native_oauth_store
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Real native processes and process inventory are forbidden in auth scenarios")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess.Popen, "__init__", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
+    monkeypatch.setattr(psutil, "process_iter", forbidden)
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
@@ -370,6 +390,11 @@ class _ReloadingV2ConfigController:
     @property
     def config(self):
         return V2Config.load()
+
+
+async def _wait_for_flow_cancellation(_flow):
+    """Keep an unfinished provider flow alive until the test tears it down."""
+    await asyncio.Event().wait()
 
 
 def _save_remote_web_auth_config() -> V2Config:
@@ -904,7 +929,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             )
             config.agents.claude.auth_mode = "oauth"
             config.agents.claude.auth_mode_set = True
-            config.save()
+            save_direct_auth_config(config)
 
             await runner.run(
                 ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
@@ -1047,7 +1072,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             config.agents.claude.auth_mode = "oauth"
             config.agents.claude.auth_mode_set = True
             config.agents.claude.cli_path = "claude-probe"
-            config.save()
+            save_direct_auth_config(config)
 
             await runner.run(
                 ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
@@ -1166,7 +1191,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 agents=AgentsConfig(),
             )
             config.agents.codex.cli_path = "codex-probe"
-            config.save()
+            save_direct_auth_config(config)
             await runner.run(ScenarioStep("test_connection", run_connection_probe))
 
         self.assertTrue(harness.test_result["ok"])
@@ -1888,12 +1913,13 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         process = FakeProcess()
         harness.service._start_codex_process = AsyncMock(return_value=process)
         harness.service._read_codex_output_web = AsyncMock()
-        harness.service._wait_for_codex_completion_web = AsyncMock()
+        harness.service._wait_for_codex_completion_web = AsyncMock(side_effect=_wait_for_flow_cancellation)
 
         web_flow = await harness.service.start_web_setup(
             "codex",
             force_reset=False,
         )
+        self.addAsyncCleanup(harness.service.cancel_web_flow, web_flow.flow_id)
         await harness.service.start_setup(
             harness.context,
             backend="codex",
@@ -2100,7 +2126,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.service._start_claude_control_flow = AsyncMock(
             return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
-        harness.service._wait_for_claude_completion = AsyncMock(return_value=None)
+        harness.service._wait_for_claude_completion = AsyncMock(side_effect=_wait_for_flow_cancellation)
         harness.service._send_claude_callback = AsyncMock(
             side_effect=lambda client, authorization_code, state: callback_payloads.append((client, authorization_code, state))
         )
@@ -2117,6 +2143,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+        flow = harness.flow("claude")
+        self.addAsyncCleanup(harness.service._terminate_flow, flow)
         intruder_context = harness.make_context(user_id="U2")
         consumed = await harness.service.maybe_consume_setup_reply(intruder_context, "auth-code#oauth-state")
         self.assertFalse(consumed)
@@ -2134,6 +2162,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.text_contains(harness, "https://platform.claude.com/oauth/code/callback", index=1)
         ScenarioExpect.text_contains(harness, "only the user who started this setup flow")
         self.assertIn("C1:claude", harness.service._flows)
+        self.assertFalse(flow.native_closing)
+        flow.native_lease.assert_owned("claude")
         self.assertEqual(callback_payloads, [])
 
     async def test_callback_submission_and_fallback_command_do_not_double_consume_claude_flow(self):
@@ -2267,7 +2297,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.service._start_claude_control_flow = AsyncMock(
             return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
-        harness.service._wait_for_claude_completion = AsyncMock(return_value=None)
+        harness.service._wait_for_claude_completion = AsyncMock(side_effect=_wait_for_flow_cancellation)
         harness.service._send_claude_callback = AsyncMock()
 
         await runner.run(
@@ -2286,10 +2316,14 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+        flow = harness.flow("claude")
+        self.addAsyncCleanup(harness.service._terminate_flow, flow)
         harness.service._send_claude_callback.assert_not_awaited()
         ScenarioExpect.step_history(runner, ["start_setup", "submit_malformed_callback"])
         ScenarioExpect.text_contains(harness, "authorizationCode#state")
         self.assertIn("C1:claude", harness.service._flows)
+        self.assertFalse(flow.native_closing)
+        flow.native_lease.assert_owned("claude")
 
     async def test_concurrent_setup_flows_route_replies_to_the_matching_backend(self):
         """Scenario: AUTH-SETUP-205"""
@@ -2797,7 +2831,7 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         real_cfg = V2Config.default()
         real_cfg.agents.codex.auth_mode = "api_key"
         real_cfg.agents.codex.api_key = "sk-relay"
-        real_cfg.save()
+        save_direct_auth_config(real_cfg)
 
     def _api_module(self):
         from vibe import api as vibe_api
@@ -3272,7 +3306,6 @@ def test_hub_oauth_model_free_observation_closed_loop(
     state_store = EngineStateStore(tmp_path / "engine-state")
     api_calls = []
     inventory_calls = []
-    rejected = status == 401 or (not credential_valid and not (validation_before_auth and status == 400))
     is_openai = vendor in {"openai", "codex"}
     protocol = "openai_responses" if is_openai else "anthropic"
     if vendor == "anthropic" and "error" in body:
@@ -3284,7 +3317,8 @@ def test_hub_oauth_model_free_observation_closed_loop(
         else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
     )
     auth_name = "oauth-test.json"
-    state_store._secure_write_json(state_store.auth_dir / auth_name, {"access_token": bound_token})
+    grant = {"access_token": bound_token, "refresh_token": "test-refresh-grant"}
+    state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
 
     def management_request(method, path, *, query=None, payload=None):
         if path == "/auth-files":
@@ -3359,17 +3393,20 @@ def test_hub_oauth_model_free_observation_closed_loop(
         assert source["supply_channel"] == "hub"
         assert source["credential_ref"] == h.credential_ref
         assert source["verification_pending"]
-        assert source["state"]["status"] == ("needs_action" if rejected else "standby")
-        assert [model["id"] for model in source["models"]] == ([] if rejected else ["gpt-5.6"])
+        # A request-level access-token rejection is not refresh-grant evidence.
+        # Retain the completed OAuth grant as unverified and use best-effort
+        # inventory; neither a 401 nor a schema response proves it unusable.
+        assert source["state"]["status"] == "standby"
+        assert [model["id"] for model in source["models"]] == ["gpt-5.6"]
         assert service.list_sources() == [source]
-        assert bound_token not in json.dumps(terminal)
+        assert all(secret not in json.dumps(terminal) for secret in grant.values())
         assert (await service.oauth_status(h.flow_id))["source"] == source
         assert adapter.revoked == []
         assert len(api_calls) == 1
         assert api_calls[0]["header"]["Authorization"] == "Bearer $TOKEN$"
-        assert len(inventory_calls) == int(not rejected)
-        assert json.loads((state_store.auth_dir / auth_name).read_text())["access_token"] == bound_token
-        assert bound_token not in caplog.text
+        assert len(inventory_calls) == 1
+        assert json.loads((state_store.auth_dir / auth_name).read_text()) == grant
+        assert all(secret not in caplog.text for secret in grant.values())
 
     asyncio.run(runner.run(
         ScenarioStep("start_login", start_login),
@@ -3466,6 +3503,7 @@ def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, 
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
+    save_direct_auth_config(config)
     client = app.test_client()
     base_url = "https://alex.avibe.bot"
     client.set_cookie(remote_access.SESSION_COOKIE_NAME, remote_session_cookie(
@@ -3518,7 +3556,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
     monkeypatch.setenv("XDG_DATA_HOME", str(isolated / "data"))
     config = V2Config.default()
     config.agents.opencode.enabled = True
-    config.save()
+    save_direct_auth_config(config)
     upsert_opencode_provider_api_key("test-provider", "old-test-key")
     api.setup_opencode_permission()
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(isolated / "bin/opencode"))
