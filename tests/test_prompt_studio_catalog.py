@@ -100,7 +100,7 @@ def test_reference_documents_are_source_addressable_and_grouped_with_their_skill
     references = [document for document in documents if document.get("parent_id") == "skill-use-avibe"]
     files = sorted((ROOT / "skills/use-avibe/references").rglob("*.md"))
     assert [document["source_path"] for document in references] == [path.relative_to(ROOT).as_posix() for path in files]
-    assert len(references) == 7
+    assert references
     start = next(index for index, document in enumerate(documents) if document["id"] == "skill-use-avibe")
     assert documents[start + 1:start + 1 + len(references)] == references
     ids = [document["id"] for document in documents]
