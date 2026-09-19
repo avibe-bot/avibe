@@ -7,6 +7,9 @@
   Apps consumes the remaining row width, including after sidebar resizing.
 - The desktop Apps launcher and Dock paint above application windows and the
   route-sized Settings panel, regardless of which surface opened first.
+- Activating a Dock tile dismisses Settings through its existing outside-
+  interaction behavior; newly opened, focused, or restored windows must receive
+  pointer input rather than merely exist in the DOM.
 - Version details escape the sidebar stacking context, paint as one opaque
   surface above the launcher, and remain anchored to the version badge.
   Desktop placement follows resizing and stays inside the viewport.

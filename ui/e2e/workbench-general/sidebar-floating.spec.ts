@@ -69,7 +69,42 @@ for (const order of ['dock-first', 'settings-first'] as const) {
       path: `e2e/.artifacts/workbench-general/shots/${order}.png`, scale: 'css', animations: 'disabled',
     });
     await library.click();
-    await expect(page.locator('[data-window-id][aria-label="App Library"]')).toBeVisible();
+    await expect(page.locator(OVERLAY)).toHaveCount(0);
+    const appWindow = page.locator('[data-window-id][aria-label="App Library"]');
+    await expect(appWindow).toBeVisible();
+    await expect.poll(() => receivesPointer(appWindow)).toBe(true);
+    await appWindow.click({ trial: true });
+    expect(denied).toEqual([]);
+  });
+}
+
+for (const state of ['running', 'minimized'] as const) {
+  test(`Dock activation dismisses Settings and reaches an existing ${state} window`, async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.setViewportSize(VIEWPORT);
+    await open(page, '/');
+    await page.locator(LAUNCHER).click();
+    const library = page.locator(DOCK).getByRole('button', { name: 'App Library', exact: true });
+    await library.click();
+    const appWindow = page.locator('[data-window-id][aria-label="App Library"]');
+    await expect(appWindow).toBeVisible();
+    const windowId = await appWindow.getAttribute('data-window-id');
+    if (state === 'minimized') {
+      await appWindow.getByRole('button', { name: 'Minimize', exact: true }).click();
+      await expect(appWindow).toHaveAttribute('inert');
+    }
+    await page.locator(SETTINGS).click();
+    await expect(page.locator(OVERLAY)).toBeVisible();
+    // The existing Settings outside-interaction dismissal must handle focus
+    // and restore just as it handles opening a fresh window.
+    await library.click();
+    await expect(page.locator(OVERLAY)).toHaveCount(0);
+    await expect(appWindow).toHaveCount(1);
+    await expect(appWindow).toHaveAttribute('data-window-id', windowId!);
+    await expect(appWindow).not.toHaveAttribute('inert');
+    await expect.poll(() => receivesPointer(appWindow)).toBe(true);
+    await appWindow.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(appWindow).toHaveCount(0);
     expect(denied).toEqual([]);
   });
 }
