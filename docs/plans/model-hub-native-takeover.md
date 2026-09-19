@@ -107,3 +107,17 @@ explicitly authorized acceptance check.
   must remain blocked after the guard exits if durable takeover recovery is
   incomplete. Completed or fully reverted transactions remove their names.
   Startup recovery restores this set before runtime startup or admission.
+- `vibe.native_oauth_store.read_native_oauth(backend, *, home=None,
+  allow_secret=False) -> NativeOAuthSnapshot | None` resolves the effective
+  native store. A snapshot has `backend`, stable selection `revision`, private
+  `payload: dict | None`, `exportable: bool`, and
+  `keychain_edit: dict | None`. File-backed payloads may be read by scan;
+  secret-bearing OS-store access occurs only with `allow_secret=True`.
+  A caller-supplied fixture `home` never accesses the real OS credential store.
+  An unsupported store must not fall back to an inactive stale file.
+- `vibe.native_oauth_store.apply_keychain_edit(edit: dict, *, reverse=False)`
+  compares the live entry against recorded before/after states before changing
+  it, preserving unrelated fields. The private edit is journal-serializable;
+  scan never serializes it. This function never performs remote logout/revoke.
+  A Keychain candidate's selection revision must match between metadata-only
+  scan and its secret-bearing apply read.
