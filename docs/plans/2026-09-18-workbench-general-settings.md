@@ -69,7 +69,8 @@ the user has not answered, while the shell's own location follows the foreground
 ## Implementation record
 
 - **Shell** — `AppShell` sidebar at 248 on `--sidebar-background`, brand row (mark, title, `workbench.eyebrow`)
-  with Search and Inbox as siblings, always-expanded capability navigation via one `SidebarNavRow` carrying the
+  with Search and Inbox as siblings, a capability navigation group that is expanded by default and can be
+  collapsed, with each entry rendered by one `SidebarNavRow` carrying the
   three source states on tokens, real project/session tree or true empty state, Apps/Settings footer, version and
   live service badge. Nav-state tokens (`--nav-selected-bg`/`-border`, `--nav-hover-bg`, `--sidebar-background`,
   `--logo-well-background`, `--illustration-card-border`, `--desktop-overlay-shadow`) and the

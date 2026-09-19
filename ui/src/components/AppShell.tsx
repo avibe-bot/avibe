@@ -359,13 +359,13 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar Y1TiVV — 248 wide by default, 20/16 padding, top group and bottom
+      {/* Sidebar Y1TiVV — 248 wide by default, 16px padding, top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
           The width is SidebarResizer's --app-sidebar-w, which <main> below and the
           Settings overlay read too, so a drag moves the whole layout at once. */}
       {!chromeless && (
-      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex">
+      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-4 md:flex">
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
         </div>
@@ -374,7 +374,7 @@ export const AppShell: React.FC = () => {
             then version on the left and the live service status on the right.
             AppsLauncher keeps its layout slot here while its interactive surface
             floats above app windows. */}
-        <div className="relative flex shrink-0 flex-col gap-2.5">
+        <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
             {canUseApps && <AppsLauncher />}
             {settingsOpen ? (

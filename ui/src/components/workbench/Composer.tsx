@@ -1694,11 +1694,32 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     </>
   );
 
-  // Send / Stop / Queue / Discard — one cluster, so the two-row layout can put it
-  // at the end of the action row without either box owning a second copy.
+  // Send / Stop / Queue controls stay at the trailing edge of the action row.
+  // Voice discard is rendered separately so the destructive action can stay at
+  // the opposite edge from the primary voice control in the two-row layout.
   //
   // A running agent turn keeps its Stop escape hatch even during voice capture.
   // Queue/Send withdraw while capture owns the draft.
+  const voiceDiscardControl = voiceDiscardAvailable && (
+    <Button
+      type="button"
+      variant="destructive-soft"
+      size="icon"
+      onClick={() => {
+        if (recording) abortRecording();
+        else if (voiceRetainedSession) discardVoiceSession(voiceRetainedSession);
+      }}
+      aria-label={t(
+        recording
+          ? 'chat.compose.cancelRecording'
+          : 'chat.compose.voiceDiscard',
+      )}
+      className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
+    >
+      <Trash2 className="size-4" />
+    </Button>
+  );
+
   const sendControls = (
     <>
         {busyControls ? (
@@ -1752,29 +1773,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <Send className="size-4" />
           </Button>
         ) : null}
-        {/* Destructive voice actions stay at the opposite edge from the primary
-            voice slot. Finish is never adjacent to Trash; once a failed or
-            recovered recording is retained, Send remains available before the
-            rightmost Trash action. */}
-        {voiceDiscardAvailable && (
-          <Button
-            type="button"
-            variant="destructive-soft"
-            size="icon"
-            onClick={() => {
-              if (recording) abortRecording();
-              else if (voiceRetainedSession) discardVoiceSession(voiceRetainedSession);
-            }}
-            aria-label={t(
-              recording
-                ? 'chat.compose.cancelRecording'
-                : 'chat.compose.voiceDiscard',
-            )}
-            className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
-          >
-            <Trash2 className="size-4" />
-          </Button>
-        )}
     </>
   );
 
@@ -1839,14 +1837,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       {actions ? (
         /* Two-row box (design TfqkD): the input on top, then an action row
            carrying the caller's pickers on the left and Send on the right. */
-        <div className="flex w-full flex-col gap-[22px] rounded-2xl border border-border-strong bg-surface-2 p-[18px] shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
+        <div className="flex w-full flex-col gap-3 rounded-2xl border border-border-strong bg-surface-2 p-3 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
           <div className="flex w-full items-end gap-1.5">{inputControl}</div>
           <div className="flex w-full items-end justify-between gap-2">
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-              {mediaControls}
+              {voiceDiscardControl}
               {actions}
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">{sendControls}</div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {mediaControls}
+              {sendControls}
+            </div>
           </div>
         </div>
       ) : (
@@ -1859,6 +1860,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {mediaControls}
           {inputControl}
           {sendControls}
+          {voiceDiscardControl}
         </div>
       )}
     </div>
