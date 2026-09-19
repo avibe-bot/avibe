@@ -1,9 +1,9 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Link,
   MemoryRouter,
@@ -23,30 +23,61 @@ import {
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
-import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
+import { isForegroundFocusOwner, SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
 
 let chatMounts = 0;
 let chatUnmounts = 0;
 
 const RetainedModalEditor = () => {
-  const active = useRouteSurfaceActive();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState('保留');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const selectionRef = useRef({ start: 2, end: 2 });
 
   return (
     <>
       <button type="button" onClick={() => setOpen(true)}>open-retained-editor</button>
-      {open && active ? (
-        <div role="dialog" aria-modal="true" aria-label="retained editor">
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent
+          aria-describedby={undefined}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            const input = inputRef.current;
+            input?.focus();
+            input?.setSelectionRange(selectionRef.current.start, selectionRef.current.end);
+          }}
+        >
+          <DialogTitle className="sr-only">retained editor</DialogTitle>
           <input
+            ref={inputRef}
             aria-label="retained editor input"
-            autoFocus
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              selectionRef.current = {
+                start: event.target.selectionStart ?? event.target.value.length,
+                end: event.target.selectionEnd ?? event.target.value.length,
+              };
+            }}
+            onSelect={(event) => {
+              selectionRef.current = {
+                start: event.currentTarget.selectionStart ?? 0,
+                end: event.currentTarget.selectionEnd ?? 0,
+              };
+            }}
           />
-        </div>
-      ) : null}
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => navigate('/settings/replies')}
+          >
+            open-settings-from-editor
+          </button>
+        </DialogContent>
+      </Dialog>
     </>
   );
 };
@@ -190,6 +221,51 @@ afterEach(() => {
 });
 
 describe('SettingsOverlayRouteSurface', () => {
+  it('recognizes retained modal producers without admitting ordinary windows or popovers', () => {
+    const explicitModal = document.createElement('div');
+    explicitModal.setAttribute('role', 'dialog');
+    explicitModal.setAttribute('aria-modal', 'true');
+    const explicitEditor = document.createElement('input');
+    explicitModal.append(explicitEditor);
+    document.body.append(explicitModal);
+
+    const sharedModal = document.createElement('div');
+    sharedModal.setAttribute('role', 'dialog');
+    sharedModal.setAttribute('data-state', 'open');
+    sharedModal.setAttribute('aria-labelledby', 'dialog-title');
+    const sharedEditor = document.createElement('input');
+    sharedModal.append(sharedEditor);
+    document.body.append(sharedModal);
+
+    const appWindow = document.createElement('div');
+    appWindow.setAttribute('role', 'dialog');
+    appWindow.setAttribute('data-window-id', 'win-1');
+    appWindow.setAttribute('aria-label', 'Editor');
+    const windowEditor = document.createElement('input');
+    appWindow.append(windowEditor);
+    document.body.append(appWindow);
+
+    const popover = document.createElement('div');
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('data-state', 'open');
+    popover.setAttribute('aria-label', 'Inbox');
+    const popoverEditor = document.createElement('input');
+    popover.append(popoverEditor);
+    document.body.append(popover);
+
+    try {
+      expect(isForegroundFocusOwner(explicitEditor)).toBe(true);
+      expect(isForegroundFocusOwner(sharedEditor)).toBe(true);
+      expect(isForegroundFocusOwner(windowEditor)).toBe(false);
+      expect(isForegroundFocusOwner(popoverEditor)).toBe(false);
+    } finally {
+      explicitModal.remove();
+      sharedModal.remove();
+      appWindow.remove();
+      popover.remove();
+    }
+  });
+
   it('preserves the Chat route with a data router', async () => {
     const user = userEvent.setup();
     const router = createMemoryRouter([
@@ -221,23 +297,29 @@ describe('SettingsOverlayRouteSurface', () => {
 
     await user.click(screen.getByRole('button', { name: 'open-retained-editor' }));
     const editorInput = screen.getByRole('textbox', { name: 'retained editor input' });
-    await user.type(editorInput, '保留');
     expect(document.activeElement).toBe(editorInput);
+    editorInput.setSelectionRange(1, 2);
+    fireEvent.select(editorInput);
+    expect(editorInput.selectionStart).toBe(1);
+    expect(editorInput.selectionEnd).toBe(2);
 
     // The mousedown guard models a retained modal's explicit Settings handoff:
     // navigation changes the foreground route without making the shell button
     // the editor's new owner of focus.
-    await user.click(screen.getByRole('button', { name: 'open-settings-preserving-focus' }));
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-editor' }));
     await user.click(screen.getByRole('button', { name: 'close-settings' }));
 
     const resumedInput = await screen.findByRole('textbox', { name: 'retained editor input' });
     expect(resumedInput).not.toBe(editorInput);
     await waitFor(() => expect(document.activeElement).toBe(resumedInput));
-    await user.keyboard('{End}x');
-    expect((resumedInput as HTMLInputElement).value).toBe('保留x');
     expect(document.activeElement).toBe(resumedInput);
-    await user.keyboard('续写🌱');
-    expect((resumedInput as HTMLInputElement).value).toBe('保留x续写🌱');
+    expect((resumedInput as HTMLInputElement).selectionStart).toBe(1);
+    expect((resumedInput as HTMLInputElement).selectionEnd).toBe(2);
+    await user.keyboard('x');
+    expect((resumedInput as HTMLInputElement).value).toBe('保x');
+    expect(document.activeElement).toBe(resumedInput);
+    await user.keyboard('{End}续写🌱');
+    expect((resumedInput as HTMLInputElement).value).toBe('保x续写🌱');
   });
 
   it('does not let a stale close callback focus the old origin after Settings reopens', async () => {

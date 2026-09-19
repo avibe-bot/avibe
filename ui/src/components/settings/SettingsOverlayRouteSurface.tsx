@@ -21,13 +21,22 @@ type SettingsOverlayRouteSurfaceProps = {
   fallbackElement: ReactElement;
 };
 
-const isForegroundFocusOwner = (element: Element | null): element is HTMLElement => {
+// eslint-disable-next-line react-refresh/only-export-components -- this pure predicate is white-box tested with every retained surface shape.
+export const isForegroundFocusOwner = (element: Element | null): element is HTMLElement => {
   if (!(element instanceof HTMLElement) || !element.isConnected) return false;
   if (element.closest('[data-settings-overlay], [inert], [aria-hidden="true"]')) return false;
   // Retained modal owners can recreate their editor while Settings is open. A
   // recreated input is the owner of the return focus, but it cannot be the
   // frozen target because that DOM node did not exist when Settings opened.
-  if (element.closest('[role="dialog"][aria-modal="true"]')) return true;
+  // Radix's modal DialogContent intentionally exposes role=dialog and its
+  // open state, but does not emit aria-modal. AppWindow also uses role=dialog;
+  // its data-window-id keeps ordinary retained windows out of this branch.
+  if (element.closest(
+    '[role="dialog"][aria-modal="true"]:not([data-window-id]), '
+      + '[role="dialog"][data-state="open"][aria-labelledby]:not([data-window-id])',
+  )) {
+    return true;
+  }
   return false;
 };
 
