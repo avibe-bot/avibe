@@ -832,6 +832,7 @@ class ModelHubService:
         revocations: Optional[CredentialRevocationJournal] = None,
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         migration_home: Optional[Path] = None,
+        migration_project_roots: Callable[[], tuple[Path, ...]] | None = None,
         migration_guard: Any = None,
         migration_journal: NativeTakeoverJournal | None = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
@@ -872,6 +873,7 @@ class ModelHubService:
         )
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.migration_home = migration_home
+        self.migration_project_roots = migration_project_roots or (lambda: ())
         self.migration_journal = migration_journal or NativeTakeoverJournal(
             events.path.parent / "native-takeover" / "current.json"
         )
@@ -879,6 +881,7 @@ class ModelHubService:
         self.migration_guard = migration_guard or self._unavailable_migration_guard
         self._migration_lock = asyncio.Lock()
         self._migration_task: asyncio.Task | None = None
+        self._migration_item_ids: tuple[str, ...] | None = None
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
@@ -6286,6 +6289,7 @@ class ModelHubService:
                     home=self.migration_home,
                     claude_oauth_probe=self.migration_claude_oauth_probe,
                     validate_base_url=_validated_base_url,
+                    project_roots=self.migration_project_roots(),
                     legacy_auth=(
                         self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
                         if isinstance(self.store, V2ModelHubConfigStore) else None
@@ -6295,21 +6299,39 @@ class ModelHubService:
         }
 
     async def migration_apply(self, item_ids: object) -> dict:
-        from vibe.native_oauth_store import NativeOAuthError
+        from core.backend_restart import NativeMigrationBlockedError
+        from vibe.native_oauth_store import NativeOAuthError, NativeOAuthPermissionError
 
         try:
+            selection = (
+                tuple(sorted(item_ids))
+                if isinstance(item_ids, list) and all(isinstance(value, str) for value in item_ids)
+                else None
+            )
             task = self._migration_task
             if task is not None and not task.done():
-                raise ModelHubError("mode_switch_blocked", status=409)
-            task = asyncio.create_task(apply_native_migration(
-                self, item_ids, mask_credential=_mask_credential,
-                validate_base_url=_validated_base_url,
-            ), name="model-hub-native-takeover")
-            self._migration_task = task
+                if selection != self._migration_item_ids:
+                    raise ModelHubError("migration_native_busy", status=409)
+            else:
+                task = asyncio.create_task(apply_native_migration(
+                    self, item_ids, mask_credential=_mask_credential,
+                    validate_base_url=_validated_base_url,
+                ), name="model-hub-native-takeover")
+                self._migration_task = task
+                self._migration_item_ids = selection
             applied, added_to = await await_owned_task(task)
-        except (MigrationConflictError, TakeoverStateError, NativeOAuthError, OSError):
+        except NativeMigrationBlockedError:
+            raise ModelHubError("migration_native_busy", status=409) from None
+        except (NativeOAuthPermissionError, PermissionError):
+            raise ModelHubError("migration_permission_needed", status=409) from None
+        except (TakeoverStateError, NativeOAuthError):
+            raise ModelHubError("migration_configuration_blocked", status=409) from None
+        except (MigrationConflictError, OSError):
             raise ModelHubError("migration_item_conflict", status=409)
         except ModelHubError as exc:
+            pending = self.migration_journal.load()
+            if pending is not None and pending["phase"] == "exposed":
+                raise ModelHubError("migration_recovery_pending", status=409) from None
             if exc.code != "discovery_failed":
                 raise
             raise ModelHubError("migration_item_conflict", status=409) from None
@@ -7587,27 +7609,32 @@ def create_default_service(
 
         native_oauth_adapter = create_native_oauth_adapter()
 
-    def claude_oauth_probe() -> bool:
-        from vibe.api import (
-            _build_claude_status_probe_env,
-            _read_claude_cli_oauth_signed_in,
-            _resolve_claude_status_probe_cwd,
-        )
-        from vibe.claude_config import build_claude_subprocess_env
-
+    def migration_project_roots() -> tuple[Path, ...]:
+        # This owner-only operation covers registered local projects and the
+        # default workdir, never an unbounded home/filesystem walk.
+        roots: set[Path] = set()
         try:
             config = V2Config.load()
         except FileNotFoundError:
-            config = default_config()
-        claude = config.agents.claude
-        env = _build_claude_status_probe_env(
-            build_claude_subprocess_env(claude, force_oauth=True)
-        )
-        return _read_claude_cli_oauth_signed_in(
-            claude.cli_path,
-            env=env,
-            cwd=_resolve_claude_status_probe_cwd(config),
-        ) is True
+            pass
+        else:
+            if config.runtime.default_cwd:
+                roots.add(Path(config.runtime.default_cwd).expanduser().resolve())
+        if paths.get_sqlite_state_path().exists():
+            from storage.db import get_cached_sqlite_engine
+            from storage.projects_service import list_projects
+            from vibe.authorization import instance_owner_context
+
+            with get_cached_sqlite_engine().connect() as connection:
+                projects = list_projects(
+                    connection, include_archived=True,
+                    authorization_context=instance_owner_context(),
+                )
+            roots.update(
+                Path(project["folder_path"]).expanduser().resolve()
+                for project in projects if project.get("folder_path")
+            )
+        return tuple(sorted(roots))
 
     return ModelHubService(
         store=V2ModelHubConfigStore(),
@@ -7617,7 +7644,7 @@ def create_default_service(
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
-        migration_claude_oauth_probe=claude_oauth_probe,
+        migration_project_roots=migration_project_roots,
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,

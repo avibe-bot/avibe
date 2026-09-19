@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +41,58 @@ def _json_bytes(payload: dict) -> bytes:
     # Preserve even unrelated escaped surrogate values without accepting them
     # as Hub model identities or failing halfway through native cleanup.
     return (json.dumps(payload, ensure_ascii=True, indent=2) + "\n").encode()
+
+
+def claude_settings_paths(home: Path | None, projects: tuple[Path, ...]) -> tuple[Path, ...]:
+    return tuple(dict.fromkeys([
+        get_claude_settings_path(home).absolute(),
+        *(root / ".claude" / name for root in projects for name in ("settings.json", "settings.local.json")),
+    ]))
+
+
+def opencode_config_paths(home: Path | None, projects: tuple[Path, ...]) -> tuple[Path, ...]:
+    candidates = get_opencode_config_paths(home)
+    if home is None:
+        config_home = os.environ.get("XDG_CONFIG_HOME")
+        if config_home:
+            candidates.append(Path(config_home).expanduser() / "opencode/opencode.json")
+        directory = os.environ.get("OPENCODE_CONFIG_DIR")
+        if directory:
+            candidates.append(Path(directory).expanduser() / "opencode.json")
+    paths = [path for candidate in candidates for path in (candidate, candidate.with_suffix(".jsonc"))]
+    if home is None and os.environ.get("OPENCODE_CONFIG"):
+        paths.append(Path(os.environ["OPENCODE_CONFIG"]).expanduser())
+    paths.extend(
+        root / name for root in projects
+        for name in ("opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc")
+    )
+    return tuple(dict.fromkeys(path.absolute() for path in paths))
+
+
+def opencode_auth_path(home: Path | None) -> Path:
+    if home is None and os.environ.get("XDG_DATA_HOME"):
+        return Path(os.environ["XDG_DATA_HOME"]).expanduser() / "opencode/auth.json"
+    return get_opencode_auth_path(home)
+
+
+def codex_config_paths(home: Path | None, projects: tuple[Path, ...]) -> tuple[Path, ...]:
+    config_path, _ = get_codex_config_paths(home)
+    return tuple(dict.fromkeys([config_path.absolute(), *(root / ".codex/config.toml" for root in projects)]))
+
+
+def read_native_toml(path: Path) -> dict | None:
+    content = _read_regular(path)
+    if content is None:
+        return None
+    try:
+        return tomllib.loads(content.decode())
+    except (ValueError, UnicodeError):
+        raise TakeoverStateError("native configuration cannot be parsed") from None
+
+
+def read_native_config(path: Path, *, jsonc: bool = False) -> dict | None:
+    content = _read_regular(path)
+    return None if content is None else _object(content, jsonc=jsonc)
 
 
 def plan_native_cleanup(
@@ -104,10 +157,8 @@ def plan_native_cleanup(
                 raise TakeoverStateError("native credential helper requires configuration")
             payload.pop("apiKeyHelper", None)
 
-        edit_json(get_claude_settings_path(home), clear_settings)
-        for root in project_roots:
-            for filename in ("settings.json", "settings.local.json"):
-                edit_json(root / ".claude" / filename, clear_settings)
+        for path in claude_settings_paths(home, project_roots):
+            edit_json(path, clear_settings)
 
     if "codex" in backends:
         config_path, auth_path = get_codex_config_paths(home)
@@ -124,8 +175,10 @@ def plan_native_cleanup(
                 payload.pop(key, None)
 
         edit_json(auth_path, clear_auth)
-        content = _read_regular(config_path)
-        if content is not None:
+        for config_path in codex_config_paths(home, project_roots):
+            content = _read_regular(config_path)
+            if content is None:
+                continue
             try:
                 config = tomllib.loads(content.decode())
             except (ValueError, UnicodeError):
@@ -139,13 +192,26 @@ def plan_native_cleanup(
                     provider = providers.get(provider_id)
                     if not isinstance(provider, dict):
                         continue
+                    if provider.get("experimental_bearer_token") and provider["experimental_bearer_token"] not in selected_secrets:
+                        raise TakeoverStateError("another native credential requires migration")
                     # Retain user labels, capabilities, and timeout preferences.
-                    for key in ("base_url", "env_key", "experimental_bearer_token", "http_headers", "env_http_headers", "requires_openai_auth"):
+                    for key in ("base_url", "env_key", "experimental_bearer_token", "requires_openai_auth"):
                         provider.pop(key, None)
+                    for header_field in ("http_headers", "env_http_headers"):
+                        headers = provider.get(header_field)
+                        if isinstance(headers, dict):
+                            for name in list(headers):
+                                if name.lower() in {"authorization", "x-api-key"}:
+                                    headers.pop(name)
                 if not providers:
                     config.pop("model_providers", None)
             if config.get("model_provider") in removable:
                 config.pop("model_provider", None)
+            profiles = config.get("profiles")
+            if isinstance(profiles, dict):
+                for profile in profiles.values():
+                    if isinstance(profile, dict) and profile.get("model_provider") in removable:
+                        profile.pop("model_provider")
             config.pop(CREDENTIALS_STORE_KEY, None)
             if json.dumps(config, sort_keys=True, default=str) != before:
                 edits[config_path] = NativeFileEdit(config_path.absolute(), content, _dump_toml(config).encode())
@@ -165,24 +231,28 @@ def plan_native_cleanup(
                     continue
                 options = provider.get("options")
                 if isinstance(options, dict):
-                    if options.get("apiKey") and options["apiKey"] not in selected_secrets:
-                        raise TakeoverStateError("another native credential requires migration")
+                    value = options.get("apiKey")
+                    if value and value not in selected_secrets:
+                        # An unset environment placeholder supplied no native
+                        # credential; an auth.json fallback was the imported key.
+                        unresolved = (
+                            isinstance(value, str)
+                            and value.startswith("{env:") and value.endswith("}")
+                            and not os.environ.get(value[5:-1])
+                        )
+                        if not unresolved:
+                            raise TakeoverStateError("another native credential requires migration")
                     options.pop("apiKey", None)
                     options.pop("baseURL", None)
                     if not options:
                         provider.pop("options", None)
 
-        config_paths = get_opencode_config_paths(home)
-        config_paths.extend(
-            root / filename for root in project_roots
-            for filename in ("opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc")
-        )
-        for path in dict.fromkeys(config_paths):
+        for path in opencode_config_paths(home, project_roots):
             edit_json(path, clear_providers, jsonc=True)
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
                 payload.pop(vendor, None)
 
-        edit_json(get_opencode_auth_path(home), clear_provider_auth)
+        edit_json(opencode_auth_path(home), clear_provider_auth)
     return list(edits.values())
