@@ -34,10 +34,9 @@ import type { BackendId } from '../settings/shared/useBackendRuntime';
 
 /** One provider choice: its brand mark, the name a person recognises, and the id
  *  OpenCode files it under — shown because that id is what the rest of OpenCode,
- *  its config file and its model identifiers use. The caller supplies the name,
- *  because what a row should be called depends on where it stands: a prioritised
- *  brand slot has to say the brand, and a row under More has to say which of
- *  that brand's entries it is. */
+ *  its config file and its model identifiers use. The name is not the row's to
+ *  compute: it is handed out once for the whole list by `allocate` below, because
+ *  what a row may be called depends on what every other row is already called. */
 type PickerRow = { entry: OpencodeProvider; label: string };
 
 // A custom provider's id is whatever its author typed into Settings, and OpenCode
@@ -59,6 +58,36 @@ const providerMark = (entry: OpencodeProvider) => entry.custom ? CUSTOM_VENDOR :
 const providerTitle = (entry: OpencodeProvider) => entry.custom
   ? entry.name?.trim() || entry.id
   : providerLabel(entry.id, entry.name);
+
+/**
+ * The name a row is allowed to show, given the names already handed out.
+ *
+ * The rule is that no two rows may read alike: a person choosing between them has
+ * nothing else to act on, and the two are different endpoints that will be sent
+ * different credentials. What a row asks for is `natural` — a brand's own name in
+ * a brand slot, a custom provider's configured name anywhere else — and asking
+ * first wins, which is why brand slots are allocated first.
+ *
+ * A row that loses falls back to the id OpenCode files it under, which is unique
+ * within one catalog and is the thing that actually tells two entries of a brand
+ * apart. But that id may itself already be on screen, because a custom provider's
+ * *name* is whatever its author typed and may spell another row's id exactly. So
+ * every candidate is checked before it is taken, including the fallback and the
+ * composition after it — a candidate that is merely emitted rather than reserved
+ * is how two rows come to read the same in the first place.
+ *
+ * The widening at the end terminates for the same reason the ladder is needed:
+ * each attempt produces a string no earlier attempt did, and only finitely many
+ * names have been handed out, so some attempt is free.
+ */
+const allocate = (natural: string, id: string, used: Set<string>): string => {
+  let label = natural;
+  for (let attempt = 0; used.has(label.toLowerCase()); attempt += 1) {
+    label = attempt === 0 ? id : attempt === 1 ? `${natural} (${id})` : `${natural} (${id} ${attempt})`;
+  }
+  used.add(label.toLowerCase());
+  return label;
+};
 
 function ProviderRow({ entry, label, onPick }: PickerRow & { onPick: () => void }) {
   const { t } = useTranslation();
@@ -84,7 +113,12 @@ function ProviderRow({ entry, label, onPick }: PickerRow & { onPick: () => void 
 // become unreachable rather than merely small. The floor is therefore the four
 // fixed rows, the gaps between them, the padding on both sides — and one more
 // control row, the height this dialog already gives every control it owns, so
-// that the middle can show a whole field rather than a slice of one.
+// that what is left is a usable amount of room rather than a sliver.
+//
+// One control row is not one field, and this floor does not claim to be: a field
+// is a label, an input taller than a control row, and a hint under it, so the
+// reserve is deliberately the smaller, load-bearing half of that. What it buys is
+// that the middle always has room worth scrolling, not that any one field fits.
 //
 // CSS cannot ask the question: media queries read the layout viewport, which is
 // the very measurement a soft keyboard leaves wrong. So it is asked here, from
@@ -195,50 +229,26 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
     : backend === 'codex' ? 'onboarding.connection.codexDialogIntro'
     : 'onboarding.connection.opencodeDialogIntro');
 
-  const { shortlist, more } = useMemo(() => {
-    const term = query.trim().toLowerCase();
+  // What every row is called, decided once for the whole catalog and before any
+  // query narrows it.
+  //
+  // Two things have to hold at the same time, and only one place can hold both.
+  // No two rows may read alike, and a row must read the same whether or not
+  // somebody typed in the search box — otherwise searching for the name you can
+  // see is the one way to make it disappear. So names are handed out here, over
+  // every eligible provider, and the search below matches the name that was handed
+  // out rather than recomputing one of its own.
+  //
+  // Order is the whole of the policy: a brand slot asks first, so the eight always
+  // read as their brand; everything else asks in catalog order, which no sort or
+  // query can disturb. What each row asks for is its own, and `allocate` decides
+  // what it actually gets.
+  const naming = useMemo(() => {
     // Subscriptions follow OpenCode's real OAuth capability; the eight brands
     // below are an API-key presentation order, not an authentication catalog.
     const eligible = providers.filter((entry) => (method === 'api_key' ? !entry.local : entry.oauth_available));
-    // Both names are searchable, so "qwen" finds the row OpenCode calls
-    // "Alibaba (China)" and "alibaba" still finds it too. A custom provider is
-    // searched by what it is — its own name, its id, its models — and not by the
-    // brand its id happens to spell.
-    const haystack = (entry: OpencodeProvider) => [providerTitle(entry), entry.name, entry.id, entry.models.join(' '),
-      entry.custom ? '' : `${providerBrandLabel(entry.id, entry.name)} ${providerLabel(entry.id, entry.name)}`].join(' ').toLowerCase();
-    const matching = eligible.filter((entry) => !term || haystack(entry).includes(term));
-    const rank = (entry: OpencodeProvider) => method === 'api_key' && !entry.custom ? setupPrimaryRank(entry.id) : null;
-    const row = (entry: OpencodeProvider, brand = false): PickerRow => ({ entry,
-      label: brand ? providerBrandLabel(entry.id, entry.name) : providerTitle(entry) });
-    // No two rows on screen may read the same, or there is nothing to act on
-    // the difference with. The first row to use a title keeps it — and a brand
-    // slot is always first — so the eight always read as their brand, and a
-    // second entry of that brand falls back to the id it is filed under, which
-    // is exactly what tells one of them from another.
-    const distinct = (rows: PickerRow[]) => {
-      const used = new Set<string>();
-      return rows.map((entry) => {
-        if (!used.has(entry.label)) { used.add(entry.label); return entry; }
-        return { ...entry, label: entry.entry.id };
-      });
-    };
-    // A search has to reach every provider, so it collapses nothing. Neither
-    // does the subscription list: it is already only what can sign in, and
-    // there is no shortlist to be the remainder of. Both keep the brand order
-    // in front, then whatever already holds credentials.
-    if (term || method !== 'api_key') return {
-      shortlist: distinct([...matching].sort((left, right) => {
-        const [a, b] = [rank(left), rank(right)];
-        if (a !== null && b !== null) return a - b;
-        if (a !== null) return -1;
-        if (b !== null) return 1;
-        if (left.configured !== right.configured) return left.configured ? -1 : 1;
-        return providerTitle(left).localeCompare(providerTitle(right));
-      }).map((entry) => row(entry))),
-      more: [] as PickerRow[],
-    };
     const byVendor = new Map<string, OpencodeProvider[]>();
-    for (const entry of matching) {
+    for (const entry of eligible) {
       if (entry.custom) continue;
       const vendor = providerVendorId(entry.id);
       const group = byVendor.get(vendor);
@@ -253,7 +263,7 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
     // the same catalog can never trade them. Only entries OpenCode ships are
     // candidates: a brand with nothing but a custom relay behind it gets no row
     // rather than a row that would name someone's endpoint after it.
-    const chosen = SETUP_PRIMARY_VENDORS.flatMap((vendor) => {
+    const chosen = method !== 'api_key' ? [] : SETUP_PRIMARY_VENDORS.flatMap((vendor) => {
       const group = byVendor.get(vendor);
       if (!group?.length) return [];
       const exact = (entry: OpencodeProvider) => entry.id.trim().toLowerCase() === vendor;
@@ -263,18 +273,53 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
         return left.id.localeCompare(right.id);
       })[0]];
     });
+    const slots = new Set(chosen.map((entry) => entry.id));
+    const used = new Set<string>();
+    const labels = new Map<string, string>();
+    for (const entry of [...chosen, ...eligible.filter((entry) => !slots.has(entry.id))]) {
+      labels.set(entry.id, allocate(slots.has(entry.id) ? providerBrandLabel(entry.id, entry.name) : providerTitle(entry), entry.id, used));
+    }
+    // A provider this allocation never saw — the one already chosen, when the
+    // method has since changed under it — still has to be callable something.
+    return { eligible, chosen, slots, label: (entry: OpencodeProvider) => labels.get(entry.id) ?? providerTitle(entry) };
+  }, [providers, method]);
+
+  const { shortlist, more } = useMemo(() => {
+    const { eligible, chosen, slots, label } = naming;
+    const term = query.trim().toLowerCase();
+    // Every name this row answers to is searchable: the one it shows, the one
+    // OpenCode gave it, its id, its models — so "qwen" finds the row the catalog
+    // calls "Alibaba (China)" and "alibaba" still finds it too. A custom provider
+    // is searched by what it is and not by the brand its id happens to spell.
+    const haystack = (entry: OpencodeProvider) => [label(entry), providerTitle(entry), entry.name, entry.id, entry.models.join(' '),
+      entry.custom ? '' : `${providerBrandLabel(entry.id, entry.name)} ${providerLabel(entry.id, entry.name)}`].join(' ').toLowerCase();
+    const matching = eligible.filter((entry) => !term || haystack(entry).includes(term));
+    const rank = (entry: OpencodeProvider) => method === 'api_key' && !entry.custom ? setupPrimaryRank(entry.id) : null;
+    const row = (entry: OpencodeProvider): PickerRow => ({ entry, label: label(entry) });
+    // A search has to reach every provider, so it collapses nothing. Neither
+    // does the subscription list: it is already only what can sign in, and
+    // there is no shortlist to be the remainder of. Both keep the brand order
+    // in front, then whatever already holds credentials.
+    if (term || method !== 'api_key') return {
+      shortlist: [...matching].sort((left, right) => {
+        const [a, b] = [rank(left), rank(right)];
+        if (a !== null && b !== null) return a - b;
+        if (a !== null) return -1;
+        if (b !== null) return 1;
+        if (left.configured !== right.configured) return left.configured ? -1 : 1;
+        return label(left).localeCompare(label(right));
+      }).map(row),
+      more: [] as PickerRow[],
+    };
     // Holding credentials is a reason to be easy to find, not a reason to take
     // a brand's slot — so a configured provider opens More instead of growing
     // the eight. Everything the shortlist did not take is here, which is what
     // keeps every native provider reachable without a search.
-    const taken = new Set(chosen.map((entry) => entry.id));
-    const rows = distinct([...chosen.map((entry) => row(entry, true)),
-      ...matching.filter((entry) => !taken.has(entry.id)).map((entry) => row(entry))]);
-    return { shortlist: rows.slice(0, chosen.length), more: rows.slice(chosen.length).sort((left, right) => {
+    return { shortlist: chosen.map(row), more: matching.filter((entry) => !slots.has(entry.id)).map(row).sort((left, right) => {
       if (left.entry.configured !== right.entry.configured) return left.entry.configured ? -1 : 1;
       return left.label.localeCompare(right.label);
     }) };
-  }, [providers, method, query]);
+  }, [naming, method, query]);
 
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
     <DialogContent ref={frame} className="connection-dialog" data-backend={backend} closeLabel={t('common.close')}>
@@ -291,7 +336,9 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
       ) : provider ? (
         <div className="connection-controls connection-chosen">
           <span className="connection-provider-mark"><VendorGlyph vendor={providerMark(provider)} /></span>
-          <span className="connection-provider-text"><strong>{providerTitle(provider)}</strong><small>{t('onboarding.connection.providerDescription')}</small></span>
+          {/* The row that was picked, still reading exactly as it read when it was
+              picked — one row, one name, everywhere it appears. */}
+          <span className="connection-provider-text"><strong>{naming.label(provider)}</strong><small>{t('onboarding.connection.providerDescription')}</small></span>
           <Button variant="ghost" size="xs" disabled={busy} onClick={() => setProvider(undefined)}>{t('onboarding.connection.changeProvider')}</Button>
         </div>
       ) : null}
