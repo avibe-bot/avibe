@@ -25,7 +25,7 @@ import {
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
-import { isForegroundFocusOwner, SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
+import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
 
 let chatMounts = 0;
 let chatUnmounts = 0;
@@ -82,6 +82,44 @@ const RetainedModalEditor = () => {
   );
 };
 
+type RetainedFocusOwnerKind = 'explicit-modal' | 'app-window' | 'popover';
+
+const RetainedFocusOwner = ({ kind }: { kind: RetainedFocusOwnerKind }) => {
+  const active = useRouteSurfaceActive();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (active && open) inputRef.current?.focus();
+  }, [active, open]);
+
+  const dialogProps = kind === 'explicit-modal'
+    ? { 'aria-modal': 'true' }
+    : kind === 'app-window'
+      ? { 'data-window-id': 'retained-window' }
+      : { 'data-state': 'open', 'aria-label': 'retained popover' };
+  const label = `retained ${kind} input`;
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>open-{kind}</button>
+      {open && active ? (
+        <div role="dialog" {...dialogProps}>
+          <input ref={inputRef} aria-label={label} defaultValue="保留" />
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => navigate('/settings/replies')}
+          >
+            open-settings-from-{kind}
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+};
+
 const ChatProbe = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -119,6 +157,9 @@ const ChatProbe = () => {
       </div>
       <button type="button" onClick={() => setCount((value) => value + 1)}>increment-chat</button>
       <RetainedModalEditor />
+      <RetainedFocusOwner kind="explicit-modal" />
+      <RetainedFocusOwner kind="app-window" />
+      <RetainedFocusOwner kind="popover" />
       <button type="button" onClick={() => navigate('/settings/replies')} onMouseDown={(event) => event.preventDefault()}>
         open-settings-preserving-focus
       </button>
@@ -205,6 +246,11 @@ const RemountingHarness = () => {
   return <Harness key={guardKey} desktop />;
 };
 
+const settleDeferredFocus = async () => {
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+};
+
 beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
@@ -221,51 +267,6 @@ afterEach(() => {
 });
 
 describe('SettingsOverlayRouteSurface', () => {
-  it('recognizes retained modal producers without admitting ordinary windows or popovers', () => {
-    const explicitModal = document.createElement('div');
-    explicitModal.setAttribute('role', 'dialog');
-    explicitModal.setAttribute('aria-modal', 'true');
-    const explicitEditor = document.createElement('input');
-    explicitModal.append(explicitEditor);
-    document.body.append(explicitModal);
-
-    const sharedModal = document.createElement('div');
-    sharedModal.setAttribute('role', 'dialog');
-    sharedModal.setAttribute('data-state', 'open');
-    sharedModal.setAttribute('aria-labelledby', 'dialog-title');
-    const sharedEditor = document.createElement('input');
-    sharedModal.append(sharedEditor);
-    document.body.append(sharedModal);
-
-    const appWindow = document.createElement('div');
-    appWindow.setAttribute('role', 'dialog');
-    appWindow.setAttribute('data-window-id', 'win-1');
-    appWindow.setAttribute('aria-label', 'Editor');
-    const windowEditor = document.createElement('input');
-    appWindow.append(windowEditor);
-    document.body.append(appWindow);
-
-    const popover = document.createElement('div');
-    popover.setAttribute('role', 'dialog');
-    popover.setAttribute('data-state', 'open');
-    popover.setAttribute('aria-label', 'Inbox');
-    const popoverEditor = document.createElement('input');
-    popover.append(popoverEditor);
-    document.body.append(popover);
-
-    try {
-      expect(isForegroundFocusOwner(explicitEditor)).toBe(true);
-      expect(isForegroundFocusOwner(sharedEditor)).toBe(true);
-      expect(isForegroundFocusOwner(windowEditor)).toBe(false);
-      expect(isForegroundFocusOwner(popoverEditor)).toBe(false);
-    } finally {
-      explicitModal.remove();
-      sharedModal.remove();
-      appWindow.remove();
-      popover.remove();
-    }
-  });
-
   it('preserves the Chat route with a data router', async () => {
     const user = userEvent.setup();
     const router = createMemoryRouter([
@@ -311,7 +312,7 @@ describe('SettingsOverlayRouteSurface', () => {
 
     const resumedInput = await screen.findByRole('textbox', { name: 'retained editor input' });
     expect(resumedInput).not.toBe(editorInput);
-    await waitFor(() => expect(document.activeElement).toBe(resumedInput));
+    await settleDeferredFocus();
     expect(document.activeElement).toBe(resumedInput);
     expect((resumedInput as HTMLInputElement).selectionStart).toBe(1);
     expect((resumedInput as HTMLInputElement).selectionEnd).toBe(2);
@@ -320,6 +321,49 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(document.activeElement).toBe(resumedInput);
     await user.keyboard('{End}续写🌱');
     expect((resumedInput as HTMLInputElement).value).toBe('保x续写🌱');
+  });
+
+  it('keeps an explicit retained modal as the return-focus owner after its editor remounts', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-explicit-modal' }));
+    const editor = screen.getByRole('textbox', { name: 'retained explicit-modal input' });
+    expect(document.activeElement).toBe(editor);
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-explicit-modal' }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+
+    const resumedEditor = await screen.findByRole('textbox', { name: 'retained explicit-modal input' });
+    await settleDeferredFocus();
+    expect(document.activeElement).toBe(resumedEditor);
+  });
+
+  it.each([
+    ['app-window', 'retained app-window input'],
+    ['popover', 'retained popover input'],
+  ] as const)('falls back from a retained non-modal %s instead of restoring its input', async (kind, inputName) => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: `open-${kind}` }));
+    const input = screen.getByRole('textbox', { name: inputName });
+    expect(document.activeElement).toBe(input);
+    await user.click(screen.getByRole('button', { name: `open-settings-from-${kind}` }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+
+    await screen.findByRole('textbox', { name: inputName });
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('link', { name: 'shell-settings' }),
+    ));
+    expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: inputName }));
   });
 
   it('does not let a stale close callback focus the old origin after Settings reopens', async () => {

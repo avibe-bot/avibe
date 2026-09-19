@@ -21,8 +21,7 @@ type SettingsOverlayRouteSurfaceProps = {
   fallbackElement: ReactElement;
 };
 
-// eslint-disable-next-line react-refresh/only-export-components -- this pure predicate is white-box tested with every retained surface shape.
-export const isForegroundFocusOwner = (element: Element | null): element is HTMLElement => {
+const isForegroundFocusOwner = (element: Element | null): element is HTMLElement => {
   if (!(element instanceof HTMLElement) || !element.isConnected) return false;
   if (element.closest('[data-settings-overlay], [inert], [aria-hidden="true"]')) return false;
   // Retained modal owners can recreate their editor while Settings is open. A
