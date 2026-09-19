@@ -30,8 +30,11 @@ restart is part of this change.
   revokes both authentication and request routing. Retention is bounded by the
   routes used by a process, not the number of completed turns.
 - The gateway removes Avibe-private metadata before upstream forwarding while
-  preserving unrelated native metadata. Missing, malformed, foreign-scope, or
-  unknown identity fails closed without poisoning another turn.
+  preserving unrelated native metadata. Missing or malformed fields,
+  foreign-scope or unknown route handles, and live turn/route mismatches fail
+  closed without poisoning another turn. A valid route handle with a no-longer
+  live turn ID may route without attribution: completed turn IDs are not retained
+  as a second authorization store.
 - Non-Codex credential routing and native/direct channel behavior are unchanged.
   Older Codex clients that cannot carry the required metadata must not silently
   use active-turn inference.
@@ -72,3 +75,6 @@ restart is part of this change.
 - Shared processes remain keyed by working directory.
 - Genuine direct/native/Hub channel changes may still require process replacement.
 - No broad catch, notification suppression, or extra delivery retry is added.
+- The Hub provider's automatic compaction uses the existing Responses route.
+  The legacy remote compact endpoint remains unsupported; its header-only native
+  wire probe verifies the carrier, not end-to-end gateway support.

@@ -275,6 +275,8 @@ async def _post_turn(
     payload: dict[str, object] | None = None,
 ) -> tuple[int, bytes]:
     headers = {"Authorization": f"Bearer {launch.gateway_token}"}
+    if launch.gateway_request_metadata:
+        headers["x-codex-turn-metadata"] = json.dumps(launch.gateway_request_metadata)
     request_payload = payload or {
         "model": launch.runtime_model,
         "messages": [],

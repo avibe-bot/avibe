@@ -3347,6 +3347,16 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandboxPolicy": {"type": "dangerFullAccess"},
         }
+        from modules.agents.model_hub import launch_for_context
+
+        launch = launch_for_context(getattr(request, "context", None))
+        if (
+            launch is not None and launch.backend == "codex" and launch.channel == "hub"
+            and launch.gateway_request_metadata
+        ):
+            # Process authentication stays stable; native tool loops and retries
+            # carry this turn's route instead of inheriting a peer's launch.
+            turn_params["responsesapiClientMetadata"] = dict(launch.gateway_request_metadata)
         if effective_model is not None or model_explicit:
             turn_params["model"] = effective_model
         if effective_effort is not None or effort_explicit:

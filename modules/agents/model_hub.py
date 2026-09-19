@@ -77,6 +77,7 @@ class ModelHubLaunch:
     source_id: Optional[str] = None
     gateway_base_url: Optional[str] = None
     gateway_token: Optional[str] = None
+    gateway_request_metadata: dict[str, str] = field(default_factory=dict, repr=False)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     supports_tools: Optional[bool] = None
@@ -627,6 +628,7 @@ class ModelHubRuntimeRouter:
                 source_id=source_id,
                 via_mapping=via_mapping,
                 gateway_request_model_id=gateway_request_model_id,
+                request_scoped=backend == "codex",
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -983,6 +985,13 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
+                gateway_request_metadata=(
+                    self.turn_gateway.correlation.gateway_request_metadata(
+                        backend=backend, token=gateway_token, turn_id=turn_id,
+                    )
+                    if self.turn_gateway is not None and backend == "codex"
+                    else {}
+                ),
                 context_window=context_window,
                 max_output_tokens=max_output_tokens,
                 supports_tools=supports_tools,
