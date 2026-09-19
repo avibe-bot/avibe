@@ -7,7 +7,7 @@ import { errorMessage } from '@/lib/errorMessage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { SegmentedRadio } from '../shared/SegmentedRadio';
+import { MethodRadio } from './MethodRadio';
 import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendOAuth, type OAuthBackend } from '../oauth/useBackendOAuth';
 import { BackendOAuthPanel } from '../BackendOAuthPanel';
@@ -224,13 +224,30 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const credentialLabel = t(compact ? 'onboarding.connection.credentialType' : 'settings.backends.claudeCredentialTypeLabel');
   const secretLabel = credential === 'auth_token' && backend === 'claude' ? tokenLabel : apiKeyLabel;
   const startLabel = backend === 'claude' ? t('onboarding.connection.claudeSignIn') : backend === 'codex' ? t('onboarding.connection.codexSignIn') : t('settings.backends.opencodeProviderSignIn');
-  if (loading) return <div className="connection-loading" role="status"><LoaderCircle className="animate-spin" size={16} />{t('common.loading')}</div>;
+  // Settings keeps its old content-sized loading row. The dialog does not: its
+  // frame is anchored, so loading has to arrive inside the same three regions as
+  // every other state or the tabs and the footer would appear late and move.
+  if (loading && !compact) return <div className="connection-loading" role="status"><LoaderCircle className="animate-spin" size={16} />{t('common.loading')}</div>;
+  // Exactly three children, always in this order: the method row, the scrolling
+  // body, and the action footer. `connection.css` anchors the first and last to
+  // their own rows of the dialog grid, which is what keeps the heading, tabs and
+  // footer still while the body changes underneath them.
   return <div className="backend-connection-form">
-    {!(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <SegmentedRadio
-      value={method} onChange={(value) => { if (!busy) { pendingConfirmation.current = null; draftTouched.current = true; setMethod(value); setError(''); setConnected(false); } }} disabled={busy}
+    {!(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <MethodRadio
+      value={method} onChange={(value) => { if (!busy && !loading) { pendingConfirmation.current = null; draftTouched.current = true; setMethod(value); setError(''); setConnected(false); } }} disabled={busy || loading}
       ariaLabel={t('onboarding.connection.method')}
       options={[{ id: 'oauth', label: backend === 'claude' ? t('onboarding.connection.claudeLogin') : backend === 'codex' ? t('onboarding.connection.codexSignIn') : t('onboarding.connection.subscription') },
         { id: 'api_key', label: backend === 'claude' ? t('onboarding.connection.claudeCredentials') : backend === 'codex' ? t('onboarding.connection.openaiKey') : apiKeyLabel }]} />}
+    <div className="connection-body">
+    {loading && <div className="connection-loading" role="status"><LoaderCircle className="animate-spin" size={16} />{t('common.loading')}</div>}
+    {/* The method's own instructions live here, not in the dialog heading: the
+        heading and description are anchored and method-independent. */}
+    {!loading && compact && <p className="connection-intro">{t(method === 'api_key'
+      ? backend === 'claude' ? 'onboarding.connection.claudeKeyIntro' : backend === 'codex' ? 'onboarding.connection.codexKeyIntro' : 'onboarding.connection.providerKeyIntro'
+      : backend === 'claude' ? active ? 'onboarding.connection.claudeCompleteIntro' : 'onboarding.connection.claudeIntro'
+      : backend === 'codex' ? active ? 'onboarding.connection.codexCompleteIntro' : 'onboarding.connection.codexIntro'
+      : 'onboarding.connection.providerIntro', { name: provider?.name })}</p>}
+    {!loading && <>
     {uncertain && <p className="connection-notice">{t('onboarding.connection.uncertain')}</p>}
     {native && 'file_store_active' in native && method === 'api_key' && !native.file_store_active && !uncertain && <p className="connection-notice">{t('settings.backends.codexCredentialsStoreKeyringWarn', { store: native.credentials_store })}</p>}
     {native && 'settings_conflict' in native && native.settings_conflict && <p className="connection-notice">{t('settings.backends.claudeSettingsConflictTitle')}: {t('settings.backends.claudeSettingsConflictBody', { var: native.settings_env_key_var || 'ANTHROPIC_API_KEY', path: native.settings_path })}</p>}
@@ -257,7 +274,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       </div>}
     </>)}
     {method === 'api_key' && <>
-      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><SegmentedRadio value={credential} onChange={(value) => { draftTouched.current = true; setCredential(value); }} disabled={busy} ariaLabel={credentialLabel}
+      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><MethodRadio value={credential} onChange={(value) => { draftTouched.current = true; setCredential(value); }} disabled={busy} ariaLabel={credentialLabel}
         options={[{ id: 'api_key', label: apiKeyLabel }, { id: 'auth_token', label: tokenLabel }]} /></div>}
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-key`}>{secretLabel}</Label>
         {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => { draftTouched.current = true; setEditing(true); setKey(''); }}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
@@ -272,6 +289,8 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
         {!urlValid && <p className="connection-error">{t('onboarding.connection.invalidUrl')}</p>}
       </div>
     </>}
+    </>}
+    </div>
     {(compact || method === 'api_key') && <div className="connection-actions">
       {compact && <Button variant="secondary" onClick={onCancel}>{t('common.cancel')}</Button>}
       {!compact && hasKey && method === 'api_key' && <Button variant="ghost" disabled={busy} onClick={() => void remove(true)}>{t('settings.backends.claudeApiKeyRemove')}</Button>}

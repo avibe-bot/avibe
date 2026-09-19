@@ -451,6 +451,17 @@ export type MigrationItem = {
   selected: boolean;
   /** i18n key for the row's secondary line. */
   notes_key?: string | null;
+  /** Provider slug the row's credential belongs to — the join key to the shipped
+   *  vendor catalog. Optional: an older server omits it, and a row without it
+   *  falls back to `masked_detail` and a generic mark rather than guessing an
+   *  identity from `backend`. */
+  vendor?: string;
+  /** Server-side label for the provider. For OpenCode rows this is the raw
+   *  provider id, so `providerIdentity` upgrades known ids to a brand label. */
+  display_name?: string;
+  /** The already-masked credential that also appears inside `masked_detail`,
+   *  carried separately so provider and key can render as two elements. */
+  masked_credential?: string | null;
 };
 
 export type MigrationScan = { items: MigrationItem[] };

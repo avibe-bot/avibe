@@ -68,6 +68,132 @@ for (const lang of ['en', 'zh']) for (const theme of ['dark', 'light']) {
   });
 }
 
+/**
+ * The reported defect: switching Subscription/API Key re-measured the dialog and moved
+ * its own top edge, because a centred box with content height moves by half of every
+ * content change. The fix is a fixed frame whose height belongs to the assistant, so this
+ * measures the anchors the contract names — heading, tab bar, dialog bounds, footer —
+ * across repeated switches in BOTH directions. Repetition matters: a one-way switch can
+ * be stable while the way back is not, and a frame that settles a frame late would pass a
+ * single comparison.
+ */
+const anchorBoxes = (page: Page) => page.evaluate(() => {
+  const round = (value: number) => Math.round(value * 10) / 10;
+  const read = (selector: string) => {
+    const node = document.querySelector(selector);
+    if (!node) return null;
+    const rect = node.getBoundingClientRect();
+    return { x: round(rect.x), y: round(rect.y), width: round(rect.width), height: round(rect.height) };
+  };
+  return {
+    frame: read('.connection-dialog'),
+    heading: read('.connection-heading'),
+    description: read('.connection-description'),
+    // The method tabs are the dialog's first radio group; a credential group, when a
+    // method has one, lives inside the scrolling middle and is not an anchor.
+    tabs: read('.connection-dialog [role="radiogroup"]'),
+    close: read('.connection-dialog > button:last-of-type'),
+    footer: read('.connection-actions'),
+  };
+});
+
+/** Only the middle may scroll: a scroller inside the frame's other rows — or the frame
+ *  itself — would mean it had been asked to hold more than it has room for. */
+const scrollers = (page: Page) => page.evaluate(() => [...document.querySelectorAll('.connection-dialog, .connection-dialog *')]
+  .filter((node) => node.scrollHeight > node.clientHeight + 1 && ['auto', 'scroll'].includes(getComputedStyle(node).overflowY))
+  .map((node) => node.className.toString())
+  .filter((name) => name !== 'connection-body'));
+
+/**
+ * What the window leaves a frame. The dialog asks for its assistant's own height and the
+ * shared primitive caps it — `100dvh - 32` on a desktop, and below 768 the mobile sheet's
+ * `90dvh`. Deriving that here keeps the check about the ASSISTANT deciding the height
+ * while staying exact at a window too short to grant it.
+ */
+const room = (viewport: { width: number; height: number }) =>
+  (viewport.width < 768 ? viewport.height * 0.9 : viewport.height - 32);
+
+for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 640 }]) {
+  test(`the connection frame holds while its methods change ${viewport.width}x${viewport.height}`, async ({ page }, info) => {
+    const denied = await serveProduct(page); await authFixtures(page);
+    await page.setViewportSize(viewport);
+    await openOnboarding(page); await openSetup(page, 'en');
+    await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add subscription' }).click();
+    const dialog = page.getByRole('dialog');
+    const method = dialog.getByRole('radiogroup', { name: 'Connection method' });
+    await expect(dialog.getByRole('button', { name: 'Sign in with Claude' })).toBeVisible();
+    await settleEffects(page);
+
+    const baseline = await anchorBoxes(page);
+    // The height is the assistant's, so it cannot be a function of what is on screen.
+    expect(baseline.frame!.height).toBeCloseTo(Math.min(620, room(viewport)), 0);
+    for (const anchor of Object.values(baseline)) expect(anchor).not.toBeNull();
+    expect(baseline.frame!.y + baseline.frame!.height).toBeLessThanOrEqual(viewport.height);
+
+    // Subscription ⇄ API Key, four times, with the anchors measured after each.
+    for (const label of ['API credentials', 'Claude account', 'API credentials', 'Claude account']) {
+      await method.getByRole('radio', { name: label, exact: true }).click();
+      await expect(method.getByRole('radio', { name: label, exact: true })).toHaveAttribute('aria-checked', 'true');
+      await settleEffects(page);
+      expect(await anchorBoxes(page)).toEqual(baseline);
+      expect(await scrollers(page)).toEqual([]);
+    }
+
+    // API Key ⇄ Auth Token, the second switch the contract names. It lives inside the
+    // middle, so it is exactly the kind of change that used to move everything above it.
+    await method.getByRole('radio', { name: 'API credentials', exact: true }).click();
+    const credential = dialog.getByRole('radiogroup', { name: 'Credential type' });
+    await expect(credential).toBeVisible();
+    for (const label of ['Auth Token', 'API Key', 'Auth Token', 'API Key']) {
+      await credential.getByRole('radio', { name: label, exact: true }).click();
+      await expect(credential.getByRole('radio', { name: label, exact: true })).toHaveAttribute('aria-checked', 'true');
+      await settleEffects(page);
+      expect(await anchorBoxes(page)).toEqual(baseline);
+    }
+    // The label the field asks for follows the choice, which is the only thing that
+    // should have changed across all of that.
+    await expect(dialog.getByLabel('Auth Token', { exact: true })).toHaveCount(0);
+    await expect(dialog.getByLabel('API Key', { exact: true })).toBeVisible();
+    await settleEffects(page);
+    await dialog.screenshot({ path: info.outputPath(`frame-stability-claude-${viewport.width}x${viewport.height}.png`) });
+
+    // A radio group is ONE tab stop that answers arrow keys, and the selected tab keeps
+    // the focus so the next press continues from where the reader is. The loop above left
+    // the second tab selected, so that is the one Tab reaches.
+    const tabs = method.getByRole('radio');
+    expect(await tabs.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).tabIndex))).toEqual([-1, 0]);
+    await tabs.nth(1).focus();
+    await page.keyboard.press('ArrowRight'); // wraps
+    await expect(tabs.first()).toBeFocused();
+    await expect(tabs.first()).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('ArrowRight');
+    await expect(tabs.nth(1)).toBeFocused();
+    await expect(tabs.nth(1)).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('Home');
+    await expect(tabs.first()).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(tabs.nth(1)).toBeFocused();
+    await expect(tabs.nth(1)).toHaveAttribute('aria-checked', 'true');
+    expect(await anchorBoxes(page)).toEqual(baseline);
+
+    await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
+
+    // The frame is the assistant's own: Codex is the shorter one, and it holds too.
+    await page.getByLabel('Codex', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
+    await expect(dialog.getByLabel('Base URL (optional)')).toBeVisible();
+    await settleEffects(page);
+    const codex = await anchorBoxes(page);
+    expect(codex.frame!.height).toBeCloseTo(Math.min(580, room(viewport)), 0);
+    for (const label of ['Sign in with ChatGPT', 'OpenAI API Key', 'Sign in with ChatGPT']) {
+      await dialog.getByRole('radiogroup', { name: 'Connection method' }).getByRole('radio', { name: label, exact: true }).click();
+      await settleEffects(page);
+      expect(await anchorBoxes(page)).toEqual(codex);
+    }
+    await page.keyboard.press('Escape');
+    expect(denied).toEqual([]);
+  });
+}
+
 for (const lang of ['en', 'zh']) {
   test(`corrected compact labels and Light action ${lang}`, async ({ page }, info) => {
     const denied = await serveProduct(page); await authFixtures(page);

@@ -30,9 +30,14 @@ export function AccessTiles() {
       <ul className="onboarding-access-grid" onPointerEnter={() => setPointerInside(true)} onPointerLeave={() => setPointerInside(false)}
         onFocus={() => setFocusInside(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusInside(false); }}>
         {PLATFORMS.map((platform, index) => (
-          <li key={platform} tabIndex={0} className="onboarding-access-tile" data-emphasis={automatic && emphasis === index}>
-            <span className="onboarding-access-icon"><PlatformIcon platform={platform} size={22} aria-hidden="true" /></span>
-            <span>{t(`onboarding.access.${platform}`)}</span>
+          // `data-connects` is what the mint emphasis is keyed on. The five chat
+          // platforms are the ones Avibe connects *to*; the mobile app is Avibe
+          // itself, so it lifts on hover like the rest but is never lit up as a
+          // connection the user still has to make.
+          <li key={platform} tabIndex={0} className="onboarding-access-tile"
+            data-connects={platform !== 'avibe'} data-emphasis={automatic && emphasis === index}>
+            <span className="onboarding-access-icon"><PlatformIcon platform={platform} size={26} aria-hidden="true" /></span>
+            <span className="onboarding-access-label">{t(`onboarding.access.${platform}`)}</span>
           </li>
         ))}
       </ul>

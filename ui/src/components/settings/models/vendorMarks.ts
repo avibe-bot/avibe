@@ -92,6 +92,12 @@ export const VENDOR_MARKS: Record<string, VendorMark | undefined> = {
     path: 'M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81',
     ink: [0, 0, 24, 24],
   },
+  // Four straight-edged slashes in one path; every segment is a line, so this
+  // ink was computed from the path's own extremes rather than measured.
+  xai: {
+    path: 'M6.469 8.776L16.512 23h-4.464L2.005 8.776H6.47zm-.004 7.9l2.233 3.164L6.467 23H2l4.465-6.324zM22 2.582V23h-3.659V7.764L22 2.582zM22 1l-9.952 14.095-2.233-3.163L17.533 1H22z',
+    ink: [2, 1, 20, 22],
+  },
   openai: OPENAI_MARK,
   anthropic: ANTHROPIC_MARK,
 };

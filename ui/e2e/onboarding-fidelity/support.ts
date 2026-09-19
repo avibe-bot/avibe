@@ -13,12 +13,21 @@ export const PHASES = {
   'pm-summary': 8000,
 } as const;
 
+/**
+ * The accepted responsive matrix, plus the two widths between its rows that the
+ * composition actually changes at. 1920 and 1440 are the wide desktop that takes the
+ * 1200 content box; 1366 and 1200 are the standard desktop on 976; 1024 and 768 are
+ * where the diagram stops following its proportion; 390, 375 and 320 are the phones.
+ */
 export const VIEWPORTS = [
-  { width: 1200, height: 800 },
+  { width: 1920, height: 1080 },
   { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1200, height: 800 },
   { width: 1024, height: 768 },
   { width: 768, height: 1024 },
   { width: 390, height: 844 },
+  { width: 375, height: 812 },
   { width: 320, height: 568 },
 ] as const;
 
@@ -204,4 +213,47 @@ export async function setDocumentHidden(page: Page, hidden: boolean) {
 export async function openSetup(page: Page, lang: string) {
   await page.getByRole('button', { name: lang === 'zh' ? '开始使用' : 'Get started' }).click();
   await page.locator('.onboarding-assistants').waitFor();
+}
+
+/**
+ * The two shapes a migration scan really returns. Three credentials the gateway can
+ * take over, and two native subscription tokens it must leave where they are — the
+ * setup notice counts only the first kind, so a fixture without the second could not
+ * show that it does. The detail strings are the server's own masked form, Chinese
+ * included, because that is what the capsule has to stay one line tall around.
+ */
+export const MIGRATION_KEYS = [
+  { id: 'claude-key', backend: 'claude', kind: 'api_key', masked_detail: 'sk-ant-…4f2a + 自定义 Base URL', proposed_action: 'import', selected: true, vendor: 'anthropic', display_name: 'Anthropic', masked_credential: 'sk-ant-…4f2a' },
+  { id: 'codex-key', backend: 'codex', kind: 'api_key', masked_detail: 'sk-…9d31', proposed_action: 'import', selected: true, vendor: 'openai', display_name: 'OpenAI', masked_credential: 'sk-…9d31' },
+  { id: 'opencode-qwen', backend: 'opencode', kind: 'opencode_provider', masked_detail: 'sk-…7c08 · 阿里云百炼', proposed_action: 'import', selected: true, vendor: 'qwen', display_name: 'alibaba-cn', masked_credential: 'sk-…7c08' },
+] as const;
+export const MIGRATION_NATIVE = [
+  { id: 'claude-oauth', backend: 'claude', kind: 'oauth_native', masked_detail: 'Claude 订阅令牌', proposed_action: 'keep_native', selected: false },
+  { id: 'codex-oauth', backend: 'codex', kind: 'oauth_native', masked_detail: 'ChatGPT 订阅令牌', proposed_action: 'keep_native', selected: false },
+] as const;
+
+/**
+ * Turns the Model Gateway capability on and answers its migration scan, so the setup
+ * step draws the API-key import offer. Call it AFTER `serveProduct`: Playwright matches
+ * routes newest-first, which is what lets this override that fixture's `/api/config`
+ * and answer the scan POST the catch-all would otherwise refuse.
+ */
+export async function serveModelHub(page: Page) {
+  const applied: string[][] = [];
+  let items = [...MIGRATION_KEYS, ...MIGRATION_NATIVE] as { id: string }[];
+  // The scan is a POST, so the product asks for a CSRF token before issuing it. The
+  // base fixture refuses every write and everything that enables one, which is what
+  // keeps a capture honest; an opt-in write surface has to answer this itself.
+  await page.route('**/api/csrf-token', (route) => route.fulfill({ json: { csrf_token: 'fixture-token' } }));
+  await page.route('**/api/config', (route) =>
+    route.fulfill({ json: { ...CONFIG, capabilities: { model_hub: { enabled: true } } } }),
+  );
+  await page.route('**/api/models/migration/scan', (route) => route.fulfill({ json: { scan: { items } } }));
+  await page.route('**/api/models/migration/apply', (route) => {
+    const ids: string[] = JSON.parse(route.request().postData() || '{}').item_ids ?? [];
+    applied.push(ids);
+    items = items.filter((item) => !ids.includes(item.id));
+    return route.fulfill({ json: { applied: ids.length, sources: [] } });
+  });
+  return applied;
 }

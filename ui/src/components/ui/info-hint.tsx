@@ -11,6 +11,14 @@ interface InfoHintProps {
   label: string;
   className?: string;
   align?: 'start' | 'center' | 'end';
+  /** What the trigger draws. Defaults to the ⓘ badge. A caller that already has
+   *  its own wording ("What is Model Gateway?") passes that text instead. */
+  trigger?: React.ReactNode;
+  /** Also reveal on mouse hover and keyboard focus. Off by default so existing
+   *  hints keep their click-only behavior. */
+  hover?: boolean;
+  /** Width of the revealed panel. Defaults to the 16rem hint width. */
+  contentClassName?: string;
 }
 
 // A small "ⓘ" affordance that reveals a hint on click / tap — uniform across
@@ -20,8 +28,46 @@ interface InfoHintProps {
 // as a sibling of the dialog, where Radix marks it aria-hidden/inert — the same
 // reason AgentRoutePicker takes a `modal` prop. Click toggles; Escape / outside
 // click dismiss via Radix.
-export const InfoHint: React.FC<InfoHintProps> = ({ content, label, className, align = 'start' }) => {
+export const InfoHint: React.FC<InfoHintProps> = ({
+  content,
+  label,
+  className,
+  align = 'start',
+  trigger,
+  hover = false,
+  contentClassName,
+}) => {
   const [open, setOpen] = React.useState(false);
+  // Hover-close is deferred so the pointer can travel from the trigger into the
+  // panel — which is portalled, so no wrapper can hold both.
+  const closeTimer = React.useRef<number | null>(null);
+  const cancelClose = React.useCallback(() => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+  const scheduleClose = React.useCallback(() => {
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => setOpen(false), 120);
+  }, [cancelClose]);
+  React.useEffect(() => cancelClose, [cancelClose]);
+
+  // Only a mouse hovers. A tap reports pointerType 'touch' and is left to the
+  // click handler, so a phone gets one clean toggle instead of open-then-close.
+  const hoverProps = hover
+    ? {
+      onPointerEnter: (event: React.PointerEvent) => {
+        if (event.pointerType === 'mouse') { cancelClose(); setOpen(true); }
+      },
+      onPointerLeave: (event: React.PointerEvent) => {
+        if (event.pointerType === 'mouse') scheduleClose();
+      },
+      onFocus: () => { cancelClose(); setOpen(true); },
+      onBlur: scheduleClose,
+    }
+    : {};
+
   return (
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger asChild>
@@ -29,12 +75,15 @@ export const InfoHint: React.FC<InfoHintProps> = ({ content, label, className, a
           type="button"
           aria-label={label}
           onClick={() => setOpen((prev) => !prev)}
+          {...hoverProps}
           className={cn(
-            'inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted outline-none transition hover:text-foreground focus-visible:text-foreground',
+            trigger
+              ? 'inline-flex shrink-0 items-center outline-none transition'
+              : 'inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted outline-none transition hover:text-foreground focus-visible:text-foreground',
             className,
           )}
         >
-          <Info className="size-3.5" />
+          {trigger ?? <Info className="size-3.5" />}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -42,7 +91,9 @@ export const InfoHint: React.FC<InfoHintProps> = ({ content, label, className, a
         sideOffset={6}
         // Don't steal focus from the trigger on hover-open, so tabbing isn't trapped.
         onOpenAutoFocus={(event) => event.preventDefault()}
-        className="w-64 p-3 text-[12px] font-normal leading-relaxed text-muted"
+        onPointerEnter={hover ? cancelClose : undefined}
+        onPointerLeave={hover ? scheduleClose : undefined}
+        className={cn('w-64 p-3 text-[12px] font-normal leading-relaxed text-muted', contentClassName)}
       >
         {content}
       </PopoverContent>

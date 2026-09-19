@@ -24,7 +24,7 @@ import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
 import type { BackendConnectionState } from '@/context/ApiContext';
 import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
-import { MigrationBanner } from '../settings/models/MigrationBanner';
+import { ImportKeysNotice } from '../onboarding/ImportKeysNotice';
 import { useModelHubCapability } from '../settings/models/useModelHubCapability';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
@@ -309,12 +309,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // Page mode keeps the existing settings shell — render the inner content only
   const Inner = isPage ? (
     <>
-      {/* Setup-wizard migration trigger (spec §5-03): offer to import pre-existing
-          native CLI configs into the Hub. Wizard-only — the Settings → Backends
-          page already surfaces this via BackendSupplyModeCard. Self-hides when
-          nothing is importable or the hub isn't reachable yet. */}
-      {!isPage && modelHubEnabled === true && <MigrationBanner />}
-
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
@@ -503,17 +497,17 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         <h2>{t('onboarding.setup.title')}</h2>
         <p>{t('onboarding.setup.subtitle')}</p>
       </header>
-      {modelHubEnabled === true && <MigrationBanner />}
+      {/* The stage both steps share, so the action below lands on the same
+          coordinates as the intro's — see `.onboarding-stage` in onboarding.css. */}
+      <div className="onboarding-stage">
       <div className="onboarding-assistants">
-        <div className="onboarding-assistants-header">
-          <h3>{t('onboarding.setup.assistants')}</h3>
-          {/* n4ATm draws this as an outlined control on its own surface, not a bare
-              text button: `secondary` is that pair, and `xs` its 12px/12px metrics. */}
-          <Button type="button" variant="secondary" size="xs" onClick={() => void detectAll()}
-            disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
-            <RefreshCw size={14} />{t('agentDetection.rescan')}
-          </Button>
-        </div>
+        {/* No section bar above the cards: the page heading already names the three,
+            and a second title here pushed them below the line the intro left them on.
+            Rescanning moved to the footer hint, which is where a person looks once the
+            cards have not told them what they expected. */}
+        {/* The intro's three tracks, reused rather than restated — see
+            `.onboarding-assistants-list` in onboarding.css. */}
+        <div className="onboarding-assistants-list">
         {ASSISTANT_ORDER.map((name) => {
           const agent = agents[name];
           const result = installResults[name];
@@ -547,21 +541,37 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               }} />}
           />;
         })}
+        </div>
       </div>
       <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
         permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
         onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />
+      {/* Wizard-only: the offer to take over API keys already on this machine.
+          Settings → Backends reaches the same migration through
+          BackendSupplyModeCard, with its broader scope intact. Self-hides when
+          there is nothing importable or the gateway isn't reachable. */}
+      {modelHubEnabled === true && <ImportKeysNotice />}
+      </div>
       {providerDialog}
       {completionRecovery}
       <div className="onboarding-setup-footer">
-        <Button type="button" variant="brand" className="group onboarding-primary-action" onClick={() => void handlePrimaryAction()}
+        <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
           disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
           {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
           <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
         </Button>
-        <p className="text-center text-xs text-muted">{t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}</p>
+        <p className="text-center text-xs text-muted">
+          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
+          {/* The whole-screen rescan, kept as part of the sentence that explains why a
+              card might not say what was expected rather than as a control competing
+              with the action above it. */}
+          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
+            onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
+            <RefreshCw size={12} />{t('agentDetection.rescan')}
+          </Button>
+        </p>
         {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
-        {onBack && <Button type="button" variant="ghost" size="sm" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
       </div>
     </div>
   );

@@ -1226,3 +1226,207 @@ def test_apply_rejects_a_credential_changed_after_scan(
     assert error.value.code == "migration_item_conflict"
     assert adapter.provisioned == []
     assert store.config.sources == []
+
+
+# --- Additive provider-presentation metadata (ratified 2026-09-19) -----------
+#
+# `vendor`, `display_name` and `masked_credential` let a client name and draw the
+# provider a credential belongs to. They exist because `backend` cannot: it says
+# which CLI held the key, not whose key it is, and an OpenCode row can come from
+# either of two stores. The tests below hold the three properties that make them
+# safe to add — every source shape carries them, the masked credential is the same
+# masking the composed detail already used, and no pre-existing value or id moves.
+
+_KEY_FROM_OPENCODE_CONFIG = "sk-config-deepseek-123456"
+_KEY_FROM_OPENCODE_AUTH = "sk-auth-zhipu-123456"
+_CLAUDE_KEY = "sk-ant-meta-123456789"
+_CLAUDE_TOKEN = "bearer-meta-123456"
+_CODEX_KEY = "sk-openai-meta-123456"
+
+_ALL_PLAINTEXT = (
+    _KEY_FROM_OPENCODE_CONFIG,
+    _KEY_FROM_OPENCODE_AUTH,
+    _CLAUDE_KEY,
+    _CLAUDE_TOKEN,
+    _CODEX_KEY,
+    "claude-oauth-meta-token",
+    "codex-oauth-meta-token",
+)
+
+
+def _write_key_sources(home: Path) -> None:
+    """Every shape that yields an importable key, in one home."""
+    _write(
+        home / ".claude" / "settings.json",
+        json.dumps({"env": {"ANTHROPIC_API_KEY": _CLAUDE_KEY, "ANTHROPIC_AUTH_TOKEN": _CLAUDE_TOKEN}}),
+    )
+    _write(home / ".codex" / "auth.json", json.dumps({"OPENAI_API_KEY": _CODEX_KEY}))
+    _write(home / ".codex" / "config.toml", 'cli_auth_credentials_store = "file"\n')
+    # deepseek keeps its key in the OpenCode config file, zhipuai in auth.json —
+    # the two stores `backend` + `kind` cannot tell apart.
+    _write(
+        home / ".config" / "opencode" / "opencode.json",
+        json.dumps(
+            {
+                "provider": {
+                    "deepseek": {"options": {"apiKey": _KEY_FROM_OPENCODE_CONFIG}},
+                    "zhipuai": {"options": {"baseURL": "https://zhipu.example/v1"}},
+                }
+            }
+        ),
+    )
+    _write(
+        home / ".local" / "share" / "opencode" / "auth.json",
+        json.dumps({"zhipuai": {"type": "api", "key": _KEY_FROM_OPENCODE_AUTH}}),
+    )
+    _write(
+        home / ".cache" / "opencode" / "models.json",
+        json.dumps(
+            {
+                "deepseek": {
+                    "id": "deepseek",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://api.deepseek.com/v1",
+                },
+                "zhipuai": {
+                    "id": "zhipuai",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://zhipu.example/v1",
+                },
+            }
+        ),
+    )
+
+
+def _write_oauth_sources(home: Path) -> None:
+    """The subscription shapes, which carry no credential of their own."""
+    _write(
+        home / ".claude" / ".credentials.json",
+        json.dumps({"claudeAiOauth": {"accessToken": "claude-oauth-meta-token"}}),
+    )
+    _write(
+        home / ".codex" / "auth.json",
+        json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "codex-oauth-meta-token"}}),
+    )
+    _write(home / ".codex" / "config.toml", 'cli_auth_credentials_store = "file"\n')
+
+
+def test_mh_mig_003_scan_rows_name_their_provider_without_exposing_plaintext(
+    tmp_path: Path,
+) -> None:
+    """MH-MIG-003: every shape the scan produces carries the provider it belongs
+    to, and no shape carries a plaintext credential."""
+    home = tmp_path / "keys"
+    _write_key_sources(home)
+    items = scan_native_configs(ModelHubConfig(), home=home, mask_credential=_mask_credential)
+    payload = {"items": [item.to_payload() for item in items]}
+    _validate_scan(payload)
+
+    by_shape = {
+        (row["backend"], row["kind"], row["proposed_action"]): row for row in payload["items"]
+    }
+    # Claude's API key and its Auth Token, Codex's API key, and an OpenCode key
+    # from each of the two stores. The Auth Token is `reauth` and still needs a
+    # name to show, so metadata is not conditional on being importable.
+    assert set(by_shape) == {
+        ("claude", "api_key", "import"),
+        ("claude", "api_key", "reauth"),
+        ("codex", "api_key", "import"),
+        ("opencode", "opencode_provider", "import"),
+    }
+    assert len([r for r in payload["items"] if r["backend"] == "opencode"]) == 2
+
+    for row in payload["items"]:
+        assert row["vendor"], row
+        assert row["display_name"], row
+        assert row["masked_credential"], row
+
+    serialized = json.dumps(payload)
+    for secret in _ALL_PLAINTEXT:
+        assert secret not in serialized
+
+
+def test_masked_credential_is_the_same_masking_the_detail_already_showed(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "keys"
+    _write_key_sources(home)
+    rows = [
+        item.to_payload()
+        for item in scan_native_configs(
+            ModelHubConfig(), home=home, mask_credential=_mask_credential
+        )
+    ]
+
+    for row in rows:
+        if row["backend"] == "opencode":
+            # The composed detail is provider + masked key; splitting it in the
+            # client would be re-parsing a display string, so the field carries
+            # the same text the composition used.
+            assert row["masked_detail"] == f"{row['vendor']} · {row['masked_credential']}"
+        else:
+            # Claude and Codex show the masked key alone, so the two agree exactly.
+            assert row["masked_detail"] == row["masked_credential"]
+
+    for plaintext in (_KEY_FROM_OPENCODE_CONFIG, _KEY_FROM_OPENCODE_AUTH, _CLAUDE_KEY):
+        masked = _mask_credential(plaintext)
+        assert masked != plaintext
+        assert any(row["masked_credential"] == masked for row in rows), masked
+
+
+def test_subscription_rows_carry_a_name_but_no_credential(tmp_path: Path) -> None:
+    home = tmp_path / "oauth"
+    _write_oauth_sources(home)
+    rows = [
+        item.to_payload()
+        for item in scan_native_configs(
+            ModelHubConfig(), home=home, mask_credential=_mask_credential
+        )
+    ]
+    _validate_scan({"items": rows})
+
+    assert {(row["backend"], row["kind"], row["proposed_action"]) for row in rows} == {
+        ("claude", "oauth_native", "keep_native"),
+        ("codex", "oauth_native", "keep_native"),
+    }
+    for row in rows:
+        assert row["vendor"] and row["display_name"]
+        # There is no key here to mask; a client falls back to `masked_detail`.
+        assert row["masked_credential"] is None
+
+
+def test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "keys"
+    _write_key_sources(home)
+
+    def scan() -> list:
+        return scan_native_configs(
+            ModelHubConfig(), home=home, mask_credential=_mask_credential
+        )
+
+    established = (
+        "id",
+        "backend",
+        "kind",
+        "masked_detail",
+        "proposed_action",
+        "selected",
+        "notes_key",
+    )
+    first = [item.to_payload() for item in scan()]
+    second = [item.to_payload() for item in scan()]
+
+    # Ids are content-derived, so a second scan of untouched files must reproduce
+    # them exactly — an id that moved would orphan a selection made before it.
+    assert [{k: row[k] for k in established} for row in first] == [
+        {k: row[k] for k in established} for row in second
+    ]
+    # And the established half still reads off the dataclass it always did.
+    for item, row in zip(scan(), first):
+        assert row["id"] == item.id
+        assert row["masked_detail"] == item.masked_detail
+        assert row["proposed_action"] == item.proposed_action
+        assert row["selected"] == item.selected
+        assert row["notes_key"] == item.notes_key
