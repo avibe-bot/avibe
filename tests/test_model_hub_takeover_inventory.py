@@ -1,6 +1,7 @@
 """Takeover discovers and cleans all supported precedence layers as one unit."""
 
 import asyncio
+import hashlib
 import json
 from contextlib import asynccontextmanager
 
@@ -105,6 +106,156 @@ def test_keychain_takeover_preserves_mcp_without_offering_it_as_a_new_login(monk
     keychain.mdates[locator] += 1
     assert [row["backend"] for row in service.migration_scan()["items"]] == ["claude"]
     assert len(keychain.read_calls) == reads_after_takeover
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_unchanged_unrelated_keychain_container_completes_without_import(monkeypatch, tmp_path, backend):
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    monkeypatch.setenv("USER", "fixture-user")
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    if backend == "claude":
+        locator = ("Claude Code-credentials", "fixture-user")
+    else:
+        _write(home / ".codex/config.toml", 'cli_auth_credentials_store = "keyring"\n')
+        account = "cli|" + hashlib.sha256(str((home / ".codex").resolve()).encode()).hexdigest()[:16]
+        locator = ("Codex Auth", account)
+    keychain.items[locator] = ('{"mcpOAuth":{"unrelated":"保留"}}', "fixture-original")
+    original = dict(keychain.items)
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents[backend].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert len(ids) == 1
+    assert not keychain.read_calls
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert store.config.agents[backend].mode == "hub"
+    assert not store.config.sources
+    assert not adapter.provisioned and not adapter.oauth_provisioned
+    assert keychain.items == original
+    assert not keychain.write_calls and not keychain.delete_calls
+    reads = len(keychain.read_calls)
+    assert reads > 0
+    assert service.migration_scan()["items"] == []
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert len(keychain.read_calls) == reads
+    keychain.items[locator] = (original[locator][0], "fixture-new-revision")
+    keychain.mdates[locator] += 1
+    assert len(service.migration_scan()["items"]) == 1
+
+
+@pytest.mark.parametrize("with_api_key", [False, True])
+def test_empty_codex_container_never_authorizes_deleting_dormant_file_grant(
+    monkeypatch, tmp_path, with_api_key,
+):
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    config = 'cli_auth_credentials_store = "keyring"\n'
+    if with_api_key:
+        config += (
+            'model_provider = "fixture"\n[model_providers.fixture]\n'
+            'base_url = "https://fixture.example/v1"\n'
+            'experimental_bearer_token = "fixture-key"\n'
+        )
+    _write(home / ".codex/config.toml", config)
+    account = "cli|" + hashlib.sha256(str((home / ".codex").resolve()).encode()).hexdigest()[:16]
+    locator = ("Codex Auth", account)
+    keychain.items[locator] = ('{"mcpOAuth":{"keep":"保留"}}', "fixture-original")
+    dormant = home / ".codex/auth.json"
+    payload = {"tokens": {"access_token": "fixture-dormant", "refresh_token": "fixture-dormant-refresh"}}
+    if with_api_key:
+        payload["OPENAI_API_KEY"] = "fixture-key"
+    _write(dormant, json.dumps(payload))
+    before = dormant.read_bytes()
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    if with_api_key:
+        with pytest.raises(ModelHubError):
+            asyncio.run(service.migration_apply(ids))
+        assert store.config.agents["codex"].mode == "direct"
+    else:
+        assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+        assert store.config.agents["codex"].mode == "hub"
+    assert dormant.read_bytes() == before
+    assert not store.config.sources
+    assert not adapter.provisioned and not adapter.oauth_provisioned
+    assert not keychain.delete_calls and not keychain.write_calls
+    assert service.migration_journal.load() is None
+
+
+@pytest.mark.parametrize("boundary", ["permission", "install", "start"])
+def test_empty_container_evidence_cannot_hide_denial_or_an_intervening_login(
+    monkeypatch, tmp_path, boundary,
+):
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+    from core.handlers.model_hub.adapter import EngineEnsureResult, EngineHealth, EngineStatus
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    monkeypatch.setenv("USER", "fixture-user")
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    locator = ("Claude Code-credentials", "fixture-user")
+    keychain.items[locator] = ('{"mcpOAuth":{"keep":"保留"}}', "fixture-original")
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["claude"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert len(ids) == 1
+    status = EngineStatus(EngineHealth.OK, "fixture", True, "127.0.0.1", 32199, None)
+
+    def login():
+        keychain.items[locator] = (json.dumps({
+            "claudeAiOauth": {"accessToken": "fixture-new", "refreshToken": "fixture-refresh"},
+            "mcpOAuth": {"keep": "保留"},
+        }), "fixture-new-login")
+        keychain.mdates[locator] += 1
+
+    async def install(**kwargs):
+        if boundary == "install":
+            login()
+        return EngineEnsureResult(status, False)
+
+    async def start():
+        if boundary == "start":
+            login()
+        return status
+
+    adapter.ensure_installed = install
+    adapter.start = start
+    keychain.read_denied = boundary == "permission"
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    assert not store.config.sources
+    assert not adapter.oauth_provisioned and not adapter.provisioned
+    assert not keychain.delete_calls and not keychain.write_calls
+    assert service.migration_journal.completed() is None
+    assert service.migration_journal.load() is None
+    assert store.config.agents["claude"].mode == "direct"
+    assert not service.migration_blocked_backends
+    if boundary != "permission":
+        assert "fixture-new" in keychain.items[locator][0]
+        new_ids = [row["id"] for row in service.migration_scan()["items"]]
+        assert new_ids != ids
+        # A new, explicit consent can now take over the new login.
+        adapter.ensure_installed = lambda **kwargs: _return_async(EngineEnsureResult(status, False))
+        adapter.start = lambda: _return_async(status)
+        assert asyncio.run(service.migration_apply(new_ids))["applied"] == 1
+        assert len(adapter.oauth_provisioned) == 1
+        assert service.migration_journal.load() is None
+
+
+async def _return_async(value):
+    return value
 
 
 def test_unsupported_provider_blocks_only_its_cli_before_any_cleanup(monkeypatch, tmp_path):
@@ -220,6 +371,38 @@ def test_existing_hub_key_still_clears_legacy_auth_when_hub_config_is_unchanged(
     assert loaded.agents.claude.api_key is None
     assert loaded.agents.claude.auth_mode == "oauth"
     assert len(adapter.provisioned) == 1  # No duplicate credential or Source.
+    assert service.migration_journal.load() is None
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_reused_hub_key_requires_current_proof_before_native_cleanup(monkeypatch, tmp_path, accepted):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    asyncio.run(service.create_source({
+        "kind": "api_key", "vendor": "anthropic", "key": "fixture-key",
+        "display_name": "Existing source",
+    }))
+    store.config.agents["claude"].mode = "direct"
+    native = home / ".claude/settings.json"
+    _write(native, '{"env":{"ANTHROPIC_API_KEY":"fixture-key"},"mcp":{"keep":true}}')
+    before = native.read_bytes()
+    previous = store.config.to_payload()
+    observed = len(adapter.observed)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    if not accepted:
+        adapter.unproven_observation_vendor = "anthropic"
+        with pytest.raises(ModelHubError) as failure:
+            asyncio.run(service.migration_apply(ids))
+        assert failure.value.code == "migration_item_conflict"
+        assert native.read_bytes() == before
+        assert store.config.to_payload() == previous
+    else:
+        assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+        assert store.config.to_payload()["sources"] == previous["sources"]
+        assert json.loads(native.read_text()) == {"env": {}, "mcp": {"keep": True}}
+    assert len(adapter.observed) == observed + 1
+    assert len(adapter.provisioned) == 1
     assert service.migration_journal.load() is None
 
 

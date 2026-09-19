@@ -9,6 +9,7 @@ import json
 import re
 import textwrap
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -4175,8 +4176,17 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     }
 
 
+@asynccontextmanager
+async def _idle_mode_guard(backends):
+    async def verify_idle():
+        pass
+    yield verify_idle
+
+
 def test_direct_to_hub_changes_only_mode(tmp_path):
     service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    service.migration_guard = _idle_mode_guard
     store.config.agents["claude"].mode = "direct"
 
     switched = asyncio.run(service.set_agent_mode("claude", "hub"))
@@ -4195,6 +4205,7 @@ def test_direct_to_hub_changes_only_mode(tmp_path):
 def test_direct_to_hub_without_recognized_login_changes_only_mode(tmp_path):
     service, store, adapter = _service(tmp_path)
     service.migration_home = tmp_path / "native-home"
+    service.migration_guard = _idle_mode_guard
     store.config.agents["claude"].mode = "direct"
 
     switched = asyncio.run(service.set_agent_mode("claude", "hub"))
@@ -4382,11 +4393,13 @@ def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         migration_home=tmp_path / "native-home",
+        migration_guard=_idle_mode_guard,
     )
 
-    with pytest.raises(OSError, match="persist failed"):
+    with pytest.raises(ModelHubError) as failure:
         asyncio.run(service.set_agent_mode("claude", "hub"))
 
+    assert failure.value.code == "mode_switch_blocked"
     assert store.config.agents["claude"].mode == "direct"
     assert store.config.sources == []
 

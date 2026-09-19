@@ -148,7 +148,9 @@ def plan_native_cleanup(
         if json.dumps(payload, sort_keys=True) != before:
             edits[path] = NativeFileEdit(path.absolute(), original, _json_bytes(payload))
 
-    backends = {item.backend for item in items}
+    # Consent to inspect an opaque, verified-empty container does not transfer
+    # any credential. It cannot authorize cleanup of another native store.
+    backends = {item.backend for item in items if not item.native_store_placeholder}
     selected_secrets = {item.secret for item in items if item.secret}
     if "claude" in backends:
         def clear_settings(payload: dict) -> None:
@@ -181,6 +183,7 @@ def plan_native_cleanup(
                 raise TakeoverStateError("another native credential requires migration")
             if payload.get("tokens") and not any(
                 item.backend == "codex" and item.kind == "oauth_native"
+                and not item.native_store_placeholder
                 for item in items
             ):
                 raise TakeoverStateError("another native credential requires migration")
@@ -225,7 +228,11 @@ def plan_native_cleanup(
                 for profile in profiles.values():
                     if isinstance(profile, dict) and profile.get("model_provider") in removable:
                         profile.pop("model_provider")
-            config.pop(CREDENTIALS_STORE_KEY, None)
+            # A consented empty container is unrelated data, not replaced
+            # authentication. Keep its selector so the recorded clean revision
+            # remains observable (and a later native login is not hidden).
+            if not any(item.backend == "codex" and item.native_store_placeholder for item in items):
+                config.pop(CREDENTIALS_STORE_KEY, None)
             if json.dumps(config, sort_keys=True, default=str) != before:
                 edits[config_path] = NativeFileEdit(config_path.absolute(), content, _dump_toml(config).encode())
 

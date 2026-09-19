@@ -106,8 +106,11 @@ class MigrationAdapter:
         vendor: str,
         secret: str,
         base_url: str | None,
+        *, on_reserved=None,
     ) -> str:
         credential_ref = f"cred_observation_{len(self.transient_refs) + 1}"
+        if on_reserved:
+            on_reserved(credential_ref)
         self.transient_refs.append(credential_ref)
         return credential_ref
 
@@ -143,8 +146,11 @@ class MigrationAdapter:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *, on_reserved=None,
     ) -> str:
         credential_ref = f"cred_migration_{len(self.provisioned) + 1}"
+        if on_reserved:
+            on_reserved(credential_ref)
         self.provisioned.append((vendor, len(secret), credential_ref))
         self.keys[credential_ref] = (vendor, protocol, secret, base_url)
         return credential_ref
@@ -154,8 +160,11 @@ class MigrationAdapter:
         source_id: str,
         vendor: str,
         material: Mapping[str, object],
+        *, on_reserved=None,
     ) -> str:
         credential_ref = f"cred_oauth_migration_{len(self.oauth_provisioned) + 1}"
+        if on_reserved:
+            on_reserved(credential_ref)
         self.oauth_provisioned.append((source_id, vendor, dict(material)))
         return credential_ref
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 
 import pytest
 
@@ -23,6 +23,56 @@ from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
     _write_claude_oauth,
     _write_codex_oauth,
 )
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("native_present", [False, True])
+@pytest.mark.parametrize("boundary", ["entry", "verify"])
+def test_mode_only_adoption_checks_native_absence_inside_guard(
+    monkeypatch, tmp_path, backend, native_present, boundary,
+):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents[backend].mode = "direct"
+    assert service.migration_scan()["items"] == []
+    checks = []
+
+    def login():
+        if native_present:
+            if backend == "claude":
+                _write_claude_oauth(home)
+            elif backend == "codex":
+                _write_codex_oauth(home)
+            else:
+                _write(home / ".local/share/opencode/auth.json",
+                       '{"openai":{"type":"api","key":"fixture-key"}}')
+
+    @asynccontextmanager
+    async def guard(backends):
+        assert backends == (backend,)
+        assert not service._mutation_lock.locked()
+        if boundary == "entry":
+            login()
+        async def verify():
+            checks.append(True)
+            if boundary == "verify":
+                login()
+        yield verify
+
+    service.migration_guard = guard
+    if native_present:
+        with pytest.raises(ModelHubError) as failure:
+            asyncio.run(service.set_agent_mode(backend, "hub"))
+        assert failure.value.code == "mode_switch_blocked"
+        assert store.config.agents[backend].mode == "direct"
+        assert service.migration_scan()["items"]
+    else:
+        assert asyncio.run(service.set_agent_mode(backend, "hub"))["mode"] == "hub"
+        assert checks
+    assert not store.config.sources
+    assert not adapter.provisioned and not adapter.oauth_provisioned
+    assert service.migration_journal.load() is None
 
 
 def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, tmp_path):

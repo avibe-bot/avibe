@@ -167,6 +167,12 @@ explicitly authorized acceptance check.
   existing completed receipt; unrelated bytes are not changed. Any new revision
   requires consent again. A selector for a verified-empty Codex store remains
   unchanged so later native logins at that locator remain observable.
+  Empty-container evidence never authorizes cleanup of an unimported file
+  grant. When the entire batch contains only verified-empty containers, no
+  credential is exposed: the existing `withdrawn` phase remains reversible
+  through runtime start. A changed container restores the previous mode and
+  releases the pending transaction for fresh consent, without restoring or
+  deleting any credential bytes.
 
 ## Durable transaction
 
@@ -191,7 +197,11 @@ After cleanup, Source/Routes/
 backend mode and legacy auth fields are committed without calling the runtime.
 The `exposed` marker is durable before activation **or engine projection**.
 Recovery explicitly reconciles the projection even when saved config is
-already identical. OAuth completion additionally requires credential-specific
+already identical. While a prepared transaction still owns provisional refs,
+ordinary engine reconciliation must not revoke those refs merely because
+they are not yet bound in config. An uncertain prepared-record save outcome
+is resolved by durable recovery, not local grant deletion.
+OAuth completion additionally requires credential-specific
 upstream validation; an invalid or unavailable grant after possible exposure
 is never restored as a native login. Unavailable or inconclusive validation
 keeps takeover pending. Authoritative refresh-grant rejection instead records

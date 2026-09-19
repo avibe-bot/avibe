@@ -403,7 +403,10 @@ class UnavailableEngineAdapter:
     async def gateway_token(self) -> str:
         raise EngineUnavailableError
 
-    async def provision_credential(self, vendor: str, protocol: str, secret: str, base_url: str | None) -> str:
+    async def provision_credential(
+        self, vendor: str, protocol: str, secret: str, base_url: str | None,
+        *, on_reserved: Callable[[str], None] | None = None,
+    ) -> str:
         raise EngineUnavailableError
 
     async def provision_oauth_credential(
@@ -411,6 +414,7 @@ class UnavailableEngineAdapter:
         source_id: str,
         vendor: str,
         material: Mapping[str, object],
+        *, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
@@ -426,7 +430,10 @@ class UnavailableEngineAdapter:
     ) -> bool:
         raise EngineUnavailableError
 
-    async def provision_transient_credential(self, vendor: str, secret: str, base_url: str | None) -> str:
+    async def provision_transient_credential(
+        self, vendor: str, secret: str, base_url: str | None,
+        *, on_reserved: Callable[[str], None] | None = None,
+    ) -> str:
         raise EngineUnavailableError
 
     async def revoke_credential(self, credential_ref: str) -> None:
@@ -633,10 +640,12 @@ async def _provision_transient_credential_with_cancellation_ownership(
     vendor: str,
     key: str,
     base_url: str | None,
+    *, on_reserved: Callable[[str], None] | None = None,
 ) -> str:
+    options = {"on_reserved": on_reserved} if on_reserved is not None else {}
     return await _acquire_credential_ref_with_cancellation_ownership(
         service,
-        service.adapter.provision_transient_credential(vendor, key, base_url),
+        service.adapter.provision_transient_credential(vendor, key, base_url, **options),
         "observation",
     )
 
@@ -1231,6 +1240,11 @@ class ModelHubService:
             if self._engine_synced and not pending_revocations:
                 return
             config = self.store.load()
+            takeover = self.migration_journal.load()
+            takeover_credentials = {
+                (credential["source_id"], credential["credential_ref"])
+                for credential in (takeover or {}).get("credentials", [])
+            }
             await self._sync_sources(config, force_empty=bool(pending_revocations))
             self._engine_synced = True
             active_credentials = {
@@ -1245,6 +1259,11 @@ class ModelHubService:
                         )
                     except OSError:
                         pass
+                    continue
+                if (pending.source_id, pending.credential_ref) in takeover_credentials:
+                    # A prepared takeover owns refs before they appear in
+                    # config. Other Hub consumers may reconcile between a
+                    # failed request and recovery; they cannot revoke its grant.
                     continue
                 if pending.operation == "cleanup_orphaned_oauth_material":
                     try:
@@ -1643,6 +1662,7 @@ class ModelHubService:
         payload: Mapping[str, Any],
         *,
         require_proven: bool = False,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         if set(payload) - {"vendor", "base_url", "key", "protocol"}:
             raise ModelHubError("discovery_failed")
@@ -1661,6 +1681,7 @@ class ModelHubService:
             vendor,
             key.strip(),
             base_url,
+            on_reserved=on_reserved,
         )
         try:
             if require_proven:
@@ -1686,19 +1707,24 @@ class ModelHubService:
     async def _require_proven_source_payload(
         self,
         payload: Mapping[str, Any],
+        *, on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
-        return await self._observe_source_payload(payload, require_proven=True)
+        return await self._observe_source_payload(
+            payload, require_proven=True, on_reserved=on_reserved,
+        )
 
     async def _provision_oauth_credential(
         self,
         source_id: str,
         vendor: str,
         material: Mapping[str, object],
+        *, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         return await self.adapter.provision_oauth_credential(
             source_id,
             vendor,
             material,
+            on_reserved=on_reserved,
         )
 
     async def observe_source(self, payload: object) -> dict:
@@ -4322,6 +4348,48 @@ class ModelHubService:
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"}:
             raise ModelHubError("mode_switch_blocked")
+        if mode == "hub":
+            from core.backend_restart import NativeMigrationBlockedError
+
+            # A UI scan is advisory. Serialize with takeover, then recheck
+            # native absence while writers and launches are held out. Never
+            # treat mode-only consent as permission to import a new login.
+            async with self._migration_lock:
+                async with self._mutation_lock:
+                    current = self.store.load()
+                    agent = self._agent(current, backend)
+                    if agent.mode == "hub":
+                        return self._agent_payload(current, agent)
+                try:
+                    async with self.migration_guard((backend,)) as verify_idle:
+                        async with self._mutation_lock:
+                            # Inventory must follow the last asynchronous drain:
+                            # a CLI may have logged in and exited during it.
+                            await verify_idle()
+                            previous = self.store.load()
+                            available = await asyncio.to_thread(
+                                scan_native_configs, previous,
+                                mask_credential=_mask_credential,
+                                home=self.migration_home,
+                                validate_base_url=_validated_base_url,
+                                legacy_auth=(
+                                    self.store.native_auth_snapshot((backend,))
+                                    if isinstance(self.store, V2ModelHubConfigStore) else None
+                                ),
+                                project_roots=self.migration_project_roots(),
+                                clean_native_stores=(
+                                    self.migration_journal.completed() or {}
+                                ).get("clean_native_stores"),
+                            )
+                            if any(item.backend == backend for item in available):
+                                raise ModelHubError("mode_switch_blocked", status=409)
+                            config = self._clone_config(previous)
+                            self._agent(config, backend).mode = "hub"
+                            await self._commit_synced(previous, config)
+                            committed = self.store.load()
+                            return self._agent_payload(committed, self._agent(committed, backend))
+                except (NativeMigrationBlockedError, TakeoverStateError, OSError):
+                    raise ModelHubError("mode_switch_blocked", status=409) from None
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)

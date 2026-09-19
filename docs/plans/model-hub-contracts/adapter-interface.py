@@ -449,14 +449,19 @@ class EngineAdapter(Protocol):
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Store an API-key secret in the ENGINE-OWNED credential store and
         return the opaque ``credential_ref``.
 
         ``secret`` is transient: the adapter must never log it; L2 must never
-        persist it (config stores refs only). Hub OAuth credentials never pass
-        through here — they are created engine-side by the OAuth flow and
-        surfaced via ``OAuthFlowState.credential_ref``."""
+        persist it (config stores refs only). When supplied, ``on_reserved`` is
+        called synchronously with the opaque ref after an atomic no-secret
+        reservation and before any secret bytes are written. A callback failure
+        forbids the write. Hub OAuth credentials never pass through here —
+        they are created engine-side by the OAuth flow and surfaced via
+        ``OAuthFlowState.credential_ref``."""
         ...
 
     async def provision_oauth_credential(
@@ -464,14 +469,19 @@ class EngineAdapter(Protocol):
         source_id: str,
         vendor: str,
         material: Mapping[str, object],
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Stage a native OAuth grant outside CPA's watched auth directory.
 
         ``material`` is transient and must never cross the L2 config boundary.
         Return a durable opaque ref, with the provider, source, and prefix
-        already bound. Neither provisioning nor a restart may expose the staged
-        grant to CPA. Only ``activate_oauth_credential`` transfers refresh
-        ownership, after the caller has durably withdrawn native ownership.
+        already bound. When supplied, ``on_reserved`` is called synchronously
+        with the opaque ref after an atomic no-secret reservation and before
+        any grant bytes are written. A callback failure forbids the write.
+        Neither provisioning nor a restart may expose the staged grant to CPA.
+        Only ``activate_oauth_credential`` transfers refresh ownership, after
+        the caller has durably withdrawn native ownership.
         """
         ...
 
@@ -537,8 +547,15 @@ class EngineAdapter(Protocol):
         vendor: str,
         secret: str,
         base_url: str | None,
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
-        """Provision an unbound credential for an unsaved observation."""
+        """Provision an unbound credential for an unsaved observation.
+
+        The optional callback has the same write-ahead semantics as the
+        permanent and OAuth provisioners. Callers that own transient cleanup
+        may journal the ref before the observation secret reaches disk.
+        """
         ...
 
     async def cleanup_orphaned_oauth_material(self, credential_ref: str) -> bool:

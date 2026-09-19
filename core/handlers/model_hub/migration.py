@@ -99,6 +99,7 @@ class MigrationCredentialsInvalidError(RuntimeError):
 class MigrationHost(Protocol):
     store: Any
     adapter: Any
+    revocations: Any
     _mutation_lock: Any
     now: Callable[[], datetime]
     migration_home: Optional[Path]
@@ -142,11 +143,18 @@ class MigrationHost(Protocol):
         source_id: str,
         vendor: str,
         material: Mapping[str, object],
+        *, on_reserved: Callable[[str], None] | None = None,
     ) -> str: ...
 
     async def _require_proven_source_payload(
         self,
         payload: dict[str, object],
+        *, on_reserved: Callable[[str], None] | None = None,
+    ) -> SourceObservation: ...
+
+    async def _require_proven_observation(
+        self, vendor: str, base_url: str | None, credential_ref: str,
+        protocol_order: tuple[str, ...],
     ) -> SourceObservation: ...
 
     def _apply_discovered_models(
@@ -1002,10 +1010,6 @@ def _validated_source(
         raise MigrationConflictError from None
 
 
-def _migration_rollback_id(source_id: str, credential_ref: str) -> str:
-    return f"{source_id}:migration:{_stable_suffix(credential_ref)}"
-
-
 def _native_auth_snapshot(host: MigrationHost, backends: tuple[str, ...]) -> dict:
     reader = getattr(host.store, "native_auth_snapshot", None)
     return reader(backends) if callable(reader) else {}
@@ -1021,14 +1025,22 @@ async def _prepare_takeover(
     consented: list[NativeMigrationItem] | None = None,
     project_roots: tuple[Path, ...] = (),
     retained_source_ids: tuple[str, ...] | None = None,
+    clean_native_stores: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Stage all grants and durable before/after images, still native-owned."""
-    edits = plan_native_cleanup(selected, home=host.migration_home, project_roots=project_roots)
+    clean_native_stores = dict(clean_native_stores or {})
+    cleanup_items = [
+        *selected,
+        *(item for item in (consented or []) if (
+            item.native_store_placeholder and item.backend in clean_native_stores
+        )),
+    ]
+    edits = plan_native_cleanup(cleanup_items, home=host.migration_home, project_roots=project_roots)
     updated = host._clone_config(previous)
     provisioned: list[dict[str, str]] = []
     source_ids: list[str] = list(retained_source_ids or ())
     catalog = bundled_catalog_reasoning_efforts_by_model()
-    journaled = False
+    handoff_attempted = False
     try:
         # A completed receipt can authorize cleanup of the exact old material
         # reintroduced by an external writer. Its current Hub refs are already
@@ -1054,6 +1066,13 @@ async def _prepare_takeover(
                             item.secret, validate_base_url(item.base_url),
                         ))
                     ):
+                        # Identity reuse is not current authentication proof.
+                        # Observe the exact existing target/ref without changing
+                        # its inventory, state, order, or user-owned routes.
+                        await host._require_proven_observation(
+                            candidate.vendor, candidate.base_url,
+                            candidate.credential_ref, (candidate.protocol,),
+                        )
                         source_ids.append(candidate.id)
                         break
                 else:
@@ -1061,7 +1080,7 @@ async def _prepare_takeover(
                         "vendor": item.vendor,
                         "base_url": validate_base_url(item.base_url),
                         "key": item.secret,
-                    })
+                    }, on_reserved=lambda ref: host.revocations.add("observation", ref))
                     protocol = cast(Any, observation.protocol)
                 if observation is None:
                     continue
@@ -1075,20 +1094,29 @@ async def _prepare_takeover(
                 item = replace(item, source_id=f"src_{_stable_suffix(item.id, 'takeover')}")
                 existing = None
 
+            def reserved(ref: str) -> None:
+                # Use the final Source identity so recovery retains current
+                # Hub grants instead of misclassifying them as orphaned keys.
+                host.revocations.add(item.source_id, ref)
+                provisioned.append({
+                    "source_id": item.source_id, "credential_ref": ref,
+                    "kind": "oauth" if item.kind == "oauth_native" else "api_key",
+                })
+
             if item.kind == "oauth_native":
                 if not item.oauth_material:
                     raise MigrationConflictError
                 credential_ref = await host._engine_call(host._provision_oauth_credential(
                     item.source_id, item.vendor, item.oauth_material,
+                    on_reserved=reserved,
                 ))
             else:
                 credential_ref = await host._engine_call(host.adapter.provision_credential(
                     item.vendor, protocol, item.secret, validate_base_url(item.base_url),
+                    on_reserved=reserved,
                 ))
-            provisioned.append({
-                "source_id": item.source_id, "credential_ref": credential_ref,
-                "kind": "oauth" if item.kind == "oauth_native" else "api_key",
-            })
+            if not provisioned or provisioned[-1]["credential_ref"] != credential_ref:
+                raise MigrationConflictError
             source = _validated_source(
                 item, now=host.now(), protocol=protocol,
                 validate_base_url=validate_base_url, credential_ref=credential_ref,
@@ -1122,13 +1150,14 @@ async def _prepare_takeover(
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
             source_ids.append(source.id)
-        backends = sorted({item.backend for item in selected})
+        backends = sorted({item.backend for item in (consented or selected)})
         native_before = _native_auth_snapshot(host, tuple(backends))
+        credential_backends = {item.backend for item in selected}
         native_after = {
-            backend: {
+            backend: ({
                 name: ("oauth" if name == "auth_mode" else True if name == "auth_mode_set" else None)
                 for name in values
-            }
+            } if backend in credential_backends else dict(values))
             for backend, values in native_before.items()
         }
         updated.enabled = True
@@ -1146,6 +1175,7 @@ async def _prepare_takeover(
             "files": [edit.to_payload() for edit in edits],
             "native_before": native_before, "native_after": native_after,
             "keychain": [],
+            "clean_native_stores": clean_native_stores,
         }
         seen_stores: set[str] = set()
         for item in selected:
@@ -1156,14 +1186,18 @@ async def _prepare_takeover(
             if operations:
                 record["keychain"].append({**edit, "operations": operations})
             seen_stores.add(item.native_store_revision)
+        # Replacement can succeed before a durability/readback failure is
+        # reported. From this attempt onward recovery owns the refs: the
+        # prepared record if present, otherwise their write-ahead revocations.
+        # Never revoke a grant that a possibly durable prepared record needs.
+        handoff_attempted = True
         host.migration_journal.save(record)
-        journaled = True
         return record
     finally:
-        if not journaled:
+        if not handoff_attempted:
             for credential in reversed(provisioned):
                 await host._rollback_credential(
-                    _migration_rollback_id(credential["source_id"], credential["credential_ref"]),
+                    credential["source_id"],
                     credential["credential_ref"],
                 )
 
@@ -1178,17 +1212,30 @@ async def _revert_takeover(host: MigrationHost, record: dict[str, Any]) -> None:
         raise MigrationConflictError
     if current.to_payload() == updated.to_payload():
         host._save_config(previous)
+        host._engine_synced = False
     for raw in reversed(record["files"]):
         NativeFileEdit.from_payload(raw).apply(reverse=True)
     for edit in reversed(record.get("keychain", [])):
         await asyncio.to_thread(apply_keychain_edit, edit, reverse=True)
     for credential in reversed(record["credentials"]):
         await host._rollback_credential(
-            _migration_rollback_id(credential["source_id"], credential["credential_ref"]),
+            credential["source_id"],
             credential["credential_ref"],
         )
     host.migration_journal.forget()
     host.migration_blocked_backends.difference_update(record["backends"])
+
+
+async def _verify_clean_native_stores(host: MigrationHost, record: Mapping[str, Any]) -> None:
+    for backend, revision in record.get("clean_native_stores", {}).items():
+        snapshot = await asyncio.to_thread(
+            read_native_oauth, backend, home=host.migration_home,
+        )
+        if (
+            snapshot is None or snapshot.revision != revision
+            or (snapshot.payload or {}).get("status") != "metadata_only"
+        ):
+            raise MigrationConflictError
 
 
 async def _resume_takeover(
@@ -1221,6 +1268,7 @@ async def _resume_takeover(
         await _revert_takeover(host, record)
         raise MigrationConflictError
     try:
+        await _verify_clean_native_stores(host, record)
         if record["phase"] == "prepared":
             # Installation and host compatibility are knowable before custody.
             # Staged grants are outside CPA's watched directory, so ensuring
@@ -1228,6 +1276,7 @@ async def _resume_takeover(
             # must leave a working native login intact.
             await host._ensure_runtime_dependency()
             await verify_idle()
+            await _verify_clean_native_stores(host, record)
             for edit in record.get("keychain", []):
                 await asyncio.to_thread(apply_keychain_edit, edit)
             for raw in record["files"]:
@@ -1244,13 +1293,21 @@ async def _resume_takeover(
         ):
             raise MigrationConflictError
         if record["phase"] == "withdrawn":
+            await _verify_clean_native_stores(host, record)
             # Save the decision without projecting staged grants into CPA.
             # sync_sources is a runtime write, not a config-only operation.
             host._save_config(updated)
             host._engine_synced = False
-            # This durable marker precedes *any* exposure to CPA. After it, an
-            # exception means resume forward, never restore a stale OAuth grant.
-            record["phase"] = "exposed"
+            # This durable marker precedes any credential exposure to CPA.
+            # An empty-container-only confirmation transferred no grant and
+            # changed no native bytes: keep it reversible through runtime start
+            # so a newly observed login can be presented for fresh consent.
+            if (
+                record["source_ids"] or record["credentials"]
+                or record["files"] or record.get("keychain")
+                or record["native_before"] != record["native_after"]
+            ):
+                record["phase"] = "exposed"
             host.migration_journal.save(record)
         for raw in record["files"]:
             NativeFileEdit.from_payload(raw).check(applied=True)
@@ -1259,7 +1316,7 @@ async def _resume_takeover(
         if record.get("keychain"):
             from vibe.native_oauth_store import check_keychain_edit
 
-            record["clean_native_stores"] = {}
+            record.setdefault("clean_native_stores", {})
             for edit in record["keychain"]:
                 snapshot = await asyncio.to_thread(
                     read_native_oauth, edit["backend"], home=host.migration_home,
@@ -1298,6 +1355,7 @@ async def _resume_takeover(
                 else:
                     record.setdefault("validated_source_ids", []).append(credential["source_id"])
                     host.migration_journal.save(record)
+        await _verify_clean_native_stores(host, record)
         if invalid_source_ids:
             terminal_config = host._clone_config(updated)
             for source in terminal_config.sources:
@@ -1413,6 +1471,7 @@ async def apply_native_migration(
                 )
                 consented = selected
                 selected = []
+                clean_native_stores: dict[str, str] = {}
                 for original in consented:
                     resolved = [
                         item for item in rescanned
@@ -1424,6 +1483,29 @@ async def apply_native_migration(
                     ] if original.native_store_placeholder else [
                         item for item in rescanned if item.id == original.id
                     ]
+                    if original.native_store_placeholder and not resolved:
+                        # A consent-time secret read can establish that an
+                        # opaque container holds only unrelated data. Bind the
+                        # absence to the same metadata, routing and Source
+                        # identity before recording it as verified clean.
+                        metadata_rows = await asyncio.to_thread(
+                            scan_native_configs, previous,
+                            mask_credential=mask_credential, home=host.migration_home,
+                            validate_base_url=validate_base_url,
+                            legacy_auth=_native_auth_snapshot(host, backends),
+                            project_roots=project_roots,
+                        )
+                        if any(
+                            item.id == original.id
+                            and item.native_store_placeholder
+                            and item.native_store_revision == original.native_store_revision
+                            for item in metadata_rows
+                        ) and not any(
+                            item.backend == original.backend and item.native_store_revision is not None
+                            for item in rescanned
+                        ):
+                            clean_native_stores[original.backend] = original.native_store_revision
+                            continue
                     if original.native_store_placeholder and not any(
                         item.id == original.id for item in resolved
                     ):
@@ -1447,6 +1529,7 @@ async def apply_native_migration(
                         tuple(completed_record["source_ids"])
                         if completed_record is not None else None
                     ),
+                    clean_native_stores=clean_native_stores,
                 )
                 return await _resume_takeover(host, record, verify_idle)
 
