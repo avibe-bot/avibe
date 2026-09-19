@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { resolvePath, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { Navigator } from 'react-router-dom';
@@ -21,6 +21,16 @@ type SettingsOverlayRouteSurfaceProps = {
   fallbackElement: ReactElement;
 };
 
+const isForegroundFocusOwner = (element: Element | null): element is HTMLElement => {
+  if (!(element instanceof HTMLElement) || !element.isConnected) return false;
+  if (element.closest('[data-settings-overlay], [inert], [aria-hidden="true"]')) return false;
+  // Retained modal owners can recreate their editor while Settings is open. A
+  // recreated input is the owner of the return focus, but it cannot be the
+  // frozen target because that DOM node did not exist when Settings opened.
+  if (element.closest('[role="dialog"][aria-modal="true"]')) return true;
+  return false;
+};
+
 export const SettingsOverlayRouteSurface = ({
   children,
   fallbackElement,
@@ -32,6 +42,14 @@ export const SettingsOverlayRouteSurface = ({
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const settingsSurfaceOpenRef = useRef(settingsSurfaceOpen);
+  const locationRef = useRef(location);
+  const settingsVisitRef = useRef(0);
+  const focusFrameRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    settingsSurfaceOpenRef.current = settingsSurfaceOpen;
+    locationRef.current = location;
+  }, [location, settingsSurfaceOpen]);
   useEffect(() => {
     const onFocusIn = (event: FocusEvent) => {
       if (event.target instanceof HTMLElement && !event.target.closest('[data-settings-overlay]')) {
@@ -40,6 +58,9 @@ export const SettingsOverlayRouteSurface = ({
     };
     document.addEventListener('focusin', onFocusIn);
     return () => document.removeEventListener('focusin', onFocusIn);
+  }, []);
+  useEffect(() => () => {
+    if (focusFrameRef.current !== null) window.cancelAnimationFrame(focusFrameRef.current);
   }, []);
   // The route this surface renders behind any overlay — the retained origin
   // while Settings is open, the foreground route otherwise.
@@ -109,6 +130,11 @@ export const SettingsOverlayRouteSurface = ({
                 }
               }}
               onOpenAutoFocus={() => {
+                if (focusFrameRef.current !== null) {
+                  window.cancelAnimationFrame(focusFrameRef.current);
+                  focusFrameRef.current = null;
+                }
+                settingsVisitRef.current += 1;
                 // Freeze the origin focus for this visit. Retained app windows
                 // may focus themselves on return, before Radix's deferred close
                 // callback runs; that must not replace the initiating control.
@@ -116,12 +142,25 @@ export const SettingsOverlayRouteSurface = ({
               }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
+                const visit = settingsVisitRef.current;
+                const expectedOrigin = origin;
                 const target = returnFocusRef.current;
-                window.requestAnimationFrame(() => {
+                focusFrameRef.current = window.requestAnimationFrame(() => {
+                  focusFrameRef.current = null;
+                  // A close callback may outlive a rapid Settings reopen or a
+                  // route change. Its old focus decision must not cross either
+                  // boundary and land in the new foreground surface.
+                  if (
+                    settingsSurfaceOpenRef.current
+                    || settingsVisitRef.current !== visit
+                    || expectedOrigin === null
+                    || locationPath(locationRef.current) !== locationPath(expectedOrigin.location)
+                  ) return;
                   if (target?.isConnected && !target.closest('[inert]')) {
                     target.focus({ preventScroll: true });
                     return;
                   }
+                  if (isForegroundFocusOwner(document.activeElement)) return;
                   const fallback = Array.from(
                     document.querySelectorAll<HTMLElement>('[data-settings-toggle="true"]'),
                   ).find((candidate) => !candidate.closest('[inert]'));

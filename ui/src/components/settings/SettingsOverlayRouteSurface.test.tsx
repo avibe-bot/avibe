@@ -29,6 +29,28 @@ import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
 let chatMounts = 0;
 let chatUnmounts = 0;
 
+const RetainedModalEditor = () => {
+  const active = useRouteSurfaceActive();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>open-retained-editor</button>
+      {open && active ? (
+        <div role="dialog" aria-modal="true" aria-label="retained editor">
+          <input
+            aria-label="retained editor input"
+            autoFocus
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+        </div>
+      ) : null}
+    </>
+  );
+};
+
 const ChatProbe = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -65,6 +87,10 @@ const ChatProbe = () => {
         {(location.state as { maintenance?: string } | null)?.maintenance ?? 'none'}
       </div>
       <button type="button" onClick={() => setCount((value) => value + 1)}>increment-chat</button>
+      <RetainedModalEditor />
+      <button type="button" onClick={() => navigate('/settings/replies')} onMouseDown={(event) => event.preventDefault()}>
+        open-settings-preserving-focus
+      </button>
       <Link to="/settings/replies">open-settings</Link>
       <Link to="/settings/diagnostics">open-diagnostics</Link>
       <Link to="/doctor">open-legacy-settings</Link>
@@ -183,6 +209,64 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'shell-settings' }));
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  it('keeps a remounted retained modal editor focused for continued Unicode input', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-retained-editor' }));
+    const editorInput = screen.getByRole('textbox', { name: 'retained editor input' });
+    await user.type(editorInput, '保留');
+    expect(document.activeElement).toBe(editorInput);
+
+    // The mousedown guard models a retained modal's explicit Settings handoff:
+    // navigation changes the foreground route without making the shell button
+    // the editor's new owner of focus.
+    await user.click(screen.getByRole('button', { name: 'open-settings-preserving-focus' }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+
+    const resumedInput = await screen.findByRole('textbox', { name: 'retained editor input' });
+    expect(resumedInput).not.toBe(editorInput);
+    await waitFor(() => expect(document.activeElement).toBe(resumedInput));
+    await user.keyboard('{End}x');
+    expect((resumedInput as HTMLInputElement).value).toBe('保留x');
+    expect(document.activeElement).toBe(resumedInput);
+    await user.keyboard('续写🌱');
+    expect((resumedInput as HTMLInputElement).value).toBe('保留x续写🌱');
+  });
+
+  it('does not let a stale close callback focus the old origin after Settings reopens', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    const queuedFrames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      queuedFrames.push(callback);
+      return queuedFrames.length;
+    });
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(cancelFrame).toHaveBeenCalledWith(1);
+
+    queuedFrames[0](performance.now());
+    expect(screen.getByRole('dialog', { name: 'nav.settings' }).contains(document.activeElement)).toBe(true);
+
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
   });
 
   it('keeps the background route mounted across Settings navigation and close', async () => {
