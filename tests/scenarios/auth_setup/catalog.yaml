@@ -121,7 +121,7 @@ scenarios:
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_api_key_setup_does_not_schedule_a_model
   - id: AUTH-SETUP-113
-    name: Hub OAuth retains completed credentials as unverified and preserves explicit rejection state
+    name: Hub OAuth retains completed credentials as unverified without treating access-token rejection as grant revocation
     status: covered
     kind: negative_path
     layer: scenario
