@@ -15,7 +15,10 @@ restart is part of this change.
   The Codex adapter passes it unchanged as `responsesapiClientMetadata` on
   `turn/start`, including a collaboration-mode compatibility retry.
 - The gateway issues `avibe_route_id`, an opaque process-scoped route handle, and
-  `avibe_turn_id`, the existing Avibe runtime turn ID. Neither field is a user
+  `avibe_turn_id`, the existing Avibe runtime turn ID, or the explicit empty
+  string for callers outside the FSM (including IM/CLI launches). Both keys
+  remain required. An empty turn selects only the registered route, never an
+  active turn; it creates no trace or synthetic turn. Neither field is a user
   model name. Existing route registrations own their lifecycle; no per-turn
   tombstone cache, second scheduler, or native Codex patch is introduced.
 - Native Codex serializes these entries into the JSON string at
@@ -45,8 +48,10 @@ restart is part of this change.
   Codex process scope; the default preserves credential-bound consumers.
 - `prepare_gateway_turn(...)` continues registering the route. In an explicit
   scope its returned route handle is not a bearer credential.
-- `gateway_request_metadata(backend=..., token=..., turn_id=...)` returns
+- `gateway_request_metadata(backend=..., token=..., turn_id=..., route=...)` returns
   `{"avibe_route_id": ..., "avibe_turn_id": ...}` for the prepared launch.
+  `route` is the exact existing `PreparedGatewayRoute`, required only when
+  there is no FSM turn to look up. Unknown routes are not issued metadata.
 - `gateway_terminalizer(..., request_metadata=...)` accepts the decoded header
   mapping. Explicit scopes never fall back to inferred sole-active-turn ownership.
   Missing/unknown identity yields no owner and no route; terminalizer model

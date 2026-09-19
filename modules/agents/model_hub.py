@@ -23,6 +23,7 @@ from core.handlers.model_hub.events import (
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
+    PreparedGatewayRoute,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
     produce_turn_outcome,
@@ -988,6 +989,12 @@ class ModelHubRuntimeRouter:
                 gateway_request_metadata=(
                     self.turn_gateway.correlation.gateway_request_metadata(
                         backend=backend, token=gateway_token, turn_id=turn_id,
+                        route=PreparedGatewayRoute(
+                            requested_model_id=requested_model,
+                            resolved_model_id=target_model,
+                            source_id=source.id,
+                            gateway_request_model_id=runtime_model,
+                        ),
                     )
                     if self.turn_gateway is not None and backend == "codex"
                     else {}

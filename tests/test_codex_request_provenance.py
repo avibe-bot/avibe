@@ -4,6 +4,7 @@ from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
+    PreparedGatewayRoute,
     TurnCorrelationRegistry,
 )
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
@@ -88,6 +89,38 @@ def test_explicit_route_handles_are_process_scoped_and_no_turn_inference(
     }
     assert route_handle != token
     assert not registry.authenticates("codex", route_handle)
+
+
+def test_untracked_metadata_requires_an_exact_registered_route(tmp_path):
+    registry = _registry(tmp_path)
+    token = registry.credentials("codex", "codex-process", None, request_scoped=True)
+    route = PreparedGatewayRoute("untracked-alias", "upstream", "source", "untracked-alias")
+    assert registry.gateway_request_metadata(
+        backend="codex", token=token, turn_id=None, route=route,
+    ) == {}
+    handle = registry.prepare_gateway_turn(
+        backend="codex", token=token, turn_id=None,
+        requested_model_id=route.requested_model_id,
+        resolved_model_id=route.resolved_model_id,
+        source_id=route.source_id,
+        gateway_request_model_id=route.gateway_request_model_id,
+        via_mapping=False,
+    )
+    metadata = registry.gateway_request_metadata(
+        backend="codex", token=token, turn_id=None, route=route,
+    )
+    assert metadata == {"avibe_route_id": handle, "avibe_turn_id": ""}
+    with registry.gateway_terminalizer(
+        backend="codex", token=token, request_metadata=metadata,
+    ) as untracked:
+        assert untracked.resolution_model("untracked-alias") == "untracked-alias"
+        assert untracked.turn_id is None
+    assert not registry._traces
+    assert not registry._turn_scopes
+    scope = registry._scopes[("codex", "codex-process")]
+    assert not scope.active_turns
+    assert not scope.prepared_routes
+    assert len(scope.route_tokens) == len(registry._credentials) == 1
 
 
 def test_legacy_codex_route_credentials_are_revoked_on_explicit_promotion(

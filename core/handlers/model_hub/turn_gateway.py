@@ -116,12 +116,14 @@ def _codex_request_metadata(raw: str | None) -> dict | None:
         metadata = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-    if not isinstance(metadata, dict) or any(
-        not isinstance(metadata.get(key), str) or not metadata[key].strip()
-        for key in _CODEX_ROUTE_FIELDS
-    ):
+    if not isinstance(metadata, dict):
         return None
-    if not metadata["avibe_route_id"].isascii():
+    route_id = metadata.get("avibe_route_id")
+    turn_id = metadata.get("avibe_turn_id")
+    if (
+        not isinstance(route_id, str) or not route_id.strip() or not route_id.isascii()
+        or not isinstance(turn_id, str) or (turn_id != "" and not turn_id.strip())
+    ):
         return None
     return {key: metadata[key] for key in _CODEX_ROUTE_FIELDS}
 

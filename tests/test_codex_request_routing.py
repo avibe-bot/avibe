@@ -20,7 +20,7 @@ from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.codex.agent import CodexAgent
-from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
+from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch, resolve_model_hub_launch
 from tests.scenario_harness.model_hub import (
     MemoryModelHubStore,
     ModelHubScenarioAdapter,
@@ -153,8 +153,41 @@ async def test_codex_shared_transport_routes_overlapping_aliases(runtime):
     assert {model for _source, model, _origin in runtime.adapter.invocations} == {"same-upstream"}
 
 
+async def test_codex_untracked_launch_routes_without_claiming_live_turn(runtime):
+    """MH-CODEX-ROUTING-001: IM/CLI launches need a route, not an invented FSM turn."""
+    tracked = await _launch(runtime, "tracked")
+    controller = SimpleNamespace(
+        model_hub_runtime=runtime.router,
+        session_turns=SimpleNamespace(model_hub_turn_id_for_task=Mock(return_value=None)),
+    )
+    untracked = await resolve_model_hub_launch(
+        controller, "codex", ALIASES[1], process_scope=runtime.cwd,
+    )
+    assert untracked.gateway_token == tracked.gateway_token
+    assert untracked.fingerprint == tracked.fingerprint
+    assert untracked.gateway_request_metadata["avibe_turn_id"] == ""
+    assert untracked.gateway_request_metadata["avibe_route_id"]
+    runtime.adapter.invoke_results.clear()
+    runtime.adapter.invoke_results.extend([
+        ScenarioCallResult(RawOutcomeKind.HTTP_ERROR, status=404, error_code="model_not_found"),
+        SUCCESS,
+    ])
+    assert (await _post(untracked))[0] == 400
+    assert (await _post(tracked))[0] == 200
+    await _settle(runtime, "tracked")
+    record = runtime.service.get_turn_provenance("tracked")
+    assert record["outcome"] == "served"
+    assert record["failed_attempts"] == []
+    assert record["terminal_error"] is None
+    assert [source_id for source_id, _model, _origin in runtime.adapter.invocations] == [
+        "src_request02", "src_request01",
+    ]
+    assert not runtime.gateway.correlation._traces
+    assert not runtime.gateway.correlation._scopes[("codex", runtime.cwd)].active_turns
+
+
 @pytest.mark.parametrize("bad_identity", [
-    "missing", "malformed", "unknown", "unicode-route", "foreign",
+    "missing", "missing-turn", "whitespace-turn", "malformed", "unknown", "unicode-route", "foreign",
     "mismatched-body", "wrong-model", "wrong-live-turn",
 ])
 async def test_codex_invalid_identity_cannot_route_or_poison_peer(runtime, bad_identity):
@@ -163,6 +196,14 @@ async def test_codex_invalid_identity_cannot_route_or_poison_peer(runtime, bad_i
     payload = _body(launch)
     if bad_identity == "missing":
         headers.pop(METADATA)
+    elif bad_identity in {"missing-turn", "whitespace-turn"}:
+        metadata = dict(launch.gateway_request_metadata)
+        if bad_identity == "missing-turn":
+            metadata.pop("avibe_turn_id")
+        else:
+            metadata["avibe_turn_id"] = " "
+        headers[METADATA] = json.dumps(metadata)
+        payload.pop("client_metadata")
     elif bad_identity == "malformed":
         headers[METADATA] = "{"
     elif bad_identity in {"unknown", "unicode-route"}:

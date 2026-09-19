@@ -36,11 +36,15 @@ from tests.test_codex_request_routing import (
 pytestmark = pytest.mark.e2e_model_hub
 
 
-async def test_codex_native_gateway_keeps_concurrent_route_ownership(runtime, metadata_runtime):
+@pytest.mark.parametrize("untracked_second", [False, True])
+async def test_codex_native_gateway_keeps_concurrent_route_ownership(
+    runtime, metadata_runtime, untracked_second,
+):
     """MH-CODEX-ROUTING-002: real launch, native requests, routing and settlement agree."""
     first = await _launch(runtime, "native-first", ALIASES[0])
-    second = await _launch(runtime, "native-second", ALIASES[1])
+    second = await _launch(runtime, None if untracked_second else "native-second", ALIASES[1])
     assert first.fingerprint == second.fingerprint
+    assert second.gateway_request_metadata["avibe_turn_id"] == ("" if untracked_second else "native-second")
     runtime.adapter.invoke_results.clear()
     runtime.adapter.invoke_results.extend([
         ScenarioCallResult(
@@ -97,9 +101,13 @@ async def test_codex_native_gateway_keeps_concurrent_route_ownership(runtime, me
         await _completed(completed)
         assert transport._process is process and process.returncode is None
     await _settle(runtime, "native-first")
-    await _settle(runtime, "native-second")
+    if not untracked_second:
+        await _settle(runtime, "native-second")
     assert arrivals == 2
     for turn, source_id in (("native-first", "src_request01"), ("native-second", "src_request02")):
+        if untracked_second and turn == "native-second":
+            assert runtime.service.provenance.get(turn) is None
+            continue
         record = runtime.service.get_turn_provenance(turn)
         assert record["outcome"] == "served"
         assert record["served"]["source_id"] == source_id
@@ -110,3 +118,4 @@ async def test_codex_native_gateway_keeps_concurrent_route_ownership(runtime, me
         assert "avibe_turn_id" not in metadata
         assert metadata["thread_id"] in for_thread
     assert {model for _source, model, _origin in runtime.adapter.invocations} == {"same-upstream"}
+    assert not runtime.gateway.correlation._traces

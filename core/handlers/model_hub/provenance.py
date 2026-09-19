@@ -963,7 +963,7 @@ class TurnCorrelationRegistry:
             not isinstance(route_id, str)
             or not route_id.strip()
             or not isinstance(turn_id, str)
-            or not turn_id.strip()
+            or (turn_id != "" and not turn_id.strip())
         ):
             return None
         return route_id, turn_id
@@ -1390,12 +1390,11 @@ class TurnCorrelationRegistry:
         backend: str,
         token: str,
         turn_id: Optional[str],
+        route: PreparedGatewayRoute | None = None,
     ) -> dict[str, str]:
-        """Return the explicit route and turn identity for a prepared launch."""
+        """Return a registered route, with an empty turn for untracked callers."""
 
         normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return {}
         with self._lock:
             credential = self._credential(backend, token)
             if credential is None:
@@ -1404,11 +1403,18 @@ class TurnCorrelationRegistry:
             if (
                 scope is None
                 or not scope.request_scoped
-                or normalized_turn_id not in scope.active_turns
-                or normalized_turn_id in scope.routing_conflicts
             ):
                 return {}
-            route = scope.prepared_routes.get(normalized_turn_id)
+            if normalized_turn_id:
+                if (
+                    normalized_turn_id not in scope.active_turns
+                    or normalized_turn_id in scope.routing_conflicts
+                ):
+                    return {}
+                prepared = scope.prepared_routes.get(normalized_turn_id)
+                if route is not None and route != prepared:
+                    return {}
+                route = prepared
             if route is None:
                 return {}
             route_id = scope.route_tokens.get(route)
