@@ -699,11 +699,12 @@ describe('shared Settings and onboarding connection owner', () => {
   // The narrower version of the same rule: the submitted type is right, but the
   // value is not the one that was sent any more. A receipt settles the write it
   // belongs to, and a replacement typed since is a newer intention than that write.
-  it('a newer edit outlives the receipt for the write it replaced', async () => {
-    statefulClaudeAuth();
+  it('a newer edit outlives the receipt for the write it replaced, and keeps the field it is in', async () => {
+    const account = statefulClaudeAuth();
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
     const saved = vi.fn();
-    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    const props = (revision: number) => ({ backend: 'claude' as const, initialMethod: 'api_key' as const, onConnected: saved, connectionRevision: revision });
+    const view = render(wrap(<BackendConnectionForm {...props(0)} />));
     await settingsCredential(AUTH_TOKEN);
     fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
     fireEvent.click(screen.getByRole('button', { name: en.common.save }));
@@ -719,6 +720,123 @@ describe('shared Settings and onboarding connection owner', () => {
     fireEvent.click(refresh);
     await waitFor(() => expect(saved).toHaveBeenCalledOnce());
     expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+
+    // Surviving the receipt is only half of surviving. Work the receipt kept must
+    // keep its claim on the field it is in, or the very next observation — the
+    // revision this write's own restart will raise — seeds the server's answer
+    // straight over it: the type it reports takes the radio, and the address it
+    // reports takes the box. The read is deferred and resolved here so the moment
+    // it lands is a moment this test chooses, rather than one it infers from a
+    // call count that was already past any threshold three reads ago. That the
+    // mechanism can reseed at all is the matched Cancel test below; here it must
+    // not, and the only difference between the two is whether anything was left.
+    const late = deferred<ClaudeAuthState>();
+    const before = mock.api.getClaudeAuth.mock.calls.length;
+    mock.api.getClaudeAuth.mockImplementationOnce(() => late.promise);
+    view.rerender(wrap(<BackendConnectionForm {...props(1)} />));
+    await waitFor(() => expect(mock.api.getClaudeAuth.mock.calls.length).toBeGreaterThan(before));
+    await act(async () => { late.resolve({ ...account.stored(), credential_type: 'api_key', base_url: 'https://server-moved.example' }); await late.promise; });
+
+    const group = await interactiveRadios(en.settings.backends.claudeCredentialTypeLabel);
+    expect(within(group).getByRole('radio', { name: AUTH_TOKEN }).getAttribute('aria-checked')).toBe('true');
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+    expect((screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement).value).toBe('https://old.example');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // The narrowest version again, and the one that says what a draft actually is.
+  // A field somebody has deliberately reopened is not the field that was sent,
+  // even when they then retype the very same characters into it: the value agrees
+  // and the state does not, and the state is the half that says whether there is
+  // an editor on screen to close.
+  it('an editor reopened on the same value is still later work than the write that carried it', async () => {
+    statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+
+    // The write landed, so the field is behind its mask again. Reopening it and
+    // typing the same thing is a second intention that happens to look identical.
+    fireEvent.click(screen.getByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌');
+    expect(screen.queryByRole('button', { name: REPLACE })).toBeNull();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // The other side of that pair. Cancel puts the field back exactly as an
+  // untouched one, so there is nothing left to protect — and a form that went on
+  // protecting it would quietly stop following the server for the rest of its
+  // life. Same staged read as above, opposite outcome, and the only difference is
+  // whether any work survived.
+  it('cancelling a replacement hands the field back, so the form follows the server again', async () => {
+    const account = statefulClaudeAuth();
+    const props = (revision: number) => ({ backend: 'claude' as const, initialMethod: 'api_key' as const, connectionRevision: revision });
+    const view = render(wrap(<BackendConnectionForm {...props(0)} />));
+    const url = () => screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement;
+    await waitFor(() => expect(url().value).toBe('https://old.example'));
+    fireEvent.click(await screen.findByRole('button', { name: REPLACE }));
+    fireEvent.click(screen.getByRole('button', { name: en.common.cancel }));
+    expect(noDraft(API_KEY)).toBeNull();
+    expect(screen.getByText('sk-•••old')).toBeTruthy();
+
+    const late = deferred<ClaudeAuthState>();
+    const before = mock.api.getClaudeAuth.mock.calls.length;
+    mock.api.getClaudeAuth.mockImplementationOnce(() => late.promise);
+    view.rerender(wrap(<BackendConnectionForm {...props(1)} />));
+    await waitFor(() => expect(mock.api.getClaudeAuth.mock.calls.length).toBeGreaterThan(before));
+    await act(async () => { late.resolve({ ...account.stored(), base_url: 'https://server-moved.example' }); await late.promise; });
+    await waitFor(() => expect(url().value).toBe('https://server-moved.example'));
+    expect(mock.api.saveClaudeAuth).not.toHaveBeenCalled();
+  });
+  // A save does not have to carry a credential at all: leaving the stored key
+  // alone and changing only the address sends no key, and its receipt therefore
+  // has no credential work to spend. An empty field nobody has opened and a field
+  // just opened by Replace read the same value, so a receipt that recognised its
+  // own submission by value alone could not tell "what I sent" from "what somebody
+  // started after I was sent" — and cancelled the replacement to prove it.
+  it('a save that carries no credential has none to spend, and cannot cancel a replacement begun after it', async () => {
+    statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    const url = () => screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement;
+    await waitFor(() => expect(url().value).toBe('https://old.example'));
+    // The stored key is left where it is — the field is showing its mask, not an
+    // editor — and only the address is changed.
+    expect(screen.getByText('sk-•••old')).toBeTruthy();
+    fireEvent.change(url(), { target: { value: 'https://relay.example' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    expect(mock.api.saveClaudeAuth.mock.calls[0]![0].api_key).toBeUndefined();
+
+    // The runtime has not picked it up yet, so the receipt is still outstanding —
+    // and that is exactly when somebody starts replacing the key. An editor opened
+    // and not yet typed into is the literal state this is about: an empty field
+    // with somebody's hand on it, which reads the same as an empty field nobody
+    // has touched and is not the same thing at all.
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+    fireEvent.click(screen.getByRole('button', { name: REPLACE }));
+    expect(draftValue(API_KEY)).toBe('');
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+
+    // The receipt spent the address it carried. The editor it never carried is
+    // still open, and still nobody's to close.
+    expect(draftValue(API_KEY)).toBe('');
+    expect(screen.queryByRole('button', { name: REPLACE })).toBeNull();
+    expect(url().value).toBe('https://relay.example');
+    // And it is still a live field: what goes into it stays there.
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-新' } });
+    expect(draftValue(API_KEY)).toBe('sk-ant-新');
     expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
   });
   // What a Claude receipt has to observe is not "a key is in use" — both credential
@@ -796,11 +914,11 @@ describe('shared Settings and onboarding connection owner', () => {
   });
   // Storage and application are separate observations, and a form that is going
   // away is neither.
-  it('a write the runtime cannot pick up keeps its submission, and unmounting settles nothing', async () => {
+  it('a write the runtime cannot pick up keeps its submission, and leaving with one pending settles nothing', async () => {
     const account = statefulClaudeAuth();
     account.applies({ ok: false, message: 'restart refused' });
     const saved = vi.fn();
-    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    const view = render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
     await settingsCredential(AUTH_TOKEN);
     fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
     fireEvent.click(screen.getByRole('button', { name: en.common.save }));
@@ -814,16 +932,31 @@ describe('shared Settings and onboarding connection owner', () => {
     await waitFor(() => expect(saved).toHaveBeenCalledOnce());
     expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
 
-    // A second form, taken off screen while its read is still in flight. The answer
-    // arrives for nobody: no consumer is called, and nothing throws into the void.
-    const late = deferred<ClaudeAuthState>();
-    mock.api.getClaudeAuth.mockImplementation(() => late.promise);
+    // And a second form taken off screen with a submission of its OWN still
+    // outstanding, which is the state worth proving: the read that would have
+    // settled it is still in flight when the form goes, so the answer arrives for
+    // nobody. No consumer is called and nothing throws into the void.
+    view.unmount();
+    account.applies({ ok: false, message: 'restart refused again' });
     const second = vi.fn();
     const leaving = render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={second} />));
-    await waitFor(() => expect(mock.api.getClaudeAuth).toHaveBeenCalled());
+    // A token is what is stored now, so the API Key side is an empty field again.
+    await settingsCredential(API_KEY);
+    fireEvent.change(await screen.findByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-未定' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await screen.findByText(/restart refused again/);
+    expect(second).not.toHaveBeenCalled();
+
+    const late = deferred<ClaudeAuthState>();
+    const before = mock.api.getClaudeAuth.mock.calls.length;
+    mock.api.getClaudeAuth.mockImplementation(() => late.promise);
+    account.applies({ ok: true });
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.refresh }));
+    await waitFor(() => expect(mock.api.getClaudeAuth.mock.calls.length).toBeGreaterThan(before));
     leaving.unmount();
     await act(async () => { late.resolve(account.stored()); await late.promise; });
     expect(second).not.toHaveBeenCalled();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledTimes(2);
   });
   // Signing in settles the account. It sends no credential at all, so there is
   // nothing for its receipt to spend — including the key someone was part-way

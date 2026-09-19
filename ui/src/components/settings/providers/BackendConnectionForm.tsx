@@ -45,18 +45,55 @@ const unsaved = (draft: Draft) => draft.value !== '' || draft.editing;
  *
  * A receipt settles one submission, so the only work it may release is the work
  * that submission actually carried: signing in sends no credential and no URL at
- * all, and a save sends exactly one type's value alongside one URL. Carrying the
- * values as well as their names is what makes a late receipt safe — anything
- * retyped since the write went out is no longer what was sent, so it outlives
+ * all, and a save sends at most one type's value alongside one URL. Carrying the
+ * work itself as well as its name is what makes a late receipt safe — anything
+ * changed since the write went out is no longer what was sent, so it outlives
  * its own submission's receipt rather than being erased by it. A deferred
  * confirmation therefore settles what was submitted rather than whatever happens
  * to be on screen when it lands.
+ *
+ * `sent` is the **whole draft** that went out, not its value, because a draft is
+ * a value *and* whether someone is part-way through replacing what is stored.
+ * Those two states can share a value: an empty field nobody has opened and a
+ * field just opened by Replace both read `''`, and only one of them is the state
+ * that was submitted. It is `null` when the payload omitted the credential
+ * altogether — a save that changes only the address sends no key, so its receipt
+ * has no credential work to spend, and modelling that as an empty draft would
+ * make it spend one.
+ *
+ * `credential` is the type the write *declared*, which is not the same question:
+ * Claude sends `credential_type` on every save, including one that carries no
+ * key, so the type a receipt must prove outlives the draft it may or may not
+ * have sent. `null` says this write declared no type at all.
  *
  * `baseUrl` is the URL exactly as it stood in the field, not the trimmed payload:
  * the question it answers is whether the person has moved on since, and `null`
  * says this write carried no URL to settle.
  */
-type Submission = { method: Method; baseUrl: string | null; sent: { credential: Credential; value: string } | null };
+type Submission = { method: Method; baseUrl: string | null; credential: Credential | null; sent: Draft | null };
+const sameDraft = (left: Draft, right: Draft) => left.value === right.value && left.editing === right.editing;
+
+/**
+ * What one receipt releases, decided once.
+ *
+ * Every question here is the same question — did this submission carry this
+ * editable, and does the screen still read the way it was sent — and the answers
+ * are wanted in three places: the drafts to keep, the ownership to give back, and
+ * whether the form may follow the server again. Answering it once and reading the
+ * answer three times is the whole point of the type; computing it once by
+ * comparison and again by assumption is how a retained draft lost its ownership.
+ */
+type Settlement = { drafts: Record<Credential, Draft>; baseUrl: boolean; method: boolean; credentialType: boolean };
+const settle = (submission: Submission, showing: { baseUrl: string; method: Method; credential: Credential; drafts: Record<Credential, Draft> }): Settlement => {
+  const { credential, sent } = submission;
+  const released = credential !== null && sent !== null && sameDraft(showing.drafts[credential], sent);
+  return {
+    drafts: released && credential !== null ? { ...showing.drafts, [credential]: EMPTY_DRAFTS[credential] } : showing.drafts,
+    baseUrl: submission.baseUrl !== null && showing.baseUrl === submission.baseUrl,
+    method: showing.method === submission.method,
+    credentialType: credential !== null && showing.credential === credential,
+  };
+};
 
 /**
  * Something on this form a person can change, and an observation can seed over.
@@ -116,10 +153,21 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
    */
   const onScreen = useRef({ baseUrl, method, credential, drafts });
   onScreen.current = { baseUrl, method, credential, drafts };
-  /** Edits only ever reach the credential type currently on screen. */
+  /**
+   * Edits only ever reach the credential type currently on screen.
+   *
+   * Ownership is read off the draft the edit produces rather than asserted by the
+   * act of editing, because not every edit leaves something to lose: Cancel puts
+   * the field back exactly as an untouched one, and a form that still claimed it
+   * would stop following the server for the rest of its life over nothing.
+   */
   const patchDraft = useCallback((patch: Partial<Draft>) => {
-    touched.current.add(credential);
-    setDrafts((current) => ({ ...current, [credential]: { ...current[credential], ...patch } }));
+    setDrafts((current) => {
+      const next = { ...current[credential], ...patch };
+      if (unsaved(next)) touched.current.add(credential);
+      else touched.current.delete(credential);
+      return { ...current, [credential]: next };
+    });
   }, [credential]);
   const pendingConfirmation = useRef<Submission | null>(null);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
@@ -191,10 +239,13 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       // producer emits this field for every stored credential, including its
       // legacy API-key fallback, so nothing to compare means nothing observed,
       // not licence to settle on the weaker half of the question. Backends with
-      // no such discriminator keep the method answer they have always had.
-      if (expected?.sent && backend === 'claude') {
+      // no such discriminator keep the method answer they have always had. The
+      // claim is the type the write DECLARED, not the draft it happened to carry:
+      // a save that only changes the address still declares one, and a receipt
+      // that cannot see it land has still not seen the write land.
+      if (expected?.credential && backend === 'claude') {
         const stored = fresh.native && 'credential_type' in fresh.native ? fresh.native.credential_type : null;
-        if (stored !== expected.sent.credential) messages.push(t('onboarding.connection.unconfirmed'));
+        if (stored !== expected.credential) messages.push(t('onboarding.connection.unconfirmed'));
       }
     }
     setError([...new Set(messages)].join(' '));
@@ -216,25 +267,27 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     return () => { observation.current += 1; };
   }, [connectionRevision, observe]);
 
-  // Release what this receipt paid for, and only that. Each editable is let go on
-  // the same two conditions — the submission carried it, and it still reads the
-  // way it was sent — so a settled credential cannot take a URL, a method or a
-  // type that nobody submitted down with it. Anything that fails either condition
-  // is newer work than the receipt, and stays.
+  // Release what this receipt paid for, and only that. One settlement decides it,
+  // and the drafts it hands back are the same ones the ownership is then read off
+  // — so a credential the comparison refused to release cannot lose its ownership
+  // to a second, more optimistic answer. Anything the submission did not carry, or
+  // that has changed since it went out, is newer work than the receipt and stays.
+  //
+  // It is done inside the updater because `current` is the only authoritative
+  // draft state, and everything it writes is derived from the state it returns
+  // rather than added to what was there before — so an updater React chooses to
+  // run twice reaches the same answer both times.
   const consume = (submission: Submission) => {
-    const { sent } = submission;
-    const showing = onScreen.current;
-    if (sent && showing.drafts[sent.credential].value === sent.value) {
-      setDrafts((current) => (current[sent.credential].value === sent.value
-        ? { ...current, [sent.credential]: EMPTY_DRAFTS[sent.credential] } : current));
-    }
-    // A credential counts as work only while something is on screen to lose, so
-    // one emptied by this receipt — or by the person — stops counting either way.
-    const settled = sent ? { ...showing.drafts, [sent.credential]: EMPTY_DRAFTS[sent.credential] } : showing.drafts;
-    for (const type of CREDENTIALS) if (!unsaved(settled[type])) touched.current.delete(type);
-    if (submission.baseUrl !== null && showing.baseUrl === submission.baseUrl) touched.current.delete('base_url');
-    if (showing.method === submission.method) touched.current.delete('method');
-    if (sent && showing.credential === sent.credential) touched.current.delete('credential_type');
+    setDrafts((current) => {
+      const settled = settle(submission, { ...onScreen.current, drafts: current });
+      // A credential counts as work only while something is on screen to lose, so
+      // one emptied by this receipt — or by the person — stops counting either way.
+      for (const type of CREDENTIALS) if (!unsaved(settled.drafts[type])) touched.current.delete(type);
+      if (settled.baseUrl) touched.current.delete('base_url');
+      if (settled.method) touched.current.delete('method');
+      if (settled.credentialType) touched.current.delete('credential_type');
+      return settled.drafts;
+    });
   };
   const confirm = async (submission: Submission, receiptError = '') => {
     pendingConfirmation.current = submission;
@@ -246,7 +299,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   };
   // Signing in settles the account, not the key someone was part-way through
   // typing, and not an address they were part-way through changing either.
-  const OAUTH: Submission = { method: 'oauth', baseUrl: null, sent: null };
+  const OAUTH: Submission = { method: 'oauth', baseUrl: null, credential: null, sent: null };
   const confirmOAuth = async () => {
     if (!await confirm(OAUTH)) throw new Error(t('onboarding.connection.applyPending'));
   };
@@ -289,11 +342,12 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     if (!canSave || lifetime.current.busy) return;
     lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
     // What this write carries, decided here rather than when the receipt lands: by
-    // then the visible type may be the other one, and the value or the address may
-    // be a newer edit than the one that went out.
-    const submitted: Submission = { method: 'api_key', baseUrl, sent: { credential, value: key } };
+    // then the visible type may be the other one, and the draft or the address may
+    // be newer work than the one that went out. `sent` follows the payload exactly
+    // — an omitted key is no credential work, not empty credential work.
+    const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
+    const submitted: Submission = { method: 'api_key', baseUrl, credential, sent: payload.api_key ? drafts[credential] : null };
     try {
-      const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
       const result = backend === 'claude' ? await api.saveClaudeAuth({ ...payload, credential_type: credential })
         : backend === 'codex' ? await api.saveCodexAuth(payload)
         : await api.setOpencodeProviderAuth(provider!.id, payload.api_key, payload.base_url);
