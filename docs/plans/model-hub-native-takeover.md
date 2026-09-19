@@ -177,3 +177,20 @@ Claude's interrupted-OAuth settings backup is included in the migration
 inventory and cleanup, so constructor recovery cannot restore a replaced key.
 This scope preserves legacy native subscription Sources until explicit
 takeover, without introducing another permanent ownership marker.
+
+## Compatibility and platform limits
+
+Migration targets ordinary Codex and Claude Code native grants supported by
+the pinned CPA runtime. Explicit custom client IDs or grants whose recorded
+scopes omit CPA's refresh scopes are blocked before custody. Missing metadata
+uses the ordinary native-store contract; validation still requires upstream
+acceptance. Extra connector/plugin permissions are not promised to survive a
+CPA refresh.
+
+OS-store mutations use the observed item identity and metadata, immediate
+compare-before-write, and readback. macOS Security does not provide an atomic
+value-CAS against arbitrary external writers. The application-wide lease and
+external-CLI drain are therefore required; they do not claim to prevent an
+uncooperative process starting or modifying the same item during the native
+API's internal mutation window. This limitation is not permission to overwrite
+a detected concurrent login.

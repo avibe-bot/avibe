@@ -226,6 +226,48 @@ def test_interrupted_claude_auth_backup_is_imported_and_cannot_restore_old_key(m
     }
 
 
+@pytest.mark.parametrize("metadata", [
+    {"client_id": "fixture-custom-client"},
+    {"scopes": ["user:inference"]},
+    {"scope": "user:profile user:inference"},
+    {"scopes": None},
+])
+def test_explicit_incompatible_native_grant_is_blocked_before_custody(monkeypatch, tmp_path, metadata):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_claude_oauth(home)
+    path = home / ".claude/.credentials.json"
+    payload = json.loads(path.read_text())
+    payload["claudeAiOauth"].update(metadata)
+    path.write_text(json.dumps(payload))
+    original = path.read_bytes()
+    service, _, adapter = _service(tmp_path)
+    rows = service.migration_scan()["items"]
+    assert len(rows) == 1 and rows[0]["proposed_action"] == "keep_native"
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply([rows[0]["id"]]))
+    assert path.read_bytes() == original
+    assert not adapter.oauth_provisioned
+
+
+def test_ordinary_native_grant_with_extra_scopes_remains_importable(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_claude_oauth(home)
+    path = home / ".claude/.credentials.json"
+    payload = json.loads(path.read_text())
+    payload["claudeAiOauth"].update({
+        "clientId": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        "scopes": [
+            "user:profile", "user:inference", "user:sessions:claude_code",
+            "user:mcp_servers", "user:file_upload", "user:plugins",
+        ],
+    })
+    path.write_text(json.dumps(payload))
+    service, _, _ = _service(tmp_path)
+    assert service.migration_scan()["items"][0]["proposed_action"] == "import"
+
+
 def test_codex_embedded_bearer_key_is_migrated_without_deleting_provider_preferences(monkeypatch, tmp_path):
     home = tmp_path / "native"
     _isolate_native_home(monkeypatch, home)

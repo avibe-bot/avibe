@@ -73,6 +73,19 @@ _OPENCODE_BUILTIN_PROTOCOLS: dict[
     "openrouter": "openai_chat",
 }
 _OPENCODE_UNSUPPORTED_NATIVE_IDS = {"alibaba-cn", "poe"}
+# Pinned CPA ordinary-grant compatibility. Extra native scopes are permitted,
+# but the gateway does not promise to retain connector/plugin capabilities.
+_OAUTH_CLIENT_IDS = {
+    "codex": "app_EMoamEEZ73f0CkXaXp7hrann",
+    "claude": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+}
+_OAUTH_REFRESH_SCOPES = {
+    "codex": frozenset({"openid", "profile", "email"}),
+    "claude": frozenset({
+        "user:profile", "user:inference", "user:sessions:claude_code",
+        "user:mcp_servers", "user:file_upload",
+    }),
+}
 
 
 class MigrationConflictError(ValueError):
@@ -296,6 +309,26 @@ def _normalize_oauth_material(
         nested = cast(Mapping[str, object], payload["claudeAiOauth"])
     if provider == "codex" and isinstance(payload.get("tokens"), dict):
         nested = cast(Mapping[str, object], payload["tokens"])
+
+    # Official native stores often omit client/scope metadata. Their locator
+    # establishes the ordinary CLI grant; explicit contrary metadata must
+    # never be discarded and silently replaced with CPA's fixed defaults.
+    for metadata in (payload, nested):
+        for name in ("client_id", "clientId"):
+            if name in metadata and metadata[name] != _OAUTH_CLIENT_IDS[provider]:
+                return None
+        for name in ("scope", "scopes"):
+            if name not in metadata:
+                continue
+            scopes = metadata[name]
+            if isinstance(scopes, str):
+                granted = set(scopes.split())
+            elif isinstance(scopes, list) and all(isinstance(value, str) for value in scopes):
+                granted = set(scopes)
+            else:
+                return None
+            if not _OAUTH_REFRESH_SCOPES[provider].issubset(granted):
+                return None
 
     access_token = _oauth_text(nested, "access_token", "accessToken")
     refresh_token = _oauth_text(nested, "refresh_token", "refreshToken")
