@@ -3735,6 +3735,8 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
     config = V2Config.default()
     config.agents.opencode.enabled = True
     config.agents.opencode.default_provider = provider
+    # This scenario repairs native provider-qualified routing, not Hub supply.
+    config.model_hub.agents["opencode"].mode = "direct"
     config.save()
     upsert_opencode_provider_api_key(provider, "fixture-only-key")
     if model_id == "family/custom-model":
