@@ -106,10 +106,26 @@ async def management_fixture(state, service, native_path, backend):
             payload = await request.json()
             fixture.probes.append(payload)
             assert payload["header"]["Authorization"] == "Bearer $TOKEN$"
-            assert "model" not in json.loads(payload["data"])
+            assert payload["method"] == "GET"
+            assert payload["url"] == (
+                "https://chatgpt.com/backend-api/wham/usage"
+                if backend == "codex"
+                else "https://api.anthropic.com/api/oauth/profile"
+            )
+            assert "data" not in payload
+            serialized = json.dumps(payload)
+            for secret in (
+                "claude-oauth-token",
+                "claude-refresh-token",
+                "codex-access-123456",
+                "codex-refresh-123456",
+            ):
+                assert secret not in serialized
             status = 503 if fixture.fail_validation else 200
             body = {"error": {"type": "unavailable"}} if status == 503 else (
-                {"object": "response"} if backend == "codex" else {"type": "message"}
+                {"plan_type": "future-plan", "rate_limit": {"allowed": False}}
+                if backend == "codex"
+                else {"account": {"uuid": "fixture-account-uuid"}}
             )
             return web.json_response({"status_code": status, "body": json.dumps(body)})
         fixture.violations.append("unexpected management mutation or model request")

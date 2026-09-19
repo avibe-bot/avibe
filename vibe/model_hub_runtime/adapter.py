@@ -1099,6 +1099,92 @@ def _probe_oauth_protocol_response(
     return request(headers)
 
 
+_OAUTH_CONTROL_PLANE_URLS = {
+    "anthropic": "https://api.anthropic.com/api/oauth/profile",
+    "openai": "https://chatgpt.com/backend-api/wham/usage",
+    "codex": "https://chatgpt.com/backend-api/wham/usage",
+}
+
+
+def _parse_oauth_control_plane_witness(
+    vendor: str,
+    status: object,
+    body: object,
+) -> bool:
+    """Accept only the provider's model-free account/control-plane shape."""
+
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        return False
+    if not isinstance(body, (str, bytes, bytearray)):
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(payload, dict) or "error" in payload:
+        return False
+
+    if vendor == "anthropic":
+        account = payload.get("account")
+        uuid_value = account.get("uuid") if isinstance(account, dict) else None
+        return isinstance(uuid_value, str) and bool(uuid_value.strip())
+    if vendor in {"openai", "codex"}:
+        plan_type = payload.get("plan_type")
+        return isinstance(plan_type, str) and bool(plan_type.strip())
+    return False
+
+
+def _probe_oauth_control_plane_witness(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+) -> None:
+    """Use CPA's current auth record for a bodyless control-plane GET."""
+
+    normalized_vendor = vendor.strip().lower()
+    url = _OAUTH_CONTROL_PLANE_URLS.get(normalized_vendor)
+    if url is None:
+        raise EngineClientError("unsupported OAuth control-plane witness")
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer $TOKEN$",
+    }
+    if normalized_vendor == "anthropic":
+        headers.update(
+            {
+                "User-Agent": "axios/1.15.2",
+                "Cache-Control": "no-cache",
+            }
+        )
+    else:
+        headers["User-Agent"] = "codex-cli"
+        if auth.account_id:
+            headers["ChatGPT-Account-ID"] = auth.account_id
+
+    payload = client.management_request(
+        "POST",
+        "/api-call",
+        payload={
+            "auth_index": auth.auth_index,
+            "method": "GET",
+            "url": url,
+            "header": headers,
+        },
+    )
+    if not _parse_oauth_control_plane_witness(
+        normalized_vendor,
+        payload.get("status_code"),
+        payload.get("body"),
+    ):
+        raise EngineClientError(
+            "OAuth control-plane witness was inconclusive",
+            error_type="invalid_response",
+        )
+
+
 @dataclass
 class _OAuthFlow:
     flow_id: str
@@ -1792,17 +1878,14 @@ class CLIProxyEngineAdapter:
             # also puts request failures in status_message. None of those
             # inventory strings proves that a refresh grant was rejected.
             try:
-                evidence = await run_owned_in_thread(
-                    _probe_oauth_protocol_response,
+                await run_owned_in_thread(
+                    _probe_oauth_control_plane_witness,
                     client=client,
                     auth=matches[0],
                     vendor=normalized_vendor,
-                    protocol=protocol,
                 )
             except (EngineClientError, OSError) as exc:
                 raise EngineStateError("OAuth credential validation failed") from exc
-            if evidence.authentication is not _AuthenticationEvidence.ACCEPTED:
-                raise EngineStateError("OAuth credential validation failed")
 
     async def matches_api_key_credential(
         self,

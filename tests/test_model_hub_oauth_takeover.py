@@ -115,7 +115,7 @@ class _FakeEngineClient:
         self.calls: list[tuple[str, str]] = []
         self.files: list[dict[str, Any]] = []
         self.api_call_payloads: list[dict[str, Any]] = []
-        self.api_call_response = '{"object":"response"}'
+        self.api_call_response = '{"plan_type":"pro"}'
         self.api_call_status_code = 200
         self.on_restart: Any = None
         self.on_inventory: Any = None
@@ -175,6 +175,7 @@ class _FakeSupervisor:
                 "name": auth_files[0].name,
                 "provider": payload["type"],
                 "auth_index": "0",
+                "id_token": {"chatgpt_account_id": payload.get("account_id")},
             }
         ]
 
@@ -195,6 +196,7 @@ async def test_adapter_activation_is_idempotent_and_does_not_reupload(
                 "name": auth_files[0].name,
                 "provider": payload["type"],
                 "auth_index": "0",
+                "id_token": {"chatgpt_account_id": payload.get("account_id")},
             }
         ]
     client.on_restart = reconcile_from_watched_file
@@ -308,6 +310,7 @@ async def test_activation_retry_after_rotation_keeps_live_r1_and_never_reuploads
                 "name": auth_path.name,
                 "provider": payload["type"],
                 "auth_index": "0",
+                "id_token": {"chatgpt_account_id": payload.get("account_id")},
             }
         ]
 
@@ -356,6 +359,7 @@ async def test_rotation_during_engine_binding_is_accepted_by_identity(
             "name": auth_name,
             "provider": payload["type"],
             "auth_index": "0",
+            "id_token": {"chatgpt_account_id": payload.get("account_id")},
         }
     ]
 
@@ -421,6 +425,7 @@ async def test_startup_retry_reconciles_published_file_without_stale_upload(
                 "name": auth_name,
                 "provider": payload["type"],
                 "auth_index": "0",
+                "id_token": {"chatgpt_account_id": payload.get("account_id")},
             }
         ]
 
@@ -443,7 +448,7 @@ async def test_startup_retry_reconciles_published_file_without_stale_upload(
 
 
 @pytest.mark.asyncio
-async def test_validate_uses_credential_specific_probe_not_model_inventory(
+async def test_validate_uses_credential_specific_control_plane_witness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -462,17 +467,13 @@ async def test_validate_uses_credential_specific_probe_not_model_inventory(
 
     observed: list[tuple[str, str]] = []
 
-    def probe(**kwargs: Any) -> runtime_adapter._ProtocolEvidence:
-        observed.append((kwargs["auth"].auth_index, kwargs["protocol"]))
-        return runtime_adapter._ProtocolEvidence(
-            protocol=runtime_adapter._ProtocolProof.UNPROVEN,
-            authentication=runtime_adapter._AuthenticationEvidence.ACCEPTED,
-        )
+    def probe(**kwargs: Any) -> None:
+        observed.append((kwargs["auth"].auth_index, kwargs["vendor"]))
 
-    monkeypatch.setattr(runtime_adapter, "_probe_oauth_protocol_response", probe)
+    monkeypatch.setattr(runtime_adapter, "_probe_oauth_control_plane_witness", probe)
     await adapter.validate_oauth_credential(ref)
 
-    assert observed == [("0", "openai_responses")]
+    assert observed == [("0", "openai")]
     assert ("GET", "/auth-files/models") not in client.calls
 
 
@@ -497,13 +498,13 @@ async def test_validate_rejects_staged_or_denied_grants_without_secret_details(
 
     await adapter.activate_oauth_credential(ref)
 
-    def reject(**_kwargs: Any) -> runtime_adapter._ProtocolEvidence:
-        return runtime_adapter._ProtocolEvidence(
-            protocol=runtime_adapter._ProtocolProof.UNPROVEN,
-            authentication=runtime_adapter._AuthenticationEvidence.REJECTED,
+    def reject(**_kwargs: Any) -> None:
+        raise runtime_adapter.EngineClientError(
+            "fixture control-plane unavailable",
+            status_code=401,
         )
 
-    monkeypatch.setattr(runtime_adapter, "_probe_oauth_protocol_response", reject)
+    monkeypatch.setattr(runtime_adapter, "_probe_oauth_control_plane_witness", reject)
     with pytest.raises(
         EngineStateError,
         match="OAuth credential validation failed",
@@ -514,31 +515,31 @@ async def test_validate_rejects_staged_or_denied_grants_without_secret_details(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("vendor", "material_type", "protocol", "url", "response"),
+    ("vendor", "material_type", "url", "response", "expected_header"),
     (
         (
             "openai",
             "codex",
-            "openai_responses",
-            "https://chatgpt.com/backend-api/codex/responses",
-            '{"object":"response"}',
+            "https://chatgpt.com/backend-api/wham/usage",
+            '{"plan_type":"future-plan","rate_limit":{"allowed":false}}',
+            ("ChatGPT-Account-ID", "account-fixture"),
         ),
         (
             "anthropic",
             "claude",
-            "anthropic",
-            "https://api.anthropic.com/v1/messages?beta=true",
-            '{"type":"message"}',
+            "https://api.anthropic.com/api/oauth/profile",
+            '{"account":{"uuid":"fixture-account-uuid"}}',
+            (None, None),
         ),
     ),
 )
-async def test_validate_sends_model_free_credential_scoped_management_probe(
+async def test_validate_sends_model_free_control_plane_management_probe(
     tmp_path: Path,
     vendor: str,
     material_type: str,
-    protocol: str,
     url: str,
     response: str,
+    expected_header: tuple[str | None, str | None],
 ) -> None:
     store = EngineStateStore(tmp_path / "engine")
     client = _FakeEngineClient()
@@ -559,44 +560,41 @@ async def test_validate_sends_model_free_credential_scoped_management_probe(
     assert len(client.api_call_payloads) == 1
     probe = client.api_call_payloads[0]
     assert probe["auth_index"] == "0"
-    assert probe["method"] == "POST"
+    assert probe["method"] == "GET"
     assert probe["url"] == url
     assert probe["header"]["Authorization"] == "Bearer $TOKEN$"
-    assert "model" not in json.loads(probe["data"])
+    assert "data" not in probe
+    assert "access-token-fixture" not in json.dumps(probe)
+    assert "refresh-token-fixture" not in json.dumps(probe)
+    if expected_header[0] is not None:
+        assert probe["header"][expected_header[0]] == expected_header[1]
+        assert probe["header"]["User-Agent"] == "codex-cli"
+    else:
+        assert probe["header"]["User-Agent"] == "axios/1.15.2"
+        assert probe["header"]["Cache-Control"] == "no-cache"
     assert ("GET", "/auth-files/models") not in client.calls
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "response", "expected"),
+    ("status", "response"),
     (
-        (
-            401,
-            '{"error":{"type":"invalid_api_key"}}',
-            "OAuth credential validation failed",
-        ),
-        (
-            401,
-            '{"error":{"type":"invalid_token"}}',
-            "OAuth credential validation failed",
-        ),
-        (
-            401,
-            '{"error":{"type":"token_expired"}}',
-            "OAuth credential validation failed",
-        ),
-        (
-            403,
-            '{"error":{"type":"permission_error","message":"profile access denied"}}',
-            "OAuth credential validation failed",
-        ),
+        (200, '{"error":{"type":"invalid_token"}}'),
+        (200, '{"plan_type":""}'),
+        (200, '{"account":{}}'),
+        (200, '["plan_type","pro"]'),
+        (200, "not-json"),
+        (True, '{"plan_type":"pro"}'),
+        (None, '{"plan_type":"pro"}'),
+        (401, '{"error":{"type":"invalid_token"}}'),
+        (403, '{"error":{"type":"permission_error"}}'),
+        (503, '{"error":{"type":"unavailable"}}'),
     ),
 )
-async def test_validate_distinguishes_definitive_invalid_grant_from_unknown_denial(
+async def test_validate_rejects_non_witness_control_plane_shapes(
     tmp_path: Path,
-    status: int,
+    status: Any,
     response: str,
-    expected: str,
 ) -> None:
     store = EngineStateStore(tmp_path / "engine")
     client = _FakeEngineClient()
@@ -613,7 +611,10 @@ async def test_validate_distinguishes_definitive_invalid_grant_from_unknown_deni
     )
     await adapter.activate_oauth_credential(ref)
 
-    with pytest.raises(EngineStateError, match=f"^{expected}$"):
+    with pytest.raises(
+        EngineStateError,
+        match="^OAuth credential validation failed$",
+    ):
         await adapter.validate_oauth_credential(ref)
 
 
