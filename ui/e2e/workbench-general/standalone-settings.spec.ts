@@ -374,3 +374,158 @@ test('C-SETTINGS-06: retained image viewer releases keys while Settings is foreg
   expect(denied).toEqual([]);
   expect(pageErrors).toEqual([]);
 });
+
+for (const width of [1366, 390]) {
+  test(`C-SETTINGS-07: retained search query/filter/selection, history and true close at ${width}`, async ({ page }) => {
+    const denied = await serveProduct(page);
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    const searches: string[] = [];
+    await page.route('**/api/show-pages', (route) => route.fulfill({ json: { pages: [] } }));
+    await page.route('**/api/search/messages?**', (route) => {
+      searches.push(route.request().url());
+      return route.fulfill({ json: { sessions: [{ session_id: 'search-session', title: '星河', project_name: '项目', archived: true,
+        matches: [1, 2].map((id) => ({ id: `search-${id}`, author: 'user', type: 'user', source: 'user', created_at: '2026-09-19T00:00:00Z',
+          snippet: { prefix: '', match: `星河结果${id}`, suffix: '' } })),
+      }] } });
+    });
+    // The palette's phone case is an explicit desktop-history resize continuation.
+    await page.setViewportSize({ width: 1366, height: 768 });
+    await open(page, '/');
+    await toggle(page).click();
+    await settings(page).getByRole('button', { name: 'Close Settings' }).click();
+    await expect(settings(page)).toBeHidden();
+    await page.setViewportSize({ width, height: 768 });
+    await page.keyboard.press('Control+k');
+    const palette = page.getByRole('dialog', { name: 'Search', exact: true });
+    const query = palette.getByRole('textbox');
+    await query.fill('星河 🌱');
+    await palette.getByRole('switch').click();
+    await expect(palette.locator('[aria-current="true"]')).toContainText('星河结果1');
+    await query.focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(palette.locator('[aria-current="true"]')).toContainText('星河结果2');
+    for (let round = 0; round < 2; round += 1) {
+      await page.goForward();
+      await expect(settings(page)).toBeVisible();
+      await expect(palette).toHaveCount(0);
+      await expect(page.locator('body')).not.toHaveCSS('pointer-events', 'none');
+      await expect(page.locator('body')).not.toHaveAttribute('data-scroll-locked');
+      const count = searches.length;
+      await page.keyboard.press('Control+k');
+      await page.keyboard.press('ArrowDown');
+      await page.waitForTimeout(300);
+      expect(searches.length).toBe(count);
+      expect(await settings(page).evaluate((node) => node.contains(document.activeElement))).toBe(true);
+      await page.goBack();
+      await expect(query).toHaveValue('星河 🌱');
+      await expect(palette.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+      await expect(palette.locator('[aria-current="true"]')).toContainText('星河结果2');
+      await page.waitForTimeout(300);
+      await expect(query).toBeFocused();
+    }
+    await page.keyboard.press('a');
+    await page.keyboard.insertText('续');
+    await expect(query).toHaveValue('星河 🌱a续');
+    await page.keyboard.press('Escape');
+    await expect(palette).toHaveCount(0);
+    await page.keyboard.press('Control+k');
+    await expect(query).toHaveValue('');
+    await expect(palette.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(denied).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+}
+
+test('C-SETTINGS-08: pinned Apps survives repeated Settings and measures its current placement', async ({ page }) => {
+  const denied = await serveProduct(page);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  let inventoryReads = 0;
+  await page.route('**/api/show-pages', (route) => {
+    inventoryReads += 1;
+    return route.fulfill({ json: { pages: [] } });
+  });
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await open(page, '/');
+  const apps = page.getByRole('button', { name: 'Apps', exact: true });
+  await apps.click();
+  await expect(apps).toHaveAttribute('aria-pressed', 'true');
+  for (const width of [1920, 1366]) {
+    await toggle(page).click();
+    await expect(settings(page)).toBeVisible();
+    await expect(apps).toHaveCount(0);
+    await expect(page.getByRole('menu', { name: 'Apps', exact: true })).toHaveCount(0);
+    const count = inventoryReads;
+    await page.setViewportSize({ width, height: 768 });
+    await page.waitForTimeout(300);
+    expect(inventoryReads).toBe(count);
+    await settings(page).getByRole('button', { name: 'Close Settings' }).click();
+    await expect(apps).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('menu', { name: 'Apps', exact: true })).toBeVisible();
+    const appBox = await apps.boundingBox();
+    const settingsBox = await toggle(page).boundingBox();
+    expect(Math.abs(appBox!.y - settingsBox!.y)).toBeLessThan(2);
+    expect(appBox!.x).toBeGreaterThanOrEqual(0);
+  }
+  await apps.click();
+  await expect(apps).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('menu', { name: 'Apps', exact: true })).toHaveCount(0);
+  await apps.click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Open App Library' })).toBeVisible();
+  expect(denied).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});
+
+test('C-SETTINGS-09: a held sidebar create cannot navigate through foreground Settings; active create navigates once', async ({ page }) => {
+  const denied = await serveProduct(page);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.route('**/api/show-pages', (route) => route.fulfill({ json: { pages: [] } }));
+  const session = { id: 'ses-sidebar-create', title: 'Created fixture', scope_id: 'scope-1', project_id: 'proj-1',
+    agent_name: 'codex', agent_backend: 'codex', status: 'active', pinned: false, agent_status: 'idle',
+    workdir: '/fixture/work', metadata: {}, created_at: '2026-09-19T00:00:00Z', updated_at: '2026-09-19T00:00:00Z' };
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let creates = 0;
+  await page.route('**/api/sessions', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    expect(route.request().postDataJSON()).toEqual({ project_id: 'proj-1' });
+    creates += 1;
+    if (creates === 1) await held;
+    return route.fulfill({ json: session });
+  });
+  await page.route('**/api/sessions/ses-sidebar-create/bootstrap', (route) => route.fulfill({ json: {
+    session, capabilities: { can_chat: true }, agents: [], default_agent_name: 'codex', config: { ui: {} },
+    messages: [], queued: [], draft: { text: '', updated_at: null }, next_before_id: null, next_after_id: null,
+    turn_state: { in_flight: false, foreground: 'idle', native_turn_started: false, pending_input_count: 0,
+      background_activities: [], pending_activity_output_count: 0, connection: 'connected' },
+  } }));
+  await page.route('**/api/sessions/ses-sidebar-create', (route) => route.fulfill({ json: session }));
+  await page.route('**/api/sessions/ses-sidebar-create/queue', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/sessions/ses-sidebar-create/activity**', (route) => route.fulfill({ json: { groups: [] } }));
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await open(page, '/');
+  const create = page.locator('aside button[aria-label="New session in this project"]');
+  await create.click();
+  await expect.poll(() => creates).toBe(1);
+  await toggle(page).click();
+  await expect(settings(page)).toBeVisible();
+  const index = await page.evaluate(() => history.state.idx);
+  release();
+  await expect(create).toBeEnabled();
+  await page.waitForTimeout(300);
+  await expect(page).toHaveURL(/\/settings\/general$/);
+  expect(await page.evaluate(() => history.state.idx)).toBe(index);
+  await settings(page).getByRole('button', { name: 'Close Settings' }).click();
+  await expect(page).toHaveURL(`${origin}/`);
+  await page.waitForTimeout(300);
+  await expect(page).toHaveURL(`${origin}/`);
+  const beforeCreate = await page.evaluate(() => history.state.idx);
+  await create.click();
+  await expect(page).toHaveURL(/\/chat\/ses-sidebar-create$/);
+  expect(creates).toBe(2);
+  expect(await page.evaluate(() => history.state.idx)).toBe(beforeCreate + 1);
+  expect(denied).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});

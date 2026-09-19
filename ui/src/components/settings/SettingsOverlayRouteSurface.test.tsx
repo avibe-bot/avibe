@@ -288,6 +288,22 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
   });
 
+  it('maintains only the retained origin through data-router scoped replacement', async () => {
+    const user = userEvent.setup();
+    const router = createMemoryRouter([{ path: '*', element: <Harness desktop /> }], {
+      initialEntries: [{ pathname: '/chat/ses_1', search: '?view=chat', hash: '#tail', state: { maintenance: 'pending' } }],
+    });
+    render(<RouterProvider router={router} />);
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    await waitFor(() => expect(screen.getByTestId('chat-maintenance').textContent).toBe('done'));
+    expect(router.state.location.pathname).toBe('/settings/replies');
+    expect(screen.queryByText('escaped-route')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(router.state.location.pathname).toBe('/chat/ses_1');
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
+    expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
+  });
+
   it('keeps a remounted retained modal editor focused for continued Unicode input', async () => {
     const user = userEvent.setup();
     render(

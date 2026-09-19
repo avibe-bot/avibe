@@ -8,6 +8,7 @@ import { Dock } from './apps/Dock';
 import { ContextMenu, ContextMenuItem } from './ui/context-menu';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { useShowPageDrag } from '../context/showPageDrag';
+import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 
 // The sidebar bottom-left "Apps" button that reveals the Dock.
 //   - hover        → the Dock floats up ABOVE the button (transient preview; the
@@ -19,10 +20,20 @@ import { useShowPageDrag } from '../context/showPageDrag';
 //                    and the empty-Dock hint), complementing §7.1c point 7. It
 //                    does NOT touch the hover/pin behavior.
 export const AppsLauncher: React.FC = () => {
+  const active = useRouteSurfaceActive();
+  const [pinned, setPinned] = useState(false);
+  // Pinning belongs to the launcher owner. Hover/menu/drag and Dock demand
+  // belong to the visible presentation and retire together on suspension.
+  return active ? <LauncherPresentation pinned={pinned} setPinned={setPinned} /> : null;
+};
+
+const LauncherPresentation = ({ pinned, setPinned }: {
+  pinned: boolean;
+  setPinned: (value: boolean) => void;
+}) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const showPageDrag = useShowPageDrag();
-  const [pinned, setPinned] = useState(false);
   const [hovering, setHovering] = useState(false);
   const [dragHovering, setDragHovering] = useState(false);
   // Cursor-positioned right-click menu, on the shared ContextMenu primitive.
@@ -91,12 +102,9 @@ export const AppsLauncher: React.FC = () => {
       closeTimer.current = null;
     }, 180);
   };
-  useEffect(
-    () => () => {
-      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-    },
-    [],
-  );
+  useEffect(() => () => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+  }, []);
 
   const onClick = () => {
     if (pinned) {

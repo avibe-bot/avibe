@@ -390,7 +390,11 @@ export const AppShell: React.FC = () => {
             floats above app windows. */}
         <div className="relative flex shrink-0 flex-col gap-2.5">
           <div className="flex h-[39px] items-stretch gap-2">
-            {!settingsOpen && canUseApps && <AppsLauncher />}
+            {canUseApps && (
+              <RouteSurfaceActivityBoundary active={!settingsOpen}>
+                <AppsLauncher />
+              </RouteSurfaceActivityBoundary>
+            )}
             {settingsOpen ? (
               <button
                 type="button"
@@ -543,7 +547,9 @@ export const AppShell: React.FC = () => {
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}
-      {!settingsOpen && <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      <RouteSurfaceActivityBoundary active={!settingsOpen}>
+        <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+      </RouteSurfaceActivityBoundary>
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
