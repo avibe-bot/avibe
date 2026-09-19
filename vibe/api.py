@@ -10785,6 +10785,15 @@ def _hub_backend_connection_auth(config: V2Config, backend: str) -> str:
     return "none"
 
 
+def _direct_claude_connection_auth() -> dict:
+    """Keep the bounded native status reader inside the takeover exclusion."""
+    with NativeCredentialLease(("claude",)) as lease:
+        # The caller's config may predate an await or a completed takeover.
+        # acquire() checks pending recovery; custody must be reread under lease.
+        lease.assert_auth_custody("claude")
+        return get_claude_auth(connection_observation=True)
+
+
 async def get_backend_connection(name: str) -> dict:
     """Observe persisted credential custody and application, without a model call."""
     from core.backend_restart import pending_native_backends
@@ -10851,7 +10860,9 @@ async def get_backend_connection(name: str) -> dict:
             result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
         else:
             if name == "claude":
-                auth = await asyncio.to_thread(get_claude_auth, probe_cli=False)
+                # Cancelling to_thread does not stop its native status process.
+                # Join the worker and retain its lease through the entire tail.
+                auth = await finish_native_operation(asyncio.to_thread(_direct_claude_connection_auth))
             else:
                 auth = await asyncio.to_thread(get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):
@@ -10860,6 +10871,8 @@ async def get_backend_connection(name: str) -> dict:
         if name == "opencode" and enabled:
             permission = await asyncio.to_thread(opencode_permission_status)
             result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
+    except NativeMigrationBlockedError:
+        return result
     except Exception as exc:
         result["message"] = str(exc)
         return result
@@ -12023,7 +12036,7 @@ def save_codex_auth(payload: dict) -> dict:
     return state
 
 
-def get_claude_auth(*, probe_cli: bool = True) -> dict:
+def get_claude_auth(*, connection_observation: bool = False) -> dict:
     """Return the user-facing Claude auth state for the Settings UI.
 
     Claude differs from Codex in two structural ways:
@@ -12038,6 +12051,10 @@ def get_claude_auth(*, probe_cli: bool = True) -> dict:
     Legacy V2Config keys are read only as a migration fallback so old
     installs still render their current state before the next save moves
     the key into Claude's own settings file.
+
+    ``connection_observation`` is the leased Direct connection projection:
+    use actual launch-key precedence and explicit uncertainty if neither the
+    bounded status query nor the selected native store proves OAuth.
     """
     from vibe.claude_config import (
         read_claude_auth_state,
@@ -12047,7 +12064,7 @@ def get_claude_auth(*, probe_cli: bool = True) -> dict:
     )
 
     disk_state = read_claude_auth_state()
-    disk_oauth_signed_in = read_claude_oauth_signed_in()
+    disk_oauth_signed_in = False if connection_observation else read_claude_oauth_signed_in()
     settings_env = read_claude_settings_env()
     settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
@@ -12069,6 +12086,14 @@ def get_claude_auth(*, probe_cli: bool = True) -> dict:
 
     configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
+    if connection_observation:
+        # Settings are applied by Claude after Avibe's launch environment.
+        # Reuse its composition so explicit OAuth masks inherited keys while
+        # legacy environment keys and persisted settings still take precedence.
+        launch_env = build_claude_subprocess_env(cfg if "cfg" in locals() else None)
+        launch_env.update(settings_env)
+        if launch_env.get("ANTHROPIC_API_KEY") or launch_env.get("ANTHROPIC_AUTH_TOKEN"):
+            return {"ok": True, "active_auth_mode": "api_key"}
     try:
         claude_status_env = _build_claude_status_probe_env(
             build_claude_subprocess_env(
@@ -12078,13 +12103,31 @@ def get_claude_auth(*, probe_cli: bool = True) -> dict:
         )
     except Exception:
         claude_status_env = None
-    # Connection observation must not launch a credential-bearing CLI process.
-    # The Settings auth detail endpoint retains its existing explicit probe.
+    # Direct connection observation owns the native lease through this bounded
+    # status query. Hub observations never call this native reader.
     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
         configured_cli_path if isinstance(configured_cli_path, str) else None,
         env=claude_status_env,
         cwd=status_probe_cwd,
-    ) if probe_cli else None
+    )
+    if connection_observation:
+        if cli_oauth_signed_in is not None:
+            return {"ok": True, "active_auth_mode": "oauth" if cli_oauth_signed_in else "none"}
+        from vibe.native_oauth_store import read_native_oauth
+
+        try:
+            snapshot = read_native_oauth("claude", allow_secret=False)
+        except Exception:
+            # An unavailable observer is not proof of logout. Do not expose
+            # native errors or metadata in the public connection response.
+            return {"ok": True, "auth_mode_uncertain": True}
+        if snapshot is None:
+            return {"ok": True, "active_auth_mode": "none"}
+        if snapshot.exportable:
+            return {"ok": True, "active_auth_mode": "oauth"}
+        # Keychain attributes describe a container, which may hold only MCP
+        # credentials. Neither that presence nor denied access proves OAuth.
+        return {"ok": True, "auth_mode_uncertain": True}
     oauth_signed_in = (
         cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in
     )

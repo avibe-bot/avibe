@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -19,6 +21,7 @@ from config.v2_config import (
 from vibe import api, internal_client, runtime, ui_server
 
 _REAL_GET_CLAUDE_AUTH = api.get_claude_auth
+_REAL_CLAUDE_STATUS_PROBE = api._read_claude_cli_oauth_signed_in
 
 
 @pytest.fixture(autouse=True)
@@ -560,7 +563,7 @@ def test_retained_native_subscription_uses_only_its_explicit_owner(
     native_ready.assert_not_called()
 
 
-def test_connection_does_not_launch_claude_status_probe(connection, monkeypatch):
+def test_api_key_connection_does_not_need_claude_status_probe(connection, monkeypatch):
     from vibe.claude_config import read_claude_settings_env
 
     # Exercise the real getter, not the fixture's public-auth stub.
@@ -574,6 +577,243 @@ def test_connection_does_not_launch_claude_status_probe(connection, monkeypatch)
     assert "fixture-legacy-key" not in json.dumps(state)
     assert not read_claude_settings_env()
     probe.assert_not_called()
+
+
+@pytest.fixture
+def claude_native_observation(connection, monkeypatch):
+    """Exercise the native resolver with an opaque, non-interactive fake store."""
+    from vibe import native_oauth_store
+
+    forbidden = Mock(side_effect=AssertionError("readiness must not read or mutate Keychain values"))
+    keychain = SimpleNamespace(
+        metadata=Mock(return_value=native_oauth_store._KeychainMetadata("not_found", "fixture-absent")),
+        read=forbidden, write=forbidden, delete=forbidden,
+    )
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    monkeypatch.setattr(native_oauth_store, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(native_oauth_store.getpass, "getuser", lambda: "fixture-user")
+    monkeypatch.setattr(api, "get_claude_auth", _REAL_GET_CLAUDE_AUTH)
+    probe = Mock(return_value=None)
+    keychain.status_probe = probe
+    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", probe)
+    yield keychain
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ({"loggedIn": True, "authMethod": "claude.ai"}, "subscription"),
+        ({"loggedIn": True, "authMethod": "setup-token"}, "subscription"),
+        ({"loggedIn": True, "authMethod": "api-key"}, "none"),
+        ({"loggedIn": False}, "none"),
+        ({"loggedIn": True}, "unknown"),
+        ({}, "unknown"),
+    ],
+)
+def test_direct_claude_keychain_status_restores_readiness_without_secret_read(
+    connection, claude_native_observation, monkeypatch, status, expected,
+):
+    from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError
+    from vibe import native_oauth_store
+    from vibe.claude_config import get_claude_credentials_paths
+
+    claude_native_observation.metadata.return_value = native_oauth_store._KeychainMetadata(
+        "found", "fixture-revision",
+    )
+    assert not any(path.exists() for path in get_claude_credentials_paths())
+
+    def run(command, **kwargs):
+        assert command[1:] == ["auth", "status", "--json"]
+        assert kwargs["timeout"] == 3
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert not kwargs["check"]
+        # An independent migration owner cannot enter while status is reading.
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_in_progress"):
+            NativeCredentialLease(("claude",)).acquire(recovery=True)
+        return subprocess.CompletedProcess(command, 0, json.dumps(status), "")
+
+    process = Mock(side_effect=run)
+    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", _REAL_CLAUDE_STATUS_PROBE)
+    monkeypatch.setattr(subprocess, "run", process)
+    state = asyncio.run(api.get_backend_connection("claude"))
+    assert state["auth"] == expected
+    assert state["ready"] is (expected == "subscription")
+    assert state["entry_eligible"] is state["ready"]
+    process.assert_called_once()
+    if expected != "unknown":
+        claude_native_observation.metadata.assert_not_called()
+    with NativeCredentialLease(("claude",)):
+        pass
+
+
+def test_direct_claude_status_cancellation_joins_worker_before_releasing_lease(
+    connection, claude_native_observation, monkeypatch,
+):
+    from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError
+
+    async def scenario():
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def status(*_args, **_kwargs):
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(3), "fixture did not release the status reader"
+            return True
+
+        monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", status)
+        task = asyncio.create_task(api.get_backend_connection("claude"))
+        try:
+            await asyncio.wait_for(started.wait(), 3)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                assert not task.done()
+                with pytest.raises(NativeMigrationBlockedError, match="native_auth_in_progress"):
+                    NativeCredentialLease(("claude",)).acquire(recovery=True)
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+        with NativeCredentialLease(("claude",)):
+            pass
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", ["hub", "hub_disabled", "pending", "busy", "corrupt_config"])
+def test_direct_claude_rechecks_custody_after_async_application_wait(
+    connection, claude_native_observation, monkeypatch, change,
+):
+    from config import paths
+    from core.backend_restart import NativeCredentialLease
+
+    lease = None
+
+    async def application(_backend):
+        nonlocal lease
+        if change in {"hub", "hub_disabled"}:
+            persisted = V2Config.load()
+            persisted.model_hub.agents["claude"].mode = "hub"
+            persisted.model_hub.enabled = change != "hub_disabled"
+            persisted.save()
+        elif change == "pending":
+            journal = paths.get_state_dir() / "native-takeover" / "current.json"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(json.dumps({"version": 1, "phase": "prepared", "backends": ["claude"]}))
+        elif change == "corrupt_config":
+            paths.get_config_path().write_text("{invalid")
+        else:
+            lease = NativeCredentialLease(("claude",)).acquire()
+        return {"status_code": 200, "body": {"ok": True, "state": "applied"}}
+
+    monkeypatch.setattr(internal_client, "backend_application", application)
+    try:
+        state = asyncio.run(api.get_backend_connection("claude"))
+        assert state["auth"] == "unknown"
+        assert not state["ready"] and not state["entry_eligible"]
+        claude_native_observation.status_probe.assert_not_called()
+        claude_native_observation.metadata.assert_not_called()
+    finally:
+        if lease is not None:
+            lease.release()
+
+
+@pytest.mark.parametrize("error", [subprocess.TimeoutExpired("fixture-cli", 3), OSError("fixture-native-detail")])
+def test_direct_claude_status_failure_is_uncertain_and_releases_lease(
+    connection, claude_native_observation, monkeypatch, error,
+):
+    from core.backend_restart import NativeCredentialLease
+    from vibe import native_oauth_store
+
+    claude_native_observation.metadata.return_value = native_oauth_store._KeychainMetadata(
+        "found", "fixture-revision",
+    )
+    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", _REAL_CLAUDE_STATUS_PROBE)
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=error))
+    state = asyncio.run(api.get_backend_connection("claude"))
+    assert state["auth"] == "unknown" and not state["entry_eligible"]
+    assert "fixture-" not in json.dumps(state)
+    with NativeCredentialLease(("claude",)):
+        pass
+
+
+@pytest.mark.parametrize("payload_kind", ["claude_oauth", "mcp_only"])
+def test_claude_keychain_container_is_unknown_not_logged_out_or_proven_oauth(
+    connection, claude_native_observation, payload_kind,
+):
+    from vibe import native_oauth_store
+
+    # Both secret contents have exactly the same safe Keychain metadata. The
+    # observer must not inspect either payload or infer Claude OAuth from it.
+    claude_native_observation.stored_payload = {
+        "claude_oauth": {"claudeAiOauth": {"accessToken": "fixture-oauth-secret"}},
+        "mcp_only": {"mcpOAuth": {"provider": {"accessToken": "fixture-mcp-secret"}}},
+    }[payload_kind]
+    claude_native_observation.metadata.return_value = native_oauth_store._KeychainMetadata(
+        "found", "fixture-revision", {"svce": "Claude Code-credentials", "acct": "fixture-user"},
+    )
+    state = asyncio.run(api.get_backend_connection("claude"))
+    assert state["auth"] == "unknown"
+    assert not state["ready"] and not state["entry_eligible"]
+    assert state["application"] == "applied"
+    assert state["supply_mode"] == "direct"
+    assert "fixture-" not in json.dumps(state)
+    claude_native_observation.metadata.assert_called_once()
+
+
+@pytest.mark.parametrize("metadata_state", ["not_found", "permission_needed", "found"])
+@pytest.mark.parametrize("file_oauth", [False, True])
+def test_claude_native_observation_respects_selected_store(
+    connection, claude_native_observation, metadata_state, file_oauth,
+):
+    from vibe import native_oauth_store
+    from vibe.claude_config import get_claude_credentials_path
+
+    claude_native_observation.metadata.return_value = native_oauth_store._KeychainMetadata(
+        metadata_state, "fixture-revision",
+    )
+    if file_oauth:
+        path = get_claude_credentials_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture-file-secret"}}))
+    state = asyncio.run(api.get_backend_connection("claude"))
+    expected_auth = (
+        "unknown" if metadata_state != "not_found" else "subscription" if file_oauth else "none"
+    )
+    assert state["auth"] == expected_auth
+    assert state["ready"] is (expected_auth == "subscription")
+    assert state["entry_eligible"] is state["ready"]
+    assert "fixture-file-secret" not in json.dumps(state)
+
+
+@pytest.mark.parametrize("key_var", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+@pytest.mark.parametrize("source", ["settings", "legacy_env", "explicit_oauth_env"])
+def test_claude_connection_observes_launch_key_precedence(
+    connection, claude_native_observation, monkeypatch, key_var, source,
+):
+    from vibe import native_oauth_store
+    from vibe.claude_config import get_claude_settings_path
+
+    claude_native_observation.metadata.return_value = native_oauth_store._KeychainMetadata(
+        "found", "fixture-revision",
+    )
+    connection.config.agents.claude.auth_mode = "oauth"
+    connection.config.agents.claude.auth_mode_set = source != "legacy_env"
+    if source == "settings":
+        path = get_claude_settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"env": {key_var: "fixture-settings-secret"}}))
+    else:
+        monkeypatch.setenv(key_var, "fixture-inherited-secret")
+    state = asyncio.run(api.get_backend_connection("claude"))
+    key_selected = source != "explicit_oauth_env"
+    assert state["auth"] == ("api_key" if key_selected else "unknown")
+    assert state["ready"] is key_selected
+    assert "fixture-" not in json.dumps(state)
+    if key_selected:
+        claude_native_observation.metadata.assert_not_called()
 
 
 @pytest.mark.parametrize("gate", ["backend_disabled", "not_installed", "draining", "permission"])
