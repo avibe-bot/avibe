@@ -582,6 +582,66 @@ class EngineStateStore:
                 raise EngineStateError("credential is unavailable")
             return payload
 
+    def has_current_source_credential(
+        self,
+        credential_ref: str,
+        *,
+        source_id: str,
+        kind: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> bool:
+        """Observe a Source's current credential binding without repair or secrets.
+
+        Unlike credential_metadata(), this read never creates directories or
+        fixes permissions. It proves local ownership/existence, not upstream
+        authentication, refreshability, or model entitlement. OAuth auth files
+        remain entirely engine-owned and are not opened by this observation.
+        """
+        try:
+            if not isinstance(credential_ref, str) or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+                return False
+            _validated_source_id(source_id)
+            credential_kind = {"api_key": "api_key", "subscription": "oauth"}.get(kind)
+            if credential_kind is None or not isinstance(vendor, str) or protocol not in _PROTOCOLS:
+                return False
+            normalized_vendor = vendor.strip().lower()
+            normalized_base_url = _validated_base_url(base_url)
+            _validate_source_target(
+                normalized_vendor, protocol, normalized_base_url, credential_kind=credential_kind,
+            )
+            credentials_dir = self.root / "credentials"
+            for directory in (self.root, credentials_dir):
+                mode = directory.lstat().st_mode
+                if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
+                    return False
+            payload = json.loads(self._read_private_bytes(
+                credentials_dir / f"{credential_ref}.json",
+                "credential path is unsafe",
+            ))
+            if not isinstance(payload, dict) or (
+                payload.get("kind") != credential_kind or payload.get("vendor") != normalized_vendor
+            ):
+                return False
+            if credential_kind == "api_key":
+                return (
+                    payload.get("protocol") == protocol
+                    and payload.get("base_url") == normalized_base_url
+                    and isinstance(payload.get("value"), str)
+                    and bool(payload["value"].strip())
+                )
+            auth_name = payload.get("auth_name")
+            return (
+                normalized_base_url is None
+                and payload.get("source_id") == source_id
+                and payload.get("activation_state") in {None, "active"}
+                and isinstance(auth_name, str)
+                and bool(_validated_oauth_auth_name(auth_name))
+            )
+        except (OSError, ValueError, TypeError, EngineStateError):
+            return False
+
     def validate_api_key_target(
         self,
         credential_ref: str,

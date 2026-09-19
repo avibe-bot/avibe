@@ -10738,8 +10738,56 @@ def _codex_process_status(resolved_binary: str | None) -> str:
     return "running" if _codex_processes(resolved_binary) else "stopped"
 
 
+def _hub_backend_connection_auth(config: V2Config, backend: str) -> str:
+    """Observe only configured supply owners; never resolve or invoke a model."""
+    from core.handlers.model_hub.resolver import (
+        source_after_cooldown_recovery,
+        source_eligible_for_backend,
+        source_runnable,
+    )
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    hub = config.model_hub
+    if not hub.enabled:
+        return "none"
+    source_ids = list(dict.fromkeys([
+        *hub.effective_source_order(backend),
+        *(hop.source_id for route in hub.agents[backend].routes.values() for hop in route.hops),
+    ]))
+    by_id = {source.id: source for source in hub.sources}
+    now = datetime.now(timezone.utc)
+    credentials = EngineStateStore(paths.get_runtime_dir() / "model-hub" / "state")
+    for source_id in source_ids:
+        source = by_id.get(source_id)
+        if source is None or not source_eligible_for_backend(source, backend) or not source_runnable(source, now=now):
+            continue
+        if source.supply_channel == "hub":
+            if credentials.has_current_source_credential(
+                source.credential_ref,
+                source_id=source.id,
+                kind=source.kind,
+                vendor=source.vendor,
+                protocol=source.protocol,
+                base_url=source.base_url,
+            ):
+                return "api_key" if source.kind == "api_key" else "subscription"
+        elif source.supply_channel == "native_cli" and source.kind == "subscription":
+            from modules.agents.model_hub import ModelHubRuntimeRouter
+
+            # The retained Source is the explicit subscription owner. Reuse
+            # its launch checks, including native key/endpoint conflicts;
+            # an arbitrary dormant native login cannot supply another Source.
+            recovered = source_after_cooldown_recovery(source, now)
+            if ModelHubRuntimeRouter._default_native_cli_ready(
+                backend, verified_oauth=backend == "codex" and recovered.state.status == "active",
+            ):
+                return "subscription"
+    return "none"
+
+
 async def get_backend_connection(name: str) -> dict:
-    """Observe native launch auth and controller application, without a model call."""
+    """Observe persisted credential custody and application, without a model call."""
+    from core.backend_restart import pending_native_backends
     from vibe import internal_client, runtime
 
     if not is_agent_backend(name):
@@ -10747,9 +10795,11 @@ async def get_backend_connection(name: str) -> dict:
     config = await asyncio.to_thread(load_config)
     backend_config = getattr(config.agents, name)
     enabled = bool(backend_config.enabled)
+    supply_mode = config.model_hub.agents[name].mode
     installed = await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
     result = {
         "ok": True, "backend": name, "installed": installed, "enabled": enabled,
+        "supply_mode": supply_mode,
         "auth": "unknown", "application": "unknown", "ready": False,
         "entry_eligible": False,
     }
@@ -10779,10 +10829,14 @@ async def get_backend_connection(name: str) -> dict:
     if receipt and not receipt.get("ok") and result["application"] != "stopped":
         result["application"] = "failed"
         result["message"] = receipt.get("message") or receipt.get("error")
-    if not installed:
+    if not installed or config.load_warnings:
+        return result
+    if name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
     try:
-        if name == "opencode":
+        if supply_mode == "hub":
+            result["auth"] = await asyncio.to_thread(_hub_backend_connection_auth, config, name)
+        elif name == "opencode":
             if not enabled:
                 return result
             # Read the same persisted launch sources as the provider catalog.
@@ -10795,15 +10849,23 @@ async def get_backend_connection(name: str) -> dict:
             modes.update({pid: "api" for pid in key_ids})
             effective = next((mode for mode in modes.values() if mode in {"api", "oauth"}), None)
             result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
-            permission = await asyncio.to_thread(opencode_permission_status)
-            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
         else:
-            auth = await asyncio.to_thread(get_claude_auth if name == "claude" else get_codex_auth)
+            if name == "claude":
+                auth = await asyncio.to_thread(get_claude_auth, probe_cli=False)
+            else:
+                auth = await asyncio.to_thread(get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):
                 return result
             result["auth"] = {"oauth": "subscription", "api_key": "api_key", "none": "none"}.get(auth.get("active_auth_mode"), "unknown")
+        if name == "opencode" and enabled:
+            permission = await asyncio.to_thread(opencode_permission_status)
+            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
     except Exception as exc:
         result["message"] = str(exc)
+        return result
+    # An ownership transition may have started while the observation awaited
+    # IPC or native read-only checks. Do not admit against a pending journal.
+    if name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
     credential_ready = enabled and result["auth"] in {"subscription", "api_key"} and not result.get("permission_required")
     result["ready"] = credential_ready and result["application"] == "applied"
@@ -11961,7 +12023,7 @@ def save_codex_auth(payload: dict) -> dict:
     return state
 
 
-def get_claude_auth() -> dict:
+def get_claude_auth(*, probe_cli: bool = True) -> dict:
     """Return the user-facing Claude auth state for the Settings UI.
 
     Claude differs from Codex in two structural ways:
@@ -12016,11 +12078,13 @@ def get_claude_auth() -> dict:
         )
     except Exception:
         claude_status_env = None
+    # Connection observation must not launch a credential-bearing CLI process.
+    # The Settings auth detail endpoint retains its existing explicit probe.
     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
         configured_cli_path if isinstance(configured_cli_path, str) else None,
         env=claude_status_env,
         cwd=status_probe_cwd,
-    )
+    ) if probe_cli else None
     oauth_signed_in = (
         cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in
     )
