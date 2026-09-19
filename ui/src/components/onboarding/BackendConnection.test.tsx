@@ -561,6 +561,121 @@ describe('shared Settings and onboarding connection owner', () => {
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
     await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
   });
+  // Saving is the other half of keeping the two drafts apart. A receipt settles
+  // ONE submission, so it may only spend the draft that submission actually sent:
+  // the type that was not saved still holds work nobody has stored anywhere, and
+  // clearing it is the same loss as typing it into the wrong field.
+  const settingsCredential = async (label: string) => {
+    const group = await interactiveRadios(en.settings.backends.claudeCredentialTypeLabel);
+    fireEvent.click(within(group).getByRole('radio', { name: label }));
+  };
+  const API_KEY = en.settings.backends.claudeCredentialTypeApiKey;
+  const AUTH_TOKEN = en.settings.backends.claudeCredentialTypeAuthToken;
+  const draftValue = (label: string) => (screen.getByLabelText(label, { exact: true }) as HTMLInputElement).value;
+  it('a Settings save spends only the credential it sent, in both directions', async () => {
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    // The stored credential is an API key, so that side opens on its mask.
+    fireEvent.click(await screen.findByRole('button', { name: en.settings.backends.replaceApiKey }));
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-半成品' } });
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    // What was sent is spent; what was not sent is still exactly where it was left.
+    expect(draftValue(AUTH_TOKEN)).toBe('');
+    await settingsCredential(API_KEY);
+    expect(draftValue(API_KEY)).toBe('sk-ant-半成品');
+
+    // And the same in the other direction, with fresh work waiting on the token side.
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌-改' } });
+    await settingsCredential(API_KEY);
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenLastCalledWith({ auth_mode: 'api_key', credential_type: 'api_key', api_key: 'sk-ant-半成品', base_url: 'https://old.example' }));
+    // Spending the API key draft returns that side to the stored mask...
+    await screen.findByRole('button', { name: en.settings.backends.replaceApiKey });
+    // ...and leaves the token nobody saved untouched.
+    await settingsCredential(AUTH_TOKEN);
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+  });
+  // A confirmation can arrive long after the write: through Refresh, and with the
+  // person now looking at the other credential. What it settles is the submission,
+  // so the type on screen at that moment decides nothing.
+  it('a deferred confirmation spends the credential that was submitted, not the one on screen', async () => {
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
+    // The write landed but the runtime has not confirmed it, so nothing is spent yet.
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+    expect(saved).not.toHaveBeenCalled();
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌');
+
+    // Meanwhile the other side is filled in, and left on screen.
+    await settingsCredential(API_KEY);
+    fireEvent.click(screen.getByRole('button', { name: en.settings.backends.replaceApiKey }));
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-半成品' } });
+
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    // The API key on screen was never submitted, so the receipt has no claim on it.
+    expect(draftValue(API_KEY)).toBe('sk-ant-半成品');
+    await settingsCredential(AUTH_TOKEN);
+    expect(draftValue(AUTH_TOKEN)).toBe('');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // The narrower version of the same rule: the submitted type is right, but the
+  // value is not the one that was sent any more. A receipt settles the write it
+  // belongs to, and a replacement typed since is a newer intention than that write.
+  it('a newer edit outlives the receipt for the write it replaced', async () => {
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌-改' } });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+  });
+  // Signing in settles the account. It sends no credential at all, so there is
+  // nothing for its receipt to spend — including the key someone was part-way
+  // through typing when they decided to try the subscription instead.
+  it('an OAuth confirmation spends neither credential draft', async () => {
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'api_key' });
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" compact initialMethod="api_key" onConnected={saved} />));
+    fireEvent.click(await screen.findByRole('button', { name: en.settings.backends.replaceApiKey }));
+    fireEvent.change(screen.getByLabelText('API Key', { exact: true }), { target: { value: 'sk-ant-半成品' } });
+    const credentials = await interactiveRadios(en.onboarding.connection.credentialType);
+    fireEvent.click(within(credentials).getByRole('radio', { name: 'Auth Token' }));
+    fireEvent.change(screen.getByLabelText('Auth Token', { exact: true }), { target: { value: '中转令牌' } });
+
+    const method = await interactiveRadios(en.onboarding.connection.method);
+    fireEvent.click(within(method).getByRole('radio', { name: en.onboarding.connection.claudeLogin }));
+    mock.api.startOAuthWeb.mockResolvedValue({ ok: true, flow_id: 'draft-safe', state: 'success' });
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'oauth' });
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.claudeSignIn }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+
+    fireEvent.click(within(await interactiveRadios(en.onboarding.connection.method)).getByRole('radio', { name: en.onboarding.connection.claudeCredentials }));
+    expect(draftValue('Auth Token')).toBe('中转令牌');
+    fireEvent.click(within(await interactiveRadios(en.onboarding.connection.credentialType)).getByRole('radio', { name: 'API Key' }));
+    expect(draftValue('API Key')).toBe('sk-ant-半成品');
+    expect(mock.api.saveClaudeAuth).not.toHaveBeenCalled();
+  });
   it('Codex saves through its native owner and refuses uncertain keychain readback', async () => {
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ auth_mode_uncertain: true }));
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', ok: true, application: 'applied', ready: false, entry_eligible: false, auth: 'unknown' }));

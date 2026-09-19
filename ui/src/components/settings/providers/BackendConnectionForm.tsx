@@ -32,10 +32,26 @@ export type ConnectionHeading = { method: Method; active: boolean; credential: C
  * safe.
  */
 type Draft = { value: string; editing: boolean };
+const CREDENTIALS: readonly Credential[] = ['api_key', 'auth_token'];
 const EMPTY_DRAFTS: Readonly<Record<Credential, Draft>> = {
   api_key: { value: '', editing: false },
   auth_token: { value: '', editing: false },
 };
+/** Typed, or asked to replace what is stored — either way, something is on screen to lose. */
+const unsaved = (draft: Draft) => draft.value !== '' || draft.editing;
+
+/**
+ * What a confirmation is allowed to spend.
+ *
+ * A receipt settles one submission, so the only draft it may consume is the one
+ * that submission actually sent: signing in sends no credential at all, and a
+ * save sends exactly one type's value. Carrying the value as well as the type is
+ * what makes a late receipt safe — a draft retyped since the write went out is
+ * no longer the one that was sent, so it outlives its own submission's receipt
+ * rather than being erased by it. A deferred confirmation therefore settles what
+ * was submitted rather than whatever type happens to be on screen when it lands.
+ */
+type Submission = { method: Method; sent: { credential: Credential; value: string } | null };
 
 /** Settings and onboarding share persistence, validation, effective readback and cancellation. */
 export function BackendConnectionForm({ backend, provider, initialMethod = 'oauth', compact = false,
@@ -78,7 +94,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     draftTouched.current = true;
     setDrafts((current) => ({ ...current, [credential]: { ...current[credential], ...patch } }));
   }, [credential]);
-  const pendingConfirmation = useRef<Method | null>(null);
+  const pendingConfirmation = useRef<Submission | null>(null);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
   const lifetime = useRef({ mounted: true, busy: false });
   const onConnectedRef = useRef(onConnected); onConnectedRef.current = onConnected;
@@ -160,19 +176,36 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     return () => { observation.current += 1; };
   }, [connectionRevision, observe]);
 
-  const confirm = async (expectedMethod: Method = method, receiptError = '') => {
-    pendingConfirmation.current = expectedMethod;
-    if (!await observe({ expectedMethod, receiptError })) return false;
+  // Spend one submission's draft, and only that one. Written as an update rather
+  // than from the render's own `drafts` because the gap this closes is exactly the
+  // one where a receipt arrives after the field moved on.
+  const consume = (sent: Submission['sent']) => {
+    if (!sent) return;
+    setDrafts((current) => {
+      if (current[sent.credential].value !== sent.value) return current;
+      const next = { ...current, [sent.credential]: EMPTY_DRAFTS[sent.credential] };
+      // The form may follow the server again only once nothing unsaved is left to
+      // lose: reseeding the type, method and URL while a sibling draft is still on
+      // screen would move the person off the very work that survived. Derived from
+      // `next` alone, so a repeated update cannot drift.
+      draftTouched.current = CREDENTIALS.some((type) => unsaved(next[type]));
+      return next;
+    });
+  };
+  const confirm = async (submission: Submission, receiptError = '') => {
+    pendingConfirmation.current = submission;
+    if (!await observe({ expectedMethod: submission.method, receiptError })) return false;
     pendingConfirmation.current = null;
-    setDrafts(EMPTY_DRAFTS); draftTouched.current = false;
+    consume(submission.sent);
     await onConnectedRef.current?.();
     return true;
   };
+  // Signing in settles the account, not the key someone was part-way through typing.
   const confirmOAuth = async () => {
-    if (!await confirm('oauth')) throw new Error(t('onboarding.connection.applyPending'));
+    if (!await confirm({ method: 'oauth', sent: null })) throw new Error(t('onboarding.connection.applyPending'));
   };
   const observeOAuthFailure = async (receiptError: string) => {
-    pendingConfirmation.current = 'oauth';
+    pendingConfirmation.current = { method: 'oauth', sent: null };
     await observe({ receiptError });
   };
   const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirmOAuth,
@@ -209,6 +242,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const save = async () => {
     if (!canSave || lifetime.current.busy) return;
     lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
+    // Which draft this write spends, decided here rather than when the receipt lands:
+    // by then the visible type may be the other one, and the value may be a newer edit.
+    const submitted: Submission = { method: 'api_key', sent: { credential, value: key } };
     try {
       const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
       const result = backend === 'claude' ? await api.saveClaudeAuth({ ...payload, credential_type: credential })
@@ -218,10 +254,10 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.saveFailed'));
       if ('notices' in result) surfaceBackendNotices(result.notices, showToast, t);
       if ('partial' in result && result.partial) showToast(result.detail || result.warning || t('onboarding.connection.partial'), 'warning');
-      await confirm('api_key', result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '');
+      await confirm(submitted, result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '');
     } catch (err) {
       if (lifetime.current.mounted) {
-        pendingConfirmation.current = 'api_key';
+        pendingConfirmation.current = submitted;
         await observe({ receiptError: errorMessage(err) || t('onboarding.connection.saveFailed') });
       }
     }
