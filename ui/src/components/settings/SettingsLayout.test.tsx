@@ -329,6 +329,28 @@ describe('SettingsLayout', () => {
     expect(screen.getByTestId('account-menu').getAttribute('data-open-upward')).toBe('true');
   });
 
+  it('updates the retained rail when instance-management permission changes', async () => {
+    const surface = () => (
+      <MemoryRouter initialEntries={['/settings/general']}>
+        <Routes>
+          <Route path="/settings" element={<SettingsLayoutHarness />}>
+            <Route path="general" element={<div>general-body</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+    const view = render(surface());
+    expect(await screen.findByRole('link', { name: 'settings.sections.backends' })).toBeTruthy();
+    authorization.capabilities.can_manage_instance = false;
+    view.rerender(surface());
+    expect(screen.queryByRole('link', { name: 'settings.sections.backends' })).toBeNull();
+    expect(screen.getByText('general-body')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
+    authorization.capabilities.can_manage_instance = true;
+    view.rerender(surface());
+    expect(await screen.findByRole('link', { name: 'settings.sections.backends' })).toBeTruthy();
+  });
+
   it('keeps member preferences, Replies, and Access while preserving the phase-2 permission gate', () => {
     authorization.capabilities.can_manage_instance = false;
     renderLayout('/settings/replies');
