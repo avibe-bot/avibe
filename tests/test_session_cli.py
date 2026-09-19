@@ -459,6 +459,38 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
     assert page2["pagination"]["has_more"] is False
 
 
+def test_queue_list_reports_server_owned_explicit_retry_hold(monkeypatch, tmp_path, capsys):
+    from core.session_turns import SessionTurnManager
+    from tests.test_session_delivery_fsm import _Controller
+
+    engine = _setup(monkeypatch, tmp_path)
+    scope_id = _seed(engine, "sesaaa")
+    manager = SessionTurnManager(_Controller())
+    manager._engine = engine
+    with engine.begin() as conn:
+        payload = message_deliveries.enqueue_queued(
+            conn, scope_id=scope_id, session_id="sesaaa", text="保留附件",
+            metadata={"requires_explicit_retry": True, "retry_reason": "caller spoof"},
+        )
+    _, before = _run(cli.cmd_session_queue_list, ["session", "queue", "list", "sesaaa"], capsys)
+    assert before["queued"][0]["requires_explicit_retry"] is False
+    assert before["queued"][0]["retry_reason"] is None
+    for _ in range(3):
+        turn_id = message_deliveries.new_turn_id()
+        with engine.begin() as conn:
+            delivery = message_deliveries.get_delivery(conn, payload["id"])
+            message_deliveries.claim_start_batch(
+                conn, turn_id=turn_id, session_id="sesaaa", backend="claude",
+                deliveries=[delivery], dispatch_text="保留附件",
+            )
+        manager._settle_durable_prewrite_failure(turn_id, outcome="no_terminal_result")
+    code, result = _run(cli.cmd_session_queue_list, ["session", "queue", "list", "sesaaa"], capsys)
+    assert code == 0
+    assert result["queued"][0]["id"] == payload["id"]
+    assert result["queued"][0]["requires_explicit_retry"] is True
+    assert result["queued"][0]["retry_reason"] == "no_terminal_result"
+
+
 def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
     monkeypatch,
     tmp_path,

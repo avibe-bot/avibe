@@ -21,14 +21,19 @@ const state = (status: SourceStatus, over: Partial<SourceState> = {}): SourceSta
 });
 
 describe('sourceStatePresentation', () => {
-  it.each(['card', 'detail'] as const)('keeps unverified %s sources distinct from adopted healthy sources', (surface) => {
+  it.each(['card', 'detail'] as const)('presents saved %s sources neutrally while preserving real errors', (surface) => {
     for (const status of SOURCE_STATUSES) {
       const current = state(status);
       const adoption = { known: true, backends: ['Codex'], native: false };
       const presentation = sourceStatePresentation(current, surface, 'en', 0, { ...adoption, verificationPending: true });
       if (status === 'active' || status === 'standby') {
-        expect(presentation.key).toBe('settings.models.sourceDetail.status.unverified');
-        expect(presentation.dotClass).toBe('bg-gold');
+        expect(presentation.key).toBe('settings.models.sourceDetail.status.saved');
+        expect(presentation.textClass).toBe('text-muted');
+        expect(presentation.dotClass).toBe('bg-muted');
+        expect(presentation.hint).toEqual({
+          labelKey: 'settings.models.sourceDetail.status.savedHintLabel',
+          bodyKey: 'settings.models.sourceDetail.status.savedHint',
+        });
       } else {
         expect(presentation).toEqual(sourceStatePresentation(current, surface, 'en', 0, adoption));
       }

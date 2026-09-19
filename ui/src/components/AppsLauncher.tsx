@@ -116,7 +116,7 @@ export const AppsLauncher: React.FC = () => {
   const launcher = (
     <div
       ref={launcherRef}
-      className="fixed z-30 hidden md:block"
+      className="fixed z-40 hidden md:block"
       style={{ left: placement.left, bottom: placement.bottom, width: placement.width }}
       data-show-page-dock-drop-target
       onMouseEnter={openHover}
@@ -206,7 +206,8 @@ export const AppsLauncher: React.FC = () => {
   return (
     <>
       {/* Keep the sidebar's layout slot, but let this single launcher and its Dock escape the
-          sidebar stacking context. z-30 is above all app windows (z-20), below dialogs (z-50). */}
+          sidebar stacking context. z-40 clears app windows (z-20) and route panels (z-30);
+          floating details and modal dialogs keep their own foreground layer (z-50). */}
       <div ref={slotRef} className="flex-1" style={{ height: placement.height }} />
       {createPortal(launcher, document.body)}
     </>

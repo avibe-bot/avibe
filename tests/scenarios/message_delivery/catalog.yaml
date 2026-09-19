@@ -14,6 +14,30 @@ status_legend:
   manual: currently validated only by human regression
   gap: not covered yet
 scenarios:
+  - id: MESSAGE-DELIVERY-031
+    name: Bounded prewrite retry retains FIFO input across restart until explicit recovery
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_prewrite_retry_budget_survives_restart_and_preserves_original_input
+  - id: MESSAGE-DELIVERY-032
+    name: Oversized Codex stdout frames preserve a non-reconnectable failure cause
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_codex_transport.py::CodexTransportHealthTests::test_oversized_stdout_fails_all_pending_requests_with_typed_cause
+  - id: MESSAGE-DELIVERY-033
+    name: Failure recovery cannot replace a Codex process owned by a live neighbour
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_codex_agent.py::CodexAgentHandleMessageTests::test_failure_replacement_respects_live_durable_and_unknown_ownership
+  - id: MESSAGE-DELIVERY-034
+    name: Excluded Codex resume responses preserve stored history and next-turn model context
+    status: partial
+    kind: regression
+    layer: contract
+    test: tests/test_codex_prompt_delivery_contract.py::test_excluded_resume_preserves_native_history_and_model_settings
   - id: MESSAGE-DELIVERY-001
     name: Scheduled result finalizes its delivery anchor
     status: covered

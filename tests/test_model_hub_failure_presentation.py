@@ -1,5 +1,6 @@
 """User-visible failure copy consumes exact Hub facts, not native error text."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -157,7 +158,11 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
         async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=5)) as client:
             async with client.post(
                 f"{launch.gateway_base_url}/v1/{endpoint}",
-                headers={"Authorization": f"Bearer {launch.gateway_token}"},
+                headers={
+                    "Authorization": f"Bearer {launch.gateway_token}",
+                    **({"x-codex-turn-metadata": json.dumps(launch.gateway_request_metadata)}
+                       if launch.gateway_request_metadata else {}),
+                },
                 json={"model": launch.runtime_model, "stream": False},
             ) as response:
                 assert response.status == status

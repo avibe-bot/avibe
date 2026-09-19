@@ -8016,6 +8016,8 @@ def _session_queue_row(row: dict, *, position: int) -> dict:
         "author": row.get("author"),
         "source": row.get("source"),
         "run_id": _queued_agent_run_id(row),
+        "requires_explicit_retry": row.get("requires_explicit_retry") is True,
+        "retry_reason": row.get("retry_reason"),
     }
 
 
