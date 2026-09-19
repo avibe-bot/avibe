@@ -111,6 +111,53 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
    Native is one configured hop inside Gateway mode.
 
+### Takeover producer/consumer closure
+
+Source identity reuse retains the current credential proof and Source/ref/state.
+If the consenting backend references that Source in neither its default order nor
+an explicit Route, append it only to that backend's defaults before withdrawal.
+Do not rewrite existing Routes or other backends' orders. This also applies when
+an existing native subscription Source changes custody in place.
+
+OpenCode candidates sharing vendor, protocol, normalized target and credential
+are one logical import even when several native config layers reference them.
+Union their manual model IDs (later layer labels win for a repeated ID), and bind
+the consent identity to every contributing candidate. Distinct credentials or
+targets and all blockers remain separate. Physical cleanup still inventories and
+journals every supported config/auth path; logical deduplication cannot remove
+file compare guards or unrelated settings.
+
+Persisted native authentication and live launch configuration must converge
+before custody can complete or native admission can reopen. The internal,
+synchronous seam is:
+
+- `ModelHubService._reconcile_native_auth(backends: tuple[str, ...]) -> None`
+  reads the store's current `native_auth_snapshot`, not a guessed Hub-mode
+  projection, and supplies it to optional `migration_reconcile_auth`.
+- The Controller binds that callback to
+  `BackendRestartCoordinator.reconcile_migration_auth(snapshot) -> None`.
+  It is valid only inside that coordinator's existing migration guard with
+  request locks, native lease and both admission gates still owned.
+- The coordinator calls
+  `AgentAuthService.reconcile_native_auth_snapshot(snapshot) -> None`.
+  Only the existing native-auth fields are mirrored to live compatibility/raw
+  config consumers: Controller, handlers, agents, Claude control client and
+  Codex config aliases. Update existing objects/fields so shared aliases stay
+  coherent; do not register agents, call native auth or HTTP, launch processes,
+  release turns, restart services, or change unrelated runtime configuration.
+- After a successful V2 takeover save, mirror before the first possible
+  exposure. On exposed recovery mirror even when the Hub payload is unchanged.
+  Success and terminal completion mirror before writing a completed receipt;
+  reversal mirrors the restored persistent direction before forgetting its
+  journal. A mirror failure retains a recoverable pending transaction and closed
+  admission. Exposure remains forward-only; a pre-exposure failure may use the
+  existing reversal path. Empty-only/native-retained state is not blindly cleared.
+
+Standalone fixture services may omit the callback because they have no live
+Controller cache. Production cannot acquire the migration guard without its
+Controller owner. This is a memory-consumer correction inside the existing
+lifecycle, not another journal, marker, lock, phase or public API field.
+
 ## Authority and mirror guard
 
 `mirror-registry.json` is the executable index for closed vocabularies and decision
