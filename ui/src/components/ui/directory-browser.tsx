@@ -1,5 +1,5 @@
 import type { TranslationKey } from '@/i18n/types';
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useLayoutEffect, useRef } from 'react';
 import {
   Check,
   ChevronLeft,
@@ -26,6 +26,7 @@ import { useApi } from '../../context/ApiContext';
 import { Button } from './button';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { errorMessage } from '@/lib/errorMessage';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 
 interface DirectoryBrowserProps {
   /** Initial path to show when opening */
@@ -82,6 +83,9 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const surfaceActive = useRouteSurfaceActive();
+  const foreground = useRef(surfaceActive);
+  useLayoutEffect(() => { foreground.current = surfaceActive; }, [surfaceActive]);
 
   const [currentPath, setCurrentPath] = useState('');
   // Resolved user home — captured on the first browse('~') response so the
@@ -126,24 +130,17 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
     };
   }, []);
 
-  // Esc closes the picker, ⌘N opens the new-folder prompt — both familiar
-  // shortcuts from Finder.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n' && !creating) {
-        e.preventDefault();
-        setCreating(true);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [creating, pathEditing, onClose]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (!event.defaultPrevented && (event.metaKey || event.ctrlKey)
+      && event.key.toLowerCase() === 'n' && !creating) {
+      event.preventDefault();
+      setCreating(true);
+    }
+  });
 
   useEffect(() => {
-    if (creating) {
-      newFolderInputRef.current?.focus();
-    }
-  }, [creating]);
+    if (surfaceActive && creating) newFolderInputRef.current?.focus();
+  }, [creating, surfaceActive]);
 
   const fetchPath = useCallback(
     async (path: string, hidden?: boolean) => {
@@ -250,12 +247,15 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
       // of typing from scratch — that's the common case.
       setPathInput(currentPath);
       setPathError(null);
-      pathInputRef.current?.focus();
-      pathInputRef.current?.select();
+      if (foreground.current) {
+        pathInputRef.current?.focus();
+        pathInputRef.current?.select();
+      }
     }
   }, [pathEditing, currentPath]);
 
   const submitManualPath = async () => {
+    if (!foreground.current) return;
     const target = pathInput.trim();
     if (!target) return;
     setPathError(null);
@@ -277,6 +277,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   };
 
   const submitNewFolder = async () => {
+    if (!foreground.current) return;
     const name = newFolderName.trim();
     if (!name) return;
     setCreateError(null);
@@ -327,9 +328,14 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const canBack = historyIndex > 0;
   const canForward = historyIndex < history.length - 1;
 
+  // Keep this owner (including unconfirmed inputs/history) mounted, while
+  // withdrawing the complete modal layer and its focus/pointer/scroll effects.
+  if (!surfaceActive) return null;
+
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open onOpenChange={(open) => { if (!open && foreground.current) onClose(); }}>
       <DialogContent
+        onCloseAutoFocus={(event) => { if (!foreground.current) event.preventDefault(); }}
         aria-describedby={undefined}
         closeLabel={t('directoryBrowser.cancel')}
         onEscapeKeyDown={(event) => {
