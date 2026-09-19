@@ -528,6 +528,49 @@ def test_fixture_home_never_selects_real_keychain(
     assert store.read_native_oauth("codex", home=tmp_path) is None
 
 
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("allow_secret", [False, True])
+@pytest.mark.parametrize("exists", [False, True])
+def test_claude_non_macos_production_selection_uses_file_without_keychain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    allow_secret: bool,
+    exists: bool,
+) -> None:
+    secure_root = tmp_path / "isolated-claude"
+    secure_root.mkdir()
+    path = secure_root / ".credentials.json"
+    payload = _claude_payload()
+    if exists:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(secure_root))
+    monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(
+        store,
+        "_keychain_for",
+        lambda *_: pytest.fail("non-macOS Claude must not probe Keychain"),
+    )
+
+    snapshot = store.read_native_oauth("claude", allow_secret=allow_secret)
+
+    if not exists:
+        assert snapshot is None
+        return
+    assert snapshot is not None and snapshot.exportable
+    assert snapshot.payload == payload
+    if allow_secret:
+        assert snapshot.keychain_edit is not None
+        [operation] = snapshot.keychain_edit["operations"]
+        assert operation["kind"] == "file"
+        assert operation["path"] == str(path)
+        assert json.loads(operation["after"]["raw"]) == {"mcpOAuth": payload["mcpOAuth"]}
+    else:
+        assert snapshot.keychain_edit is None
+    assert json.loads(path.read_text()) == payload
+
+
 def test_secret_keychain_read_denial_is_permission_placeholder(
     tmp_path: Path,
     fake_keychain: FakeKeychain,

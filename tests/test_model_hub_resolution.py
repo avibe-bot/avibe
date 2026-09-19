@@ -1934,14 +1934,13 @@ def test_source_admission_uses_explicit_owners_and_keeps_verified_paths_proven()
     assert "_require_proven_source_payload" in calls(
         service_functions["create_source"]
     )
-    assert "_require_proven_source_payload" in calls(
-        migration_functions["apply_native_migration"]
-    )
+    assert "_prepare_takeover" in calls(migration_functions["apply_native_migration"])
+    assert "_require_proven_source_payload" in calls(migration_functions["_prepare_takeover"])
     oauth_calls = calls(service_functions["_create_oauth_source"])
     assert "_observe_provisioned_credential" in oauth_calls
     assert "_mark_source_unverified" in oauth_calls
     assert "_mark_source_unverified" in calls(service_functions["create_source"])
-    assert "_mark_source_unverified" in calls(migration_functions["apply_native_migration"])
+    assert "_mark_source_unverified" in calls(migration_functions["_prepare_takeover"])
 
 
 def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):

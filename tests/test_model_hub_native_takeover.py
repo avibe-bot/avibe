@@ -25,7 +25,7 @@ def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, 
     home = tmp_path / "native"
     _write_claude_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     store.config.agents["claude"].mode = "direct"
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
     activate = adapter.activate_oauth_credential
@@ -59,7 +59,7 @@ def test_failure_after_possible_rotation_retains_current_owner_and_retries(monke
     home = tmp_path / "native"
     _write_codex_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     store.config.agents["codex"].mode = "direct"
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
     activate = adapter.activate_oauth_credential
@@ -109,7 +109,7 @@ def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
         _write_claude_oauth(home)
         native = home / ".claude/.credentials.json"
     original = native.read_bytes()
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert asyncio.run(service.migration_apply(ids))["applied"] == 1
     current = store.config.to_payload()
@@ -131,7 +131,7 @@ def test_completed_receipt_does_not_authorize_new_unconsented_native_key(monkeyp
     _isolate_native_home(monkeypatch, home)
     native = home / ".config/opencode/opencode.json"
     _write(native, '{"provider":{"openai":{"options":{"apiKey":"fixture-first"}}}}')
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     asyncio.run(service.migration_apply(ids))
     changed = '{"provider":{"openai":{"options":{"apiKey":"fixture-new"}}}}'
@@ -147,7 +147,7 @@ def test_restart_recovers_exposed_handoff_without_native_tokens(monkeypatch, tmp
     home = tmp_path / "native"
     _write_claude_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    first, store, adapter = _service(tmp_path)
+    first, store, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in first.migration_scan()["items"]]
     validate = adapter.validate_oauth_credential
 
@@ -157,7 +157,7 @@ def test_restart_recovers_exposed_handoff_without_native_tokens(monkeypatch, tmp
     adapter.validate_oauth_credential = offline
     with pytest.raises(ModelHubError):
         asyncio.run(first.migration_apply(ids))
-    second, _, _ = _service(tmp_path)
+    second, _, _ = _service(tmp_path, migration_home=home)
     second.store = store
     second.adapter = adapter
     adapter.validate_oauth_credential = validate
@@ -171,7 +171,7 @@ def test_caller_cancellation_does_not_abandon_credential_custody(monkeypatch, tm
     home = tmp_path / "native"
     _write_claude_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in service.migration_scan()["items"]]
 
     async def exercise():
@@ -202,7 +202,7 @@ def test_native_compare_and_swap_does_not_erase_a_concurrent_login(monkeypatch, 
     home = tmp_path / "native"
     _write_claude_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in service.migration_scan()["items"]]
     path = home / ".claude/.credentials.json"
     concurrent = '{"claudeAiOauth":{"accessToken":"different-user","refreshToken":"different-grant"}}'
@@ -245,7 +245,7 @@ def test_invalid_journal_does_not_start_engine_or_admit_native_backends(monkeypa
     home = tmp_path / "native"
     home.mkdir()
     _isolate_native_home(monkeypatch, home)
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     path = service.migration_journal.path
     path.parent.mkdir(parents=True, mode=0o700)
     path.write_text("not-json")
@@ -261,7 +261,7 @@ def test_rejected_refresh_finishes_custody_without_claiming_success(monkeypatch,
     _write_claude_oauth(home)
     _write_codex_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in service.migration_scan()["items"]]
     validate = adapter.validate_oauth_credential
 
@@ -301,7 +301,7 @@ def test_explicit_hub_reauth_can_repair_inconclusive_exposed_takeover(
     home = tmp_path / "native"
     _isolate_native_home(monkeypatch, home)
     _write_codex_oauth(home)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in service.migration_scan()["items"]]
 
     async def inconclusive(ref):
@@ -369,7 +369,7 @@ def test_explicit_reauth_keeps_verified_sibling_usable(monkeypatch, tmp_path):
     _isolate_native_home(monkeypatch, home)
     _write_claude_oauth(home)
     _write_codex_oauth(home)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
 
     async def validate(ref):
@@ -396,7 +396,7 @@ def test_rejected_grant_terminal_decision_recovers_after_crash(monkeypatch, tmp_
     home = tmp_path / "native"
     _write_claude_oauth(home)
     _isolate_native_home(monkeypatch, home)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in service.migration_scan()["items"]]
 
     async def rejected(ref):

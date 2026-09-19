@@ -1450,8 +1450,8 @@ Migration action errors are closed, redacted boundary codes:
   presented as success.
 - `migration_recovery_pending`: custody was exposed but durable cleanup or projection
   is incomplete; the affected backend remains blocked and retry continues recovery.
-- `migration_credentials_invalid`: an explicitly selected grant failed
-  credential-specific refresh/validation. Hub custody is retained, the Source is
+- `migration_credentials_invalid`: an authoritative adapter established refresh
+  grant rejection (the pinned CPA inventory alone cannot). Hub custody is retained, the Source is
   marked `needs_action` with `models.source.needs_action.oauth_expired`, the pending
   transaction is cleared only after durable terminalization, and a retry receipt never
   reports success. An expired access token alone is not this error.

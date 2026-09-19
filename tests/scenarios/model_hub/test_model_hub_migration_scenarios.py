@@ -183,7 +183,9 @@ class MigrationAdapter:
         self.revoked.append(credential_ref)
 
 
-def _service(tmp_path: Path) -> tuple[ModelHubService, MemoryStore, MigrationAdapter]:
+def _service(
+    tmp_path: Path, *, migration_home: Path | None = None,
+) -> tuple[ModelHubService, MemoryStore, MigrationAdapter]:
     store = MemoryStore()
     adapter = MigrationAdapter()
     state = tmp_path / "avibe-state"
@@ -197,7 +199,7 @@ def _service(tmp_path: Path) -> tuple[ModelHubService, MemoryStore, MigrationAda
         events=BoundedEventLog(state / "events.json"),
         oauth_flows=OAuthFlowRegistry(state / "oauth.json"),
         revocations=CredentialRevocationJournal(state / "revocations.json"),
-        migration_home=tmp_path / "native-home",
+        migration_home=migration_home or tmp_path / "native-home",
         migration_guard=lambda backends: nullcontext(verify_fixture_idle),
         now=lambda: datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc),
     )
@@ -686,7 +688,9 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     opencode_config = (
         native_home / ".config" / "opencode" / "opencode.json"
     ).read_text(encoding="utf-8")
-    assert '"apiKey": "{env:OPENROUTER_API_KEY}"' in opencode_config
+    # The unset reference is an auth hook, not an unrelated preference. Its
+    # auth.json fallback was migrated; no direct override should remain.
+    assert "{env:OPENROUTER_API_KEY}" not in opencode_config
     reloaded = _assert_canonical_round_trip(store.config)
     by_id = {source.id: source for source in store.config.sources}
     imported_ids = set(by_id)

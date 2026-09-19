@@ -1548,6 +1548,11 @@ def _read_codex(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot
 def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot | None:
     secure_root, service, account = _claude_locator(home)
     credentials_path = native_credentials_paths("claude", home)[0]
+    # Claude uses the file store off macOS. An unavailable Security framework
+    # there is not a Keychain permission request. Explicit fixture homes may
+    # still exercise a fake macOS store on any test host.
+    if home is None and sys.platform != "darwin":
+        return _read_claude_file(credentials_path, allow_secret=allow_secret)
     store, isolated = _keychain_for(home)
     keychain_snapshot = _read_keychain_snapshot(
         "claude",

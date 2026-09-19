@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+try:
+    import tomllib
+except ImportError:  # Python 3.10 uses the existing conditional dependency.
+    import tomli as tomllib
 
 from vibe.claude_config import get_claude_oauth_settings_backup_path, get_claude_settings_path
 from vibe.codex_config import (

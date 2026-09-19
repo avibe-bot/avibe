@@ -994,7 +994,12 @@ def _validated_source(
         "account_label": item.account_label,
         "masked_credential": masked_credential,
     }
-    return ModelHubSourceConfig.from_payload(payload)
+    try:
+        return ModelHubSourceConfig.from_payload(payload)
+    except ValueError:
+        # Canonical Source validation is the last input boundary before custody.
+        # Invalid native metadata must not escape as an unredacted server error.
+        raise MigrationConflictError from None
 
 
 def _migration_rollback_id(source_id: str, credential_ref: str) -> str:

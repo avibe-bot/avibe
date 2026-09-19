@@ -139,7 +139,7 @@ async def test_real_store_http_takeover_recovers_rotated_grant(monkeypatch, tmp_
     else:
         _write_claude_oauth(home)
         native_path = home / ".claude/.credentials.json"
-    service, config_store, _ = _service(tmp_path)
+    service, config_store, _ = _service(tmp_path, migration_home=home)
     config_store.config.agents[backend].mode = "direct"
     ids = [row["id"] for row in service.migration_scan()["items"]]
     state = EngineStateStore(tmp_path / "engine")
@@ -155,7 +155,7 @@ async def test_real_store_http_takeover_recovers_rotated_grant(monkeypatch, tmp_
         assert json.loads(live_path.read_text())["refresh_token"] == "fixture-current-R1"
 
         # Reopen both persistence layers, discarding process-local adapter state.
-        restarted, _, _ = _service(tmp_path)
+        restarted, _, _ = _service(tmp_path, migration_home=home)
         restarted.store = config_store
         reopened = EngineStateStore(tmp_path / "engine")
         restarted.adapter = real_adapter(reopened, fixture.origin)

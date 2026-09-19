@@ -29,7 +29,7 @@ def test_global_and_project_keys_are_all_imported_and_unrelated_data_survives(mo
             "provider": {"openai": {"options": {"apiKey": key}, "name": "保留"}},
             "mcp": {"notes": {"command": ["fixture"]}},
         }))
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     service.migration_project_roots = lambda: (project,)
     ids = [item["id"] for item in service.migration_scan()["items"]]
     assert len(ids) == 2
@@ -50,7 +50,7 @@ def test_shadowed_opencode_auth_key_is_not_silently_deleted(monkeypatch, tmp_pat
     }))
     auth_path = home / ".local/share/opencode/auth.json"
     _write(auth_path, json.dumps({"openai": {"type": "api", "key": "fixture-auth-key"}}))
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [item["id"] for item in service.migration_scan()["items"]]
     assert len(ids) == 2
     with pytest.raises(ModelHubError):
@@ -81,7 +81,7 @@ def test_keychain_takeover_preserves_mcp_without_offering_it_as_a_new_login(monk
     keychain.items[locator] = (json.dumps(material), "fixture-original")
     path = home / ".claude/.credentials.json"
     _write(path, json.dumps(material))
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert keychain.read_calls == []  # Metadata-only consent.
     assert asyncio.run(service.migration_apply(ids))["applied"] == 1
@@ -116,7 +116,7 @@ def test_unsupported_provider_blocks_only_its_cli_before_any_cleanup(monkeypatch
         "github-copilot": {"type": "oauth", "refresh": "fixture-refresh"},
     }))
     before = path.read_bytes()
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert {row["proposed_action"] for row in rows} == {"import", "reauth"}
     with pytest.raises(ModelHubError):
@@ -130,7 +130,7 @@ def test_project_key_changed_after_consent_refuses_without_import(monkeypatch, t
     _isolate_native_home(monkeypatch, home)
     path = project / ".claude/settings.local.json"
     _write(path, json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-first"}}))
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     service.migration_project_roots = lambda: (project,)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     _write(path, json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-second"}}))
@@ -167,7 +167,7 @@ wire_api = "responses"
         )
 
     monkeypatch.setattr(migration, "read_native_oauth", read)
-    service, store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path, migration_home=home)
     store.config.agents["codex"].mode = "direct"
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert len(ids) == 1
@@ -197,7 +197,7 @@ def test_existing_hub_key_still_clears_legacy_auth_when_hub_config_is_unchanged(
     _write(home / ".claude/settings.json", json.dumps({
         "env": {"ANTHROPIC_API_KEY": "fixture-key"},
     }))
-    service, memory, adapter = _service(tmp_path)
+    service, memory, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     asyncio.run(service.migration_apply(ids))
     config_path = tmp_path / "avibe-config.json"
@@ -256,7 +256,7 @@ def test_interrupted_claude_auth_backup_is_imported_and_cannot_restore_old_key(m
         {"ANTHROPIC_API_KEY": "fixture-recovery-key"},
         home=home,
     )
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert len(rows) == 3
     result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
@@ -287,7 +287,7 @@ def test_explicit_incompatible_native_grant_is_blocked_before_custody(monkeypatc
     payload["claudeAiOauth"].update(metadata)
     path.write_text(json.dumps(payload))
     original = path.read_bytes()
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert len(rows) == 1 and rows[0]["proposed_action"] == "keep_native"
     with pytest.raises(ModelHubError):
@@ -310,7 +310,7 @@ def test_ordinary_native_grant_with_extra_scopes_remains_importable(monkeypatch,
         ],
     })
     path.write_text(json.dumps(payload))
-    service, _, _ = _service(tmp_path)
+    service, _, _ = _service(tmp_path, migration_home=home)
     assert service.migration_scan()["items"][0]["proposed_action"] == "import"
 
 
@@ -327,7 +327,7 @@ wire_api = "responses"
 experimental_bearer_token = "fixture-bearer-key"
 request_max_retries = 3
 ''')
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert len(ids) == 1
     assert asyncio.run(service.migration_apply(ids))["applied"] == 1
@@ -343,7 +343,7 @@ def test_duplicate_apply_joins_owned_operation_and_shutdown_waits(monkeypatch, t
     home = tmp_path / "native"
     _isolate_native_home(monkeypatch, home)
     _write(home / ".claude/settings.json", json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-key"}}))
-    service, _, adapter = _service(tmp_path)
+    service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
 
     async def exercise():
