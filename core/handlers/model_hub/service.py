@@ -6311,6 +6311,7 @@ class ModelHubService:
                     home=self.migration_home,
                     validate_base_url=_validated_base_url,
                     project_roots=self.migration_project_roots(),
+                    clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
                     legacy_auth=(
                         self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
                         if isinstance(self.store, V2ModelHubConfigStore) else None

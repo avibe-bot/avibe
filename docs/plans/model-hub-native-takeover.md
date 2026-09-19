@@ -175,6 +175,8 @@ before starting the existing Hub flow. Keep the engine's current grants;
 never restore native material. The receipt records `reauth_requested`, not
 success or proof of expiration. Recovery replays this decision after a crash
 without another upstream validation or automatically starting a browser flow.
+Per-Source successful validation is persisted in the pending journal, so a
+verified sibling does not require another sign-in because a later Source fails.
 
 Shutdown joins the owned operation before stopping the runtime. Client
 cancellation cannot cancel credential custody. A retry after completion checks
@@ -183,6 +185,10 @@ under the lifecycle guard, not IDs alone. If the exact consented native material
 has reappeared, a new durable cleanup retains the current Hub credentials;
 replaying an old receipt never republishes a stale OAuth snapshot. Changed or
 additional native credentials require fresh consent.
+Completed receipts also retain metadata-only revisions of verified clean
+native stores containing unrelated material. Scans suppress only those exact
+placeholders; a changed revision becomes a candidate again. This avoids reading
+Keychain secrets on every scan or presenting preserved MCP data as a new login.
 
 ## Writer-boundary review decision
 

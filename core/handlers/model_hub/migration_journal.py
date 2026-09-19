@@ -166,6 +166,12 @@ class NativeTakeoverJournal:
                 or item.get("backend") not in payload["backends"]
                 for item in payload["items"]
             )
+            or not isinstance(payload.get("clean_native_stores", {}), dict)
+            or any(
+                backend not in {"claude", "codex"}
+                or not isinstance(revision, str) or not revision
+                for backend, revision in payload.get("clean_native_stores", {}).items()
+            )
         ):
             raise TakeoverStateError("invalid takeover journal")
         if payload["phase"] != "complete":
@@ -192,6 +198,17 @@ class NativeTakeoverJournal:
             edits = [NativeFileEdit.from_payload(value) for value in payload["files"]]
             if len({edit.path for edit in edits}) != len(edits):
                 raise TakeoverStateError("duplicate takeover path")
+            validated = payload.get("validated_source_ids", [])
+            oauth_ids = {
+                credential["source_id"] for credential in payload["credentials"]
+                if credential["kind"] == "oauth"
+            }
+            if (
+                not isinstance(validated, list)
+                or any(not isinstance(value, str) or value not in oauth_ids for value in validated)
+                or len(set(validated)) != len(validated)
+            ):
+                raise TakeoverStateError("invalid takeover validation evidence")
             for edit in payload.get("keychain", []):
                 if (
                     not isinstance(edit, dict)
@@ -263,6 +280,12 @@ class NativeTakeoverJournal:
 
     def complete(self, record: dict[str, Any]) -> None:
         receipt = NativeTakeoverJournal(self.path.with_name("last-completed.json"))
+        clean_stores = {
+            backend: revision
+            for backend, revision in (receipt.load() or {}).get("clean_native_stores", {}).items()
+            if backend not in record["backends"]
+        }
+        clean_stores.update(record.get("clean_native_stores", {}))
         receipt.save({
             "version": 1,
             "phase": "complete",
@@ -279,6 +302,7 @@ class NativeTakeoverJournal:
                 for source in record["updated"]["sources"]
                 if source["id"] in record["source_ids"]
             },
+            "clean_native_stores": clean_stores,
         })
         self.forget()
 

@@ -362,6 +362,35 @@ def test_explicit_hub_reauth_can_repair_inconclusive_exposed_takeover(
     assert replay.value.code != "migration_credentials_invalid"
 
 
+def test_explicit_reauth_keeps_verified_sibling_usable(monkeypatch, tmp_path):
+    from core.handlers.model_hub.migration import prepare_takeover_reauthentication
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_claude_oauth(home)
+    _write_codex_oauth(home)
+    service, store, adapter = _service(tmp_path)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+
+    async def validate(ref):
+        source = next(source for source in store.config.sources if source.credential_ref == ref)
+        adapter.validated.append(ref)
+        if source.vendor == "openai":
+            raise RuntimeError("fixture inconclusive validation")
+
+    adapter.validate_oauth_credential = validate
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    claude = next(source for source in store.config.sources if source.vendor == "anthropic")
+    codex = next(source for source in store.config.sources if source.vendor == "openai")
+    assert service.migration_journal.load()["validated_source_ids"] == [claude.id]
+    asyncio.run(prepare_takeover_reauthentication(service, codex.id))
+    assert store.config.sources[0].state.status == claude.state.status == "standby"
+    assert next(source for source in store.config.sources if source.id == codex.id).state.status == "needs_action"
+    assert len(adapter.validated) == 2
+    assert adapter.revoked == []
+
+
 @pytest.mark.parametrize("boundary", ["terminal_config", "receipt"])
 def test_rejected_grant_terminal_decision_recovers_after_crash(monkeypatch, tmp_path, boundary):
     home = tmp_path / "native"

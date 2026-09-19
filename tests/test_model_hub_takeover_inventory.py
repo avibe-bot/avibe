@@ -61,6 +61,52 @@ def test_shadowed_opencode_auth_key_is_not_silently_deleted(monkeypatch, tmp_pat
     assert json.loads(auth_path.read_text()) == {}
 
 
+def test_keychain_takeover_preserves_mcp_without_offering_it_as_a_new_login(monkeypatch, tmp_path):
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    monkeypatch.setenv("USER", "fixture-user")
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    locator = ("Claude Code-credentials", "fixture-user")
+    material = {
+        "claudeAiOauth": {
+            "accessToken": "fixture-access", "refreshToken": "fixture-refresh",
+            "expiresAt": 1893456000000,
+        },
+        "mcpOAuth": {"provider": "preserved"},
+    }
+    keychain.items[locator] = (json.dumps(material), "fixture-original")
+    path = home / ".claude/.credentials.json"
+    _write(path, json.dumps(material))
+    service, _, adapter = _service(tmp_path)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert keychain.read_calls == []  # Metadata-only consent.
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert len(adapter.oauth_provisioned) == 1
+    assert json.loads(path.read_text()) == {"mcpOAuth": {"provider": "preserved"}}
+    assert json.loads(keychain.items[locator][0]) == {"mcpOAuth": {"provider": "preserved"}}
+    reads_after_takeover = len(keychain.read_calls)
+    assert service.migration_scan()["items"] == []
+    assert len(keychain.read_calls) == reads_after_takeover
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    # A subsequent backend migration must not forget the verified clean store.
+    _write(home / ".config/opencode/opencode.json", json.dumps({
+        "provider": {"openai": {"options": {"apiKey": "fixture-other-key"}}},
+    }))
+    next_ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert asyncio.run(service.migration_apply(next_ids))["applied"] == 1
+    assert service.migration_scan()["items"] == []
+    assert len(keychain.read_calls) == reads_after_takeover
+    # A changed metadata revision is never suppressed by that receipt.
+    keychain.items[locator] = (json.dumps(material), "fixture-new-login")
+    keychain.mdates[locator] += 1
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["claude"]
+    assert len(keychain.read_calls) == reads_after_takeover
+
+
 def test_unsupported_provider_blocks_only_its_cli_before_any_cleanup(monkeypatch, tmp_path):
     home = tmp_path / "native"
     _isolate_native_home(monkeypatch, home)

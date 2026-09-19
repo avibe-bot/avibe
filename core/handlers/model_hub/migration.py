@@ -839,6 +839,7 @@ def scan_native_configs(
     legacy_auth: Mapping[str, Mapping[str, object]] | None = None,
     secret_backends: tuple[str, ...] = (),
     project_roots: tuple[Path, ...] = (),
+    clean_native_stores: Mapping[str, str] | None = None,
 ) -> list[NativeMigrationItem]:
     """Read native stores without modifying or deleting any path."""
 
@@ -912,6 +913,14 @@ def scan_native_configs(
     }
     candidates: list[NativeMigrationItem] = []
     for item in items:
+        if (
+            item.native_store_placeholder
+            and (clean_native_stores or {}).get(item.backend) == item.native_store_revision
+        ):
+            # A completed cleanup verified this exact metadata revision holds
+            # only unrelated native data (e.g. MCP OAuth). Do not read it again
+            # merely to rediscover the absence of subscription credentials.
+            continue
         native_source = existing_native_sources.get(item.vendor)
         if item.kind == "oauth_native" and native_source is not None:
             candidates.append(replace(
@@ -1240,8 +1249,16 @@ async def _resume_takeover(
         if record.get("keychain"):
             from vibe.native_oauth_store import check_keychain_edit
 
+            record["clean_native_stores"] = {}
             for edit in record["keychain"]:
+                snapshot = await asyncio.to_thread(
+                    read_native_oauth, edit["backend"], home=host.migration_home,
+                )
+                # Bind the public metadata revision to the verified private
+                # post-state. A detected intervening login prevents completion.
                 await asyncio.to_thread(check_keychain_edit, edit, applied=True)
+                if snapshot and (snapshot.payload or {}).get("status") == "metadata_only":
+                    record["clean_native_stores"][edit["backend"]] = snapshot.revision
         await verify_idle()
         if terminal:
             return _finish_rejected_takeover(host, record)
@@ -1257,6 +1274,8 @@ async def _resume_takeover(
         invalid_source_ids = []
         for credential in record["credentials"]:
             if credential["kind"] == "oauth":
+                if credential["source_id"] in record.get("validated_source_ids", []):
+                    continue
                 async def validate(ref: str) -> bool:
                     try:
                         await host.adapter.validate_oauth_credential(ref)
@@ -1266,6 +1285,9 @@ async def _resume_takeover(
 
                 if not await host._engine_call(validate(credential["credential_ref"])):
                     invalid_source_ids.append(credential["source_id"])
+                else:
+                    record.setdefault("validated_source_ids", []).append(credential["source_id"])
+                    host.migration_journal.save(record)
         if invalid_source_ids:
             terminal_config = host._clone_config(updated)
             for source in terminal_config.sources:
@@ -1338,6 +1360,7 @@ async def apply_native_migration(
                                 validate_base_url=validate_base_url,
                                 legacy_auth=_native_auth_snapshot(host, tuple(record["backends"])),
                                 project_roots=host.migration_project_roots(),
+                                clean_native_stores=record.get("clean_native_stores"),
                             )
                             if not any(item.backend in record["backends"] for item in residual):
                                 return result
@@ -1352,6 +1375,7 @@ async def apply_native_migration(
             validate_base_url=validate_base_url,
             legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
             project_roots=host.migration_project_roots(),
+            clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
         )
         selected = [item for item in available if item.id in item_ids]
         if len(selected) != len(item_ids) or any(item.proposed_action != "import" for item in selected):
@@ -1375,6 +1399,7 @@ async def apply_native_migration(
                     legacy_auth=_native_auth_snapshot(host, backends),
                     secret_backends=backends,
                     project_roots=project_roots,
+                    clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
                 )
                 consented = selected
                 selected = []
@@ -1458,15 +1483,19 @@ async def prepare_takeover_reauthentication(host: MigrationHost, source_id: str)
                     updated = ModelHubConfig.from_payload(record["updated"])
                     if host.store.load().to_payload() != updated.to_payload():
                         raise MigrationConflictError
+                    unresolved = [
+                        value for value in oauth_ids
+                        if value == source_id or value not in record.get("validated_source_ids", [])
+                    ]
                     terminal = host._clone_config(updated)
                     for source in terminal.sources:
-                        if source.id in oauth_ids:
+                        if source.id in unresolved:
                             source.state = ModelHubSourceStateConfig(
                                 status="needs_action",
                                 detail_key="models.source.needs_action.oauth_expired",
                             )
                     record["terminal"] = {
-                        "invalid_source_ids": oauth_ids,
+                        "invalid_source_ids": unresolved,
                         "config": terminal.to_payload(),
                         "reason": "reauth_requested",
                     }
