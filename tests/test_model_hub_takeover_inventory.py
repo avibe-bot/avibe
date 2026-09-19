@@ -15,6 +15,7 @@ from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
     _isolate_native_home,
     _service,
     _write,
+    _write_claude_oauth,
 )
 
 
@@ -189,6 +190,40 @@ def test_config_takeover_cas_preserves_a_concurrent_hub_edit(monkeypatch, tmp_pa
     with pytest.raises(MigrationConflictError):
         store.save_takeover(config.model_hub, {}, {}, expected_hub=(expected,))
     assert config_path.read_bytes() == concurrent
+
+
+def test_interrupted_claude_auth_backup_is_imported_and_cannot_restore_old_key(monkeypatch, tmp_path):
+    from vibe.claude_config import (
+        get_claude_oauth_settings_backup_path,
+        read_claude_oauth_settings_backup,
+        write_claude_oauth_settings_backup,
+    )
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_claude_oauth(home)
+    _write(home / ".claude/settings.json", json.dumps({
+        "env": {"ANTHROPIC_API_KEY": "fixture-active-key"},
+        "mcp": {"keep": "保留"},
+    }))
+    write_claude_oauth_settings_backup(
+        {"ANTHROPIC_API_KEY": "fixture-recovery-key"},
+        home=home,
+    )
+    service, _, adapter = _service(tmp_path)
+    rows = service.migration_scan()["items"]
+    assert len(rows) == 3
+    result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert result["applied"] == 3
+    assert len(adapter.oauth_provisioned) == 1
+    assert {target[2] for target in adapter.keys.values()} == {
+        "fixture-active-key", "fixture-recovery-key",
+    }
+    assert not get_claude_oauth_settings_backup_path(home).exists()
+    assert read_claude_oauth_settings_backup(home) is None
+    assert json.loads((home / ".claude/settings.json").read_text()) == {
+        "env": {}, "mcp": {"keep": "保留"},
+    }
 
 
 def test_codex_embedded_bearer_key_is_migrated_without_deleting_provider_preferences(monkeypatch, tmp_path):

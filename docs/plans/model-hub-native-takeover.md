@@ -163,3 +163,17 @@ cannot establish this terminal outcome.
 Shutdown joins the owned operation before stopping the runtime. Client
 cancellation cannot cancel credential custody. A retry after completion checks
 the retained source IDs and opaque credential references, not IDs alone.
+
+## Writer-boundary review decision
+
+The integration audit found the same ownership-boundary class beyond login
+flows: recovery backups and whole-document native configuration writers can
+reintroduce credentials after a successful handoff. The correction covers
+every Avibe writer of those shared documents for the full read-modify-write
+duration. Authentication writes also consult persisted Direct/native-Source
+ownership after acquiring the lease; stopping the Hub runtime does not hand
+custody back. Non-authentication edits may continue under the shared lease.
+Claude's interrupted-OAuth settings backup is included in the migration
+inventory and cleanup, so constructor recovery cannot restore a replaced key.
+This scope preserves legacy native subscription Sources until explicit
+takeover, without introducing another permanent ownership marker.

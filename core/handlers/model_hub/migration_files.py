@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibe.claude_config import get_claude_settings_path
+from vibe.claude_config import get_claude_oauth_settings_backup_path, get_claude_settings_path
 from vibe.codex_config import (
     CREDENTIALS_STORE_KEY,
     LEGACY_MANAGED_PROVIDER_IDS,
@@ -44,8 +44,11 @@ def _json_bytes(payload: dict) -> bytes:
 
 
 def claude_settings_paths(home: Path | None, projects: tuple[Path, ...]) -> tuple[Path, ...]:
+    # An interrupted OAuth flow can restore its backup into settings.json.
+    # It is therefore a credential writer's input, not an unrelated archive.
     return tuple(dict.fromkeys([
         get_claude_settings_path(home).absolute(),
+        get_claude_oauth_settings_backup_path(home).absolute(),
         *(root / ".claude" / name for root in projects for name in ("settings.json", "settings.local.json")),
     ]))
 
@@ -159,6 +162,12 @@ def plan_native_cleanup(
 
         for path in claude_settings_paths(home, project_roots):
             edit_json(path, clear_settings)
+        backup_path = get_claude_oauth_settings_backup_path(home).absolute()
+        backup_edit = edits.get(backup_path)
+        if backup_edit and backup_edit.after is not None:
+            backup = _object(backup_edit.after)
+            if set(backup) <= {"version", "env"} and not backup.get("env"):
+                edits[backup_path] = NativeFileEdit(backup_path, backup_edit.before, None)
 
     if "codex" in backends:
         config_path, auth_path = get_codex_config_paths(home)
