@@ -20,6 +20,17 @@ afterEach(() => {
 });
 
 describe('SourceRow', () => {
+  it.each(['en', 'zh'])('shows a saved source without a warning or a health claim in %s', (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    render(<I18nextProvider i18n={locale}><SourceRow source={{
+      ...source, verification_pending: 'vp_fixture', adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }],
+    }} onOpen={vi.fn()} /></I18nextProvider>);
+    const label = screen.getByText(locale.t('settings.models.sourceDetail.status.saved'));
+    expect(label.classList.contains('text-muted')).toBe(true);
+    expect(label.querySelector('.bg-muted')).not.toBeNull();
+    expect(screen.queryByText(/Supplying Codex|正在使用 Codex/)).toBeNull();
+  });
+
   it('opens the Source detail without exposing inline source mutations', async () => {
     const onOpen = vi.fn();
     render(<I18nextProvider i18n={i18n}><SourceRow source={source} onOpen={onOpen} /></I18nextProvider>);

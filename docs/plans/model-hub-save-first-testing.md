@@ -15,6 +15,10 @@ not subscription OAuth admission or credential replacement.
 - `verification_pending` remains until a real invocation succeeds for that
   credential identity. Existing explicit observation APIs remain available to
   older callers; the dialog does not call them.
+- Pending Sources use neutral Saved / 已保存 presentation, not a warning or
+  health claim. Error, needs-action and cooldown states retain precedence. The
+  accessible connection hint describes saved configuration and successful-call
+  status updates without promising a Test entry for subscriptions/native Sources.
 - Test is a separate, explicitly initiated action on a saved API-key Source.
   It offers all non-retired discovered or manual models without reordering the
   inventory. A centrally maintained ordered preference list selects the first

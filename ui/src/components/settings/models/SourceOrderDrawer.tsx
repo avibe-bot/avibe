@@ -10,8 +10,7 @@ import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
 import type { PendingWrite } from './asyncLifetime';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
-import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
-import { GuardGapList } from './GuardGapList';
+import { apiFailure, modelsApi } from './modelsApi';
 import { mayHaveWritten } from './repair';
 import { movedOrder, sameIds } from './reorder';
 import { combineSourceOrderReads } from './sourceOrderComposition';
@@ -101,7 +100,6 @@ export const SourceOrderDrawer: React.FC<{
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [order, setOrder] = React.useState<string[]>([]);
   const [saveFailed, setSaveFailed] = React.useState(false);
-  const [guard, setGuard] = React.useState<GuardConfirmation | null>(null);
   const [unknownWrite, setUnknownWrite] = React.useState(false);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState<OrderAnnouncement>(null);
@@ -119,7 +117,6 @@ export const SourceOrderDrawer: React.FC<{
     setSaved(nextOrder);
     setOrder(nextOrder);
     setSaveFailed(false);
-    setGuard(null);
     setUnknownWrite(false);
     setGrabbedId(null);
     setAnnouncement(null);
@@ -236,7 +233,7 @@ export const SourceOrderDrawer: React.FC<{
     }
   };
 
-  const save = (confirmation?: GuardConfirmation) => {
+  const save = () => {
     if (saving || readState !== 'ready') return;
     void orderWrite.track(async () => {
       try {
@@ -251,7 +248,20 @@ export const SourceOrderDrawer: React.FC<{
           setSaveFailed(true);
           return;
         }
-        const echoed = await modelsApi.putAgentSources(agent.backend, { order, ...confirmation });
+        const echoed = await modelsApi.putAgentSources(agent.backend, { order }).catch((error: unknown) => {
+          const failure = apiFailure(error);
+          if (!failure || mayHaveWritten(failure)
+            || !['source_in_route_chain', 'source_last_supplier'].includes(failure.code)
+            || !(failure.wouldRemoveHops.length || failure.wouldInterrupt.length)) throw error;
+          // Saving the default order authorizes its inherited-route changes.
+          // Echo the server's exact impact once; a changed plan still fails.
+          return modelsApi.putAgentSources(agent.backend, {
+            order,
+            force: true,
+            would_remove_hops: failure.wouldRemoveHops,
+            would_interrupt: failure.wouldInterrupt,
+          });
+        });
         const nextOrder = echoed.sources?.order ?? order;
         setSaved(nextOrder);
         setOrder(nextOrder);
@@ -260,10 +270,6 @@ export const SourceOrderDrawer: React.FC<{
         onClose();
       } catch (error) {
         const failure = apiFailure(error);
-        if (failure && (failure.wouldRemoveHops.length || failure.wouldInterrupt.length)) {
-          setGuard({ force: true, would_remove_hops: failure.wouldRemoveHops, would_interrupt: failure.wouldInterrupt });
-          return;
-        }
         setUnknownWrite(mayHaveWritten(failure));
         // F1: the request failed, not the user's draft. Keep every move and let
         // the same primary retry the exact order.
@@ -286,10 +292,7 @@ export const SourceOrderDrawer: React.FC<{
         <DialogPrimitive.Content
           className="model-hub-order-drawer fixed inset-y-0 right-0 z-50 flex flex-col overflow-hidden bg-surface outline-none"
           onEscapeKeyDown={(event) => {
-            if (guard) {
-              event.preventDefault();
-              setGuard(null);
-            } else if (grabbedId) {
+            if (grabbedId) {
               event.preventDefault();
               cancelGrab();
             } else if (saving) event.preventDefault();
@@ -317,11 +320,6 @@ export const SourceOrderDrawer: React.FC<{
           </header>
 
           <div className="model-hub-order-body flex min-h-0 flex-1 flex-col overflow-y-auto">
-            {guard ? <div className="model-hub-order-section" role="alert">
-              <h3>{t('settings.models.routing.guardTitle')}</h3>
-              <ul className="model-hub-guard-list">{guard.would_remove_hops?.map((hop) => <li key={`${hop.backend}:${hop.menu_model}:${hop.position}`} className="model-hub-guard-hop"><span>{hop.menu_model} · {hop.model_id} · {hop.source_id}</span></li>)}</ul>
-              <GuardGapList gaps={guard.would_interrupt ?? []} />
-            </div> : <>
             {readState === 'loading' && (
               <div className="model-hub-order-state"><LoaderCircle className="model-hub-ink-mint size-4 animate-spin" />{t('common.loading')}</div>
             )}
@@ -424,20 +422,19 @@ export const SourceOrderDrawer: React.FC<{
               </>
             )}
             <p aria-live="polite" className="sr-only">{announcementText}</p>
-            </>}
             {readState === 'ready' && <p className="model-hub-default-counts">{t('settings.models.routing.counts', { inherited: inheritedCount, manual: manualCount })}</p>}
           </div>
 
           <footer className="model-hub-order-foot flex shrink-0 items-center justify-end border-t border-border">
             {saveFailed && <span className="mr-auto text-[11px] text-destructive-ink">{t('settings.models.order.fail.save')}</span>}
-            <Button type="button" variant="outline" className="model-hub-order-action" disabled={saving} onClick={() => guard ? setGuard(null) : onClose()}>
+            <Button type="button" variant="outline" className="model-hub-order-action" disabled={saving} onClick={onClose}>
               {t('settings.models.order.cancel')}
             </Button>
             {readState === 'error'
               ? <Button type="button" variant="brand" className="model-hub-order-action" onClick={() => void read()}>{t('settings.models.order.retry')}</Button>
-              : <Button type="button" variant="brand" className="model-hub-order-action" disabled={!saveEnabled || saving} onClick={() => save(guard ?? undefined)}>
+              : <Button type="button" variant="brand" className="model-hub-order-action" disabled={!saveEnabled || saving} onClick={save}>
                 {saving && <LoaderCircle className="size-3 animate-spin" />}
-                {guard ? t('settings.models.routing.confirmDefaults') : saveFailed ? t('settings.models.order.retry') : t('settings.models.order.save')}
+                {saveFailed ? t('settings.models.order.retry') : t('settings.models.order.save')}
               </Button>}
           </footer>
         </DialogPrimitive.Content>

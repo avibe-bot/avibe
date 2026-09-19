@@ -1243,9 +1243,7 @@
         "exactModel": "准确模型 ID",
         "moveUp": "上移供应商",
         "moveDown": "下移供应商",
-        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由",
-        "guardTitle": "确认受影响的路由",
-        "confirmDefaults": "保存默认路由"
+        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由"
       },
       "order": {
         "title": "{{backend}} · 默认路由",
@@ -1733,7 +1731,9 @@
           "error": "异常",
           "standbyHintLabel": "这个状态是什么意思",
           "standbyHint": "这个供应商当前可用。当模型网关中的某个后端通过它调用模型时，它就会显示为使用中。",
-          "unverified": "尚未验证",
+          "saved": "已保存",
+          "savedHintLabel": "关于连接状态",
+          "savedHint": "配置已保存，这个供应商尚未用当前配置成功调用过模型。成功调用后会自动更新状态。",
           "listUpdated": "· 模型列表更新于 {{time}}"
         },
         "summary_one": "{{host}} · {{count}} 个模型",
