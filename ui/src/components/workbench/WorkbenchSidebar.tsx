@@ -29,6 +29,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
+import { tabModifierLabel } from '../../apps/appLaunch';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -717,6 +718,7 @@ const ProjectRow: React.FC<{
 export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOpenSearch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const surfaceActive = useRouteSurfaceActive();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const {
     capabilities,
@@ -732,7 +734,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;
   });
-  const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
+  const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox({
+    feed: surfaceActive,
+  });
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
   // sidebar owns only its inbox popover + the New Project dialog trigger.
@@ -749,7 +753,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     archiveProject,
     reorderProjects,
     isReorderingProjects,
-  } = useWorkbenchProjectsTree();
+  } = useWorkbenchProjectsTree({ active: surfaceActive });
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -835,7 +839,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
       >
         <Search className="size-[17px]" />
         <span>{t('workbench.search.entry')}</span>
-        <kbd className="ml-auto rounded border border-border-strong px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted">⌘K</kbd>
+        <kbd className="ml-auto rounded border border-border-strong px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted">{tabModifierLabel()}K</kbd>
       </Button>
 
       {/* Inbox entry — hover opens the floating popover (portaled above the chat).
