@@ -15,6 +15,7 @@ import * as React from 'react';
 import { KeyRound, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { Button } from '@/components/ui/button';
 import { InfoHint } from '@/components/ui/info-hint';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
 import { importableKeys, isImportableKey, scanMigrationWhenEnabled } from '@/components/settings/models/migrationScan';
@@ -94,9 +95,12 @@ export const ImportKeysNotice: React.FC<{
         <span className="onboarding-import-notice-text">{message}</span>
         <div className="onboarding-import-notice-actions">
           {remaining > 0 && (
-            <button type="button" className="onboarding-import-notice-link" onClick={() => setDialogOpen(true)}>
+            // A light button, not a text link: this is the capsule's own action and
+            // it has to read as one next to the primary CTA below it.
+            <Button type="button" variant="secondary" size="sm" className="onboarding-import-notice-action"
+              onClick={() => setDialogOpen(true)}>
               {t('settings.models.importNotice.review')}
-            </button>
+            </Button>
           )}
           <InfoHint
             align="end"

@@ -42,7 +42,15 @@ describe('assistant installation presentation', () => {
       ? new Promise((resolve) => { finishClaude = resolve; })
       : Promise.resolve({ ok: true, path: '/isolated/bin/codex' }));
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
-    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['AI assistants', 'Claude Code', 'Codex', 'OpenCode']);
+    // The three cards are the whole section: the design keeps each assistant's name at
+    // the top of its own card and gives the section no heading of its own.
+    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Claude Code', 'Codex', 'OpenCode']);
+    // "Connection state replaces roles with enable switches": the switch belongs to the
+    // same identity header as the name, not to a separate strip.
+    for (const name of ['Claude Code', 'Codex', 'OpenCode']) {
+      const identity = screen.getByRole('heading', { name }).closest('.onboarding-card-identity')!;
+      expect(within(identity as HTMLElement).getByRole('checkbox', { name: 'Enabled' })).toBeTruthy();
+    }
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     await waitFor(() => expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy());

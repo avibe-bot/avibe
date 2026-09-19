@@ -1,13 +1,69 @@
-/* Native dialogs eKlyp/Q0wFN/DZesH/JEkvL and their Light variants. */
+/* Native dialogs eKlyp/Q0wFN/DZesH/JEkvL and their Light variants.
+
+   The dialog is a fixed frame, not a box that fits its content. A centred modal
+   with content height moves its own top edge by half of every content change,
+   so switching Subscription/API Key — or a provider list growing by one row —
+   used to slide the heading and the tabs out from under the pointer. Five rows
+   own the layout instead: heading, description, the method row, the only part
+   allowed to scroll, and the action footer. Four of them are a fixed height, so
+   the frame's height is decided by the assistant alone and every anchor inside
+   it holds still while the middle changes.
+
+   The height per assistant is the tallest state each one can reach, so its own
+   middle never scrolls without cause: Codex 580, Claude 620, OpenCode 640 (it
+   also has to hold a provider list). Everything else follows from the rows —
+   50 + 40 + 40 + 56 of fixed rows, 4 × 20 gaps and 2 × 24 padding leave the
+   middle exactly H − 314. */
 .connection-dialog {
   --connection-overlay-shadow: #00000088;
   --connection-selected-border: #5bffa059;
   --connection-logo-well: #ffffff04;
+  --connection-h: 620px;
+  --connection-pad: 24px;
+  --connection-gap: 20px;
+  --connection-head: 50px;
+  --connection-desc: 40px;
+  --connection-controls: 40px;
+  --connection-footer: 56px;
   width: min(568px, calc(100vw - 32px)); max-width: 568px;
-  padding: 24px; gap: 20px; border-radius: 16px;
+  height: min(var(--connection-h), calc(100dvh - 32px));
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--connection-head) var(--connection-desc) var(--connection-controls) minmax(0, 1fr) var(--connection-footer);
+  /* The frame never scrolls; its middle does. */
+  overflow: hidden;
+  padding: var(--connection-pad); gap: var(--connection-gap); border-radius: 16px;
   border-color: var(--border-strong); background: var(--surface-2);
   box-shadow: 0 18px 48px var(--desktop-overlay-shadow, var(--connection-overlay-shadow));
 }
+.connection-dialog[data-backend='codex'] { --connection-h: 580px; }
+.connection-dialog[data-backend='opencode'] { --connection-h: 640px; }
+/* `display: contents` keeps the form one component while its three regions sit
+   in the dialog's own rows. Settings renders the same form as an ordinary
+   column, so both rules stay scoped to the dialog. */
+.connection-dialog .backend-connection-form,
+.connection-dialog .backend-connection-form > .connection-radio { display: contents; }
+.connection-dialog .connection-heading { grid-row: 1; }
+.connection-dialog .connection-description { grid-row: 2; }
+.connection-dialog .connection-controls,
+.connection-dialog .backend-connection-form > .connection-radio > [role='radiogroup'] { grid-row: 3; }
+.connection-dialog .connection-body { grid-row: 4; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--connection-gap); min-width: 0; }
+.connection-dialog .connection-body.connection-pick { gap: 12px; }
+.connection-dialog .connection-actions { grid-row: 5; margin: 0; }
+.connection-description { line-height: 20px; overflow: hidden; }
+.connection-search { position: relative; display: flex; align-items: center; }
+.connection-search > svg { position: absolute; left: 12px; color: var(--muted); pointer-events: none; }
+.connection-search input { height: 40px; padding-left: 34px; border-radius: 9px; }
+.connection-chosen { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px 0 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.connection-chosen .connection-provider-text { flex: 1; min-width: 0; }
+.connection-provider-mark { display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 7px; background: var(--logo-well-background, var(--connection-logo-well)); border: 1px solid var(--border); }
+.connection-provider-mark svg { height: 15px; width: auto; }
+.connection-chosen .connection-provider-mark { width: 24px; height: 24px; border-radius: 6px; }
+.connection-chosen .connection-provider-mark svg { height: 13px; }
+.connection-provider-text { min-width: 0; }
+.connection-provider-text strong { display: block; font-size: 13px; font-weight: 600; }
+.connection-provider-text small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-provider-configured { flex: none; font-size: 11px; font-weight: 600; color: var(--mint-ink); }
+.connection-dialog .connection-more { width: 100%; justify-content: flex-start; gap: 8px; height: 38px; border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
 [data-theme='light'] .connection-dialog { --connection-overlay-shadow: #0a0a1424; --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) .connection-dialog { --connection-overlay-shadow: #0a0a1424; --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
@@ -48,17 +104,34 @@
 .connection-waiting svg, .connection-confirmed { color: var(--mint-ink); }
 .connection-error, .connection-field .connection-error { color: var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; }
 .connection-notice { font-size: 12px; color: var(--gold-ink); }
-.connection-provider-list { display: flex; flex-direction: column; gap: 10px; max-height: 300px; overflow-y: auto; }
-.connection-provider { width: 100%; min-height: 64px; border-radius: 10px; padding: 10px 14px; gap: 12px; border: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; justify-content: space-between; text-align: left; }
-.connection-provider strong { display: block; font-size: 13px; font-weight: 600; }
-.connection-provider small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
-.connection-provider svg { flex: none; }
+/* The list does not scroll on its own: the dialog's middle already does, and a
+   scroller inside a scroller gives the same content two ways to move. */
+.connection-provider-list { display: flex; flex-direction: column; gap: 10px; }
+.connection-provider { width: 100%; min-height: 56px; border-radius: 10px; padding: 10px 14px; gap: 12px; border: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; text-align: left; }
+.connection-provider .connection-provider-text { flex: 1; }
+.connection-provider > svg { flex: none; color: var(--muted); }
 /* No narrow native frames exist: preserve a centered, scrollable dialog, type,
-   focus and reachable actions rather than inheriting the management sheet. */
+   focus and reachable actions rather than inheriting the management sheet.
+   The band is the primitive's own `md` edge, so the sheet shape and the phone
+   metrics change on the same pixel instead of leaving a few widths half-way
+   between the two. The description gets a third line here because the same
+   sentence wraps further at phone width. */
 @media (max-width: 767px) {
-  .connection-dialog { left: 50%; right: auto; top: 50%; bottom: auto; transform: translate(-50%, -50%); max-width: 568px; width: calc(100vw - 24px); padding: 20px; max-height: calc(100dvh - 24px); border-radius: 16px; }
+  .connection-dialog {
+    left: 50%; right: auto; top: 50%; bottom: auto; transform: translate(-50%, -50%);
+    max-width: 568px; width: calc(100vw - 32px); border-radius: 16px;
+    --connection-pad: 20px; --connection-gap: 16px; --connection-desc: 60px;
+  }
   .connection-dialog > div[aria-hidden='true']:first-child { display: none; }
   .connection-heading h2 { font-size: 19px; }
+}
+/* A short window keeps every anchor the contract names — tabs, close, footer —
+   and pays for them out of the parts that are only breathing room. The middle
+   is `minmax(0, 1fr)`, so it is what gives way, down to nothing, before the
+   frame is ever asked to exceed the viewport. */
+@media (max-height: 640px) {
+  .connection-dialog { --connection-pad: 16px; --connection-gap: 12px; --connection-head: 44px; --connection-desc: 40px; }
+  .connection-heading h2 { font-size: 18px; line-height: 22px; }
 }
 
 .connection-auth-steps > div > a[data-slot="button"] { height: 38px; border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 600; }

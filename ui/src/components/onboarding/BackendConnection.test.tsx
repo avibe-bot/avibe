@@ -539,3 +539,127 @@ describe('shared Settings and onboarding connection owner', () => {
   });
 
 });
+
+// What a fixed frame means in behavior rather than in pixels: the parts that
+// anchor it must not be able to say anything that depends on what is inside it.
+// jsdom has no layout, so these hold the cause — a heading, a description and a
+// footer that are the same strings before and after every method change — and
+// `geometry.spec.ts` holds the resulting geometry in a real browser.
+describe('connection dialog frame', () => {
+  const frame = () => {
+    const dialog = screen.getByRole('dialog');
+    return {
+      title: within(dialog).getByRole('heading', { level: 2 }).textContent,
+      description: dialog.querySelector('.connection-description')?.textContent,
+      // The regions the grid anchors, by the classes `connection.css` places.
+      rows: ['.connection-heading', '.connection-description', '.connection-actions']
+        .map((selector) => dialog.querySelectorAll(selector).length),
+    };
+  };
+  it.each(['claude', 'codex'] as const)('%s keeps one heading, description and footer across every method switch', async (backend) => {
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend, auth: 'none', ready: false, entry_eligible: false }));
+    render(wrap(<BackendConnectionDialog backend={backend} method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
+    const opened = frame();
+    expect(opened.title).toBe(`Connect ${backend === 'claude' ? 'Claude Code' : 'Codex'}`);
+    expect(opened.rows).toEqual([1, 1, 1]);
+
+    const tabs = screen.getAllByRole('radio');
+    // Repeatedly, both directions: a heading computed from the method would
+    // change here, and a changed heading is what used to move the frame.
+    for (const tab of [...tabs].reverse().concat(tabs, [...tabs].reverse(), tabs)) {
+      fireEvent.click(tab);
+      expect(frame()).toEqual(opened);
+    }
+    // The method still actually changed the body underneath the fixed frame.
+    fireEvent.click(screen.getByRole('radio', { name: backend === 'claude' ? en.onboarding.connection.claudeCredentials : en.onboarding.connection.openaiKey }));
+    // `find`, not `get`: the dialog's own readiness read resolves on its own schedule and
+    // re-renders the body, so the credential form is not guaranteed on the click's tick.
+    expect(await screen.findByRole('button', { name: en.onboarding.connection.saveConnect })).toBeTruthy();
+    expect(frame()).toEqual(opened);
+  });
+
+  it('moves the method with arrows, Home and End, and leaves focus on the selected tab', async () => {
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', auth: 'none', ready: false, entry_eligible: false }));
+    render(wrap(<BackendConnectionDialog backend="claude" method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
+    const [subscription, apiKey] = screen.getAllByRole('radio');
+    expect(subscription.getAttribute('aria-checked')).toBe('true');
+    // One tab stop, so Tab lands on the selection the arrows then continue from — the
+    // other half of the pattern, and what stops focus resting on an unselected tab.
+    expect([subscription.tabIndex, apiKey.tabIndex]).toEqual([0, -1]);
+    for (const [key, expected] of [['ArrowRight', apiKey], ['ArrowLeft', subscription], ['End', apiKey], ['Home', subscription]] as const) {
+      fireEvent.keyDown(group, { key });
+      expect(expected.getAttribute('aria-checked')).toBe('true');
+      expect(document.activeElement).toBe(expected);
+      expect([subscription.tabIndex, apiKey.tabIndex]).toEqual(expected === subscription ? [0, -1] : [-1, 0]);
+    }
+    // A key the group does not own is left to the dialog (Escape closes it).
+    fireEvent.keyDown(group, { key: 'Escape' });
+    expect(subscription.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('offers the eight setup providers first, keeps a configured one out of More, and lets search reach the rest', async () => {
+    const entry = (id: string, name: string, patch: Partial<{ configured: boolean; models: string[] }> = {}) =>
+      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [], ...patch });
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
+      // `alibaba-cn`, `moonshot` and `google` arrive as bare ids — the case the
+      // brand table exists for. `mistral` arrives with a real name of its own.
+      entry('mistral', 'Mistral AI'), entry('openrouter', 'OpenRouter'), entry('alibaba-cn', 'alibaba-cn', { configured: true }),
+      entry('openai', 'OpenAI'), entry('moonshot', 'moonshot'), entry('google', 'google'),
+      entry('deepseek', 'DeepSeek'), entry('anthropic', 'Anthropic'), entry('xai', 'xAI'),
+      entry('cerebras', 'Cerebras', { configured: true }), entry('groq', 'Groq', { models: ['llama-3.3-70b'] }),
+      entry('ollama', 'Ollama local', { configured: false }),
+    ] });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
+    render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+
+    const names = () => screen.getAllByRole('button').map((node) => node.querySelector('strong')?.textContent).filter(Boolean);
+    await waitFor(() => expect(names().length).toBeGreaterThan(0));
+    // The ratified default order, by friendly name rather than by the internal
+    // id: `google`, `moonshot` and `alibaba-cn` are not what anyone calls them.
+    expect(names().slice(0, 8)).toEqual(['OpenAI', 'Anthropic', 'xAI', 'Gemini', 'DeepSeek', 'Qwen', 'Kimi', 'OpenRouter']);
+    // A configured provider outside the eight stays reachable without More.
+    expect(names()).toContain('Cerebras');
+    expect(names()).not.toContain('Mistral AI');
+    // The id it is filed under stays on the row, next to the brand name.
+    expect(screen.getByRole('button', { name: /Qwen/ }).textContent).toContain('alibaba-cn');
+
+    fireEvent.click(screen.getByRole('button', { name: /More providers \(3\)/ }));
+    // A server that already sent a friendly name keeps it; nothing is renamed
+    // to a catalog brand it did not claim.
+    expect(names()).toContain('Mistral AI');
+
+    // Search reaches a provider that More would otherwise hold, by model id too.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'llama-3.3' } });
+    expect(names()).toEqual(['Groq']);
+    expect(screen.queryByRole('button', { name: /More providers/ })).toBeNull();
+
+    // Picking one hands the middle to the form and keeps the same frame rows.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'Qwen' } });
+    fireEvent.click(screen.getByRole('button', { name: /Qwen/ }));
+    expect(await screen.findByLabelText(en.onboarding.connection.apiKeyLabel)).toBeTruthy();
+    expect(frame().title).toBe('Connect OpenCode');
+    expect(frame().rows).toEqual([1, 1, 1]);
+    // The internal id the rest of OpenCode uses stays visible after the choice.
+    expect(screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen')?.textContent).toContain('Qwen');
+  });
+
+  it('never offers a local provider for an API Key, and follows OAuth capability for subscriptions', async () => {
+    const entry = (id: string, name: string, patch: Partial<{ local: boolean; oauth_available: boolean }> = {}) =>
+      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [], ...patch });
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
+      entry('openai', 'OpenAI'), entry('ollama', 'Ollama', { local: true }), entry('github-copilot', 'GitHub Copilot', { oauth_available: true }),
+    ] });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
+    const { unmount } = render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const names = () => screen.getAllByRole('button').map((node) => node.querySelector('strong')?.textContent).filter(Boolean);
+    await waitFor(() => expect(names()).toContain('OpenAI'));
+    expect(names()).not.toContain('Ollama');
+    unmount();
+
+    render(wrap(<BackendConnectionDialog backend="opencode" method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    // A subscription list is whatever can actually sign in, not the eight brands.
+    await waitFor(() => expect(names()).toEqual(['GitHub Copilot']));
+  });
+});

@@ -6,13 +6,20 @@ import { Card } from '../ui/card';
 import { ASSISTANT_ORDER, WORK_LINES, collaborationFrame } from './collaborationTimeline';
 import { useOnboardingMotion } from './motion';
 
-/** Wire geometry in the 880x272 collaboration box: two handoffs and the rounded return loop. */
+/**
+ * Wire geometry in the 976x271 collaboration box: two handoffs and the rounded return
+ * loop. Every coordinate is the reference's own — the cards take the top 232 rows, so a
+ * handoff crosses the 39.5 gap between them at y=116, their shared midline, and the
+ * return runs from the third card's centre to the first's along y=261. The box is
+ * stretched to whatever the diagram currently measures, so these hold at every width.
+ */
 const WIRES = [
-  'M240 118H320',
-  'M560 118H640',
-  'M760 228V246Q760 262 744 262H136Q120 262 120 246V228',
+  'M299 116H339',
+  'M637 116H677',
+  'M826 232V245Q826 261 810 261H165Q149 261 149 245V232',
 ];
-const PORTS: [number, number][] = [[240, 118], [320, 118], [560, 118], [640, 118], [760, 228], [120, 228]];
+/** Only the four handoff ends are drawn: the return loop leaves its cards unmarked. */
+const PORTS: [number, number][] = [[299, 116], [339, 116], [637, 116], [677, 116]];
 const ICONS = [FileText, CodeXml, ListChecks];
 // Every skeleton line as its share of the block it is measured in, so the three cards
 // draw the widths design_desktop.pen draws at any scale. The card's content box is 198
@@ -104,7 +111,7 @@ function Circuit({ handoff }: { handoff: { wire: number; progress: number } | nu
     opacity: Math.max(0, Math.min(1, handoff.progress / 0.08, (1 - handoff.progress) / 0.06)),
   };
   return (
-    <svg className="onboarding-wires" viewBox="0 0 880 272" fill="none" preserveAspectRatio="none" aria-hidden="true">
+    <svg className="onboarding-wires" viewBox="0 0 976 271" fill="none" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <filter id={glowId} x="-100%" y="-500%" width="300%" height="1100%"><feGaussianBlur stdDeviation="3" /></filter>
       </defs>
@@ -165,6 +172,14 @@ export function CollaborationStory() {
             return (
               <Card key={backend} className="onboarding-collaboration-card" data-active={active}
                 data-state={state} aria-label={t(`onboarding.story.${backend}.name`)}>
+                {/* The same identity header the connection step wears, in the same
+                    place: logo, name, and the trailing slot this step fills with the
+                    assistant's role and the next one with its enable switch. */}
+                <div className="onboarding-card-identity">
+                  <BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" />
+                  <strong className="onboarding-card-name">{t(`onboarding.story.${backend}.name`)}</strong>
+                  <span className="onboarding-card-role">{t(`onboarding.story.${backend}.role`)}</span>
+                </div>
                 <div className="onboarding-story-status" aria-hidden="true">
                   <Icon size={13} strokeWidth={1.7} className="onboarding-status-icon" />
                   <span key={caption} className="onboarding-status-text onboarding-status-enter">
@@ -173,11 +188,6 @@ export function CollaborationStory() {
                   <WorkStatus active={active} done={done} progress={frame.progress[index]} />
                 </div>
                 <Skeleton backend={backend} done={done} written={reducedMotion ? WORK_LINES : frame.written[index]} />
-                <div className="onboarding-story-identity">
-                  <BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" />
-                  <strong>{t(`onboarding.story.${backend}.name`)}</strong>
-                  <span>{t(`onboarding.story.${backend}.role`)}</span>
-                </div>
               </Card>
             );
           })}
