@@ -193,52 +193,86 @@ test.describe('workbench home geometry', () => {
   ];
 
   for (const { lang, placeholder, send, lastRow } of PHONE_COMPOSER) {
-    test(`keeps the composer's controls off the tab bar on a phone (${lang})`, async ({ page }) => {
+    test(`keeps the composer's controls off the tab bar on a phone (${lang})`, async ({ page }, info) => {
+      const pageErrors: string[] = [];
+      const unknown: string[] = [];
+      const reads: string[] = [];
+      page.on('pageerror', (error) => pageErrors.push(error.message));
       const denied = await serveProduct(page, lang);
-      await page.setViewportSize(NARROW);
-      await open(page, '/', { lang });
+      // Only the inherited, explicitly answered Home reads may fall through.
+      // Record failures too; a generic empty API response is not guard proof.
+      const inheritedReads = new Set([
+        '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
+        '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
+        '/api/inbox', '/api/version', '/api/memory/settings', '/api/events',
+      ]);
+      await page.route('**/api/**', (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (request.method() !== 'GET' || url.origin !== ORIGIN) {
+          denied.push(`${request.method()} ${request.url()}`);
+          return route.abort();
+        }
+        reads.push(url.pathname);
+        if (url.pathname === '/api/asr/status') return route.fulfill({ json: { available: false } });
+        if (url.pathname === '/api/dock') return route.fulfill({ json: {
+          dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
+        } });
+        if (inheritedReads.has(url.pathname)) return route.fallback();
+        unknown.push(`${request.method()} ${request.url()}`);
+        return route.abort();
+      });
+      try {
+        await page.setViewportSize(NARROW);
+        await open(page, '/', { lang });
 
-      const composer = page.getByPlaceholder(placeholder);
-      const sendButton = page.getByRole('button', { name: send });
-      const nav = page.locator(MOBILE_NAV);
-      await expect(composer).toBeVisible();
-      await expect(nav).toBeVisible();
+        const composer = page.getByPlaceholder(placeholder);
+        const sendButton = page.getByRole('button', { name: send });
+        const nav = page.locator(MOBILE_NAV);
+        await expect(composer).toBeVisible();
+        await expect(nav).toBeVisible();
 
-      // The premise: this page really does overflow, so clearing the bar is the
-      // anchoring and not a lucky fit. If this ever stops being true the rest of
-      // the test would pass for the wrong reason.
-      const overflow = await page.locator(SHELL_SCROLL).evaluate((node) => ({
-        top: node.scrollTop,
-        hidden: node.scrollHeight - node.clientHeight,
-      }));
-      expect(overflow.top).toBe(0);
-      expect(overflow.hidden).toBeGreaterThan(0);
+        // The normal-height phone may fit without scrolling. Clearance and
+        // actual hit targets are the invariant, not overflow at this height.
+        expect(await page.locator(SHELL_SCROLL).evaluate((node) => node.scrollTop)).toBe(0);
+        const navTop = (await nav.boundingBox())!.y;
+        expect(await bottomOf(page.getByRole('link', { name: lastRow }))).toBeLessThanOrEqual(navTop);
+        expect(await topmostOver(page, sendButton)).toBe(send);
 
-      // Nothing in the block may reach under the bar — asserted on the block's
-      // last row, which is below the action row.
-      const navTop = (await nav.boundingBox())!.y;
-      expect(await bottomOf(page.getByRole('link', { name: lastRow }))).toBeLessThanOrEqual(navTop);
-      // …and the primary control specifically: what a tap would hit, at rest.
-      expect(await topmostOver(page, sendButton)).toBe(send);
+        const draft = '给手机上的我写一句话';
+        await composer.click();
+        await composer.fill(draft);
+        await expect(composer).toBeFocused();
+        await expect(composer).toHaveValue(draft);
+        expect(await page.locator(SHELL_SCROLL).evaluate((node) => node.scrollTop)).toBe(0);
+        expect(await topmostOver(page, sendButton)).toBe(send);
+        await sendButton.click({ trial: true });
 
-      // Typing is when it matters, and a focused textarea is also when the page
-      // could scroll under the user. It must not have to.
-      await composer.click();
-      await composer.fill('给手机上的我写一句话');
-      await expect(composer).toBeFocused();
-      expect(await page.locator(SHELL_SCROLL).evaluate((node) => node.scrollTop)).toBe(0);
-      expect(await topmostOver(page, sendButton)).toBe(send);
-      // Playwright's own actionability check, which is the product's tap path.
-      await sendButton.click({ trial: true });
-
-      // A shorter phone has less room above, never less clearance below.
-      await page.setViewportSize(NARROW_SHORT);
-      await page.waitForFunction(() => window.innerHeight === 667);
-      expect(await topmostOver(page, sendButton)).toBe(send);
-      expect(await bottomOf(page.getByRole('link', { name: lastRow })))
-        .toBeLessThanOrEqual((await nav.boundingBox())!.y);
-
+        // Continue the typed draft on the existing short phone. Here overflow
+        // must be real: the controls clear the bar even in a crowded layout.
+        await page.setViewportSize(NARROW_SHORT);
+        await page.waitForFunction(() => window.innerHeight === 667);
+        const overflow = await page.locator(SHELL_SCROLL).evaluate((node) => ({
+          top: node.scrollTop,
+          hidden: node.scrollHeight - node.clientHeight,
+        }));
+        expect(overflow.top).toBe(0);
+        expect(overflow.hidden).toBeGreaterThan(0);
+        await expect(composer).toHaveValue(draft);
+        await expect(composer).toBeFocused();
+        expect(await topmostOver(page, sendButton)).toBe(send);
+        expect(await bottomOf(page.getByRole('link', { name: lastRow })))
+          .toBeLessThanOrEqual((await nav.boundingBox())!.y);
+        await sendButton.click({ trial: true });
+      } finally {
+        const evidence = info.outputPath('phone-traffic-and-page-errors.json');
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(evidence, JSON.stringify({ denied, unknown, pageErrors, reads }, null, 2));
+        await info.attach('phone-traffic-and-page-errors', { path: evidence, contentType: 'application/json' });
+      }
       expect(denied).toEqual([]);
+      expect(unknown).toEqual([]);
+      expect(pageErrors).toEqual([]);
     });
   }
 });
