@@ -234,6 +234,20 @@ application/drain, backend enablement, installation and OpenCode permission
 gates remain effective. This is connection readiness, not an inference probe
 or a promise that every selected model is available.
 
+Only Sources referenced by the backend's effective source order or explicit
+route hops participate. Eligibility reuses the existing backend and
+`source_runnable(now=...)` rules: an unexpired cooldown temporarily prevents
+entry; verification-pending standby Sources remain eligible. No selected model,
+inventory or entitlement check is added. Hub-owned credentials require a
+current matching private credential record, observed through an engine-owned
+read-only boolean helper. This observation neither exposes credential payloads
+nor creates directories, repairs permissions, starts CPA or contacts upstream.
+A nonempty reference alone is not evidence that its credential still exists.
+Retained native subscriptions use the existing native-source readiness check,
+only for an explicitly referenced subscription owner of the same backend.
+Pending takeover recovery blocks readiness without inventing a new public
+`application` state.
+
 Setup and Settings consume `supply_mode` to offer Model Hub management before
 asking for a native login or key. Server ownership refusals remain the race-safe
 fallback. Opening Model Hub from setup preserves the wizard and all session,
