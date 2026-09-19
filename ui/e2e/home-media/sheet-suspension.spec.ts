@@ -10,10 +10,11 @@ async function open(page: Page, query = '') {
   await page.getByRole('button', { name: 'Open new session' }).click();
   await expect(draft(page)).toBeEnabled();
 }
-async function settings(page: Page) {
+async function settings(page: Page, history = false) {
   // A test-owned foreground navigation shortcut models shell/external entry;
   // B has no Settings button inside the real mobile sheet.
-  await page.keyboard.press('Alt+s');
+  if (history) await page.goForward();
+  else await page.keyboard.press('Alt+s');
   await expect(page.getByTestId('settings-foreground')).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   const input = page.getByRole('textbox', { name: 'Settings value' });
@@ -147,8 +148,11 @@ test('directory draft survives history and hidden refresh while an obsolete brow
   expect((await writes(page, '/api/projects')).at(-1)?.body.folder_path).toBe(target);
 });
 
-for (const reopen of [false, true]) test(`directory manual submit cannot close a ${reopen ? 'reopened' : 'newer'} editor draft`, async ({ page }) => {
+for (const width of [390, 1366]) for (const reopen of [false, true]) test(`directory manual submit ${width} retains the ${reopen ? 'reopened' : 'newer'} draft and caret through Settings`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 768 });
   await openProjectPicker(page);
+  await settings(page);
+  await back(page);
   const edit = picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true });
   await edit.click();
   const submitted = '/已提交的目录';
@@ -162,21 +166,66 @@ for (const reopen of [false, true]) test(`directory manual submit cannot close a
     await edit.click();
     await expect(manualPath(page)).toHaveValue('/fixture');
   }
-  await manualPath(page).fill('/提交后的新草稿🌱');
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('/提交后的新草稿🌱');
+  expect(await selection(page)).toMatchObject({ start: 10, end: 10 });
+  // History entry adds no key event to refresh a stale React onSelect record.
+  await settings(page, true);
   await releaseBrowse(page, submitted);
+  await expect.poll(() => page.evaluate((path) => window.homeMedia.browseCompletions.includes(path), submitted)).toBe(true);
+  await expect(picker(page)).toHaveCount(0);
+  await back(page);
   await expect(resolvedPath(page)).toHaveText(submitted);
   await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱');
+  // Observe after deferred modal cleanup, before a key could repair focus.
+  await page.waitForTimeout(300);
   await expect(manualPath(page)).toBeFocused();
+  expect(await selection(page)).toMatchObject({ start: 10, end: 10 });
   await page.keyboard.press('x');
   await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱x');
+  await page.keyboard.insertText('续写🌿');
+  await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱x续写🌿');
   await page.keyboard.press('Escape');
   await edit.click();
   await expect(manualPath(page)).toHaveValue(submitted);
+  expect(await selection(page)).toMatchObject({ start: 0, end: submitted.length });
   await page.keyboard.press('Escape');
   await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
   await expect(resolvedPath(page)).toHaveText('/fixture');
   await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
   await expect(resolvedPath(page)).toHaveText(submitted);
+});
+
+for (const width of [390, 1366]) test(`directory selection ${width} follows text insertion, deletion and caret-only changes through repeated withdrawal`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 768 });
+  await openProjectPicker(page);
+  await settings(page);
+  await back(page);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true }).click();
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('/粘贴式输入🌱');
+  for (const edit of ['insert', 'delete', 'move', 'range'] as const) {
+    if (edit === 'delete') await page.keyboard.press('Backspace');
+    if (edit === 'move' || edit === 'range') await page.keyboard.press('ArrowLeft');
+    if (edit === 'range') await page.keyboard.press('Shift+ArrowLeft');
+    const value = await manualPath(page).inputValue();
+    const before = await selection(page);
+    expect(before.start).not.toBeNull();
+    expect(before.end).not.toBeNull();
+    if (edit === 'range') expect(before.end! - before.start!).toBeGreaterThan(0);
+    else expect(before.start).toBe(before.end);
+    await settings(page, true);
+    await back(page);
+    await page.waitForTimeout(300);
+    await expect(manualPath(page)).toBeFocused();
+    await expect(manualPath(page)).toHaveValue(value);
+    expect(await selection(page)).toEqual(before);
+    await page.keyboard.press('x');
+    const continued = `${value.slice(0, before.start!)}x${value.slice(before.end!)}`;
+    await expect(manualPath(page)).toHaveValue(continued);
+    await page.keyboard.insertText('续');
+    await expect(manualPath(page)).toHaveValue(`${value.slice(0, before.start!)}x续${value.slice(before.end!)}`);
+  }
 });
 
 for (const width of [390, 1366]) test(`sheet ${width} keeps Unicode draft and selected project/Agent while its open picker loses all modal effects`, async ({ page }) => {

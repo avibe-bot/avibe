@@ -118,6 +118,17 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const pathEditRevision = useRef(0);
   const pathSelection = useRef<{ start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null>(null);
 
+  const capturePathSelection = (input: HTMLInputElement) => {
+    // Text edits can move the caret without React firing onSelect. Capture
+    // both events, retaining the last foreground range through portal teardown.
+    if (!foreground.current || !input.isConnected || input.ownerDocument.activeElement !== input) return;
+    pathSelection.current = {
+      start: input.selectionStart ?? 0,
+      end: input.selectionEnd ?? 0,
+      direction: input.selectionDirection ?? 'none',
+    };
+  };
+
   // OS-appropriate quick-access shortcuts, resolved + existence-checked by the
   // backend (macOS Finder entries, Linux /tmp·/data·roots, Windows drives…).
   const [favorites, setFavorites] = useState<{ key: string; path: string }[]>([]);
@@ -440,11 +451,12 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                   ref={pathInputRef}
                   type="text"
                   value={pathInput}
-                  onChange={(e) => { pathEditRevision.current++; setPathInput(e.target.value); }}
-                  onSelect={(event) => {
-                    const { selectionStart, selectionEnd, selectionDirection } = event.currentTarget;
-                    pathSelection.current = { start: selectionStart ?? 0, end: selectionEnd ?? 0, direction: selectionDirection ?? 'none' };
+                  onChange={(event) => {
+                    capturePathSelection(event.currentTarget);
+                    pathEditRevision.current++;
+                    setPathInput(event.currentTarget.value);
                   }}
+                  onSelect={(event) => capturePathSelection(event.currentTarget)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
