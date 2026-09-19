@@ -1025,6 +1025,12 @@ def _keychain_status(status: int, *, action: str) -> NativeOAuthError:
 
 
 @contextmanager
+def _keychain_call_lock():
+    with _KEYCHAIN_INTERACTION_LOCK:
+        yield
+
+
+@contextmanager
 def _without_keychain_ui(bindings: _SecurityBindings):
     """Legacy macOS Keychain also needs its documented interaction switch.
 
@@ -1032,7 +1038,7 @@ def _without_keychain_ui(bindings: _SecurityBindings):
     Serialize our callers and restore the process setting on every exit.
     """
 
-    with _KEYCHAIN_INTERACTION_LOCK:
+    with _keychain_call_lock():
         previous = ctypes.c_ubyte()
         status = bindings.security.SecKeychainGetUserInteractionAllowed(ctypes.byref(previous))
         if status != _ERR_SEC_SUCCESS:
@@ -1072,7 +1078,11 @@ class _SecurityKeychainStore:
         result = _CFTypeRef()
         try:
             if allow_interaction:
-                status = bindings.security.SecItemCopyMatching(query, ctypes.byref(result))
+                with _keychain_call_lock():
+                    status = bindings.security.SecItemCopyMatching(
+                        query,
+                        ctypes.byref(result),
+                    )
             else:
                 with _without_keychain_ui(bindings):
                     status = bindings.security.SecItemCopyMatching(query, ctypes.byref(result))
@@ -1186,7 +1196,8 @@ class _SecurityKeychainStore:
                         bindings.constant("kSecValueData"): data,
                     },
                 )
-                status = bindings.security.SecItemAdd(item, None)
+                with _keychain_call_lock():
+                    status = bindings.security.SecItemAdd(item, None)
             else:
                 query, query_owned = _keychain_query(
                     bindings,
@@ -1201,7 +1212,8 @@ class _SecurityKeychainStore:
                     bindings,
                     {bindings.constant("kSecValueData"): data},
                 )
-                status = bindings.security.SecItemUpdate(query, attributes)
+                with _keychain_call_lock():
+                    status = bindings.security.SecItemUpdate(query, attributes)
             if status != _ERR_SEC_SUCCESS:
                 raise _keychain_status(status, action="write")
         finally:
@@ -1235,7 +1247,8 @@ class _SecurityKeychainStore:
             allow_interaction=True,
         )
         try:
-            status = bindings.security.SecItemDelete(query)
+            with _keychain_call_lock():
+                status = bindings.security.SecItemDelete(query)
         finally:
             _release(bindings, query, *owned)
         if status not in {_ERR_SEC_SUCCESS, _ERR_SEC_ITEM_NOT_FOUND}:

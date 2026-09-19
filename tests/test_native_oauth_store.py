@@ -4,7 +4,6 @@ import ctypes
 import ctypes.util
 import json
 import sys
-from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -265,6 +264,11 @@ class FakeSecurityBindings:
         self.queries: list[int] = []
         self.interaction_allowed = True
         self.interaction_calls: list[bool] = []
+        self.native_call_lock_states: list[bool] = []
+
+    def _record_native_call(self) -> None:
+        is_owned = getattr(store._KEYCHAIN_INTERACTION_LOCK, "_is_owned", None)
+        self.native_call_lock_states.append(bool(is_owned and is_owned()))
 
     def constant(self, name: str) -> int:
         return self.constants[name]
@@ -311,6 +315,7 @@ class FakeSecurityBindings:
         return service, account
 
     def SecItemCopyMatching(self, query: int, output) -> int:
+        self._record_native_call()
         self.queries.append(query)
         item = self.items.get(self._locator(query))
         if item is None:
@@ -331,6 +336,7 @@ class FakeSecurityBindings:
         return 0
 
     def SecItemUpdate(self, query: int, attributes: int) -> int:
+        self._record_native_call()
         item = self.items.get(self._locator(query))
         if item is None:
             return -25300
@@ -342,6 +348,7 @@ class FakeSecurityBindings:
         return 0
 
     def SecItemAdd(self, item: int, _result) -> int:
+        self._record_native_call()
         values = self.cf.get(item)
         service = self.cf.get(values[self.constant("kSecAttrService")])
         account = self.cf.get(values[self.constant("kSecAttrAccount")])
@@ -365,6 +372,7 @@ class FakeSecurityBindings:
         return 0
 
     def SecItemDelete(self, query: int) -> int:
+        self._record_native_call()
         locator = self._locator(query)
         if locator not in self.items:
             return -25300
@@ -372,11 +380,13 @@ class FakeSecurityBindings:
         return 0
 
     def SecKeychainGetUserInteractionAllowed(self, output) -> int:
+        self._record_native_call()
         self.interaction_calls.append(True)
         output._obj.value = self.interaction_allowed
         return 0
 
     def SecKeychainSetUserInteractionAllowed(self, value) -> int:
+        self._record_native_call()
         self.interaction_calls.append(bool(value))
         self.interaction_allowed = bool(value)
         return 0
@@ -655,6 +665,8 @@ def test_security_framework_keychain_uses_metadata_without_data_and_tracks_mdat(
         )
     )
     assert fake_security_bindings.interaction_calls == [True, False, True]
+    assert fake_security_bindings.native_call_lock_states
+    assert all(fake_security_bindings.native_call_lock_states)
     assert fake_security_bindings.cf.get(
         read_query[fake_security_bindings.constant("kSecReturnData")]
     )
@@ -712,6 +724,7 @@ def test_security_framework_update_preserves_unrelated_attributes_and_delete(
             fake_security_bindings.constant("kSecUseAuthenticationUIAllow")
         )
     )
+    assert all(fake_security_bindings.native_call_lock_states)
     assert ("Codex Auth", "account") not in fake_security_bindings.items
 
 
@@ -802,119 +815,34 @@ def test_apply_rechecks_each_operation_immediately_before_mutation(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="CoreFoundation smoke requires macOS")
-def test_core_foundation_ffi_smoke_without_security_item_access() -> None:
+def test_production_security_binding_cf_smoke_without_security_item_access() -> None:
+    security_path = ctypes.util.find_library("Security") or (
+        "/System/Library/Frameworks/Security.framework/Security"
+    )
     foundation_path = ctypes.util.find_library("CoreFoundation") or (
         "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
     )
-    cf = ctypes.CDLL(foundation_path)
-    cf.CFRelease.argtypes = [ctypes.c_void_p]
-    cf.CFRelease.restype = None
-    cf.CFGetTypeID.argtypes = [ctypes.c_void_p]
-    cf.CFGetTypeID.restype = ctypes.c_ulong
-    cf.CFStringCreateWithBytes.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_ubyte),
-        ctypes.c_long,
-        ctypes.c_uint32,
-        ctypes.c_bool,
-    ]
-    cf.CFStringCreateWithBytes.restype = ctypes.c_void_p
-    cf.CFStringGetTypeID.argtypes = []
-    cf.CFStringGetTypeID.restype = ctypes.c_ulong
-    cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
-    cf.CFStringGetLength.restype = ctypes.c_long
-    cf.CFStringGetMaximumSizeForEncoding.argtypes = [ctypes.c_long, ctypes.c_uint32]
-    cf.CFStringGetMaximumSizeForEncoding.restype = ctypes.c_long
-    cf.CFStringGetCString.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_char_p,
-        ctypes.c_long,
-        ctypes.c_uint32,
-    ]
-    cf.CFStringGetCString.restype = ctypes.c_bool
-    cf.CFDataCreate.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_ubyte),
-        ctypes.c_long,
-    ]
-    cf.CFDataCreate.restype = ctypes.c_void_p
-    cf.CFDataGetLength.argtypes = [ctypes.c_void_p]
-    cf.CFDataGetLength.restype = ctypes.c_long
-    cf.CFDataGetBytePtr.argtypes = [ctypes.c_void_p]
-    cf.CFDataGetBytePtr.restype = ctypes.POINTER(ctypes.c_ubyte)
-    cf.CFDateCreate.argtypes = [ctypes.c_void_p, ctypes.c_double]
-    cf.CFDateCreate.restype = ctypes.c_void_p
-    cf.CFArrayCreate.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.c_long,
-        ctypes.POINTER(store._CFArrayCallbacks),
-    ]
-    cf.CFArrayCreate.restype = ctypes.c_void_p
-    cf.CFDictionaryCreateMutable.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_long,
-        ctypes.POINTER(store._CFDictionaryKeyCallbacks),
-        ctypes.POINTER(store._CFDictionaryValueCallbacks),
-    ]
-    cf.CFDictionaryCreateMutable.restype = ctypes.c_void_p
-    cf.CFDictionarySetValue.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-    ]
-    cf.CFDictionarySetValue.restype = None
-    cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+    security = ctypes.CDLL(security_path)
+    foundation = ctypes.CDLL(foundation_path)
+    bindings = store._SecurityBindings(security, foundation)
 
-    constants = {
-        "kCFAllocatorDefault": ctypes.c_void_p.in_dll(cf, "kCFAllocatorDefault").value,
-        "kCFBooleanFalse": ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value,
-        "kCFBooleanTrue": ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value,
-    }
-    bindings = SimpleNamespace(
-        cf=cf,
-        constants=constants,
-        key_callbacks=store._CFDictionaryKeyCallbacks.in_dll(
-            cf,
-            "kCFTypeDictionaryKeyCallBacks",
-        ),
-        value_callbacks=store._CFDictionaryValueCallbacks.in_dll(
-            cf,
-            "kCFTypeDictionaryValueCallBacks",
-        ),
-        array_callbacks=store._CFArrayCallbacks.in_dll(
-            cf,
-            "kCFTypeArrayCallBacks",
-        ),
-        constant=lambda name: constants[name],
-    )
-    assert not hasattr(bindings, "security")
-    security_constant_names = (
-        "kSecAttrAccount",
-        "kSecAttrCreationDate",
-            "kSecAttrModificationDate",
-            "kSecAttrPersistentReference",
-            "kSecAttrService",
-            "kSecClass",
-            "kSecClassGenericPassword",
-            "kSecMatchItemList",
-            "kSecMatchLimit",
-        "kSecMatchLimitOne",
-        "kSecReturnAttributes",
-        "kSecReturnData",
-        "kSecReturnPersistentRef",
-        "kSecUseAuthenticationUI",
-        "kSecUseAuthenticationUIAllow",
-        "kSecUseAuthenticationUIFail",
-        "kSecValuePersistentRef",
-        "kSecValueData",
-    )
-    for name in security_constant_names:
-        constants[name] = store._cf_string(bindings, name)
+    def forbidden_sec_call(*_args):
+        raise AssertionError("CoreFoundation smoke called a Sec* API")
+
+    for name in (
+        "SecItemCopyMatching",
+        "SecItemAdd",
+        "SecItemUpdate",
+        "SecItemDelete",
+        "SecKeychainGetUserInteractionAllowed",
+        "SecKeychainSetUserInteractionAllowed",
+    ):
+        setattr(bindings.security, name, forbidden_sec_call)
+
     unicode_ref = store._cf_string(bindings, "服务🚀")
     data_ref = store._cf_data(bindings, "opaque-test-data")
     key_ref = store._cf_string(bindings, "key")
+    dictionary = store._cf_dictionary(bindings, {key_ref: unicode_ref})
     query, owned = store._keychain_query(
         bindings,
         "服务",
@@ -930,29 +858,32 @@ def test_core_foundation_ffi_smoke_without_security_item_access() -> None:
         return_data=True,
         allow_interaction=True,
     )
-    dictionary = store._cf_dictionary(bindings, {key_ref: unicode_ref})
     bound_query = None
     bound_owned: list[int] = []
     try:
-        found = cf.CFDictionaryGetValue(dictionary, key_ref)
+        found = bindings.cf.CFDictionaryGetValue(dictionary, key_ref)
         assert store._cf_string_value(bindings, found) == "服务🚀"
-        found_query_service = cf.CFDictionaryGetValue(
+        found_query_service = bindings.cf.CFDictionaryGetValue(
             query,
-            constants["kSecAttrService"],
+            bindings.constant("kSecAttrService"),
         )
         assert store._cf_string_value(bindings, found_query_service) == "服务"
-        query_values = cf.CFDictionaryGetValue(
-            query,
-            constants["kSecUseAuthenticationUI"],
+        assert (
+            bindings.cf.CFDictionaryGetValue(
+                query,
+                bindings.constant("kSecUseAuthenticationUI"),
+            )
+            == bindings.constant("kSecUseAuthenticationUIFail")
         )
-        assert query_values == constants["kSecUseAuthenticationUIFail"]
-        interactive_values = cf.CFDictionaryGetValue(
-            interactive_query,
-            constants["kSecUseAuthenticationUI"],
+        assert (
+            bindings.cf.CFDictionaryGetValue(
+                interactive_query,
+                bindings.constant("kSecUseAuthenticationUI"),
+            )
+            == bindings.constant("kSecUseAuthenticationUIAllow")
         )
-        assert interactive_values == constants["kSecUseAuthenticationUIAllow"]
-        data_length = cf.CFDataGetLength(data_ref)
-        data_pointer = cf.CFDataGetBytePtr(data_ref)
+        data_length = bindings.cf.CFDataGetLength(data_ref)
+        data_pointer = bindings.cf.CFDataGetBytePtr(data_ref)
         assert bytes(data_pointer[:data_length]) == b"opaque-test-data"
         observed = store._KeychainRead(
             value="",
@@ -971,13 +902,17 @@ def test_core_foundation_ffi_smoke_without_security_item_access() -> None:
             return_data=False,
             expected=observed,
         )
-        assert cf.CFDictionaryGetValue(
+        match_list = bindings.cf.CFDictionaryGetValue(
             bound_query,
-            constants["kSecMatchItemList"],
+            bindings.constant("kSecMatchItemList"),
         )
-        assert cf.CFDictionaryGetValue(
+        assert bindings.cf.CFArrayGetCount(match_list) == 1
+        assert bindings.cf.CFDataGetLength(
+            bindings.cf.CFArrayGetValueAtIndex(match_list, 0),
+        ) == len(b"opaque-test-data")
+        assert bindings.cf.CFDictionaryGetValue(
             bound_query,
-            constants["kSecAttrModificationDate"],
+            bindings.constant("kSecAttrModificationDate"),
         )
     finally:
         store._release(
@@ -992,7 +927,6 @@ def test_core_foundation_ffi_smoke_without_security_item_access() -> None:
             *owned,
             *interactive_owned,
             *bound_owned,
-            *[constants[name] for name in security_constant_names],
         )
 
 
