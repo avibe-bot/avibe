@@ -143,7 +143,11 @@ identities, previous/target Hub config, legacy native-auth before/after values,
 and private native file/store edits. The containing directory is mode 0700;
 the record is mode 0600. These snapshots are never response or log payloads.
 
-Prepare and API-key validation precede cleanup. After cleanup, Source/Routes/
+Prepare, runtime dependency installation, and API-key validation precede
+cleanup. Installation or unsupported-host failures leave native ownership
+intact; staged OAuth grants remain outside the watched auth directory even
+if dependency installation restarts an existing runtime.
+After cleanup, Source/Routes/
 backend mode and legacy auth fields are committed without calling the runtime.
 The `exposed` marker is durable before activation **or engine projection**.
 Recovery explicitly reconciles the projection even when saved config is

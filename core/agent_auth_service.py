@@ -935,6 +935,14 @@ class AgentAuthService:
             )
             return
         except Exception as err:  # noqa: BLE001
+            if isinstance(err, NativeMigrationBlockedError) and err.reason == "native_auth_hub_owned":
+                # A native reset button would repeat the same refused write.
+                # Custody stays in Hub; tell the user where to manage it.
+                await self._send_message(
+                    context,
+                    self._t("command.setup.hubOwned", backend=resolved_backend),
+                )
+                return
             logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
             await self._send_setup_start_failure(context, resolved_backend, str(err))
             return

@@ -1222,6 +1222,11 @@ async def _resume_takeover(
         raise MigrationConflictError
     try:
         if record["phase"] == "prepared":
+            # Installation and host compatibility are knowable before custody.
+            # Staged grants are outside CPA's watched directory, so ensuring
+            # the dependency here cannot publish them. An unavailable runtime
+            # must leave a working native login intact.
+            await host._ensure_runtime_dependency()
             await verify_idle()
             for edit in record.get("keychain", []):
                 await asyncio.to_thread(apply_keychain_edit, edit)

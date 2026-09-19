@@ -9,9 +9,13 @@ from contextlib import nullcontext
 import pytest
 
 from core.handlers.model_hub.migration_journal import NativeFileEdit, NativeTakeoverJournal
-from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub.service import EngineUnavailableError, ModelHubError
 from config.v2_config import ModelHubConfig
-from core.handlers.model_hub.adapter import OAuthCredentialRejectedError, OAuthFlowState
+from core.handlers.model_hub.adapter import (
+    OAuthCredentialRejectedError,
+    OAuthFlowState,
+    RuntimePlatformUnsupportedError,
+)
 from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
     _isolate_native_home,
     _service,
@@ -88,6 +92,37 @@ def test_failure_after_possible_rotation_retains_current_owner_and_retries(monke
     assert asyncio.run(service.migration_apply(item_ids))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     assert service.migration_journal.load() is None
+
+
+@pytest.mark.parametrize(
+    "error,code",
+    [(EngineUnavailableError, "engine_down"),
+     (RuntimePlatformUnsupportedError, "runtime_platform_unsupported")],
+)
+def test_unavailable_runtime_preserves_native_oauth_before_custody(monkeypatch, tmp_path, error, code):
+    home = tmp_path / "native"
+    _write_codex_oauth(home)
+    _isolate_native_home(monkeypatch, home)
+    native = home / ".codex/auth.json"
+    before = native.read_bytes()
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    previous = store.config.to_payload()
+    item_ids = [item["id"] for item in service.migration_scan()["items"]]
+
+    async def unavailable(**kwargs):
+        raise error()
+
+    adapter.ensure_installed = unavailable
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.migration_apply(item_ids))
+    assert failure.value.code == code
+    assert native.read_bytes() == before
+    assert store.config.to_payload() == previous
+    assert not adapter.activated
+    assert not adapter.synced
+    assert service.migration_journal.load() is None
+    assert not service.migration_blocked_backends
 
 
 @pytest.mark.parametrize("backend", ["opencode", "codex", "claude"])
