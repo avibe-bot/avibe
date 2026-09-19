@@ -19,11 +19,15 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
+import ctypes
+import ctypes.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
+
+from config.atomic_io import write_atomic
+from vibe.codex_config import get_codex_home
 
 __all__ = [
     "NativeOAuthError",
@@ -31,6 +35,8 @@ __all__ = [
     "NativeOAuthRevisionError",
     "NativeOAuthSnapshot",
     "apply_keychain_edit",
+    "check_keychain_edit",
+    "native_credentials_paths",
     "read_native_oauth",
 ]
 
@@ -57,8 +63,22 @@ _CLAUDE_OAUTH_METADATA_KEYS = frozenset(
         "organization_uuid",
     }
 )
+_CLAUDE_IDENTITY_KEYS = frozenset(
+    {
+        "accountUuid",
+        "account_uuid",
+        "accountId",
+        "account_id",
+        "email",
+        "emailAddress",
+        "accountEmail",
+        "organizationUuid",
+        "organization_uuid",
+        "organizationId",
+        "organization_id",
+    }
+)
 _SAFE_CLAUDE_ACCOUNT = re.compile(r"^[A-Za-z0-9._-]+$")
-_SECURITY_TOOL = "/usr/bin/security"
 
 
 class NativeOAuthError(RuntimeError):
@@ -144,18 +164,20 @@ def _keychain_revision(backend: str, service: str, account: str, native_revision
     return _locator_revision(backend, "keychain", f"{service}\x00{account}", native_revision)
 
 
-def _read_toml(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
+def _read_toml(path: Path) -> tuple[str, dict[str, Any] | None]:
     try:
         try:
             import tomllib  # type: ignore[attr-defined]
         except ImportError:  # pragma: no cover - Python 3.10 fallback
             import tomli as tomllib  # type: ignore[no-redef]
         value = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except FileNotFoundError:
+        return "missing", {}
+    except (OSError, UnicodeError):
+        return "permission_needed", None
+    except (ValueError, TypeError):
+        return "invalid", None
+    return ("ok", value) if isinstance(value, dict) else ("invalid", None)
 
 
 def _read_json_file(path: Path) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -183,6 +205,12 @@ def _json_file_state(path: Path) -> dict[str, Any]:
         return {"exists": False}
     except (OSError, UnicodeError) as exc:
         raise NativeOAuthPermissionError("native credential file could not be read") from exc
+    return {"exists": True, "raw": raw}
+
+
+def _json_file_state_from_raw(raw: str | None) -> dict[str, Any]:
+    if raw is None:
+        return {"exists": False}
     return {"exists": True, "raw": raw}
 
 
@@ -222,6 +250,13 @@ def _codex_has_oauth(payload: Mapping[str, Any]) -> bool:
     )
 
 
+def _codex_has_credential(payload: Mapping[str, Any]) -> bool:
+    return _codex_has_oauth(payload) or (
+        isinstance(payload.get("OPENAI_API_KEY"), str)
+        and bool(payload["OPENAI_API_KEY"].strip())
+    )
+
+
 def _claude_oauth_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     nested = payload.get("claudeAiOauth")
     if isinstance(nested, dict) and _has_nonempty_string(nested, _CLAUDE_OAUTH_KEYS):
@@ -231,10 +266,39 @@ def _claude_oauth_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _claude_identity(payload: Mapping[str, Any]) -> dict[str, str]:
+    nested = payload.get("claudeAiOauth")
+    sources: list[Mapping[str, Any]] = [payload]
+    if isinstance(nested, dict):
+        sources.insert(0, nested)
+    identity: dict[str, str] = {}
+    for source in sources:
+        for key in _CLAUDE_IDENTITY_KEYS:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                identity.setdefault(key, value.strip())
+    return identity
+
+
+def _claude_same_account(
+    primary: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+) -> bool:
+    primary_identity = _claude_identity(primary)
+    fallback_identity = _claude_identity(fallback)
+    if not primary_identity or not fallback_identity:
+        return False
+    shared_keys = primary_identity.keys() & fallback_identity.keys()
+    return bool(shared_keys) and all(
+        primary_identity[key] == fallback_identity[key] for key in shared_keys
+    )
+
+
 def _remove_codex_oauth(payload: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(payload)
     result.pop("tokens", None)
     result.pop("last_refresh", None)
+    result.pop("OPENAI_API_KEY", None)
     if result.get("auth_mode") == "chatgpt":
         result.pop("auth_mode", None)
     return result
@@ -301,12 +365,21 @@ def _keychain_operation(
 
 
 def _codex_home(home: Path | None) -> Path:
-    if home is not None:
-        return Path(home).expanduser().resolve() / ".codex"
-    configured = os.environ.get("CODEX_HOME")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return (Path.home() / ".codex").resolve()
+    return get_codex_home(home)
+
+
+def native_credentials_paths(
+    backend: str,
+    home: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return the native credential files for the resolved backend root."""
+
+    normalized = str(backend or "").strip().lower()
+    if normalized == "codex":
+        return (_codex_home(home) / "auth.json",)
+    if normalized == "claude":
+        return (_claude_locator(home)[0] / ".credentials.json",)
+    return ()
 
 
 def _claude_locator(home: Path | None) -> tuple[Path, str, str]:
@@ -324,7 +397,7 @@ def _claude_locator(home: Path | None) -> tuple[Path, str, str]:
                 if secure_env
                 else (Path.home() / ".claude").resolve()
             )
-            suffix = "" if not secure_env else f"-{_sha256(str(secure_root).encode('utf-8'))[:8]}"
+            suffix = ""
         else:
             config_defined = "CLAUDE_CONFIG_DIR" in os.environ
             config_env = os.environ.get("CLAUDE_CONFIG_DIR", "")
@@ -353,7 +426,9 @@ def _claude_locator(home: Path | None) -> tuple[Path, str, str]:
 
 
 def _codex_store_config(codex_home: Path) -> tuple[str, str | None]:
-    config = _read_toml(codex_home / "config.toml")
+    config_status, config = _read_toml(codex_home / "config.toml")
+    if config_status in {"permission_needed", "invalid"} or config is None:
+        return "unsupported", f"{config_status}_config"
     if _secret_auth_storage_enabled(config):
         return "unsupported", "secret_auth_storage"
     raw_store = config.get("cli_auth_credentials_store", "file")
@@ -392,93 +467,480 @@ def _secret_auth_storage_enabled(value: object) -> bool:
     return False
 
 
-def _run_security(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Run ``security`` without ever putting a credential in argv."""
+_CFIndex = ctypes.c_long
+_CFTypeRef = ctypes.c_void_p
+_CFStringEncoding = ctypes.c_uint32
+_CFDictionaryCallback = ctypes.c_void_p
 
+
+class _CFDictionaryCallbacks(ctypes.Structure):
+    _fields_ = [
+        ("version", _CFIndex),
+        ("retain", _CFDictionaryCallback),
+        ("release", _CFDictionaryCallback),
+        ("copy_description", _CFDictionaryCallback),
+        ("equal", _CFDictionaryCallback),
+        ("hash", _CFDictionaryCallback),
+    ]
+
+
+class _SecurityBindings:
+    def __init__(self, security: Any, core_foundation: Any) -> None:
+        self.security = security
+        self.cf = core_foundation
+        self.constants = {
+            name: ctypes.c_void_p.in_dll(library, name)
+            for library, names in (
+                (
+                    core_foundation,
+                    (
+                        "kCFAllocatorDefault",
+                        "kCFBooleanFalse",
+                        "kCFBooleanTrue",
+                    ),
+                ),
+                (
+                    security,
+                    (
+                        "kSecAttrAccount",
+                        "kSecAttrCreationDate",
+                        "kSecAttrModificationDate",
+                        "kSecAttrService",
+                        "kSecClass",
+                        "kSecClassGenericPassword",
+                        "kSecMatchLimit",
+                        "kSecMatchLimitOne",
+                        "kSecReturnAttributes",
+                        "kSecReturnData",
+                        "kSecUseAuthenticationUI",
+                        "kSecUseAuthenticationUIFail",
+                        "kSecValueData",
+                    ),
+                ),
+            )
+            for name in names
+        }
+        self.key_callbacks = _CFDictionaryCallbacks.in_dll(
+            core_foundation,
+            "kCFTypeDictionaryKeyCallBacks",
+        )
+        self.value_callbacks = _CFDictionaryCallbacks.in_dll(
+            core_foundation,
+            "kCFTypeDictionaryValueCallBacks",
+        )
+        self._configure()
+
+    def _configure(self) -> None:
+        cf = self.cf
+        cf.CFRelease.argtypes = [_CFTypeRef]
+        cf.CFRelease.restype = None
+        cf.CFGetTypeID.argtypes = [_CFTypeRef]
+        cf.CFGetTypeID.restype = ctypes.c_ulong
+        cf.CFStringCreateWithBytes.argtypes = [
+            _CFTypeRef,
+            ctypes.POINTER(ctypes.c_ubyte),
+            _CFIndex,
+            _CFStringEncoding,
+        ]
+        cf.CFStringCreateWithBytes.restype = _CFTypeRef
+        cf.CFStringGetTypeID.argtypes = []
+        cf.CFStringGetTypeID.restype = ctypes.c_ulong
+        cf.CFStringGetLength.argtypes = [_CFTypeRef]
+        cf.CFStringGetLength.restype = _CFIndex
+        cf.CFStringGetMaximumSizeForEncoding.argtypes = [
+            _CFIndex,
+            _CFStringEncoding,
+        ]
+        cf.CFStringGetMaximumSizeForEncoding.restype = _CFIndex
+        cf.CFStringGetCString.argtypes = [
+            _CFTypeRef,
+            ctypes.c_char_p,
+            _CFIndex,
+            _CFStringEncoding,
+        ]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFDataGetTypeID.argtypes = []
+        cf.CFDataGetTypeID.restype = ctypes.c_ulong
+        cf.CFDataGetLength.argtypes = [_CFTypeRef]
+        cf.CFDataGetLength.restype = _CFIndex
+        cf.CFDataGetBytePtr.argtypes = [_CFTypeRef]
+        cf.CFDataGetBytePtr.restype = ctypes.POINTER(ctypes.c_ubyte)
+        cf.CFDataCreate.argtypes = [
+            _CFTypeRef,
+            ctypes.POINTER(ctypes.c_ubyte),
+            _CFIndex,
+        ]
+        cf.CFDataCreate.restype = _CFTypeRef
+        cf.CFDateGetTypeID.argtypes = []
+        cf.CFDateGetTypeID.restype = ctypes.c_ulong
+        cf.CFDateGetAbsoluteTime.argtypes = [_CFTypeRef]
+        cf.CFDateGetAbsoluteTime.restype = ctypes.c_double
+        cf.CFNumberGetTypeID.argtypes = []
+        cf.CFNumberGetTypeID.restype = ctypes.c_ulong
+        cf.CFNumberGetValue.argtypes = [
+            _CFTypeRef,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        cf.CFNumberGetValue.restype = ctypes.c_bool
+        cf.CFBooleanGetTypeID.argtypes = []
+        cf.CFBooleanGetTypeID.restype = ctypes.c_ulong
+        cf.CFBooleanGetValue.argtypes = [_CFTypeRef]
+        cf.CFBooleanGetValue.restype = ctypes.c_bool
+        cf.CFDictionaryCreateMutable.argtypes = [
+            _CFTypeRef,
+            _CFIndex,
+            ctypes.POINTER(_CFDictionaryCallbacks),
+            ctypes.POINTER(_CFDictionaryCallbacks),
+        ]
+        cf.CFDictionaryCreateMutable.restype = _CFTypeRef
+        cf.CFDictionarySetValue.argtypes = [
+            _CFTypeRef,
+            _CFTypeRef,
+            _CFTypeRef,
+        ]
+        cf.CFDictionarySetValue.restype = None
+        cf.CFDictionaryGetValue.argtypes = [_CFTypeRef, _CFTypeRef]
+        cf.CFDictionaryGetValue.restype = _CFTypeRef
+        self.security.SecItemCopyMatching.argtypes = [
+            _CFTypeRef,
+            ctypes.POINTER(_CFTypeRef),
+        ]
+        self.security.SecItemCopyMatching.restype = ctypes.c_int32
+        self.security.SecItemAdd.argtypes = [_CFTypeRef, ctypes.POINTER(_CFTypeRef)]
+        self.security.SecItemAdd.restype = ctypes.c_int32
+        self.security.SecItemUpdate.argtypes = [_CFTypeRef, _CFTypeRef]
+        self.security.SecItemUpdate.restype = ctypes.c_int32
+        self.security.SecItemDelete.argtypes = [_CFTypeRef]
+        self.security.SecItemDelete.restype = ctypes.c_int32
+
+    def constant(self, name: str) -> _CFTypeRef:
+        return self.constants[name]
+
+
+_SECURITY_BINDINGS: _SecurityBindings | None = None
+_ERR_SEC_SUCCESS = 0
+_ERR_SEC_ITEM_NOT_FOUND = -25300
+_UTF8 = 0x08000100
+_CF_NUMBER_DOUBLE = 6
+
+
+def _security_bindings() -> _SecurityBindings:
+    global _SECURITY_BINDINGS
+    if _SECURITY_BINDINGS is not None:
+        return _SECURITY_BINDINGS
+    if sys.platform != "darwin":
+        raise _KeychainUnavailable("native keychain is unavailable")
     try:
-        return subprocess.run(
-            [_SECURITY_TOOL, *args],
-            input=input_text,
-            text=True,
-            capture_output=True,
-            stdin=subprocess.DEVNULL if input_text is None else None,
-            timeout=5,
-            check=False,
+        security_path = ctypes.util.find_library("Security") or (
+            "/System/Library/Frameworks/Security.framework/Security"
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+        foundation_path = ctypes.util.find_library("CoreFoundation") or (
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        security = ctypes.CDLL(security_path)
+        core_foundation = ctypes.CDLL(foundation_path)
+        _SECURITY_BINDINGS = _SecurityBindings(security, core_foundation)
+    except (OSError, AttributeError, KeyError) as exc:
         raise _KeychainUnavailable("native keychain is unavailable") from exc
+    return _SECURITY_BINDINGS
 
 
-def _security_not_found(result: subprocess.CompletedProcess[str]) -> bool:
-    output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
-    return any(
-        marker in output
-        for marker in (
-            "could not be found",
-            "item not found",
-            "errsecitemnotfound",
-            "no matching",
-        )
+def _cf_string(bindings: _SecurityBindings, value: str) -> _CFTypeRef:
+    raw = value.encode("utf-8")
+    buffer = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+    result = bindings.cf.CFStringCreateWithBytes(
+        bindings.constant("kCFAllocatorDefault"),
+        buffer,
+        len(raw),
+        _UTF8,
     )
+    if not result:
+        raise _KeychainUnavailable("native keychain string allocation failed")
+    return result
 
 
-def _security_attributes(stdout: str) -> dict[str, str]:
-    attributes: dict[str, str] = {}
-    for line in stdout.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if key in {"acct", "svce", "cdat", "mdat", "uuid", "type"}:
-            attributes[key] = value
-    return attributes
+def _cf_data(bindings: _SecurityBindings, value: str) -> _CFTypeRef:
+    raw = value.encode("utf-8")
+    buffer = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+    result = bindings.cf.CFDataCreate(
+        bindings.constant("kCFAllocatorDefault"),
+        buffer,
+        len(raw),
+    )
+    if not result:
+        raise _KeychainUnavailable("native keychain data allocation failed")
+    return result
+
+
+def _cf_dictionary(
+    bindings: _SecurityBindings,
+    values: Mapping[_CFTypeRef, _CFTypeRef],
+) -> _CFTypeRef:
+    dictionary = bindings.cf.CFDictionaryCreateMutable(
+        bindings.constant("kCFAllocatorDefault"),
+        0,
+        ctypes.byref(bindings.key_callbacks),
+        ctypes.byref(bindings.value_callbacks),
+    )
+    if not dictionary:
+        raise _KeychainUnavailable("native keychain query allocation failed")
+    try:
+        for key, value in values.items():
+            bindings.cf.CFDictionarySetValue(dictionary, key, value)
+    except BaseException:
+        bindings.cf.CFRelease(dictionary)
+        raise
+    return dictionary
+
+
+def _release(bindings: _SecurityBindings, *objects: _CFTypeRef) -> None:
+    for value in objects:
+        if value:
+            bindings.cf.CFRelease(value)
+
+
+def _cf_string_value(bindings: _SecurityBindings, value: _CFTypeRef) -> str:
+    length = bindings.cf.CFStringGetLength(value)
+    maximum = bindings.cf.CFStringGetMaximumSizeForEncoding(length, _UTF8) + 1
+    buffer = ctypes.create_string_buffer(maximum)
+    if not bindings.cf.CFStringGetCString(value, buffer, maximum, _UTF8):
+        return ""
+    return buffer.value.decode("utf-8", errors="replace")
+
+
+def _cf_safe_value(bindings: _SecurityBindings, value: _CFTypeRef) -> Any:
+    type_id = bindings.cf.CFGetTypeID(value)
+    if type_id == bindings.cf.CFStringGetTypeID():
+        return _cf_string_value(bindings, value)
+    if type_id == bindings.cf.CFDateGetTypeID():
+        return bindings.cf.CFDateGetAbsoluteTime(value)
+    if type_id == bindings.cf.CFNumberGetTypeID():
+        number = ctypes.c_double()
+        if bindings.cf.CFNumberGetValue(value, _CF_NUMBER_DOUBLE, ctypes.byref(number)):
+            return number.value
+    if type_id == bindings.cf.CFBooleanGetTypeID():
+        return bool(bindings.cf.CFBooleanGetValue(value))
+    if type_id == bindings.cf.CFDataGetTypeID():
+        length = bindings.cf.CFDataGetLength(value)
+        pointer = bindings.cf.CFDataGetBytePtr(value)
+        raw = bytes(pointer[:length]) if pointer and length else b""
+        return f"sha256:{_sha256(raw)}"
+    return f"cf-type-{type_id}"
+
+
+def _keychain_query(
+    bindings: _SecurityBindings,
+    service: str,
+    account: str,
+    *,
+    return_attributes: bool,
+    return_data: bool,
+) -> tuple[_CFTypeRef, list[_CFTypeRef]]:
+    service_ref = _cf_string(bindings, service)
+    account_ref = _cf_string(bindings, account)
+    values = {
+        bindings.constant("kSecClass"): bindings.constant("kSecClassGenericPassword"),
+        bindings.constant("kSecAttrService"): service_ref,
+        bindings.constant("kSecAttrAccount"): account_ref,
+        bindings.constant("kSecMatchLimit"): bindings.constant("kSecMatchLimitOne"),
+        bindings.constant("kSecReturnAttributes"): (
+            bindings.constant("kCFBooleanTrue")
+            if return_attributes
+            else bindings.constant("kCFBooleanFalse")
+        ),
+        bindings.constant("kSecReturnData"): (
+            bindings.constant("kCFBooleanTrue")
+            if return_data
+            else bindings.constant("kCFBooleanFalse")
+        ),
+        bindings.constant("kSecUseAuthenticationUI"): bindings.constant(
+            "kSecUseAuthenticationUIFail"
+        ),
+    }
+    return _cf_dictionary(bindings, values), [service_ref, account_ref]
+
+
+def _metadata_from_result(
+    bindings: _SecurityBindings,
+    result: _CFTypeRef,
+    *,
+    service: str,
+    account: str,
+) -> _KeychainMetadata:
+    safe_attributes: dict[str, Any] = {}
+    for name, key in (
+        ("acct", "kSecAttrAccount"),
+        ("svce", "kSecAttrService"),
+        ("cdat", "kSecAttrCreationDate"),
+        ("mdat", "kSecAttrModificationDate"),
+    ):
+        value = bindings.cf.CFDictionaryGetValue(result, bindings.constant(key))
+        if value:
+            safe_attributes[name] = _cf_safe_value(bindings, value)
+    native_revision = _sha256(
+        json.dumps(
+            safe_attributes,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    attributes = {
+        key: value
+        for key, value in safe_attributes.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+    attributes.setdefault("acct", account)
+    attributes.setdefault("svce", service)
+    return _KeychainMetadata("found", native_revision, attributes)
+
+
+def _keychain_status(status: int, *, action: str) -> NativeOAuthError:
+    if status == _ERR_SEC_ITEM_NOT_FOUND:
+        return _KeychainNotFound("native keychain item was not found")
+    if status in {-25293, -25308, -25291, -25292}:
+        return _KeychainDenied(f"native keychain {action} was denied")
+    return _KeychainUnavailable(f"native keychain {action} failed")
 
 
 class _SecurityKeychainStore:
+    def _copy_matching(
+        self,
+        service: str,
+        account: str,
+        *,
+        return_attributes: bool,
+        return_data: bool,
+    ) -> tuple[_SecurityBindings, _CFTypeRef]:
+        bindings = _security_bindings()
+        query, owned = _keychain_query(
+            bindings,
+            service,
+            account,
+            return_attributes=return_attributes,
+            return_data=return_data,
+        )
+        result = _CFTypeRef()
+        try:
+            status = bindings.security.SecItemCopyMatching(query, ctypes.byref(result))
+        finally:
+            _release(bindings, query, *owned)
+        if status != _ERR_SEC_SUCCESS:
+            raise _keychain_status(status, action="read")
+        if not result:
+            raise _KeychainUnavailable("native keychain returned no result")
+        return bindings, result
+
     def metadata(self, service: str, account: str) -> _KeychainMetadata:
-        if sys.platform != "darwin":
-            return _KeychainMetadata("not_found", "unavailable")
-        result = _run_security(["find-generic-password", "-a", account, "-s", service])
-        if result.returncode == 0:
-            attributes = _security_attributes(result.stdout or "")
-            native_revision = "|".join(
-                attributes.get(key, "")
-                for key in ("uuid", "mdat", "cdat", "acct", "svce")
+        try:
+            bindings, result = self._copy_matching(
+                service,
+                account,
+                return_attributes=True,
+                return_data=False,
             )
-            return _KeychainMetadata("found", native_revision or "present", attributes)
-        if _security_not_found(result):
+        except _KeychainNotFound:
             return _KeychainMetadata("not_found", "absent")
-        return _KeychainMetadata("permission_needed", "permission")
+        except _KeychainDenied:
+            return _KeychainMetadata("permission_needed", "permission")
+        except _KeychainUnavailable:
+            raise
+        try:
+            return _metadata_from_result(
+                bindings,
+                result,
+                service=service,
+                account=account,
+            )
+        finally:
+            _release(bindings, result)
 
     def read(self, service: str, account: str) -> _KeychainRead:
-        metadata = self.metadata(service, account)
-        if metadata.state == "not_found":
-            raise _KeychainNotFound("native keychain item was not found")
-        if metadata.state != "found":
-            raise _KeychainDenied("native keychain read was denied")
-        result = _run_security(["find-generic-password", "-a", account, "-s", service, "-w"])
-        if result.returncode != 0:
-            if _security_not_found(result):
-                raise _KeychainNotFound("native keychain item was not found")
-            raise _KeychainDenied("native keychain read was denied")
-        value = (result.stdout or "").rstrip("\r\n")
-        if not value:
-            raise _KeychainDenied("native keychain value was empty")
-        return _KeychainRead(value=value, revision=metadata.revision)
+        bindings, result = self._copy_matching(
+            service,
+            account,
+            return_attributes=True,
+            return_data=True,
+        )
+        try:
+            metadata = _metadata_from_result(
+                bindings,
+                result,
+                service=service,
+                account=account,
+            )
+            data = bindings.cf.CFDictionaryGetValue(
+                result,
+                bindings.constant("kSecValueData"),
+            )
+            if not data:
+                raise _KeychainDenied("native keychain value was unavailable")
+            length = bindings.cf.CFDataGetLength(data)
+            pointer = bindings.cf.CFDataGetBytePtr(data)
+            raw = bytes(pointer[:length]) if pointer and length else b""
+            if not raw:
+                raise _KeychainDenied("native keychain value was empty")
+            try:
+                value = raw.decode("utf-8")
+            except UnicodeError as exc:
+                raise _KeychainDenied("native keychain value was not UTF-8") from exc
+            return _KeychainRead(value=value, revision=metadata.revision)
+        finally:
+            _release(bindings, result)
 
     def write(self, service: str, account: str, value: str) -> None:
-        result = _run_security(
-            ["add-generic-password", "-U", "-a", account, "-s", service, "-w"],
-            input_text=value,
+        bindings = _security_bindings()
+        query, query_owned = _keychain_query(
+            bindings,
+            service,
+            account,
+            return_attributes=False,
+            return_data=False,
         )
-        if result.returncode != 0:
-            raise _KeychainDenied("native keychain write was denied")
+        data = _cf_data(bindings, value)
+        attributes = _cf_dictionary(
+            bindings,
+            {bindings.constant("kSecValueData"): data},
+        )
+        try:
+            status = bindings.security.SecItemUpdate(query, attributes)
+            if status == _ERR_SEC_ITEM_NOT_FOUND:
+                item = _cf_dictionary(
+                    bindings,
+                    {
+                        bindings.constant("kSecClass"): bindings.constant(
+                            "kSecClassGenericPassword"
+                        ),
+                        bindings.constant("kSecAttrService"): query_owned[0],
+                        bindings.constant("kSecAttrAccount"): query_owned[1],
+                        bindings.constant("kSecValueData"): data,
+                    },
+                )
+                try:
+                    status = bindings.security.SecItemAdd(item, None)
+                finally:
+                    _release(bindings, item)
+            if status != _ERR_SEC_SUCCESS:
+                raise _keychain_status(status, action="write")
+        finally:
+            _release(bindings, query, attributes, data, *query_owned)
 
     def delete(self, service: str, account: str) -> None:
-        result = _run_security(["delete-generic-password", "-a", account, "-s", service])
-        if result.returncode != 0 and not _security_not_found(result):
-            raise _KeychainDenied("native keychain delete was denied")
+        bindings = _security_bindings()
+        query, owned = _keychain_query(
+            bindings,
+            service,
+            account,
+            return_attributes=False,
+            return_data=False,
+        )
+        try:
+            status = bindings.security.SecItemDelete(query)
+        finally:
+            _release(bindings, query, *owned)
+        if status not in {_ERR_SEC_SUCCESS, _ERR_SEC_ITEM_NOT_FOUND}:
+            raise _keychain_status(status, action="delete")
 
 
 class _FixtureKeychainStore:
@@ -605,7 +1067,7 @@ def _read_keychain_snapshot(
             account=account,
         )
     if backend == "codex":
-        supported = _codex_has_oauth(payload)
+        supported = _codex_has_credential(payload)
         after_payload = _remove_codex_oauth(payload)
     else:
         supported = _claude_oauth_payload(payload) is not None
@@ -644,7 +1106,7 @@ def _read_codex_file(
         return None
     if status in {"permission_needed", "invalid"} or payload is None:
         return _placeholder("codex", revision, status, store="file")
-    if not _codex_has_oauth(payload):
+    if not _codex_has_credential(payload):
         return None
     if not allow_secret:
         return NativeOAuthSnapshot(
@@ -653,10 +1115,7 @@ def _read_codex_file(
             payload=payload,
             exportable=True,
         )
-    try:
-        before = _json_file_state(auth_path)
-    except NativeOAuthPermissionError:
-        return _placeholder("codex", revision, "permission_needed", store="file")
+    before = _json_file_state_from_raw(raw)
     after_payload = _remove_codex_oauth(payload)
     after = _state_for_json_payload(after_payload, raw or "")
     operation = _file_operation(auth_path, before, after)
@@ -691,10 +1150,7 @@ def _read_claude_file(
             payload=payload,
             exportable=True,
         )
-    try:
-        before = _json_file_state(credentials_path)
-    except NativeOAuthPermissionError:
-        return _placeholder("claude", revision, "permission_needed", store="file")
+    before = _json_file_state_from_raw(raw)
     after_payload = _remove_claude_oauth(payload)
     after = _state_for_json_payload(after_payload, raw or "")
     operation = _file_operation(credentials_path, before, after)
@@ -711,7 +1167,7 @@ def _read_claude_file(
 def _read_codex(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot | None:
     codex_home = _codex_home(home)
     store_mode, unsupported = _codex_store_config(codex_home)
-    auth_path = codex_home / "auth.json"
+    auth_path = native_credentials_paths("codex", home)[0]
     if unsupported is not None:
         revision = _locator_revision("codex", "unsupported", str(codex_home), unsupported)
         return _placeholder("codex", revision, "unsupported_store", store=unsupported)
@@ -741,7 +1197,7 @@ def _read_codex(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot
 
 def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot | None:
     secure_root, service, account = _claude_locator(home)
-    credentials_path = secure_root / ".credentials.json"
+    credentials_path = native_credentials_paths("claude", home)[0]
     store, isolated = _keychain_for(home)
     keychain_snapshot = _read_keychain_snapshot(
         "claude",
@@ -753,10 +1209,7 @@ def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapsho
     )
     if keychain_snapshot is not None:
         if keychain_snapshot.exportable and allow_secret and keychain_snapshot.keychain_edit:
-            try:
-                file_status, file_payload, file_raw = _read_json_file(credentials_path)
-            except OSError:
-                file_status, file_payload, file_raw = "permission_needed", None, None
+            file_status, file_payload, file_raw = _read_json_file(credentials_path)
             if file_status == "permission_needed":
                 return _placeholder(
                     "claude",
@@ -766,15 +1219,19 @@ def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapsho
                 )
             if file_status not in {"missing", "invalid"} and file_payload is not None:
                 if _claude_oauth_payload(file_payload) is not None:
-                    try:
-                        file_before = _json_file_state(credentials_path)
-                    except NativeOAuthPermissionError:
+                    if not _claude_same_account(
+                        keychain_snapshot.payload or {},
+                        file_payload,
+                    ):
                         return _placeholder(
                             "claude",
                             keychain_snapshot.revision,
-                            "permission_needed",
-                            store="file",
+                            "conflict",
+                            store="keychain+file",
+                            service=service,
+                            account=account,
                         )
+                    file_before = _json_file_state_from_raw(file_raw)
                     file_after_payload = _remove_claude_oauth(file_payload)
                     operations = list(keychain_snapshot.keychain_edit["operations"])
                     operations.append(
@@ -837,6 +1294,9 @@ def _state_value(state: Mapping[str, Any]) -> tuple[bool, str | dict[str, Any] |
 
 
 def _state_matches(live: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    expected_revision = expected.get("revision")
+    if expected_revision is not None and live.get("revision") != expected_revision:
+        return False
     live_exists, live_value = _state_value(live)
     expected_exists, expected_value = _state_value(expected)
     if live_exists != expected_exists:
@@ -895,16 +1355,9 @@ def _apply_file_state(operation: Mapping[str, Any], desired: Mapping[str, Any]) 
         return
     if not isinstance(value, str):
         raise ValueError("invalid file edit state")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.avibe-tmp")
     try:
-        temporary.write_text(value, encoding="utf-8")
-        os.replace(temporary, path)
+        write_atomic(path, value)
     except OSError as exc:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
         raise NativeOAuthPermissionError("native credential file could not be written") from exc
 
 
@@ -927,6 +1380,11 @@ def _apply_keychain_state(
             store.delete(service, account)
     except (_KeychainDenied, _KeychainUnavailable) as exc:
         raise NativeOAuthPermissionError("native keychain mutation was denied") from exc
+    live = _live_keychain_state(store, operation)
+    readback_expected = dict(desired)
+    readback_expected.pop("revision", None)
+    if not _state_matches(live, readback_expected):
+        raise NativeOAuthRevisionError("native keychain mutation did not read back")
 
 
 def _normalize_operations(edit: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -949,6 +1407,39 @@ def _normalize_operations(edit: Mapping[str, Any]) -> list[dict[str, Any]]:
     if not operations or not all(isinstance(operation, dict) for operation in operations):
         raise ValueError("invalid native OAuth edit")
     return operations
+
+
+def _check_edit(
+    edit: Mapping[str, Any],
+    *,
+    target_key: str,
+) -> bool:
+    operations = _normalize_operations(edit)
+    keychain_store = _KEYCHAIN_STORE
+    for operation in operations:
+        kind = operation.get("kind")
+        if kind == "keychain":
+            if operation.get("store_scope") == "fixture" and keychain_store is _DEFAULT_KEYCHAIN_STORE:
+                raise NativeOAuthPermissionError("fixture keychain is not available")
+            live = _live_keychain_state(keychain_store, operation)
+        elif kind == "file":
+            live = _live_file_state(operation)
+        else:
+            raise ValueError("invalid native OAuth edit operation")
+        expected = operation.get(target_key)
+        if not isinstance(expected, dict):
+            raise ValueError("invalid native OAuth edit state")
+        if not _state_matches(live, expected):
+            raise NativeOAuthRevisionError("native OAuth store changed")
+    return True
+
+
+def check_keychain_edit(edit: dict[str, Any], *, applied: bool = False) -> bool:
+    """Check that a journal edit is still unapplied or already applied."""
+
+    if not isinstance(edit, dict) or edit.get("version") not in {None, 1}:
+        raise ValueError("invalid native OAuth edit")
+    return _check_edit(edit, target_key="after" if applied else "before")
 
 
 def apply_keychain_edit(edit: dict[str, Any], *, reverse: bool = False) -> None:
@@ -992,25 +1483,17 @@ def apply_keychain_edit(edit: dict[str, Any], *, reverse: bool = False) -> None:
             raise NativeOAuthRevisionError("native OAuth store changed")
         planned.append((operation, desired, expected, is_keychain, True))
 
-    applied: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
     try:
-        for operation, desired, original, is_keychain, should_apply in planned:
+        for operation, desired, _original, is_keychain, should_apply in planned:
             if not should_apply:
                 continue
             if is_keychain:
                 _apply_keychain_state(keychain_store, operation, desired)
             else:
                 _apply_file_state(operation, desired)
-            applied.append((operation, original, is_keychain))
+                if not _state_matches(_live_file_state(operation), desired):
+                    raise NativeOAuthRevisionError("native file mutation did not read back")
     except (NativeOAuthError, OSError, ValueError) as exc:
-        for operation, original, is_keychain in reversed(applied):
-            try:
-                if is_keychain:
-                    _apply_keychain_state(keychain_store, operation, original)
-                else:
-                    _apply_file_state(operation, original)
-            except (NativeOAuthError, OSError, ValueError):
-                pass
         if isinstance(exc, NativeOAuthError):
             raise
         raise NativeOAuthError("native OAuth edit could not be applied") from exc
