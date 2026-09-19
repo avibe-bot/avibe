@@ -9,6 +9,7 @@ capability:
     - tests/test_member_management_parity.py
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
+    - tests/test_codex_request_routing.py
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_retry_advice.py
@@ -52,6 +53,8 @@ capability:
     - tests/e2e/test_model_hub_routing.py
     - tests/e2e/test_model_hub_backend_settings.py
     - tests/e2e/test_model_hub_catalog_consumer.py
+    - tests/e2e/test_codex_request_metadata.py
+    - tests/e2e/test_codex_request_gateway.py
     - tests/e2e/test_model_hub_runtime.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
@@ -92,6 +95,34 @@ status_legend:
     expected_fail: false
     priority: false
 scenarios:
+  - id: MH-CODEX-ROUTING-001
+    name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_codex_request_routing.py::test_codex_shared_transport_routes_overlapping_aliases
+    related_tests:
+      - tests/test_codex_request_routing.py::test_codex_invalid_identity_cannot_route_or_poison_peer
+      - tests/test_codex_request_routing.py::test_codex_late_request_same_route_is_not_owned_by_successor
+      - tests/test_codex_request_routing.py::test_codex_request_ownership_precedes_body_parse
+      - tests/test_codex_request_routing.py::test_codex_adapter_keeps_request_metadata_on_compatibility_retry
+  - id: MH-CODEX-ROUTING-002
+    name: Real Codex consumes issued launch metadata through the real gateway and exact turn settlement
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/e2e/test_codex_request_gateway.py::test_codex_native_gateway_keeps_concurrent_route_ownership
+  - id: MH-CODEX-METADATA-001
+    name: Native Codex preserves per-request identity through concurrency, tool continuations, retries and compaction
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/e2e/test_codex_request_metadata.py::test_codex_concurrent_threads_keep_distinct_metadata
+    related_tests:
+      - tests/e2e/test_codex_request_metadata.py::test_codex_tool_continuation_keeps_metadata
+      - tests/e2e/test_codex_request_metadata.py::test_codex_transport_retry_keeps_metadata
+      - tests/e2e/test_codex_request_metadata.py::test_codex_auto_compaction_wire_metadata
+      - tests/e2e/test_codex_request_metadata.py::test_codex_remote_compact_request_uses_header_metadata
   - id: MH-RETRY-WINDOW-001
     name: Every fallback pass shares one admission window without replaying output
     status: covered

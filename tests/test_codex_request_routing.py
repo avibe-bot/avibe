@@ -103,7 +103,9 @@ async def _post(launch, *, headers=None, payload=None):
 
 
 async def _settle(runtime, turn):
-    completion = runtime.router.settle_turn(turn, settled_by=SETTLED_BY_TERMINAL_RESULT)
+    completion = runtime.router.settle_turn(
+        turn, settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-09-19T00:00:00Z",
+    )
     if inspect.isawaitable(completion):
         await completion
 
@@ -144,10 +146,11 @@ async def test_codex_shared_transport_routes_overlapping_aliases(runtime):
         assert record["served"]["source_id"] == source_id
         assert record["outcome"] == "served"
     for request in runtime.adapter.requests:
-        assert request["model"] == "same-upstream"
+        assert request["model"] in ALIASES
         assert request["client_metadata"]["keep"] == "native-value"
         assert json.loads(request["client_metadata"][METADATA]) == {"thread_id": "native-thread"}
         assert METADATA not in request.headers
+    assert {model for _source, model, _origin in runtime.adapter.invocations} == {"same-upstream"}
 
 
 @pytest.mark.parametrize("bad_identity", ["missing", "malformed", "unknown", "foreign", "mismatched-body"])
@@ -190,14 +193,14 @@ async def test_codex_late_request_same_route_is_not_owned_by_successor(runtime):
         ScenarioCallResult(RawOutcomeKind.HTTP_ERROR, status=404, error_code="model_not_found"),
         SUCCESS,
     ])
-    assert (await _post(old))[0] == 404
+    assert (await _post(old))[0] == 400
     assert (await _post(current))[0] == 200
     await _settle(runtime, "current")
     record = runtime.service.get_turn_provenance("current")
     assert record["outcome"] == "served"
     assert record["failed_attempts"] == []
     assert record["terminal_error"] is None
-    assert runtime.service.get_turn_provenance("old") is None
+    assert runtime.service.provenance.get("old") is None
 
 
 @pytest.mark.parametrize("malformed", [False, True])

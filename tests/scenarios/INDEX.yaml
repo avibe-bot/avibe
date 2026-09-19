@@ -135,6 +135,8 @@ capabilities:
       - tests/e2e/test_model_hub_routing.py
       - tests/e2e/test_model_hub_backend_settings.py
       - tests/e2e/test_model_hub_catalog_consumer.py
+      - tests/e2e/test_codex_request_metadata.py
+      - tests/e2e/test_codex_request_gateway.py
       - tests/e2e/test_model_hub_runtime.py
       - tests/e2e/test_model_hub_sources.py
       - tests/e2e/test_model_hub_usage_events.py
@@ -148,6 +150,8 @@ capabilities:
       - tests/test_member_management_parity.py
       - tests/test_model_hub_provenance.py
       - tests/test_model_hub_retention.py
+      - tests/test_codex_request_provenance.py
+      - tests/test_codex_request_routing.py
       - tests/test_model_hub_resolution.py
       - tests/test_model_hub_routing_modes.py
       - tests/test_model_hub_transport_leases.py
