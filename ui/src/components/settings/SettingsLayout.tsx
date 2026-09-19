@@ -239,9 +239,9 @@ export const SettingsLayout: React.FC = () => {
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
-  // Settings is a standalone page: its 196px rail is followed by one common
-  // 880px content column with 32px horizontal padding in the desktop design.
-  // Model Hub keeps its own full-height surface, but shares the same page frame.
+  // Settings is a standalone page: ordinary sections use one 944px outer
+  // frame with an 880px content column after 32px desktop padding. Model Hub
+  // keeps its full route-pane width and its own full-height surface.
   const isFluidContent = isModelHub;
 
   useEffect(() => {
@@ -446,9 +446,9 @@ export const SettingsLayout: React.FC = () => {
           <div
             key={location.pathname}
             className={clsx(
-              'w-full max-w-[944px] px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 motion-safe:animate-in motion-safe:slide-in-from-right-4 motion-safe:duration-200 md:px-8 md:pb-7 md:pt-7 md:animate-none',
+              'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 motion-safe:animate-in motion-safe:slide-in-from-right-4 motion-safe:duration-200 md:px-8 md:pb-7 md:pt-7 md:animate-none',
               isModelHub && 'min-h-full',
-              !isFluidContent && 'mx-auto',
+              !isFluidContent && 'mx-auto max-w-[944px]',
             )}
           >
             <Outlet />

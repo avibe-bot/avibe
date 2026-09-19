@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { DESKTOP, NARROW, ORIGIN, WIDE, open, serveProduct } from './support';
+import { DESKTOP, NARROW, ORIGIN, WIDE, config, open, serveProduct } from './support';
 
 /**
  * The packet's geometry claims, measured in a browser rather than inferred from
@@ -26,10 +26,99 @@ const ULTRA = { width: 1920, height: 1000 };
 // because of where it is anchored, not because 844 happens to leave room.
 const NARROW_SHORT = { width: 390, height: 667 };
 
+const MODEL_HUB_AGENT = {
+  backend: 'codex',
+  cli_present: true,
+  mode: 'hub',
+  menu_kind: 'fixed',
+  selected_model_id: 'fixture-model-中文',
+  selected_model_explicit: true,
+  sources: { order: [], eligibility: [] },
+  routes: {},
+  supply_status: 'interrupted',
+  model_supply: [{ model_id: 'fixture-model-中文', route_origin: null, chain_length: 0, has_runnable_hop: false }],
+  builtin_models: ['fixture-model-中文'],
+  named_agents: [],
+  menu: null,
+};
+
+const MODEL_HUB_RUNTIME = {
+  contract_version: 10,
+  enabled: true,
+  manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'f'.repeat(40), assets: [] },
+  status: { installed_version: 'fixture', verified: true, listening: { host: '127.0.0.1', port: 43123 }, health: 'ok' },
+};
+
+const MODEL_HUB_SESSION = {
+  remote: false,
+  authenticated: true,
+  authorization_state: 'current',
+  instance_kind: 'personal',
+  instance_role: 'owner',
+  capabilities: {
+    is_instance_owner: true, can_read_instance: true, can_chat: true,
+    can_manage_projects: true, can_manage_agents: true, can_manage_instance: true,
+    can_manage_access_members: true, can_use_agents: true, can_use_skills: true,
+    can_use_vault_secrets: true, can_use_show_pages: true, can_use_terminal_files: true,
+    can_use_terminal: true, can_use_files: true, can_use_system: true,
+  },
+};
+
+/**
+ * Render the actual Model Hub route with a ready capability, runtime, and
+ * Gateway backend. Every response remains test-owned; mutations fall through
+ * to serveProduct's strict request guard.
+ */
+async function serveModelHub(page: import('@playwright/test').Page) {
+  const denied = await serveProduct(page);
+  const unexpectedModelReads: string[] = [];
+  const getOnly = async (route: import('@playwright/test').Route, body: unknown) => {
+    if (route.request().method() !== 'GET' && route.request().method() !== 'HEAD') {
+      denied.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
+      return route.abort();
+    }
+    return route.fulfill({ json: body });
+  };
+  await page.route('**/api/session', (route) => getOnly(route, MODEL_HUB_SESSION));
+  await page.route('**/api/config', (route) => getOnly(route, { ...config('en'), capabilities: { model_hub: { enabled: true } } }));
+  await page.route('**/api/models/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const query = new URL(route.request().url()).search;
+    if (path === '/api/models/sources' && !query) return getOnly(route, { sources: [] });
+    if (path === '/api/models/runtime/status' && !query) return getOnly(route, MODEL_HUB_RUNTIME);
+    if (path === '/api/models/agents' && !query) return getOnly(route, { agents: [MODEL_HUB_AGENT] });
+    if (path === '/api/models/agents' && query === '?refresh_cli_presence=1') {
+      return getOnly(route, { agents: [MODEL_HUB_AGENT] });
+    }
+    if (path === '/api/models/agents/codex/chains' && !query) return getOnly(route, { chains: [] });
+    unexpectedModelReads.push(`${route.request().method()} ${path}${query}`);
+    return route.abort();
+  });
+  return { denied, unexpectedModelReads };
+}
+
 const widthOf = async (page: import('@playwright/test').Page, selector: string) => {
   const box = await page.locator(selector).first().boundingBox();
   expect(box, `${selector} should be laid out`).not.toBeNull();
   return box!.width;
+};
+
+const frameGeometry = async (page: import('@playwright/test').Page) => page.locator(SETTINGS_CONTENT).evaluate((node) => {
+  const style = getComputedStyle(node);
+  const box = node.getBoundingClientRect();
+  return {
+    x: box.x,
+    width: box.width,
+    contentWidth: node.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight),
+    paddingLeft: Number.parseFloat(style.paddingLeft),
+    paddingRight: Number.parseFloat(style.paddingRight),
+  };
+});
+
+const settleSettingsFrame = async (page: import('@playwright/test').Page) => {
+  await page.locator(SETTINGS_CONTENT).evaluate(async (node) => {
+    await Promise.all(node.getAnimations().map((animation) => animation.finished));
+  });
 };
 
 /**
@@ -304,6 +393,92 @@ test.describe('general settings geometry', () => {
 
     expect(await widthOf(page, SETTINGS_CONTENT)).toBe(944);
   });
+
+  for (const viewport of [
+    { width: 1366, height: 768 },
+    { width: 1920, height: 1000 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`keeps Model Hub fluid and ordinary pages constrained at ${viewport.width}px`, async ({ page }) => {
+      const { denied, unexpectedModelReads } = await serveModelHub(page);
+      const pageErrors: string[] = [];
+      page.on('pageerror', (error) => pageErrors.push(error.message));
+      await page.setViewportSize(viewport);
+
+      const modelHub = async (path: string) => {
+        await open(page, path);
+        const shell = page.locator('.model-hub-shell');
+        await expect(shell).toBeVisible();
+        await settleSettingsFrame(page);
+        await expect(page.locator('[data-agent-backend="codex"]')).toBeVisible();
+        const pane = page.locator(SETTINGS_PAGE);
+        const frame = page.locator(SETTINGS_CONTENT);
+        const [paneBox, frameBox] = await Promise.all([pane.boundingBox(), frame.boundingBox()]);
+        expect(paneBox).not.toBeNull();
+        expect(frameBox).not.toBeNull();
+        expect(frameBox!.width).toBe(paneBox!.width);
+        expect(frameBox!.x).toBe(paneBox!.x);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
+      };
+
+      await modelHub('/settings/models');
+      await modelHub('/settings/models/');
+
+      // A retained origin reaches the same real Model Hub route through the
+      // supported desktop Settings toggle or the supported mobile Apps drawer,
+      // proving the fluid exception survives overlay entry at every width.
+      await open(page, '/');
+      if (viewport.width >= 768) {
+        await page.locator('aside [data-settings-toggle="true"]').click();
+      } else {
+        await page.getByRole('button', { name: 'Apps', exact: true }).click();
+        await page.getByRole('dialog', { name: 'Apps' }).getByRole('link', { name: 'Settings', exact: true }).click();
+        await page.getByRole('link', { name: 'All settings', exact: true }).click();
+      }
+      await expect(page.locator('[data-settings-overlay="true"]')).toBeVisible();
+      await page.getByRole('navigation', { name: 'Settings sections' })
+        .getByRole('link', { name: 'Models', exact: true }).click();
+      await expect(page).toHaveURL(/\/settings\/models$/);
+      await expect(page.locator('.model-hub-shell')).toBeVisible();
+      await settleSettingsFrame(page);
+      const retainedPane = await page.locator(SETTINGS_PAGE).boundingBox();
+      const retainedFrame = await page.locator(SETTINGS_CONTENT).boundingBox();
+      expect(retainedFrame?.width).toBe(retainedPane?.width);
+      expect(retainedFrame?.x).toBe(retainedPane?.x);
+
+      // General and Shortcuts remain ordinary pages with the shared 944px
+      // outer frame and 880px content column whenever the viewport provides
+      // enough room. Measure the actual bounds because auto margins resolve to
+      // pixels in computed style.
+      for (const path of ['/settings/general', '/settings/shortcuts']) {
+        await open(page, path);
+        await settleSettingsFrame(page);
+        const frame = await frameGeometry(page);
+        expect(frame.width).toBe(viewport.width >= 944 + 196 ? 944 : viewport.width);
+        expect(frame.paddingLeft).toBe(viewport.width >= 944 + 196 ? 32 : 16);
+        expect(frame.paddingRight).toBe(frame.paddingLeft);
+        expect(frame.contentWidth).toBe(viewport.width >= 944 + 196 ? 880 : viewport.width - 32);
+        const pane = await page.locator(SETTINGS_PAGE).boundingBox();
+        expect(pane).not.toBeNull();
+        if (viewport.width >= 944 + 196) {
+          expect(Math.abs(frame.x - pane!.x - (pane!.width - frame.width) / 2)).toBeLessThanOrEqual(0.5);
+          await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
+        } else {
+          expect(frame.x).toBeGreaterThanOrEqual(pane!.x);
+          expect(frame.x + frame.width).toBeLessThanOrEqual(pane!.x + pane!.width);
+        }
+        if (path.endsWith('general')) {
+          await expect(page.getByRole('radiogroup', { name: 'Appearance' })).toBeVisible();
+        } else {
+          await expect(page.getByRole('button', { name: /Change Chat voice input shortcut/ })).toBeVisible();
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
+      }
+      expect(denied).toEqual([]);
+      expect(unexpectedModelReads).toEqual([]);
+      expect(pageErrors).toEqual([]);
+    });
+  }
 
   test('draws the preference card, the selector and the selected choice to spec', async ({ page }) => {
     await serveProduct(page);

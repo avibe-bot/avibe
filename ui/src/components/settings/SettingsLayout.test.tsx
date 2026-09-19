@@ -184,13 +184,13 @@ describe('SettingsLayout', () => {
       const modelHubFrame = screen.getByText('models-body').parentElement;
       expect(modelHubFrame?.className).toContain('min-h-full');
       expect(modelHubFrame?.className).not.toContain('mx-auto');
-      expect(modelHubFrame?.className).not.toContain('max-w-[1180px]');
+      expect(modelHubFrame?.className).not.toMatch(/(?:^|\s)(?:[\w-]+:)*max-w-/);
     },
   );
 
   // General and the other ordinary Settings sections share the standalone
-  // 944px outer frame (880px content after desktop padding). Model Hub adds
-  // `min-h-full` for its own full-height surface, not a different width.
+  // 944px outer frame (880px content after desktop padding). Model Hub keeps
+  // the full route pane for its own full-height surface.
   it.each(['/settings/general', '/settings/general/'])(
     'keeps General in the common standalone content column at %s',
     (path) => {
