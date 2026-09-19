@@ -311,7 +311,9 @@ async function switchableReads(page: Page) {
   let waiting: (() => void)[] = [];
   let open = true;
   let failing = false;
+  let asked = 0;
   const answer = async (route: Route, json: object) => {
+    asked += 1;
     if (!open) await new Promise<void>((resolve) => { waiting.push(resolve); });
     return route.fulfill({ json: failing ? { ok: false, message: READ_FAILURE } : json });
   };
@@ -327,6 +329,10 @@ async function switchableReads(page: Page) {
     hold: () => { open = false; },
     release: () => { open = true; const pending = waiting; waiting = []; for (const resolve of pending) resolve(); },
     fail: (value: boolean) => { failing = value; },
+    // How many reads this fixture has actually been asked for. A state that owed nothing
+    // to a request would prove nothing about the state it is standing in for, so where a
+    // test claims a read failed or recovered it says which request that was.
+    asked: () => asked,
   };
 }
 
@@ -689,7 +695,33 @@ for (const device of [{ width: 900, height: 700 }, { width: 620, height: 700 }])
     // the delta back up by the scale for, and the frame must not lose the mirror here.
     await drive(page, { scale: 2 }, 'resize');
     await expect.poll(() => viewportVar(page, '--app-vvh')).toBe(`${device.height - 300}px`);
-    expect((await settled(page)).frame, 'a zoom with the keyboard up changes nothing').toEqual(typing);
+    expect((await settled(page)).frame, 'a zoom that takes no room changes nothing').toEqual(typing);
+
+    // And the half of that claim the step above cannot make: it moves `scale` alone, so
+    // the width never changes and the width mirror is never asked for anything. A zoom
+    // into a corner is the case that does take width, and with the keyboard still up the
+    // mirrors are on — so the frame has to follow this axis too, from a room whose left
+    // edge has not moved. Both bounds come from the browser's own visual viewport; the
+    // frame is never checked against a number it computed.
+    const narrow = Math.round(device.width / 3);
+    await drive(page, { scale: 2, narrow }, 'resize');
+    await expect.poll(() => viewportVar(page, '--app-vvw')).toBe(`${device.width - narrow}px`);
+    const band = await visualViewport(page);
+    expect(band.width, 'the browser really is narrower').toBe(device.width - narrow);
+    const narrowed = await expectBox('narrowed with the keyboard up', band);
+    // A band this narrow leaves less than the design asked for on both devices, so the
+    // width is the room's — which pins the left edge to one inset and one clearance,
+    // wherever the room itself is. Said independently of the centring `expectBox` checks.
+    expect(narrowed.width, 'bound by the room the narrowing left').toBeCloseTo(band.width - inset.l - inset.r - MARGIN, 0);
+    expect(narrowed.width, 'and narrower than the band it came from').toBeLessThan(typing.width);
+    expect(narrowed.x, 'left edge is the inset plus its clearance').toBeCloseTo(band.left + inset.l + CLEARANCE, 0);
+    expect(narrowed.height, 'width is all a narrowing takes').toBeCloseTo(typing.height, 0);
+
+    // Given back the same way, with the keyboard still up: the width mirror is the room's
+    // current width and not a low-water mark of it.
+    await drive(page, { narrow: 0 }, 'resize');
+    await expect.poll(() => viewportVar(page, '--app-vvw')).toBe(`${device.width}px`);
+    expect((await settled(page)).frame, 'and the width comes back with the room').toEqual(typing);
 
     // A zoom with NO keyboard is the opposite claim, and the one that used to lift the
     // composer: the visual viewport shrinks, but no room was lost — so every mirror is
@@ -795,10 +827,17 @@ test('a room smaller than the frame scrolls rather than clipping what it cannot 
  * border — so 306 of visible window is the exact line. 305 is below it, 307 is above it,
  * and at 306 the middle is one control tall and nothing has changed hands yet.
  *
+ * What the floor buys, precisely: the middle it reserves is one 40px control, and the
+ * credential field is 42px, so at the line the field is usable rather than shown end to
+ * end — its centre is where a tap lands and it takes what is typed. Above the line the
+ * middle grows with the room; below it the frame takes the scroll and carries all of the
+ * content instead. The requirement is a control a person can reach and use, by sight or
+ * by scrolling, not a whole form on screen in a room that has no space for one.
+ *
  * Crossed in both directions, because a mode that latches is a mode that is wrong on the
- * way back, and with the method and the error changed at each stop: the room decides
- * this, so nothing on screen may move the line. 158px is one room below the floor; this
- * is the floor itself.
+ * way back, and with the credential and a real read failure changed at each stop: the
+ * room decides this, so nothing on screen may move the line. 158px is one room below the
+ * floor; this is the floor itself.
  */
 test('the scroll changes hands at the floor, in both directions, whatever is on screen', async ({ browser }, info) => {
   const context = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true });
@@ -812,7 +851,6 @@ test('the scroll changes hands at the floor, in both directions, whatever is on 
   await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
   const dialog = page.getByRole('dialog');
   const key = dialog.getByLabel('API Key', { exact: true });
-  const method = dialog.getByRole('radiogroup', { name: 'Connection method' });
   await expect(key).toBeVisible();
   await key.focus();
 
@@ -838,22 +876,53 @@ test('the scroll changes hands at the floor, in both directions, whatever is on 
     } else {
       // At the line, exactly one control. Above it, one control and the pixel that took
       // it there — which is the whole difference the line is drawn on.
-      expect(await middle(), `at ${visible} the middle shows a whole control`).toBeCloseTo(CONTROL + visible - FLOOR, 0);
+      expect(await middle(), `at ${visible} the middle is one control tall`).toBeCloseTo(CONTROL + visible - FLOOR, 0);
+      // And what that control is worth, said as what it is rather than more. The field
+      // asks for more than the floor reserves, so at the line the middle holds most of
+      // one and not all of it. The claim the floor earns is the one `expectEditable`
+      // makes below — a control reachable at the point it would be tapped, that takes
+      // what is typed into it — and not that a whole field is in sight.
+      expect(await key.evaluate((node) => node.getBoundingClientRect().height), `at ${visible} the field asks for more than the floor reserves`).toBeGreaterThan(CONTROL);
     }
     await expectEditable(key, `密钥-${visible}`);
 
-    // Nothing on screen may move the line: the other credential, and a failed read with
-    // its alert and its Retry, are the two biggest changes the middle can be handed.
+    // Nothing on screen may move the line, and the middle's two biggest changes are the
+    // other credential and a failed read with its alert and its Retry.
     await dialog.getByRole('radiogroup', { name: 'Credential type' }).getByRole('radio', { name: 'Auth Token', exact: true }).click();
     await expectScrollOwner(page, tight, `at ${visible} on Auth Token:`);
     await dialog.getByRole('radiogroup', { name: 'Credential type' }).getByRole('radio', { name: 'API Key', exact: true }).click();
     await expectScrollOwner(page, tight, `at ${visible} back on API Key:`);
 
+    // The second of those, reached the way a person reaches it. Nothing re-reads while
+    // the dialog is up — switching method only clears the error — so the honest route to
+    // a failed read is to leave and come back to a refusal, and the alert and the Retry
+    // it offers are then really on screen rather than assumed. Counted as well as seen.
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
     reads.fail(true);
-    await method.getByRole('radio', { name: 'Claude account', exact: true }).click();
-    await method.getByRole('radio', { name: 'API credentials', exact: true }).click();
-    await expectScrollOwner(page, tight, `at ${visible} after a method round trip:`);
+    const failing = reads.asked();
+    await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
+    await expect(dialog.getByRole('alert')).toContainText(READ_FAILURE);
+    expect(reads.asked(), `at ${visible} the failed read was really asked for`).toBeGreaterThan(failing);
+    const retry = dialog.getByRole('button', { name: 'Retry' });
+    await expect(retry).toBeVisible();
+    await expect.poll(() => viewportVar(page, '--app-vvh')).toBe(`${visible}px`);
+    await expectFitsItsRoom(page, 620);
+    await expectScrollOwner(page, tight, `at ${visible} with the read failed:`);
+    await expectReachable(dialog, { scrolling: tight });
+
+    // And back out of it by the control the product offers for it, which is a second
+    // real read. Recovery is the half that a latch would pass the first time and fail
+    // here: the alert goes, the form is the form again, and the room still decides.
     reads.fail(false);
+    const retrying = reads.asked();
+    if (tight) await retry.scrollIntoViewIfNeeded();
+    await retry.click();
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    expect(reads.asked(), `at ${visible} the retry was really asked for`).toBeGreaterThan(retrying);
+    await expect(key).toBeVisible();
+    await expectScrollOwner(page, tight, `at ${visible} after the read recovered:`);
+    await key.focus();
   }
 
   await settleEffects(page);
