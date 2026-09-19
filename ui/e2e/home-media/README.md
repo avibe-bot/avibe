@@ -55,3 +55,37 @@ in dark/light Chinese/English under `e2e/.artifacts/home-media/`.
 Production authentication/transcription and the integrated standalone Settings
 shell remain for the orchestrator's authorized acceptance pass. The fixture is
 interaction evidence, not live backend or cloud acceptance.
+
+## Settings suspension follow-up
+
+The follow-up branch starts from merged master (including PRs #2047/#2045),
+under execution-contract amendments 10:06, 10:13 and 10:54, reference
+`824544d91`. Its production change consumes the existing route activity context;
+C's AppShell must keep the NewSessionSheet owner mounted, preserve logical
+`open={newSessionOpen}` and provide `active={!settingsOpen}`. The lane's shell
+producer is a test fixture, not C's implementation; full B+C acceptance remains
+separate.
+
+The sheet's existing pendingDraft now survives modal-content unmounts. A true
+close invalidates old Composer callbacks; Settings only removes foreground
+presentation. The existing useNewSession checks still stop a create/upload
+completion before the next POST while inactive. A POST already admitted can
+finish: the sheet holds its successful result and uses the current navigator
+once on return, or preserves the retry/error/uncertainty state. No automatic
+resubmission and no replay state are introduced.
+
+DirectoryBrowser retains unconfirmed paths, history, manual-path input and
+new-folder text while withdrawing its modal and global keyboard/focus effects.
+NewProjectDialog retains confirmation state and alone owns deferred project
+completion for all callers. A successful or authorization-fenced null result
+is delivered through the current callback only after foreground returns. A
+cancelled or unmounted dialog cannot reopen an obsolete flow.
+
+`sheet-suspension.spec.ts` drives the actual sheet, project dialog and directory
+picker through the frozen shell producer shape. Alt+S is a fixture-only route
+entry (the real sheet has no Settings button); all other input, selection,
+submit, close, keyboard and return actions use real components. It exercises
+Unicode state, 390/1366px, accepted/rejected/uncertain network completion,
+pre-POST suspension, true close/fresh reopen, project creation success/failure/
+cancel and retained directory inputs. Unexpected requests fail the fixture;
+all external traffic is refused.

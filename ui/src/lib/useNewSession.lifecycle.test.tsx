@@ -21,6 +21,7 @@ vi.mock('../context/WorkbenchProjectsContext', () => ({ useWorkbenchProjectsTree
 vi.mock('./apiFetch', () => ({ apiFetch: mocks.fetch }));
 vi.mock('./workbenchUpload', async (original) => ({ ...await original<typeof import('./workbenchUpload')>(), uploadWorkbenchAttachment: mocks.upload }));
 import { useNewSession } from './useNewSession';
+import { RouteSurfaceActiveContext } from './routeSurfaceActivity';
 const attachment: ComposerAttachment = { localId: 'file-id', file: new File(['内容'], '中文.txt'), token: '', name: '中文.txt', mime: 'text/plain', size: 6, kind: 'file', url: '', status: 'staged' };
 const mount = () => renderHook(() => useNewSession({ loadErrorText: 'load failed', createFailedText: 'send failed' }));
 beforeEach(() => {
@@ -138,4 +139,60 @@ it('a missing upload session gets a new scope on explicit retry', async () => {
   expect(mocks.fetch).not.toHaveBeenCalled();
   await act(async () => { expect(await result.current.send('', [attachment])).toEqual({ sessionId: 'session-2' }); });
   expect(mocks.upload).toHaveBeenNthCalledWith(2, 'session-2', attachment.file, attachment.localId);
+});
+
+it.each(['create', 'upload'])('foreground suspension after %s retains scope and stops before POST until explicit retry', async (stage) => {
+  let release!: (value: unknown) => void;
+  const held = new Promise((resolve) => { release = resolve; });
+  if (stage === 'create') mocks.create.mockReturnValueOnce(held);
+  else mocks.upload.mockReturnValueOnce(held);
+  let foreground = true;
+  const { result, rerender } = renderHook(() => useNewSession({ active: true, loadErrorText: 'load failed', createFailedText: 'send failed' }), {
+    wrapper: ({ children }) => <RouteSurfaceActiveContext.Provider value={foreground}>{children}</RouteSurfaceActiveContext.Provider>,
+  });
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  let attempt!: ReturnType<typeof result.current.send>;
+  act(() => { attempt = result.current.send('挂起草稿', [attachment]); });
+  await waitFor(() => expect(stage === 'create' ? mocks.create : mocks.upload).toHaveBeenCalledTimes(1));
+  foreground = false;
+  rerender();
+  await act(async () => {
+    release(stage === 'create' ? { id: 'session-1' } : { token: 'uploaded', name: attachment.name });
+    expect(await attempt).toBeNull();
+  });
+  expect(mocks.fetch).not.toHaveBeenCalled();
+  await act(async () => { expect(await result.current.send('后台禁止发送')).toBeNull(); });
+  foreground = true;
+  rerender();
+  await act(async () => { expect(await result.current.send('挂起草稿', [attachment])).toEqual({ sessionId: 'session-1' }); });
+  expect(mocks.create).toHaveBeenCalledTimes(1);
+  expect(mocks.upload).toHaveBeenCalledTimes(1);
+  expect(mocks.fetch).toHaveBeenCalledTimes(1);
+});
+
+it.each(['success', 'uncertain'])('already admitted POST %s survives suspension without resetting the sheet lifetime', async (outcome) => {
+  let release!: (value: Response) => void;
+  mocks.fetch.mockReturnValueOnce(new Promise<Response>((resolve) => { release = resolve; }));
+  let foreground = true;
+  const { result, rerender } = renderHook(() => useNewSession({ active: true, loadErrorText: 'load failed', createFailedText: 'send failed' }), {
+    wrapper: ({ children }) => <RouteSurfaceActiveContext.Provider value={foreground}>{children}</RouteSurfaceActiveContext.Provider>,
+  });
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  let attempt!: ReturnType<typeof result.current.send>;
+  act(() => { attempt = result.current.send('发送已受理'); });
+  await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1));
+  foreground = false;
+  rerender();
+  await act(async () => {
+    release(outcome === 'success' ? new Response('{}', { status: 201 }) : new Response('{"dispatch_error":"dispatch_pending"}', { status: 504 }));
+    expect(await attempt).toEqual(outcome === 'success' ? { sessionId: 'session-1' } : null);
+  });
+  foreground = true;
+  rerender();
+  if (outcome === 'uncertain') {
+    expect(result.current.uncertainSessionId).toBe('session-1');
+    await act(async () => { expect(await result.current.send('不能重复')).toBeNull(); });
+  }
+  expect(mocks.create).toHaveBeenCalledTimes(1);
+  expect(mocks.fetch).toHaveBeenCalledTimes(1);
 });
