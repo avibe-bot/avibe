@@ -22,6 +22,7 @@ import { isAgentActivityBoundaryMessage, isRetryableFailureNotice, isTerminalAge
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
+import { readMessageAttachments } from '../../lib/messageAttachments';
 import {
   isVaultApprovalRequest,
   placeVaultProvisionRequests,
@@ -132,6 +133,7 @@ import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
+import { QueuedAttachmentGroup, QueuedAttachmentSheet } from './QueuedAttachments';
 import { ActivityCard, ActivityChip } from './AgentActivityGroup';
 import {
   activityGroupsForForeground,
@@ -2635,12 +2637,12 @@ export const ChatPage: React.FC = () => {
         urls.push(u);
       }
     };
+    // ``messages`` is the transcript alone — the queue is separate state — so the
+    // gallery keeps containing delivered images only, and a queued preview stays
+    // the isolated single-image view it opens as.
     for (const m of messages) {
-      const atts = (m.content as { attachments?: Array<Record<string, unknown>> })?.attachments;
-      if (Array.isArray(atts)) {
-        for (const a of atts) {
-          if (a?.kind === 'image' || String(a?.mime || '').startsWith('image/')) push(String(a?.url || ''));
-        }
+      for (const att of readMessageAttachments(m.content)) {
+        if (att.image) push(att.url);
       }
       if (m.text) {
         const re = /!\[[^\]]*\]\((\/api\/media\/[^)\s]+)\)/g;
@@ -2981,6 +2983,14 @@ export const QueueRow: React.FC<{
 }> = ({ item, onRemove, onRecall }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  // The row's own focusable anchor. An attachment control that stops existing —
+  // the disclosure once there is nothing left to disclose, or the third inline
+  // preview once the window is too narrow for it — hands focus here rather than
+  // letting the browser drop it to the document. It is the right destination
+  // because it is the row's stable inspection control: still on the same row,
+  // still about the same queued message, and harmless to activate by accident,
+  // which Remove and Send are not.
+  const textRef = useRef<HTMLDivElement>(null);
   // A plain selectable element (not a <button>) so desktop users can drag-select
   // the text; a click still toggles expand/collapse — unless the click ended a
   // text selection, in which case we leave the selection alone.
@@ -3011,12 +3021,46 @@ export const QueueRow: React.FC<{
   // contract — so an annotation that is only a highlight or only a boxed region
   // has none, and would sit here as a title, a separator, and empty space.
   const standIn = annotationView && annotationStandIn(annotationView, item.text, hasAttachments);
+  // The files waiting to be sent with this message, previewed on the row itself.
+  // Held separately from ``hasAttachments`` above, which answers a different
+  // question (can this row be recalled) and must keep answering it for an
+  // attachment this renderer cannot draw.
+  const attachments = readMessageAttachments(item.content);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  // A queued row whose author wrote no words: the files ARE the message, so the
+  // first one names it. This is the same job the screenshot stand-in does, done
+  // with the real thing — so the stand-in's generic word is only reached when
+  // there is nothing renderable to name.
+  //
+  // "No words" is judged on trimmed text, the way empty text is judged everywhere
+  // else: a lone newline or a space left over from a paste is not a message, and
+  // a row carrying one would otherwise render a blank line where its filename
+  // belongs. The stored text is untouched — this decides what to show, not what
+  // was written.
+  const showScreenshotStandIn = standIn?.kind === 'screenshot' && attachments.length === 0;
+  const wordless = !item.text?.trim();
+  const named = wordless && standIn?.kind !== 'quote' && attachments.length > 0 ? attachments[0] : null;
+  const summary =
+    named &&
+    (attachments.length > 1
+      ? t('chat.queue.attachments.summary', {
+          name: named.name || t('chat.queue.attachments.untitled'),
+          count: attachments.length - 1,
+        })
+      : named.name || t('chat.queue.attachments.untitled'));
   return (
     <div
       data-queue-row="true"
-      className="relative flex items-start gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none"
+      className={clsx(
+        'relative flex items-start gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        // Wrapping is enabled only while the remainder is disclosed. A collapsed
+        // row therefore cannot wrap at any width — the one thing that could make
+        // it taller than a text-only row is off unless the reader asked for it.
+        attachmentsOpen && 'flex-wrap',
+      )}
     >
       <div
+        ref={textRef}
         role="button"
         tabIndex={0}
         onClick={toggle}
@@ -3038,10 +3082,15 @@ export const QueueRow: React.FC<{
               <MessageSquareQuote className="size-[11px] shrink-0" />
               {t(annotationTitleKey(annotationView.direction))}
             </span>
-            {(item.text || standIn) && <span className="mr-2 text-[11px] text-muted">·</span>}
+            {(!wordless || standIn?.kind === 'quote' || showScreenshotStandIn || summary) && (
+              <span className="mr-2 text-[11px] text-muted">·</span>
+            )}
           </>
         )}
-        {item.text}
+        {/* Same trimmed judgement as ``wordless`` above, so a row whose text is
+            only a stray newline neither draws a separator with nothing after it
+            nor pushes its filename onto a second line once expanded. */}
+        {wordless ? null : item.text}
         {standIn?.kind === 'quote' && (
           // The card's own quote treatment (pin + muted), flattened to the one
           // line the strip has room for.
@@ -3050,13 +3099,24 @@ export const QueueRow: React.FC<{
             {standIn.quote}
           </span>
         )}
-        {standIn?.kind === 'screenshot' && (
+        {showScreenshotStandIn && (
           <span className="inline-flex items-center gap-[5px] align-middle text-muted">
             <ImageIcon className="size-[11px] shrink-0" />
             {t('chat.annotation.screenshot')}
           </span>
         )}
+        {summary && <span className="text-muted">{summary}</span>}
       </div>
+      {/* A sibling of the text, never a child of it: a preview or a disclosure
+          click cannot reach the expand/collapse handler above, so inspecting an
+          attachment never also rewrites the row it is on. */}
+      <QueuedAttachmentGroup
+        attachments={attachments}
+        expanded={attachmentsOpen}
+        onToggle={() => setAttachmentsOpen((v) => !v)}
+        onFocusEscape={() => textRef.current?.focus()}
+      />
+      {attachmentsOpen && <QueuedAttachmentSheet attachments={attachments} />}
       {canRecall && (
         <Button
           type="button"
@@ -4516,27 +4576,27 @@ export const MessageRow = memo(function MessageRow({
 
   // User-uploaded attachments ride in ``content.attachments`` (agent-reply media
   // is rewritten inline into the text instead, handled by the Markdown renderer).
-  const rawAttachments = (message.content as { attachments?: Array<Record<string, unknown>> })?.attachments;
-  const messageAttachments = Array.isArray(rawAttachments) ? rawAttachments : [];
+  // Read through the same boundary the queue strip uses, so an attachment that
+  // was recognisable while queued is still the same file once delivered: an IM
+  // inbound records a media token rather than a URL, and reading ``url`` directly
+  // dropped those rows from the transcript entirely.
+  const messageAttachments = readMessageAttachments(message.content);
   const attachmentsNode = messageAttachments.length > 0 ? (
     <div className="mt-2 flex flex-col gap-2">
       {messageAttachments.map((att, i) => {
-        const url = String(att?.url || '');
-        if (!url) return null;
-        // Only inline-render images served from our own media proxy; a non-proxy
-        // url falls back to a click-through FileCard so it can't auto-fetch a
-        // remote host.
-        const isImage =
-          (att?.kind === 'image' || String(att?.mime || '').startsWith('image/')) && isProxyMediaUrl(url);
+        // Nothing to point at — no URL and no token to mint one from. Existing
+        // behaviour: the transcript says nothing rather than offering a dead card.
+        if (!att.url) return null;
+        // ``att.image`` is already "an image AND served from our own media proxy";
+        // anything else falls back to a click-through FileCard so the row can't
+        // auto-fetch a remote host.
         // Server-supplied pixel size (added at upload time) reserves the box so a
         // freshly-loaded attachment never shifts the transcript.
-        const w = typeof att?.width === 'number' ? att.width : undefined;
-        const h = typeof att?.height === 'number' ? att.height : undefined;
-        return isImage ? (
-          <ChatImage key={i} src={url} alt={typeof att?.name === 'string' ? att.name : ''} width={w} height={h} />
+        return att.image ? (
+          <ChatImage key={i} src={att.url} alt={att.name} width={att.width} height={att.height} />
         ) : (
-          <FileCard key={i} href={url}>
-            {typeof att?.name === 'string' ? att.name : 'file'}
+          <FileCard key={i} href={att.url}>
+            {att.name || 'file'}
           </FileCard>
         );
       })}

@@ -5,7 +5,7 @@ import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from 
 
 import { Button } from '@/components/ui/button';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
-import { ImageViewerContext } from './image-viewer-context';
+import { ImageViewerContext, type ImageViewerOpenOptions } from './image-viewer-context';
 
 // A session-scoped image lightbox. ChatPage computes the ordered list of media-
 // proxy image URLs in the transcript and wraps the page in a provider; any chat
@@ -31,10 +31,20 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // chat images don't re-render on every streaming tick. A clicked src that
   // isn't in the list (shouldn't happen for our own clean proxy URLs, but be
   // safe) still shows exactly what was clicked — paging just turns off for it.
-  const [src, setSrc] = React.useState<string | null>(null);
+  //
+  // ``isolated`` is recorded at open time rather than re-derived per render, so
+  // an isolated view stays isolated for its whole life: the gallery growing to
+  // include this src (the queue flushing into the transcript, say) cannot hand
+  // it paging controls it was opened without.
+  const [view, setView] = React.useState<{ src: string; isolated: boolean } | null>(null);
+  const src = view?.src ?? null;
 
-  const open = React.useCallback((next: string) => setSrc(next), []);
-  const close = React.useCallback(() => setSrc(null), []);
+  const open = React.useCallback(
+    (next: string, options?: ImageViewerOpenOptions) =>
+      setView({ src: next, isolated: options?.isolated === true }),
+    [],
+  );
+  const close = React.useCallback(() => setView(null), []);
   // Controls the zoom/pan transform (wired to the desktop +/- buttons). The
   // wrapper is keyed on ``src`` so paging to another image remounts it back to 1x.
   const transformRef = React.useRef<ReactZoomPanPinchRef>(null);
@@ -50,12 +60,15 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // close hit-test must also require the click to be inside the visible stage.
   const stageRef = React.useRef<HTMLDivElement>(null);
 
-  const index = src ? images.indexOf(src) : -1;
+  // An isolated view is deliberately not looked up in the gallery at all, so it
+  // reports no index — which turns off the arrows, the counter, and the keyboard
+  // paging below through the one condition they already share.
+  const index = src && !view?.isolated ? images.indexOf(src) : -1;
   const pageable = index >= 0 && images.length > 1;
   const step = React.useCallback(
     (delta: number) => {
       if (index < 0 || images.length === 0) return;
-      setSrc(images[(index + delta + images.length) % images.length]);
+      setView({ src: images[(index + delta + images.length) % images.length], isolated: false });
     },
     [index, images],
   );

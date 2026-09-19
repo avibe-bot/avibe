@@ -4329,7 +4329,15 @@
       "title": "Queued · {{count}}",
       "sendNow": "Send now",
       "recall": "Recall to input",
-      "remove": "Remove from queue"
+      "remove": "Remove from queue",
+      "attachments": {
+        "untitled": "Attachment",
+        "previewUnavailable": "Preview unavailable",
+        "summary": "{{name}} and {{count}} more",
+        "more": "+{{count}}",
+        "showMore": "Show {{count}} more attachments",
+        "collapse": "Collapse attachments"
+      }
     }
   },
   "vaults": {
