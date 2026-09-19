@@ -569,3 +569,23 @@ async def test_remove_env_deletes_inherited_and_extra_keys(tmp_path: Path) -> No
 
     assert result.exit_code == 0
     assert result.stdout.splitlines() == ["False", "present"]
+
+
+async def test_explicit_environment_replaces_parent_without_losing_supervision(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PARENT_ONLY", "must not leak")
+    supplied = {"CHILD_ONLY": "present"}
+    spawned = []
+    result = await run_supervised_command(
+        command=[sys.executable, "-c",
+                 "import os; print(os.environ.get('PARENT_ONLY')); print(os.environ.get('CHILD_ONLY'))"],
+        cwd=str(tmp_path),
+        timeout_seconds=10,
+        label="explicit environment",
+        env=supplied,
+        on_spawn=lambda pid, identity: spawned.append((pid, identity)),
+    )
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["None", "present"]
+    assert supplied == {"CHILD_ONLY": "present"}
+    assert spawned[0][1] is not None
+    assert spawned[0][1].pid == spawned[0][0]

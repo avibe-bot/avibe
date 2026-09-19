@@ -325,3 +325,15 @@ observations:
       Prior reload and single-flight tests did not connect that reader ordering to
       actual scheduling. Always reconciling the captured snapshot retains existing
       worker identity and avoids adding a second change-acknowledgement mechanism.
+  - id: HFR-OBS-027
+    date: 2026-09-18
+    source: released-host callback diagnosis and isolated real-child negative control
+    result: confirmed
+    detail: >-
+      A correctly bound Watch inherited a different Session from the long-lived
+      service, and Vault persisted that identity before routing an expiry callback.
+      A clean parent instead lost the bound Session entirely. HFR-486 closes the
+      producer-to-consumer chain through real supervised children and isolated
+      Vault expiry. Runtime restart sanitization alone cannot supply the binding;
+      command execution must replace provenance from its own definition, preserving
+      remote authority without borrowing the creator's transient proof.

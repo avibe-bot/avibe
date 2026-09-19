@@ -268,6 +268,21 @@ def caller_resource_user_context(context: Optional[CallerContext]) -> Optional[M
     return dict(context.resource_user_context or {})
 
 
+def caller_resource_user_context_from_env(
+    env: Mapping[str, str] | None = None,
+) -> Optional[Mapping[str, Any]]:
+    """Read remote authority independently of a callback Session binding.
+
+    A scheduled command can carry remote authorization without an Agent Session.
+    Missing or malformed declared-remote provenance still fails closed.
+    """
+
+    source = os.environ if env is None else env
+    if not env_declares_remote_caller(source):
+        return None
+    return _resource_context_from_env(source) or {}
+
+
 def environment_without_caller_context(env: Optional[Mapping[str, str]] = None) -> dict[str, str]:
     """Return ``env`` with this invocation's caller provenance removed.
 
@@ -287,7 +302,38 @@ def environment_without_caller_context(env: Optional[Mapping[str, str]] = None) 
     """
 
     source = os.environ if env is None else env
-    return {key: value for key, value in source.items() if key not in CALLER_CONTEXT_ENV_NAMES}
+    return {
+        key: value for key, value in source.items()
+        if key not in CALLER_CONTEXT_ENV_NAMES and key != AVIBE_CALLER_SESSION_PROOF_ENV
+    }
+
+
+def background_command_env(
+    *,
+    session_id: str | None,
+    source: str,
+    metadata: Mapping[str, Any],
+    run_id: str | None = None,
+) -> dict[str, str]:
+    """Replace service caller provenance with this definition's execution facts.
+
+    A command is not the human turn that created its definition. Its current
+    binding owns CLI defaults and callbacks; creator metadata is not a fallback.
+    Only the definition's resource snapshot carries remote authority, rechecked
+    by runtime admission and the CLI, never a transient human/Memory proof.
+    """
+
+    env = environment_without_caller_context()
+    env[AVIBE_CALLER_SOURCE_ENV] = source
+    if session_id:
+        env[AVIBE_SESSION_ID_ENV] = session_id
+    if run_id:
+        env[AVIBE_RUN_ID_ENV] = run_id
+    snapshot = metadata.get(_RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if isinstance(snapshot, Mapping):
+        env[AVIBE_CALLER_REMOTE_ENV] = "1"
+        env[AVIBE_CALLER_RESOURCE_CONTEXT_ENV] = json.dumps(dict(snapshot), separators=(",", ":"), sort_keys=True)
+    return env
 
 
 def validated_caller_env_snapshot(source: object) -> dict[str, str]:

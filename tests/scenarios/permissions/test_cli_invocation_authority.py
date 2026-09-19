@@ -25,6 +25,7 @@ import pytest
 
 from core.caller_context import (
     AVIBE_CALLER_RESOURCE_CONTEXT_ENV,
+    AVIBE_SESSION_ID_ENV,
     CALLER_CONTEXT_ENV_NAMES,
     CallerContext,
 )
@@ -186,9 +187,12 @@ def test_permissions_026_every_cli_command_declares_a_role_floor():
         ("owner", "owner", True),
     ],
 )
-def test_permissions_026_authority_comes_from_the_caller_env(caller, expected_role, expected_remote):
+@pytest.mark.parametrize("bound_session", [False, True])
+def test_permissions_026_authority_comes_from_the_caller_env(caller, expected_role, expected_remote, bound_session):
     """PERMISSIONS-026: the snapshot the host injected is the authority the CLI runs under."""
     env = _caller_env(None if caller == "local" else caller)
+    if not bound_session:
+        env.pop(AVIBE_SESSION_ID_ENV, None)
     authority = cli._cli_invocation_authority(env)
 
     if caller == "local":
@@ -201,9 +205,12 @@ def test_permissions_026_authority_comes_from_the_caller_env(caller, expected_ro
 
 
 @pytest.mark.parametrize("provenance", ["missing", "malformed", "not_an_object"])
-def test_permissions_026_a_declared_remote_caller_without_provenance_fails_closed(provenance):
+@pytest.mark.parametrize("bound_session", [False, True])
+def test_permissions_026_a_declared_remote_caller_without_provenance_fails_closed(provenance, bound_session):
     """PERMISSIONS-026: unusable provenance is anonymous remote, never local Owner."""
     env = _caller_env("editor")
+    if not bound_session:
+        env.pop(AVIBE_SESSION_ID_ENV, None)
     if provenance == "missing":
         env.pop(AVIBE_CALLER_RESOURCE_CONTEXT_ENV)
     elif provenance == "malformed":
@@ -228,6 +235,22 @@ def test_permissions_026_a_personal_pairing_admits_a_snapshot_without_organizati
     assert authority.is_remote is True
     assert authority.instance_kind == "personal"
     assert authority.organization_id is None
+
+
+def test_permissions_026_unbound_background_editor_cannot_become_local_owner(invoke, monkeypatch, capsys):
+    from core.caller_context import background_command_env
+
+    env = background_command_env(
+        session_id=None,
+        source="scheduled_task",
+        metadata={"resource_user_context": _snapshot("editor")},
+        run_id="run_background",
+    )
+    assert AVIBE_SESSION_ID_ENV not in env
+    # A forbidden command is refused by the real entry point before any restart.
+    monkeypatch.setattr(cli, "cmd_restart", lambda *_a, **_kw: pytest.fail("must not restart"))
+    assert invoke(["restart"], caller={key: value for key, value in env.items() if key in CALLER_CONTEXT_ENV_NAMES}) == 1
+    assert _refusal(capsys)["code"] == "instance_access_forbidden"
 
 
 @pytest.mark.parametrize("mismatch", ["instance_id", "instance_kind", "reconciling"])
