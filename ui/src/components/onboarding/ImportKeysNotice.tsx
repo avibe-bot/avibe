@@ -1,5 +1,5 @@
 // Setup's API-key import offer: one line under the assistant list saying how many
-// keys already on this machine the Model Gateway can take over, with a way to look
+// keys already on this machine Model Hub can take over, with a way to look
 // at them before anything happens.
 //
 // It is deliberately narrower than the settings migration: this entry is about

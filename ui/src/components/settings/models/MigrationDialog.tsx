@@ -54,7 +54,12 @@ function migrationVisual(item: MigrationItem): { Icon: React.ComponentType<{ siz
   return { Icon: KeyRound, accent };
 }
 
-const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void; selectable: boolean }> = ({ item, onToggle, selectable }) => {
+const ItemRow: React.FC<{
+  item: MigrationItem;
+  checked: boolean;
+  onToggle: () => void;
+  selectable: boolean;
+}> = ({ item, checked, onToggle, selectable }) => {
   const { t } = useTranslation();
   const { Icon, accent } = migrationVisual(item);
   const provider = migrationProvider(item);
@@ -74,7 +79,7 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void; selectable:
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <Checkbox checked={item.selected} onCheckedChange={onToggle} disabled={!selectable} label={detail ? `${title} · ${detail}` : title} />
+        <Checkbox checked={checked} onCheckedChange={onToggle} disabled={!selectable} label={detail ? `${title} · ${detail}` : title} />
         <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
           {vendor
             ? <VendorGlyph vendor={providerVendorId(vendor)} className={cn('h-[14px] w-auto shrink-0 aspect-[10/7]', ACCENT_ICON[accent])} />
@@ -108,6 +113,8 @@ export const MigrationDialog: React.FC<{
   const [items, setItems] = React.useState<MigrationItem[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
+  const eligibleRef = React.useRef(eligible);
+  eligibleRef.current = eligible;
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
     aliveRef.current = true;
@@ -127,7 +134,18 @@ export const MigrationDialog: React.FC<{
       .scanMigration()
       .then((scan) => {
         if (cancelled) return;
-        setItems(scan.items);
+        const selectionPredicate = eligibleRef.current ?? DEFAULT_ELIGIBLE;
+        const importable = scan.items.filter(selectionPredicate);
+        const backendSelection = new Map<AgentBackend, boolean>();
+        for (const backend of BACKEND_ORDER) {
+          const rows = importable.filter((item) => item.backend === backend);
+          if (rows.length > 0) backendSelection.set(backend, rows.every((item) => item.selected));
+        }
+        setItems(scan.items.map((item) => (
+          selectionPredicate(item)
+            ? { ...item, selected: backendSelection.get(item.backend) ?? false }
+            : item
+        )));
         setLoading(false);
       })
       .catch(() => {
@@ -140,15 +158,28 @@ export const MigrationDialog: React.FC<{
     };
   }, [open, showToast, t]);
 
-  const toggle = (id: string) =>
-    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, selected: !i.selected } : i)));
-
   // One predicate decides what this dialog shows, what a person can tick, and
   // what gets submitted — a row that fails it is never counted and never sent,
   // even if the scan returned it pre-selected.
   const isEligible = eligible ?? DEFAULT_ELIGIBLE;
   const candidates = items.filter(isEligible);
-  const appliable = candidates.filter((i) => i.selected && isEligible(i));
+  const selectedBackends = new Set(
+    BACKEND_ORDER.filter((backend) => {
+      const rows = candidates.filter((item) => item.backend === backend);
+      return rows.length > 0 && rows.every((item) => item.selected);
+    }),
+  );
+  const toggle = (backend: AgentBackend) =>
+    setItems((prev) => {
+      const rows = prev.filter((item) => item.backend === backend && isEligible(item));
+      const selected = rows.length > 0 && rows.every((item) => item.selected);
+      return prev.map((item) => (
+        item.backend === backend && isEligible(item)
+          ? { ...item, selected: !selected }
+          : item
+      ));
+    });
+  const appliable = candidates.filter((item) => selectedBackends.has(item.backend));
   const selectedCount = appliable.length;
 
   const apply = async () => {
@@ -198,7 +229,13 @@ export const MigrationDialog: React.FC<{
                   {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
                 </span>
                 {group.rows.map((item) => (
-                  <ItemRow key={item.id} item={item} selectable={isEligible(item)} onToggle={() => toggle(item.id)} />
+                  <ItemRow
+                    key={item.id}
+                    item={item}
+                    checked={selectedBackends.has(group.backend)}
+                    selectable={isEligible(item)}
+                    onToggle={() => toggle(group.backend)}
+                  />
                 ))}
               </div>
             ))}

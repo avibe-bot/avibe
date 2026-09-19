@@ -127,7 +127,7 @@ const renderNotice = (onApplied?: (applied: number) => void) =>
   );
 
 const openDialog = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(await screen.findByRole('button', { name: 'Review and import' }));
+  await user.click(await screen.findByRole('button', { name: 'Review and migrate' }));
   return screen.findByRole('dialog');
 };
 
@@ -150,7 +150,7 @@ describe('ImportKeysNotice', () => {
     renderNotice();
 
     // Three of five: the subscription and the reauth row are not offers.
-    expect(await screen.findByText('Found 3 API keys to import into Model Gateway')).toBeTruthy();
+    expect(await screen.findByText('Found 3 API keys to import into Model Hub')).toBeTruthy();
   });
 
   it('offers exactly the rows it counted, and no subscription or reauth row', async () => {
@@ -170,7 +170,7 @@ describe('ImportKeysNotice', () => {
     expect(within(dialog).queryByText('Claude 账号登录（OAuth）')).toBeNull();
     expect(within(dialog).queryByText(/Keep native/)).toBeNull();
     expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
-    expect(within(dialog).getByRole('button', { name: /Import 3 items/ })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
 
   it('MH-MIG-004: submits only the rows still ticked', async () => {
@@ -181,7 +181,7 @@ describe('ImportKeysNotice', () => {
 
     const dialog = await openDialog(user);
     await user.click(within(dialog).getByRole('checkbox', { name: /Anthropic/ }));
-    await user.click(within(dialog).getByRole('button', { name: /Import 2 items/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).toEqual(['mig_opencode_zhipu', 'mig_opencode_legacy']);
@@ -195,12 +195,12 @@ describe('ImportKeysNotice', () => {
 
     const dialog = await openDialog(user);
     await user.click(within(dialog).getByRole('checkbox', { name: /Anthropic/ }));
-    await user.click(within(dialog).getByRole('button', { name: /Import 2 items/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     // The remainder is the server's answer after the rescan, not a subtraction.
-    expect(await screen.findByText('Imported 2 · 1 API key still available')).toBeTruthy();
+    expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
     // A partial selection can still be finished from here.
-    expect(screen.getByRole('button', { name: 'Review and import' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
   });
 
   it('reports a finished import with no review action left', async () => {
@@ -209,10 +209,10 @@ describe('ImportKeysNotice', () => {
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('button', { name: /Import 3 items/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    expect(await screen.findByText('Imported 3 API keys into Model Gateway')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Review and import' })).toBeNull();
+    expect(await screen.findByText('Migrated 3 API keys into Model Hub')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Review and migrate' })).toBeNull();
     // The subscription and the reauth row are still on this machine, untouched.
     expect(stored.map((i) => i.id)).toEqual(['mig_claude_oauth', 'mig_codex_reauth']);
   });
@@ -243,7 +243,7 @@ describe('ImportKeysNotice', () => {
     stored = [...stored, { ...CLAUDE_KEY, id: 'mig_claude_key_2', masked_detail: 'sk-…7a10' }];
     renderNotice();
 
-    expect(await screen.findByText('Found 4 API keys to import into Model Gateway')).toBeTruthy();
+    expect(await screen.findByText('Found 4 API keys to import into Model Hub')).toBeTruthy();
   });
 
   it('says nothing when there is nothing to import', async () => {

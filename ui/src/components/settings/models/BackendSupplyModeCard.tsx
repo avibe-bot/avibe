@@ -124,10 +124,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
         ? await (async () => {
             const result = await resumeGatewayAdoption(modelsApi, agentReads, backend);
             if (!result.ok) throw new Error(result.failure.reason);
-            return result.agent;
+            if (result.candidates.length > 0) {
+              if (aliveRef.current) setMigrateOpen(true);
+              return null;
+            }
+            return modelsApi.setAgentMode(backend, 'hub');
           })()
         : await modelsApi.setAgentMode(backend, mode);
-      if (!aliveRef.current) return;
+      if (!aliveRef.current || !next) return;
       setAgent(next);
       if (mode === 'direct') {
         showToast(t('settings.models.supplyMode.switchedDirect') as string, 'success');
@@ -158,7 +162,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   // Only surface the import strip for configs the migration dialog can actually
   // apply — a reauth-only scan would open a dead-end dialog (reauth rows are
   // disabled and excluded from apply), so those don't count as importable.
-  const importable = detected.filter((i) => i.proposed_action !== 'reauth');
+  const importable = detected.filter((i) => i.proposed_action === 'import');
   const detectItem = importable.find((i) => i.kind === 'api_key' || i.kind === 'opencode_provider') ?? importable[0] ?? null;
 
   return (
@@ -249,8 +253,10 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
       <MigrationDialog
         open={migrateOpen}
+        eligible={(item) => item.backend === backend && item.proposed_action === 'import'}
         onClose={() => setMigrateOpen(false)}
         onApplied={() => {
+          setMigrateOpen(false);
           void load();
           void scan();
         }}

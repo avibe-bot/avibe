@@ -14,7 +14,6 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
-import { InstallGatewayDialog } from './InstallGatewayDialog';
 import { MigrationDialog } from './MigrationDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
@@ -62,7 +61,7 @@ import {
   unreadRegion,
   type RegionRead,
 } from './regionRead';
-import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, runtimeIsRunning, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, runtimeCanAttemptInstall, runtimeIsRunning } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { useSourceMutationReport } from './useSourceMutationReport';
 import { handOffProviderTab } from './providerTab';
@@ -364,8 +363,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
-  const [installOpen, setInstallOpen] = React.useState(false);
   const [migrationOpen, setMigrationOpen] = React.useState(false);
+  const [migrationBackend, setMigrationBackend] = React.useState<AgentBackend | null>(null);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
@@ -855,12 +854,18 @@ export const SettingsModelsPage: React.FC = () => {
           setSwitchFailures((previous) => new Set(previous).add(agent.backend));
           return;
         }
+        if (result.candidates.length > 0) {
+          setMigrationBackend(agent.backend);
+          setMigrationOpen(true);
+          return;
+        }
+        const echoed = await modelsApi.setAgentMode(agent.backend, 'hub');
         setSwitchFailures((previous) => {
           const next = new Set(previous);
           next.delete(agent.backend);
           return next;
         });
-        await agentSaved(result.agent);
+        await agentSaved(echoed);
       } catch {
         setSwitchFailures((previous) => new Set(previous).add(agent.backend));
       } finally {
@@ -892,12 +897,24 @@ export const SettingsModelsPage: React.FC = () => {
     if (startingRuntime || stoppingRuntime) return;
     setStartingRuntime(true);
     try {
-      const result = await startRuntimeWithStatusRefresh(modelsApi);
+      if (!retainedRuntime) {
+        setRuntimeRead(failRegionRead);
+        setRuntimeRecoveryPending(true);
+        showToast(t('settings.models.errors.startFailed') as string, 'error');
+        return;
+      }
+      const result = await resumeInstallAndStartRuntime(
+        modelsApi,
+        retainedRuntime,
+        (nextRuntime) => {
+          if (aliveRef.current) setRuntimeRead(readyRegion(nextRuntime));
+        },
+      );
       setRuntimeRead((previous) => result.runtime === null
         ? failRegionRead(previous)
         : readyRegion(result.runtime));
-      setRuntimeRecoveryPending(result.runtime === null);
-      if (result.failed) showToast(t('settings.models.errors.startFailed') as string, 'error');
+      setRuntimeRecoveryPending(result.runtime === null || result.failedStep !== null);
+      if (result.failedStep) showToast(t('settings.models.errors.startFailed') as string, 'error');
     } finally {
       setStartingRuntime(false);
     }
@@ -947,8 +964,6 @@ export const SettingsModelsPage: React.FC = () => {
     if (runtimeSwitchDisabled) return;
     if (runtimeEnabled) {
       void stopRuntime();
-    } else if (runtimeHealth === 'not_installed') {
-      setInstallOpen(true);
     } else {
       void startRuntime();
     }
@@ -1528,22 +1543,19 @@ export const SettingsModelsPage: React.FC = () => {
         }}
       />
       </>}
-      {installOpen && retainedRuntime && (
-        <InstallGatewayDialog
-          runtime={retainedRuntime}
-          onClose={() => setInstallOpen(false)}
-          onRuntime={(next) => {
-            setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
-            setRuntimeRecoveryPending(next === null);
-          }}
-        />
-      )}
       {migrationOpen && (
         <MigrationDialog
           open
-          onClose={() => setMigrationOpen(false)}
+          eligible={migrationBackend
+            ? (item) => item.backend === migrationBackend && item.proposed_action === 'import'
+            : undefined}
+          onClose={() => {
+            setMigrationOpen(false);
+            setMigrationBackend(null);
+          }}
           onApplied={() => {
             setMigrationOpen(false);
+            setMigrationBackend(null);
             void refresh();
             void refreshAgentPresence();
           }}

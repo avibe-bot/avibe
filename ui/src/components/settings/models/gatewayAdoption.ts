@@ -1,17 +1,17 @@
 import { apiFailure, type ModelsApi } from './modelsApi';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { resumeInstallAndStartRuntime } from './runtimeLifecycle';
-import type { AgentBackend, AgentSupply, RuntimeDependency } from './types';
+import type { AgentBackend, AgentSupply, MigrationItem, RuntimeDependency } from './types';
 
 export type GatewayAdoptionFailure = {
-  step: 'install' | 'start' | 'mode' | 'read';
+  step: 'install' | 'start' | 'scan' | 'read';
   request?: string;
   responseStatus?: number;
   reason: 'transport' | 'refused' | 'notReady' | 'unknown';
 };
 
 export type GatewayAdoptionResult =
-  | { ok: true; agent: AgentSupply; runtime: RuntimeDependency | null }
+  | { ok: true; agent: AgentSupply; runtime: RuntimeDependency | null; candidates: MigrationItem[] }
   | { ok: false; failure: GatewayAdoptionFailure; runtime: RuntimeDependency | null };
 
 const classifiedFailure = (
@@ -42,12 +42,12 @@ const backendRow = (agents: AgentSupply[], backend: AgentBackend): AgentSupply |
   agents.find((agent) => agent.backend === backend) ?? null;
 
 /**
- * Reconciles before every attempt, so retry resumes at the first unproven step.
- * Installation, startup, and mode adoption are separate proven steps. A retry
- * resumes at the first step the server state has not already confirmed.
+ * Prepares a Direct backend for adoption without changing authentication or
+ * routing. A caller opens the shared migration dialog when candidates exist;
+ * the migration apply owns the backend mode and native cleanup.
  */
 export async function resumeGatewayAdoption(
-  api: Pick<ModelsApi, 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode' | 'scanMigration' | 'applyMigration'>,
+  api: Pick<ModelsApi, 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'scanMigration'>,
   agentReads: CollectionReadAuthority<AgentSupply[]>,
   backend: AgentBackend,
   installPollIntervalMs = 2_000,
@@ -67,7 +67,7 @@ export async function resumeGatewayAdoption(
       runtime: null,
     };
   }
-  if (current.mode === 'hub') return { ok: true, agent: current, runtime: null };
+  if (current.mode === 'hub') return { ok: true, agent: current, runtime: null, candidates: [] };
 
   let runtime: RuntimeDependency;
   try {
@@ -97,32 +97,14 @@ export async function resumeGatewayAdoption(
 
   try {
     const scan = await api.scanMigration();
-    const itemIds = scan.items
-      .filter((item) => item.backend === backend && item.proposed_action === 'import')
-      .map((item) => item.id);
-    if (itemIds.length > 0) await api.applyMigration(itemIds);
+    const candidates = scan.items.filter(
+      (item) => item.backend === backend && item.proposed_action === 'import',
+    );
+    return { ok: true, agent: current, runtime, candidates };
   } catch (error) {
     return {
       ok: false,
-      failure: classifiedFailure(error, 'mode', 'POST /api/models/migration/apply'),
-      runtime,
-    };
-  }
-
-  try {
-    const agent = await api.setAgentMode(backend, 'hub');
-    return { ok: true, agent, runtime };
-  } catch (error) {
-    try {
-      agents = await agentReads.readValue();
-      const reconciled = backendRow(agents, backend);
-      if (reconciled?.mode === 'hub') return { ok: true, agent: reconciled, runtime };
-    } catch {
-      // The write failure remains the best evidence; retry will run both reads.
-    }
-    return {
-      ok: false,
-      failure: classifiedFailure(error, 'mode', `PATCH /api/models/agents/${backend}/mode`),
+      failure: classifiedFailure(error, 'scan', 'POST /api/models/migration/scan'),
       runtime,
     };
   }

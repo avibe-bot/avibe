@@ -41,46 +41,57 @@ const adopt = (
 ) => resumeGatewayAdoption(client, createAgentCollectionReadAuthority(client), 'claude', intervalMs);
 
 describe('resumeGatewayAdoption', () => {
-  it('treats degraded as already started and goes straight to the mode PATCH', async () => {
+  it('treats degraded as already started without changing backend mode', async () => {
     const client = api({ getRuntimeStatus: vi.fn().mockResolvedValue(runtime('degraded')) });
 
     await expect(adopt(client)).resolves.toMatchObject({ ok: true });
 
     expect(client.startRuntime).not.toHaveBeenCalled();
-    expect(client.setAgentMode).toHaveBeenCalledWith('claude', 'hub');
+    expect(client.scanMigration).toHaveBeenCalledOnce();
+    expect(client.applyMigration).not.toHaveBeenCalled();
+    expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 
-  it('returns the mode PATCH AgentSupply with its newly materialized native source', async () => {
-    const adopted = { ...agent('hub'), sources: { order: ['src_native'], eligibility: [] } };
-    const client = api({ setAgentMode: vi.fn().mockResolvedValue(adopted) });
+  it('returns every import candidate for the selection dialog', async () => {
+    const client = api({
+      scanMigration: vi.fn().mockResolvedValue({
+        items: [
+          { id: 'oauth', backend: 'claude', kind: 'oauth_native', masked_detail: 'OAuth', proposed_action: 'import', selected: true },
+          { id: 'keep', backend: 'claude', kind: 'oauth_native', masked_detail: 'Native', proposed_action: 'keep_native', selected: true },
+          { id: 'other', backend: 'codex', kind: 'api_key', masked_detail: 'Key', proposed_action: 'import', selected: true },
+        ],
+      }),
+    });
 
     await expect(adopt(client)).resolves.toMatchObject({
       ok: true,
-      agent: { mode: 'hub', sources: { order: ['src_native'] } },
+      candidates: [{ id: 'oauth' }],
     });
+    expect(client.applyMigration).not.toHaveBeenCalled();
+    expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 
-  it('starts an idle runtime before switching the one backend', async () => {
+  it('starts an idle runtime before scanning the one backend', async () => {
     const client = api({ getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_started')) });
 
     await expect(adopt(client)).resolves.toMatchObject({ ok: true });
 
     expect(client.startRuntime).toHaveBeenCalledOnce();
-    expect(client.setAgentMode).toHaveBeenCalledWith('claude', 'hub');
+    expect(client.scanMigration).toHaveBeenCalledOnce();
   });
 
-  it('installs, starts, and switches in the order of the first unproven step', async () => {
+  it('installs, starts, and scans in the order of the first unproven step', async () => {
     const calls: string[] = [];
     const client = api({
       getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_installed')),
       installRuntime: vi.fn().mockImplementation(async () => { calls.push('install'); return runtime('not_started'); }),
       startRuntime: vi.fn().mockImplementation(async () => { calls.push('start'); return runtime('ok'); }),
-      setAgentMode: vi.fn().mockImplementation(async () => { calls.push('mode'); return agent('hub'); }),
+      scanMigration: vi.fn().mockImplementation(async () => { calls.push('scan'); return { items: [] }; }),
     });
 
     await expect(adopt(client, 0)).resolves.toMatchObject({ ok: true });
 
-    expect(calls).toEqual(['install', 'start', 'mode']);
+    expect(calls).toEqual(['install', 'start', 'scan']);
   });
 
   it('keeps a terminal install failure in the install step and never sends the mode PATCH', async () => {
@@ -99,29 +110,16 @@ describe('resumeGatewayAdoption', () => {
     expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 
-  it('re-reads agents after a lost mode response and accepts the committed hub mode', async () => {
+  it('keeps Direct mode when the migration scan fails', async () => {
     const client = api({
-      listAgents: vi.fn()
-        .mockResolvedValueOnce([agent('direct')])
-        .mockResolvedValueOnce([agent('hub')]),
-      setAgentMode: vi.fn().mockRejectedValue(new TypeError('response lost')),
+      scanMigration: vi.fn().mockRejectedValue(new TypeError('response lost')),
     });
 
     await expect(adopt(client)).resolves.toMatchObject({
-      ok: true,
-      agent: { mode: 'hub' },
+      ok: false,
+      failure: { step: 'scan' },
     });
-
-    expect(client.listAgents).toHaveBeenCalledTimes(2);
-  });
-
-  it('closes an already-committed retry without touching runtime or mode', async () => {
-    const client = api({ listAgents: vi.fn().mockResolvedValue([agent('hub')]) });
-
-    await expect(adopt(client)).resolves.toMatchObject({ ok: true });
-
-    expect(client.getRuntimeStatus).not.toHaveBeenCalled();
-    expect(client.startRuntime).not.toHaveBeenCalled();
+    expect(client.applyMigration).not.toHaveBeenCalled();
     expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 });

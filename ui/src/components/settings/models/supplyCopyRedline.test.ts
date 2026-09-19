@@ -34,8 +34,6 @@ const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert
 const CLASSIFIED: Record<string, string> = {
   'direct.note.perBackend': 'The user is choosing one backend at a time on the all-direct screen.',
   'gateway.fail.switchToDirect': 'Reports a failed user-triggered switch; it does not promise an automatic fallback.',
-  'adopt.undo.1': 'Names the manual, user-triggered undo promised by the adoption dialog.',
-  'adopt.undo.2': 'Names the exact location of that manual undo control.',
 };
 
 type Leaf = { key: string; text: string };
