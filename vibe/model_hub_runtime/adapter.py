@@ -233,17 +233,13 @@ _REQUEST_ERROR_IDENTIFIERS = frozenset(
 )
 _MODEL_ERROR_IDENTIFIERS = frozenset({"model_not_found", "not_found_error"})
 _AUTHENTICATION_ERROR_IDENTIFIERS = frozenset({"authentication_error", "invalid_api_key", "permission_error"})
-_DEFINITIVE_OAUTH_REJECTION_IDENTIFIERS = frozenset(
+_REFRESH_INVALIDATION_IDENTIFIERS = frozenset(
     {
-        "authentication_error",
-        "invalid_api_key",
         "invalid_grant",
-        "invalid_token",
         "refresh_token_expired",
         "refresh_token_invalid",
-        "token_expired",
-        "token_revoked",
-        "unauthorized",
+        "refresh_token_revoked",
+        "refresh_token_reused",
     }
 )
 _SERVER_ERROR_IDENTIFIERS = frozenset({"api_error", "internal_error", "overloaded", "overloaded_error", "server_error"})
@@ -498,7 +494,13 @@ def _oauth_rejection_is_definitive(
     status: int,
     payload: Mapping[str, Any],
 ) -> bool:
-    """Accept only explicit token/auth evidence as a reauthentication verdict."""
+    """Recognize refresh-invalidating words, but not access-token expiry.
+
+    This helper is intentionally not sufficient on its own for takeover
+    validation: the protocol probe is an upstream request, not a refresh
+    endpoint. The authoritative verdict comes from CPA's auth inventory after
+    its own refresh/conductor state records an invalid grant.
+    """
 
     if status not in {*_REQUEST_ERROR_STATUSES, *_AUTHENTICATION_ERROR_STATUSES}:
         return False
@@ -506,15 +508,10 @@ def _oauth_rejection_is_definitive(
     error = payload.get("error")
     if isinstance(error, dict):
         identifiers.update(_error_identifiers(error))
-        if (
-            status in _AUTHENTICATION_ERROR_STATUSES
-            and _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
-        ):
-            return True
         message = _normalized_identifier(str(error.get("message") or ""))
-        if any(token in message for token in _DEFINITIVE_OAUTH_REJECTION_IDENTIFIERS):
+        if any(token in message for token in _REFRESH_INVALIDATION_IDENTIFIERS):
             return True
-    return not _DEFINITIVE_OAUTH_REJECTION_IDENTIFIERS.isdisjoint(identifiers)
+    return not _REFRESH_INVALIDATION_IDENTIFIERS.isdisjoint(identifiers)
 
 
 def _payload_is_structured(payload: Mapping[str, Any]) -> bool:
@@ -635,7 +632,10 @@ def _parse_protocol_authenticated_evidence(
     if oauth and _oauth_rejection_is_definitive(status, payload):
         return evidence(
             protocol=_ProtocolProof.UNPROVEN,
-            authentication=_AuthenticationEvidence.REJECTED,
+            # The management probe is not CPA's refresh endpoint. Even an
+            # ``invalid_grant``-shaped upstream response is inconclusive until
+            # CPA records refresh invalidation in its auth inventory.
+            authentication=_AuthenticationEvidence.UNKNOWN,
         )
 
     top_level_identifiers = _payload_identifiers(payload)
@@ -781,6 +781,33 @@ class _AuthRecord:
     provider: str
     fingerprint: str
     account_id: str | None = None
+    status: str = ""
+    status_message: str = ""
+    unavailable: bool = False
+
+
+def _oauth_auth_record_requires_reauthentication(auth: _AuthRecord) -> bool:
+    """Use only CPA's recorded refresh-invalidating state as terminal evidence."""
+
+    if not auth.unavailable and auth.status not in {"error", "failed"}:
+        return False
+    return _normalized_identifier(auth.status_message) in _REFRESH_INVALIDATION_IDENTIFIERS
+
+
+def _raise_oauth_credential_rejected() -> None:
+    """Raise the canonical core rejection type when the integration is present.
+
+    This lane is based on the pre-class contract, so the canonical class is
+    imported lazily. The fallback keeps this branch testable before the main
+    contract commit is integrated; after integration the runtime always raises
+    ``core.handlers.model_hub.adapter.OAuthCredentialRejectedError``.
+    """
+
+    try:
+        from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
+    except ImportError:
+        raise EngineStateError("oauth credential requires reauthentication") from None
+    raise OAuthCredentialRejectedError("oauth credential requires reauthentication")
 
 
 def _response_shape_proves_protocol(
@@ -1670,83 +1697,78 @@ class CLIProxyEngineAdapter:
 
         async with self._routing_lock:
             await self._transports_idle.wait()
-            auth_name, payload, prefix, _already_active = await run_owned_in_thread(
+            auth_name, payload, _prefix, _already_active = await run_owned_in_thread(
                 self.state_store.activate_oauth_auth_file,
-                credential_ref,
-            )
-            metadata = await asyncio.to_thread(
-                self.state_store.credential_metadata,
                 credential_ref,
             )
             client = await asyncio.to_thread(self.supervisor.client_if_running)
             if client is None:
+                # The next ordered lifecycle step starts CPA. The atomically
+                # published watched file is the source of truth; no management
+                # upload is needed while the engine is down.
                 return
 
-            if not bool(metadata.get("engine_published")):
-                try:
-                    inventory = await run_owned_in_thread(_auth_inventory, client)
-                except EngineClientError as exc:
-                    raise EngineStateError(
-                        "OAuth activation could not inspect the engine"
-                    ) from exc
-                matching = [
-                    auth
-                    for auth in inventory.values()
-                    if auth.name == auth_name or auth.identity == auth_name
-                ]
-                if len(matching) > 1:
-                    raise EngineStateError("OAuth activation auth record is ambiguous")
-                if matching:
-                    expected_provider = str(payload.get("type") or "").strip().lower()
-                    if matching[0].provider != expected_provider:
-                        raise EngineStateError("OAuth activation auth record conflicts")
-                    await run_owned_in_thread(
-                        self.state_store.mark_oauth_engine_published,
-                        credential_ref,
-                    )
-                else:
-                    await run_owned_in_thread(
-                        self.state_store.assert_oauth_auth_file_unchanged,
-                        credential_ref,
-                    )
-                    try:
-                        await run_owned_in_thread(
-                            client.management_request,
-                            "POST",
-                            "/auth-files",
-                            query={"name": auth_name},
-                            payload=payload,
-                        )
-                    except EngineClientError as exc:
-                        raise EngineStateError("OAuth activation failed") from exc
-                    await run_owned_in_thread(
-                        self.state_store.mark_oauth_engine_published,
-                        credential_ref,
-                    )
-
-            metadata = await asyncio.to_thread(
-                self.state_store.credential_metadata,
-                credential_ref,
-            )
-            if bool(metadata.get("prefix_published")):
-                return
-            await run_owned_in_thread(
-                self.state_store.assert_oauth_auth_file_unchanged,
-                credential_ref,
-            )
+            expected_provider = str(payload.get("type") or "").strip().lower()
             try:
-                await run_owned_in_thread(
-                    client.management_request,
-                    "PATCH",
-                    "/auth-files/fields",
-                    payload={"name": auth_name, "prefix": prefix},
-                )
+                inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError("OAuth activation metadata update failed") from exc
+                raise EngineStateError(
+                    "OAuth activation could not inspect the engine"
+                ) from exc
+            matching = [
+                auth
+                for auth in inventory.values()
+                if auth.name == auth_name or auth.identity == auth_name
+            ]
+            if len(matching) > 1:
+                raise EngineStateError("OAuth activation auth record is ambiguous")
+            if matching:
+                if matching[0].provider != expected_provider:
+                    raise EngineStateError("OAuth activation auth record conflicts")
+                await run_owned_in_thread(
+                    self.state_store.mark_oauth_engine_published,
+                    credential_ref,
+                )
+                return
+
+            # The local file is already visible. A GET followed by POST is
+            # unsafe: CPA's watcher can register/rotate the file between those
+            # calls, after which POST would re-upload stale R0 bytes. Use the
+            # supervisor's existing watched-file reconcile path instead.
+            restart_if_running = getattr(self.supervisor, "restart_if_running", None)
+            if not callable(restart_if_running):
+                raise EngineStateError("OAuth activation could not reconcile engine")
+            try:
+                await run_owned_in_thread(restart_if_running)
+            except Exception as exc:
+                raise EngineStateError("OAuth activation could not reconcile engine") from exc
+
+            client = await asyncio.to_thread(self.supervisor.client_if_running)
+            if client is None:
+                raise EngineStateError("OAuth activation could not reconcile engine")
+            try:
+                inventory = await run_owned_in_thread(_auth_inventory, client)
+            except EngineClientError as exc:
+                raise EngineStateError(
+                    "OAuth activation could not inspect the engine"
+                ) from exc
+            matching = [
+                auth
+                for auth in inventory.values()
+                if auth.name == auth_name or auth.identity == auth_name
+            ]
+            if len(matching) > 1:
+                raise EngineStateError("OAuth activation auth record is ambiguous")
+            if not matching:
+                raise EngineStateError("OAuth activation could not reconcile engine")
+            if matching[0].provider != expected_provider:
+                raise EngineStateError("OAuth activation auth record conflicts")
             await run_owned_in_thread(
-                self.state_store.mark_oauth_prefix_published,
+                self.state_store.mark_oauth_engine_published,
                 credential_ref,
             )
+
+            return
 
     async def validate_oauth_credential(self, credential_ref: str) -> None:
         """Require an upstream authentication witness without inference."""
@@ -1789,6 +1811,8 @@ class CLIProxyEngineAdapter:
             ]
             if len(matches) != 1:
                 raise EngineStateError("OAuth credential validation is inconclusive")
+            if _oauth_auth_record_requires_reauthentication(matches[0]):
+                _raise_oauth_credential_rejected()
             try:
                 evidence = await run_owned_in_thread(
                     _probe_oauth_protocol_response,
@@ -1800,8 +1824,6 @@ class CLIProxyEngineAdapter:
             except (EngineClientError, OSError) as exc:
                 raise EngineStateError("OAuth credential validation failed") from exc
             if evidence.authentication is not _AuthenticationEvidence.ACCEPTED:
-                if evidence.authentication is _AuthenticationEvidence.REJECTED:
-                    raise EngineStateError("oauth credential requires reauthentication")
                 raise EngineStateError("OAuth credential validation failed")
 
     async def matches_api_key_credential(
@@ -2749,6 +2771,9 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
                 provider=provider,
                 fingerprint=fingerprint,
                 account_id=account_id,
+                status=str(item.get("status") or "").strip().lower(),
+                status_message=str(item.get("status_message") or "").strip(),
+                unavailable=bool(item.get("unavailable")),
             )
     return inventory
 

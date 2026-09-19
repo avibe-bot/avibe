@@ -20,7 +20,7 @@ def _oauth_material(kind: str = "codex") -> dict[str, str]:
     }
 
 
-def test_oauth_stage_stays_outside_auth_dir_and_refuses_rotation_overwrite(
+def test_oauth_stage_binds_prefix_and_accepts_cpa_rotation(
     tmp_path: Path,
 ) -> None:
     store = EngineStateStore(tmp_path / "engine")
@@ -33,22 +33,34 @@ def test_oauth_stage_stays_outside_auth_dir_and_refuses_rotation_overwrite(
 
     assert not (store.auth_dir / "avibe-migration-fixture.json").exists()
     assert (store.oauth_staging_dir / f"{ref}.json").exists()
+    staged = json.loads((store.oauth_staging_dir / f"{ref}.json").read_text())
+    prefix = str(store.credential_metadata(ref)["prefix"])
+    assert staged["prefix"] == prefix
 
-    auth_name, payload, _prefix, already_active = store.activate_oauth_auth_file(ref)
+    auth_name, payload, activated_prefix, already_active = store.activate_oauth_auth_file(ref)
     assert auth_name == "avibe-migration-fixture.json"
     assert payload["type"] == "codex"
+    assert activated_prefix == prefix
+    assert payload["prefix"] == prefix
     assert already_active is False
     assert not (store.oauth_staging_dir / f"{ref}.json").exists()
 
     store.mark_oauth_engine_published(ref)
     store.mark_oauth_prefix_published(ref)
     live_path = store.auth_dir / auth_name
-    rotated = b'{"type":"codex","refresh_token":"rotated-fixture"}\n'
+    rotated_payload = {
+        "type": "codex",
+        "access_token": "rotated-access-fixture",
+        "refresh_token": "rotated-refresh-fixture",
+        "prefix": prefix,
+    }
+    rotated = (json.dumps(rotated_payload, sort_keys=True) + "\n").encode()
     live_path.write_bytes(rotated)
     live_path.chmod(0o600)
 
-    with pytest.raises(EngineStateError, match="changed after activation"):
-        store.activate_oauth_auth_file(ref)
+    _, current, _, already_active = store.activate_oauth_auth_file(ref)
+    assert already_active is True
+    assert current == rotated_payload
     assert live_path.read_bytes() == rotated
 
 
@@ -102,6 +114,8 @@ class _FakeEngineClient:
         self.api_call_payloads: list[dict[str, Any]] = []
         self.api_call_response = '{"object":"response"}'
         self.api_call_status_code = 200
+        self.on_restart: Any = None
+        self.on_inventory: Any = None
 
     def management_request(
         self,
@@ -115,18 +129,12 @@ class _FakeEngineClient:
         del timeout
         self.calls.append((method, path))
         if method == "GET" and path == "/auth-files":
+            if self.on_inventory is not None:
+                callback, self.on_inventory = self.on_inventory, None
+                callback()
             return {"files": list(self.files)}
         if method == "POST" and path == "/auth-files":
-            assert payload is not None
-            self.files.append(
-                {
-                    "id": "uploaded-fixture",
-                    "name": str((query or {}).get("name") or ""),
-                    "provider": payload["type"],
-                    "auth_index": "0",
-                }
-            )
-            return {"status": "ok"}
+            raise AssertionError("OAuth activation must not re-upload a watched file")
         if method == "POST" and path == "/api-call":
             assert payload is not None
             self.api_call_payloads.append(payload)
@@ -150,6 +158,23 @@ class _FakeSupervisor:
     def client(self) -> _FakeEngineClient:
         return self.client_value
 
+    def restart_if_running(self) -> None:
+        if self.client_value.on_restart is not None:
+            self.client_value.on_restart()
+            return
+        auth_files = list(self.state_store.auth_dir.glob("*.json"))
+        if len(auth_files) != 1:
+            return
+        payload = json.loads(auth_files[0].read_text())
+        self.client_value.files = [
+            {
+                "id": auth_files[0].name,
+                "name": auth_files[0].name,
+                "provider": payload["type"],
+                "auth_index": "0",
+            }
+        ]
+
 
 @pytest.mark.asyncio
 async def test_adapter_activation_is_idempotent_and_does_not_reupload(
@@ -157,6 +182,19 @@ async def test_adapter_activation_is_idempotent_and_does_not_reupload(
 ) -> None:
     store = EngineStateStore(tmp_path / "engine")
     client = _FakeEngineClient()
+    def reconcile_from_watched_file() -> None:
+        auth_files = list(store.auth_dir.glob("*.json"))
+        assert len(auth_files) == 1
+        payload = json.loads(auth_files[0].read_text())
+        client.files = [
+            {
+                "id": auth_files[0].name,
+                "name": auth_files[0].name,
+                "provider": payload["type"],
+                "auth_index": "0",
+            }
+        ]
+    client.on_restart = reconcile_from_watched_file
     adapter = CLIProxyEngineAdapter(
         supervisor=_FakeSupervisor(store, client),  # type: ignore[arg-type]
         state_store=store,
@@ -172,21 +210,30 @@ async def test_adapter_activation_is_idempotent_and_does_not_reupload(
     first_calls = list(client.calls)
     assert first_calls == [
         ("GET", "/auth-files"),
-        ("POST", "/auth-files"),
-        ("PATCH", "/auth-files/fields"),
+        ("GET", "/auth-files"),
     ]
 
     await adapter.activate_oauth_credential(ref)
-    assert client.calls == first_calls
+    assert client.calls == first_calls + [("GET", "/auth-files")]
 
     auth_name = str(store.credential_metadata(ref)["auth_name"])
     live_path = store.auth_dir / auth_name
-    rotated = b'{"type":"codex","refresh_token":"rotated-fixture"}\n'
+    prefix = str(store.credential_metadata(ref)["prefix"])
+    rotated = (
+        json.dumps(
+            {
+                "type": "codex",
+                "refresh_token": "rotated-fixture",
+                "prefix": prefix,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
     live_path.write_bytes(rotated)
     live_path.chmod(0o600)
-    with pytest.raises(EngineStateError, match="changed after activation"):
-        await adapter.activate_oauth_credential(ref)
-    assert client.calls == first_calls
+    await adapter.activate_oauth_credential(ref)
+    assert client.calls == first_calls + [("GET", "/auth-files")] * 2
     assert live_path.read_bytes() == rotated
 
 
@@ -220,6 +267,176 @@ async def test_adapter_does_not_claim_same_name_for_a_different_provider(
         await adapter.activate_oauth_credential(ref)
     assert client.calls == [("GET", "/auth-files")]
     assert store.credential_metadata(ref)["engine_published"] is False
+
+
+@pytest.mark.asyncio
+async def test_activation_retry_after_rotation_keeps_live_r1_and_never_reuploads(
+    tmp_path: Path,
+) -> None:
+    store = EngineStateStore(tmp_path / "engine")
+    client = _FakeEngineClient()
+    rotate_and_fail = True
+
+    def reconcile_with_failure() -> None:
+        nonlocal rotate_and_fail
+        if rotate_and_fail:
+            rotate_and_fail = False
+            auth_path = next(store.auth_dir.glob("*.json"))
+            prefix = str(store.credential_metadata(ref)["prefix"])
+            auth_path.write_text(
+                json.dumps(
+                    {
+                        "type": "codex",
+                        "access_token": "r1-access",
+                        "refresh_token": "r1-refresh",
+                        "prefix": prefix,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            auth_path.chmod(0o600)
+            raise RuntimeError("simulated reconcile uncertainty")
+        auth_path = next(store.auth_dir.glob("*.json"))
+        payload = json.loads(auth_path.read_text())
+        client.files = [
+            {
+                "id": auth_path.name,
+                "name": auth_path.name,
+                "provider": payload["type"],
+                "auth_index": "0",
+            }
+        ]
+
+    client.on_restart = reconcile_with_failure
+    adapter = CLIProxyEngineAdapter(
+        supervisor=_FakeSupervisor(store, client),  # type: ignore[arg-type]
+        state_store=store,
+    )
+    ref = await adapter.provision_oauth_credential(
+        "src_fixture123",
+        "openai",
+        _oauth_material(),
+    )
+
+    with pytest.raises(EngineStateError, match="could not reconcile engine"):
+        await adapter.activate_oauth_credential(ref)
+
+    live_path = next(store.auth_dir.glob("*.json"))
+    r1 = live_path.read_bytes()
+    await adapter.activate_oauth_credential(ref)
+
+    assert live_path.read_bytes() == r1
+    assert all(path != "/auth-files" or method != "POST" for method, path in client.calls)
+    assert store.credential_metadata(ref)["engine_published"] is True
+
+
+@pytest.mark.asyncio
+async def test_rotation_during_engine_binding_is_accepted_by_identity(
+    tmp_path: Path,
+) -> None:
+    store = EngineStateStore(tmp_path / "engine")
+    client = _FakeEngineClient()
+    adapter = CLIProxyEngineAdapter(
+        supervisor=_FakeSupervisor(store, client),  # type: ignore[arg-type]
+        state_store=store,
+    )
+    ref = await adapter.provision_oauth_credential(
+        "src_fixture123",
+        "openai",
+        _oauth_material(),
+    )
+    auth_name, payload, _, _ = store.activate_oauth_auth_file(ref)
+    client.files = [
+        {
+            "id": auth_name,
+            "name": auth_name,
+            "provider": payload["type"],
+            "auth_index": "0",
+        }
+    ]
+
+    def rotate_live_file() -> None:
+        auth_path = next(store.auth_dir.glob("*.json"))
+        prefix = str(store.credential_metadata(ref)["prefix"])
+        auth_path.write_text(
+            json.dumps(
+                {
+                    "type": "codex",
+                    "access_token": "r1-access",
+                    "refresh_token": "r1-refresh",
+                    "prefix": prefix,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        auth_path.chmod(0o600)
+
+    client.on_inventory = rotate_live_file
+    await adapter.activate_oauth_credential(ref)
+    assert json.loads((store.auth_dir / str(store.credential_metadata(ref)["auth_name"])).read_text())[
+        "refresh_token"
+    ] == "r1-refresh"
+
+
+@pytest.mark.asyncio
+async def test_startup_retry_reconciles_published_file_without_stale_upload(
+    tmp_path: Path,
+) -> None:
+    store = EngineStateStore(tmp_path / "engine")
+    client = _FakeEngineClient()
+    supervisor = _FakeSupervisor(store, client)
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)  # type: ignore[arg-type]
+    ref = await adapter.provision_oauth_credential(
+        "src_fixture123",
+        "openai",
+        _oauth_material(),
+    )
+    auth_name, _, _, _ = store.activate_oauth_auth_file(ref)
+    live_path = store.auth_dir / auth_name
+    prefix = str(store.credential_metadata(ref)["prefix"])
+    live_path.write_text(
+        json.dumps(
+            {
+                "type": "codex",
+                "access_token": "r1-access",
+                "refresh_token": "r1-refresh",
+                "prefix": prefix,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    live_path.chmod(0o600)
+
+    def reconcile_from_watched_file() -> None:
+        payload = json.loads(live_path.read_text())
+        client.files = [
+            {
+                "id": auth_name,
+                "name": auth_name,
+                "provider": payload["type"],
+                "auth_index": "0",
+            }
+        ]
+
+    client.on_restart = reconcile_from_watched_file
+    await adapter.activate_oauth_credential(ref)
+
+    assert live_path.read_text() == (
+        json.dumps(
+            {
+                "type": "codex",
+                "access_token": "r1-access",
+                "refresh_token": "r1-refresh",
+                "prefix": prefix,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    assert ("POST", "/auth-files") not in client.calls
 
 
 @pytest.mark.asyncio
@@ -286,7 +503,7 @@ async def test_validate_rejects_staged_or_denied_grants_without_secret_details(
     monkeypatch.setattr(runtime_adapter, "_probe_oauth_protocol_response", reject)
     with pytest.raises(
         EngineStateError,
-        match="oauth credential requires reauthentication",
+        match="OAuth credential validation failed",
     ) as caught:
         await adapter.validate_oauth_credential(ref)
     assert "refresh-token-fixture" not in str(caught.value)
@@ -353,7 +570,17 @@ async def test_validate_sends_model_free_credential_scoped_management_probe(
         (
             401,
             '{"error":{"type":"invalid_api_key"}}',
-            "oauth credential requires reauthentication",
+            "OAuth credential validation failed",
+        ),
+        (
+            401,
+            '{"error":{"type":"invalid_token"}}',
+            "OAuth credential validation failed",
+        ),
+        (
+            401,
+            '{"error":{"type":"token_expired"}}',
+            "OAuth credential validation failed",
         ),
         (
             403,
@@ -385,3 +612,39 @@ async def test_validate_distinguishes_definitive_invalid_grant_from_unknown_deni
 
     with pytest.raises(EngineStateError, match=f"^{expected}$"):
         await adapter.validate_oauth_credential(ref)
+
+
+@pytest.mark.asyncio
+async def test_validate_raises_canonical_rejection_only_for_cpa_refresh_state(
+    tmp_path: Path,
+) -> None:
+    store = EngineStateStore(tmp_path / "engine")
+    client = _FakeEngineClient()
+    adapter = CLIProxyEngineAdapter(
+        supervisor=_FakeSupervisor(store, client),  # type: ignore[arg-type]
+        state_store=store,
+    )
+    ref = await adapter.provision_oauth_credential(
+        "src_fixture123",
+        "openai",
+        _oauth_material(),
+    )
+    await adapter.activate_oauth_credential(ref)
+    client.files[0].update(
+        {
+            "status": "error",
+            "status_message": "invalid_grant",
+            "unavailable": True,
+        }
+    )
+
+    try:
+        from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
+    except ImportError:
+        rejection_type = EngineStateError
+    else:
+        rejection_type = OAuthCredentialRejectedError
+
+    with pytest.raises(rejection_type) as caught:
+        await adapter.validate_oauth_credential(ref)
+    assert "refresh-token-fixture" not in str(caught.value)
