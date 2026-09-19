@@ -158,6 +158,10 @@ test('no-project handoff preserves picker path/history/manual input and confirma
   await settings(page);
   await back(page);
   await expect(path).toHaveValue('/未确认的路径/草稿');
+  await expect(path).toBeFocused();
+  await page.keyboard.press('End');
+  await page.keyboard.insertText('/继续编辑');
+  await expect(path).toHaveValue('/未确认的路径/草稿/继续编辑');
   await expect(page.getByPlaceholder(en.directoryBrowser.newFolderPlaceholder)).toHaveCount(0);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: en.directoryBrowser.newFolder, exact: true }).click();
@@ -166,6 +170,7 @@ test('no-project handoff preserves picker path/history/manual input and confirma
   await settings(page);
   await back(page);
   await expect(folderName).toHaveValue('未创建文件夹');
+  await expect(folderName).toBeFocused();
   expect(await writes(page, '/api/browse/mkdir')).toHaveLength(0);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();

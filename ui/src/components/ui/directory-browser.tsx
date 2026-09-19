@@ -335,6 +335,16 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   return (
     <Dialog open onOpenChange={(open) => { if (!open && foreground.current) onClose(); }}>
       <DialogContent
+        onOpenAutoFocus={(event) => {
+          if (!foreground.current) { event.preventDefault(); return; }
+          // The portal mounts after its retained owner's effects. Resume the
+          // editor here, without reinitializing or selecting its draft text.
+          const editor = creating ? newFolderInputRef.current : pathEditing ? pathInputRef.current : null;
+          if (editor) {
+            event.preventDefault();
+            editor.focus();
+          }
+        }}
         onCloseAutoFocus={(event) => { if (!foreground.current) event.preventDefault(); }}
         aria-describedby={undefined}
         closeLabel={t('directoryBrowser.cancel')}
