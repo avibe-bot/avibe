@@ -1288,8 +1288,12 @@ def _reset_recoverable_config_section(
         # second time and discard otherwise valid settings.
         payload[section] = {"default_cwd": str(Path.home() / "work")}
         return True
+    if section == "model_hub":
+        # Recovery is not an installation upgrade or consent to reroute native
+        # backends. Keep the optional runtime disabled until the file is fixed.
+        payload[section] = {"enabled": False, "runtime_default_applied": True}
+        return True
     if section in {
-        "model_hub",
         "memory",
         "remote_access",
         "update",
@@ -3554,9 +3558,8 @@ class ModelHubAgentSupplyConfig:
 
 @dataclass
 class ModelHubConfig:
-    # Model Hub is the default runtime for both new installations and configs
-    # that do not carry an explicit value. An explicitly persisted ``false``
-    # remains a deliberate opt-out.
+    # New installations enable the runtime. Disk loading promotes pre-marker
+    # installations once; a later explicit stop remains a deliberate opt-out.
     enabled: bool = True
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
@@ -3564,6 +3567,9 @@ class ModelHubConfig:
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in MODEL_HUB_BACKENDS
         }
     )
+    # Current writers stamp this even when saving enabled=False. Only disk
+    # loading may promote an old absent/false marker together with enabled=True.
+    runtime_default_applied: bool = True
 
     @staticmethod
     def source_eligible_for_backend(
@@ -3603,11 +3609,14 @@ class ModelHubConfig:
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
-        if set(payload) - {"enabled", "sources", "agents"}:
+        if set(payload) - {"enabled", "sources", "agents", "runtime_default_applied"}:
             raise ValueError("Config 'model_hub' contains unknown fields")
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("Config 'model_hub.enabled' must be a boolean")
+        runtime_default_applied = payload.get("runtime_default_applied", True)
+        if not isinstance(runtime_default_applied, bool):
+            raise ValueError("Config 'model_hub.runtime_default_applied' must be a boolean")
         sources_payload = payload.get("sources") or []
         agents_payload = payload.get("agents") or {}
         if not isinstance(sources_payload, list):
@@ -3663,6 +3672,7 @@ class ModelHubConfig:
             enabled=enabled,
             sources=sources,
             agents=agents,
+            runtime_default_applied=runtime_default_applied,
         )
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
@@ -3699,6 +3709,7 @@ class ModelHubConfig:
     def to_payload(self) -> dict:
         return {
             "enabled": self.enabled,
+            "runtime_default_applied": self.runtime_default_applied,
             "sources": [source.to_payload() for source in self.sources],
             "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
         }
@@ -3954,7 +3965,7 @@ class V2Config:
 
     @classmethod
     def default(cls) -> "V2Config":
-        """Return the minimal safe config used for first-run and recovery."""
+        """Return the minimal safe config used for first-run."""
 
         return cls(
             mode="self_host",
@@ -3970,6 +3981,13 @@ class V2Config:
             model_hub=ModelHubConfig(),
             platform=WORKBENCH_PLATFORM_ID,
         )
+
+    @classmethod
+    def _recovery_default(cls) -> "V2Config":
+        """Unreadable installations must not acquire fresh-install Hub modes."""
+        config = cls.default()
+        config.model_hub = ModelHubConfig.from_payload({"enabled": False})
+        return config
 
     @classmethod
     def load(
@@ -3992,7 +4010,7 @@ class V2Config:
                 backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
                 warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
                 logger.error("%s (backup=%s)", warning, backup)
-                config = cls.default()
+                config = cls._recovery_default()
                 config.load_warnings = (warning,)
                 config.recovered_sections = ()
                 config.whole_config_recovery = True
@@ -4004,7 +4022,7 @@ class V2Config:
             backup = _backup_config_file(path, "invalid-json", content=raw_bytes)
             warning = f"Config JSON could not be parsed; using recovery defaults: {exc.msg}"
             logger.error("%s (backup=%s)", warning, backup)
-            config = cls.default()
+            config = cls._recovery_default()
             config.load_warnings = (warning,)
             config.recovered_sections = ()
             config.whole_config_recovery = True
@@ -4014,7 +4032,7 @@ class V2Config:
             backup = _backup_config_file(path, "invalid-root", content=raw_bytes)
             warning = "Config root is not an object; using recovery defaults"
             logger.error("%s (backup=%s)", warning, backup)
-            config = cls.default()
+            config = cls._recovery_default()
             config.load_warnings = (warning,)
             config.recovered_sections = ()
             config.whole_config_recovery = True
@@ -4025,6 +4043,25 @@ class V2Config:
         recovery_warnings = config.load_warnings
         recovered_sections = config.recovered_sections
         whole_config_recovery = config.whole_config_recovery
+        # Use raw marker presence, not the current writer's dataclass default.
+        # Only a fully valid installation qualifies; recovery must never make
+        # an old runtime opt-in look like a successful upgrade.
+        runtime_default_pending = (
+            not migration_warnings
+            and not recovery_warnings
+            and (migrated_payload.get("model_hub") or {}).get("runtime_default_applied") is not True
+        )
+        stored_hub = payload.get("model_hub")
+        previous_runtime_enabled = isinstance(stored_hub, dict) and stored_hub.get("enabled") is True
+        if runtime_default_pending:
+            config.model_hub.enabled = True
+            config.model_hub.runtime_default_applied = True
+            migrated = True
+        elif migration_warnings or recovery_warnings:
+            # Do not materialize a new runtime default while recovering an
+            # unrelated malformed section. Preserve an already enabled Hub
+            # only when its own config could be parsed safely.
+            config.model_hub.enabled = config.model_hub.enabled and previous_runtime_enabled
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
         if (
             persist_migrations
@@ -4043,6 +4080,11 @@ class V2Config:
             except OSError as exc:
                 persistence_warning = f"Model Hub config migration could not be persisted: {exc}"
             if persistence_warning:
+                if runtime_default_pending:
+                    # A failed backup/CAS must not activate an uncommitted
+                    # default. A future successful load may retry the upgrade.
+                    config.model_hub.enabled = previous_runtime_enabled
+                    config.model_hub.runtime_default_applied = False
                 all_warnings = tuple(dict.fromkeys((*all_warnings, persistence_warning)))
                 logger.warning("%s (%s)", persistence_warning, path)
                 if "file changed" in persistence_warning and _migration_reload_depth == 0:
@@ -4089,14 +4131,14 @@ class V2Config:
                 if section is None or recovered in recovered_sections:
                     warning = f"Config could not be loaded; using recovery defaults: {exc}"
                     logger.error("%s", warning)
-                    config = cls.default()
+                    config = cls._recovery_default()
                     recovery_warnings.append(warning)
                     whole_config_recovery = True
                     break
                 if not _reset_recoverable_config_section(candidate, section, field_name):
                     warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
                     logger.error("%s", warning)
-                    config = cls.default()
+                    config = cls._recovery_default()
                     recovery_warnings.append(warning)
                     whole_config_recovery = True
                     break
