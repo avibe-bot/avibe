@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -105,6 +108,10 @@ class EngineStateStore:
     @property
     def auth_dir(self) -> Path:
         return self.root / "auth"
+
+    @property
+    def oauth_staging_dir(self) -> Path:
+        return self.root / "oauth-staging"
 
     def prepare_instance(self, install_id: str, *, rotate: bool = False) -> tuple[Path, RuntimeSecrets]:
         with self._lock:
@@ -212,6 +219,223 @@ class EngineStateStore:
                 },
             )
             return credential_ref
+
+    def stage_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        auth_name: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """Persist an OAuth grant outside the engine's watched auth directory."""
+
+        _validated_source_id(source_id)
+        normalized_vendor = vendor.strip().lower()
+        normalized_auth_name = _validated_oauth_auth_name(auth_name)
+        if not normalized_vendor:
+            raise EngineStateError("OAuth credential binding is incomplete")
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise EngineStateError("invalid OAuth auth payload")
+        with self._lock:
+            self._ensure_private_dir(self.root)
+            self._ensure_private_dir(self.oauth_staging_dir)
+            credential_ref = f"cred_{secrets.token_hex(16)}"
+            prefix = f"avibe-{secrets.token_hex(12)}"
+            staged_payload = {
+                **payload,
+                # CPA's file synthesizer reads the prefix from the auth JSON.
+                # It must be part of the fully-written staged bytes before the
+                # file can become visible in the watched auth directory.
+                "prefix": prefix,
+            }
+            expected_provider = _oauth_provider_for_vendor(normalized_vendor)
+            if str(staged_payload.get("type") or "").strip().lower() != expected_provider:
+                raise EngineStateError("OAuth auth payload provider does not match vendor")
+            stage_path = self._oauth_stage_path(credential_ref)
+            try:
+                self._secure_write_json(stage_path, staged_payload)
+                stage_revision = self._file_revision(stage_path)
+                self._secure_write_json(
+                    self._credential_path(credential_ref),
+                    {
+                        "kind": "oauth",
+                        "source_id": source_id,
+                        "vendor": normalized_vendor,
+                        "auth_name": normalized_auth_name,
+                        "prefix": prefix,
+                        "activation_state": "staged",
+                        "engine_published": False,
+                        "prefix_published": False,
+                        "stage_revision": stage_revision,
+                        "published_revision": None,
+                        "published_identity": None,
+                    },
+                )
+            except (EngineStateError, OSError, TypeError, ValueError) as exc:
+                try:
+                    stage_path.unlink()
+                except OSError:
+                    pass
+                raise EngineStateError("unable to stage OAuth credential") from exc
+            return credential_ref
+
+    def write_oauth_auth_file(self, auth_name: str, payload: dict[str, Any]) -> None:
+        """Write an imported OAuth grant into the engine auth directory."""
+        normalized = _validated_oauth_auth_name(auth_name)
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise EngineStateError("invalid OAuth auth payload")
+        with self._lock:
+            self.audit_auth_permissions(enforce=True)
+            self._secure_write_json(self.auth_dir / normalized, payload)
+
+    def activate_oauth_auth_file(
+        self,
+        credential_ref: str,
+    ) -> tuple[str, dict[str, Any], str, bool]:
+        """Publish one staged grant without replacing an existing live file.
+
+        The watched path is the durable owner after publication. CPA may rotate
+        the access and refresh tokens in that same file at any time, so retries
+        validate only the opaque file identity (name, provider, prefix), never
+        the bytes or a token hash captured before publication.
+        """
+
+        with self._lock:
+            metadata = self.credential_metadata(credential_ref)
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            target = self.auth_dir / auth_name
+            self.audit_auth_permissions(enforce=True)
+
+            # A live watched file always wins over private staging. This is the
+            # crash/refresh recovery rule: never re-publish stale R0 bytes after
+            # CPA has already observed or rotated the file.
+            if target.exists():
+                payload = self._decode_oauth_payload(target)
+                identity = self._assert_oauth_auth_file_owned_locked(metadata, target, payload)
+                updated = {
+                    **metadata,
+                    "activation_state": "active",
+                    "prefix_published": True,
+                    "published_identity": identity,
+                }
+                self._secure_write_json(self._credential_path(credential_ref), updated)
+                self._remove_oauth_stage_if_present(credential_ref)
+                return auth_name, payload, identity["prefix"], metadata.get("activation_state") == "active"
+
+            stage_path = self._oauth_stage_path(credential_ref)
+            staged_bytes = self._read_private_bytes(
+                stage_path,
+                "OAuth staging file is unsafe",
+            )
+            stage_revision = metadata.get("stage_revision")
+            actual_stage_revision = hashlib.sha256(staged_bytes).hexdigest()
+            if isinstance(stage_revision, str) and actual_stage_revision != stage_revision:
+                raise EngineStateError("OAuth staging record is inconsistent")
+            staged_payload = self._decode_oauth_payload(stage_path)
+            self._assert_oauth_payload_identity(metadata, auth_name, staged_payload)
+            try:
+                self._publish_staged_no_replace(stage_path, target)
+            except FileExistsError:
+                # The watcher or another retry won the publication race. Read
+                # that winner and bind to it; do not upload stale staged bytes.
+                if not target.exists():
+                    raise EngineStateError("OAuth auth file publication is inconclusive") from None
+                payload = self._decode_oauth_payload(target)
+                identity = self._assert_oauth_auth_file_owned_locked(metadata, target, payload)
+            else:
+                payload = self._decode_oauth_payload(target)
+                identity = self._assert_oauth_auth_file_owned_locked(metadata, target, payload)
+
+            updated = {
+                **metadata,
+                "activation_state": "active",
+                "prefix_published": True,
+                "published_identity": identity,
+            }
+            self._secure_write_json(self._credential_path(credential_ref), updated)
+            self._remove_oauth_stage_if_present(credential_ref)
+            return auth_name, payload, identity["prefix"], False
+
+    def mark_oauth_engine_published(self, credential_ref: str) -> None:
+        with self._lock:
+            metadata = self.credential_metadata(credential_ref)
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            identity = self._assert_oauth_auth_file_owned_locked(
+                metadata,
+                self.auth_dir / auth_name,
+            )
+            self._secure_write_json(
+                self._credential_path(credential_ref),
+                {
+                    **metadata,
+                    "activation_state": "active",
+                    "engine_published": True,
+                    "prefix_published": True,
+                    "published_identity": identity,
+                },
+            )
+
+    def assert_oauth_auth_file_unchanged(self, credential_ref: str) -> None:
+        """Backward-compatible name for the post-publication ownership check."""
+
+        with self._lock:
+            metadata = self.credential_metadata(credential_ref)
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            self._assert_oauth_auth_file_owned_locked(metadata, self.auth_dir / auth_name)
+
+    def mark_oauth_prefix_published(self, credential_ref: str) -> None:
+        with self._lock:
+            metadata = self.credential_metadata(credential_ref)
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            identity = self._assert_oauth_auth_file_owned_locked(
+                metadata,
+                self.auth_dir / auth_name,
+            )
+            self._secure_write_json(
+                self._credential_path(credential_ref),
+                {
+                    **metadata,
+                    "activation_state": "active",
+                    "prefix_published": True,
+                    "published_identity": identity,
+                },
+            )
+
+    def matches_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        secret: str,
+        base_url: str | None,
+    ) -> bool:
+        """Compare transient native material with an engine-owned API key."""
+
+        metadata = self.credential_metadata(credential_ref)
+        if metadata.get("kind") != "api_key":
+            return False
+        normalized_base_url = _validated_base_url(base_url)
+        if (
+            metadata.get("vendor") != vendor.strip().lower()
+            or metadata.get("protocol") != protocol
+            or metadata.get("base_url") != normalized_base_url
+        ):
+            return False
+        if not isinstance(secret, str):
+            return False
+        stored = self.read_api_key(credential_ref)
+        return hmac.compare_digest(
+            stored.encode("utf-8"),
+            secret.encode("utf-8"),
+        )
 
     def sync_sources(self, bindings: Sequence[Any]) -> list[SourceRecord]:
         """Atomically replace the engine projection using opaque credential refs."""
@@ -358,6 +582,66 @@ class EngineStateStore:
                 raise EngineStateError("credential is unavailable")
             return payload
 
+    def has_current_source_credential(
+        self,
+        credential_ref: str,
+        *,
+        source_id: str,
+        kind: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> bool:
+        """Observe a Source's current credential binding without repair or secrets.
+
+        Unlike credential_metadata(), this read never creates directories or
+        fixes permissions. It proves local ownership/existence, not upstream
+        authentication, refreshability, or model entitlement. OAuth auth files
+        remain entirely engine-owned and are not opened by this observation.
+        """
+        try:
+            if not isinstance(credential_ref, str) or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+                return False
+            _validated_source_id(source_id)
+            credential_kind = {"api_key": "api_key", "subscription": "oauth"}.get(kind)
+            if credential_kind is None or not isinstance(vendor, str) or protocol not in _PROTOCOLS:
+                return False
+            normalized_vendor = vendor.strip().lower()
+            normalized_base_url = _validated_base_url(base_url)
+            _validate_source_target(
+                normalized_vendor, protocol, normalized_base_url, credential_kind=credential_kind,
+            )
+            credentials_dir = self.root / "credentials"
+            for directory in (self.root, credentials_dir):
+                mode = directory.lstat().st_mode
+                if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
+                    return False
+            payload = json.loads(self._read_private_bytes(
+                credentials_dir / f"{credential_ref}.json",
+                "credential path is unsafe",
+            ))
+            if not isinstance(payload, dict) or (
+                payload.get("kind") != credential_kind or payload.get("vendor") != normalized_vendor
+            ):
+                return False
+            if credential_kind == "api_key":
+                return (
+                    payload.get("protocol") == protocol
+                    and payload.get("base_url") == normalized_base_url
+                    and isinstance(payload.get("value"), str)
+                    and bool(payload["value"].strip())
+                )
+            auth_name = payload.get("auth_name")
+            return (
+                normalized_base_url is None
+                and payload.get("source_id") == source_id
+                and payload.get("activation_state") in {None, "active"}
+                and isinstance(auth_name, str)
+                and bool(_validated_oauth_auth_name(auth_name))
+            )
+        except (OSError, ValueError, TypeError, EngineStateError):
+            return False
+
     def validate_api_key_target(
         self,
         credential_ref: str,
@@ -387,7 +671,14 @@ class EngineStateStore:
             path = self._credential_path(credential_ref)
             if not path.exists():
                 return
-            self.credential_metadata(credential_ref)
+            metadata = self.credential_metadata(credential_ref)
+            if metadata.get("kind") == "oauth":
+                try:
+                    self._oauth_stage_path(credential_ref).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise EngineStateError("unable to remove staged OAuth credential") from exc
             path.unlink()
 
     def clear_runtime_configs(self) -> None:
@@ -437,15 +728,7 @@ class EngineStateStore:
 
     def delete_oauth_auth_file(self, auth_name: str) -> None:
         """Delete one managed OAuth file without requiring a running engine."""
-        normalized = auth_name.strip()
-        if (
-            not normalized
-            or "\x00" in normalized
-            or "\\" in normalized
-            or Path(normalized).name != normalized
-            or not normalized.lower().endswith(".json")
-        ):
-            raise EngineStateError("invalid OAuth auth file name")
+        normalized = _validated_oauth_auth_name(auth_name)
         with self._lock:
             self.audit_auth_permissions(enforce=True)
             path = self.auth_dir / normalized
@@ -483,6 +766,12 @@ class EngineStateStore:
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         return credentials_dir / f"{credential_ref}.json"
+
+    def _oauth_stage_path(self, credential_ref: str) -> Path:
+        if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+            raise EngineStateError("invalid credential reference")
+        self._ensure_private_dir(self.oauth_staging_dir)
+        return self.oauth_staging_dir / f"{credential_ref}.json"
 
     def _oauth_credentials(self) -> list[tuple[str, dict[str, Any]]]:
         self._ensure_private_dir(self.root)
@@ -565,6 +854,109 @@ class EngineStateStore:
         write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")
 
     @staticmethod
+    def _file_revision(path: Path) -> str:
+        return hashlib.sha256(
+            EngineStateStore._read_private_bytes(
+                path,
+                "engine auth credential path is unsafe",
+            )
+        ).hexdigest()
+
+    @staticmethod
+    def _read_private_bytes(path: Path, message: str) -> bytes:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise EngineStateError("OAuth credential is unavailable") from exc
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            raise EngineStateError(message)
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise EngineStateError("OAuth credential is unavailable") from exc
+
+    @staticmethod
+    def _decode_oauth_payload(path: Path) -> dict[str, Any]:
+        payload = EngineStateStore._read_json(path)
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise EngineStateError("OAuth credential is unavailable")
+        return payload
+
+    @staticmethod
+    def _publish_staged_no_replace(stage_path: Path, target: Path) -> None:
+        """Atomically expose a complete staged file without replacing a target.
+
+        ``link`` adds the fully-written staging inode to the watched directory
+        as one directory-entry operation. It is intentionally followed by
+        directory fsyncs and only then removes the private staging name.
+        """
+
+        try:
+            os.link(stage_path, target, follow_symlinks=False)
+        except FileExistsError:
+            raise
+        except OSError as exc:
+            raise EngineStateError("unable to publish OAuth auth file") from exc
+        try:
+            EngineStateStore._fsync_directory(target.parent)
+            stage_path.unlink()
+            EngineStateStore._fsync_directory(stage_path.parent)
+        except OSError as exc:
+            raise EngineStateError("unable to finalize OAuth staging") from exc
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = getattr(os, "O_DIRECTORY", 0)
+        if not flags:
+            return
+        descriptor = os.open(path, flags | os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _assert_oauth_auth_file_owned_locked(
+        self,
+        metadata: dict[str, Any],
+        path: Path,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+        current = payload if payload is not None else self._decode_oauth_payload(path)
+        return self._assert_oauth_payload_identity(metadata, auth_name, current)
+
+    @staticmethod
+    def _assert_oauth_payload_identity(
+        metadata: dict[str, Any],
+        auth_name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, str]:
+        expected_provider = _oauth_provider_for_vendor(str(metadata.get("vendor") or ""))
+        actual_provider = str(payload.get("type") or "").strip().lower()
+        expected_prefix = str(metadata.get("prefix") or "").strip()
+        actual_prefix = str(payload.get("prefix") or "").strip().strip("/")
+        if (
+            actual_provider != expected_provider
+            or not expected_prefix
+            or actual_prefix != expected_prefix
+        ):
+            raise EngineStateError("OAuth auth file ownership is unavailable")
+        return {
+            "auth_name": auth_name,
+            "provider": expected_provider,
+            "prefix": expected_prefix,
+        }
+
+    def _remove_oauth_stage_if_present(self, credential_ref: str) -> None:
+        stage_path = self._oauth_stage_path(credential_ref)
+        try:
+            stage_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise EngineStateError("unable to finalize OAuth staging") from exc
+
+    @staticmethod
     def _ensure_private_dir(path: Path) -> None:
         if path.exists():
             if not stat.S_ISDIR(path.lstat().st_mode):
@@ -581,6 +973,32 @@ class EngineStateStore:
             return
         if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
             raise EngineStateError(message)
+
+
+def _validated_oauth_auth_name(value: str) -> str:
+    normalized = value.strip()
+    if (
+        not normalized
+        or "\x00" in normalized
+        or "\\" in normalized
+        or Path(normalized).name != normalized
+        or not normalized.lower().endswith(".json")
+    ):
+        raise EngineStateError("invalid OAuth auth file name")
+    return normalized
+
+
+def _oauth_provider_for_vendor(vendor: str) -> str:
+    normalized = vendor.strip().lower()
+    provider = {
+        "anthropic": "claude",
+        "claude": "claude",
+        "openai": "codex",
+        "codex": "codex",
+    }.get(normalized)
+    if provider is None:
+        raise EngineStateError("native OAuth vendor is unsupported")
+    return provider
 
 
 def _safe_identifier(value: str) -> str:

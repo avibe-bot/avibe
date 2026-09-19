@@ -90,8 +90,8 @@ Out of scope (documented, not dropped silently):
 ### F. Migration (C61–C67)
 | ID | Steps | Expect | Status |
 |---|---|---|---|
-| F1 | seed hermetic HOME with native claude/codex/opencode configs; scan | correct action matrix; opencode unsupported ids noted | assert |
-| F2 | apply selection | copy-only import; native login committed before imported keys (one-time sort); original files untouched | assert |
+| F1 | seed hermetic HOME with native claude/codex/opencode configs; scan | complete Claude API-key custody is importable; access-only Codex OAuth and unsupported OpenCode credentials remain visible blockers; no credential material is returned | assert |
+| F2 | apply the selected complete backend group | Claude API-key custody is committed and its direct native auth is cleaned; blocked Codex/OpenCode material and unrelated Claude settings remain unchanged | assert |
 | F3 | first open `/settings/models` after upgrade with importable items | banner visible (B2 — currently only in wizard: expected-fail until mounted) | fix-first |
 
 ### G. Guards and contract hygiene (C51–C53, B3,B7,B13,B16)

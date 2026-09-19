@@ -129,9 +129,10 @@ ledger, config generations, schema or second lifecycle controller is added.
   retains failure to deliver a refresh marker; querying an idle controller
   cannot erase that failure. Only explicit successful apply clears it.
 - `GET /api/backend/{backend}/connection` produces `BackendConnectionState`:
-  `{ok, backend, installed, enabled, auth: subscription | api_key | none | unknown,
+  `{ok, backend, installed, enabled, supply_mode: direct | hub,
+  auth: subscription | api_key | none | unknown,
   application: applied | draining | failed | stopped | unknown, ready,
-  entry_eligible, permission_required?, message?}`. The existing native auth
+  entry_eligible, permission_required?, message?}`. In Direct mode, existing native auth
   readers/provider catalog produce `auth`; no model-call test is added. A
   provider counts only with an effective API/OAuth entry, not a keyless/local
   catalog row. Codex keychain uncertainty is `unknown` regardless of saved mode.
@@ -139,7 +140,7 @@ ledger, config generations, schema or second lifecycle controller is added.
   source, controller applied and (OpenCode only) existing tool permission.
   `entry_eligible` additionally accepts a confirmed stopped controller with
   persisted auth. A running service with unavailable IPC stays unknown.
-- A fresh GET observes native launch auth and the last Avibe application, not
+- A fresh GET observes the persisted authentication owner and the last Avibe application, not
   continuous remote credential validity or external-file hot reload. This
   limitation applies equally to Settings; known apply failure takes precedence.
 - Wizard explicitly rechecks candidates, starts only a confirmed stopped
@@ -148,6 +149,16 @@ ledger, config generations, schema or second lifecycle controller is added.
   requires completion first, the ordering and failure recovery will be tested
   and documented before choosing that route. Existing invalid enabled IM drafts
   retain credential validation and the inline saved-platform recovery below.
+
+The Model Hub takeover extension adds `supply_mode` without changing existing
+field types or application states. Hub mode observes only referenced,
+backend-eligible runnable Sources and current credential ownership; it never
+falls back to an unrelated native login. Engine-owned presence checks return
+only a boolean and do not repair state, start processes or expose credentials.
+Pending takeover recovery blocks readiness. Setup offers Model Hub management
+before native authentication and retains the wizard while Settings is open.
+See [Backend connection ownership](model-hub-native-takeover.md#backend-connection-ownership)
+for eligibility, cooldown and retained-native subscription boundaries.
 
 ### Owner amendment and parallel delivery
 

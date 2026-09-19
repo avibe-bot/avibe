@@ -1207,7 +1207,6 @@ def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None
         ("service.py", "create_source"): True,
         ("service.py", "_apply_reasoning_tier_ladder"): False,
         ("migration.py", "_validated_source"): True,
-        ("migration.py", "apply_native_migration"): True,
     }
     calls_by_owner: dict[tuple[str, str | None], list[ast.Call]] = {}
     for path in (SERVICE, MIGRATION):

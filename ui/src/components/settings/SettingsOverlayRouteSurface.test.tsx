@@ -72,6 +72,8 @@ const ChatProbe = () => {
   );
 };
 
+const SetupProbe = () => <Link to="/settings/models">open-model-hub</Link>;
+
 const SettingsFrame = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -101,6 +103,7 @@ const SettingsFrame = () => {
 const settingsRoute = () => (
   <Route path="/settings" element={<SettingsFrame />}>
     <Route path="replies" element={<div>replies-settings</div>} />
+    <Route path="models" element={<div>models-settings</div>} />
     <Route path="advanced" element={<div>advanced-settings</div>} />
     <Route path="diagnostics" element={<div>diagnostics-settings</div>} />
   </Route>
@@ -127,6 +130,7 @@ const Harness = ({ desktop }: { desktop: boolean }) => (
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
+      <Route path="/setup" element={<SetupProbe />} />
       <Route path="/chat/:sessionId" element={<ChatProbe />} />
       <Route path="/escaped" element={<div>escaped-route</div>} />
       {settingsRoute()}
@@ -164,6 +168,22 @@ afterEach(() => {
 });
 
 describe('SettingsOverlayRouteSurface', () => {
+  it('opens Model Hub over setup on mobile and closes back to the wizard', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/setup']}>
+        <RoutedHarness desktop={false} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'open-model-hub' }));
+    expect(screen.getByText('models-settings')).toBeTruthy();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByRole('link', { name: 'open-model-hub' })).toBeTruthy();
+  });
+
   it('preserves the Chat route with a data router', async () => {
     const user = userEvent.setup();
     const router = createMemoryRouter([

@@ -329,6 +329,7 @@ describe('shared Settings and onboarding connection owner', () => {
     const stale = deferred<CodexAuthState>();
     mock.api.getCodexAuth.mockReturnValueOnce(stale.promise);
     view.rerender(wrap(<BackendConnectionForm backend="codex" initialMethod="api_key" connectionRevision={1} />));
+    await waitFor(() => expect(mock.api.getCodexAuth).toHaveBeenCalledTimes(2));
     fireEvent.change(screen.getByLabelText(en.onboarding.connection.baseUrl), { target: { value: 'https://draft.invalid' } });
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ active_auth_mode: 'none', has_api_key: false, has_chatgpt_tokens: false }));
     view.rerender(wrap(<BackendConnectionForm backend="codex" initialMethod="api_key" connectionRevision={2} />));
@@ -378,8 +379,8 @@ describe('shared Settings and onboarding connection owner', () => {
     const application = deferred<BackendConnectionState>();
     mock.api.getBackendConnection.mockReturnValue(application.promise);
     fireEvent.click(cleanupButton);
-    await screen.findByText('sk-•••old');
     await act(async () => application.resolve(connection({ application: 'failed', ready: false, entry_eligible: false, message: 'fixture apply failed' })));
+    await screen.findByText('sk-•••old');
     expect((await screen.findByRole('alert')).textContent).toContain('fixture apply failed');
     expect(screen.queryByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials })).toBeNull();
     await waitFor(() => expect(mock.toast.mock.calls.some(([message, kind]) => kind === 'warning' && message.includes('fixture cleanup warning'))).toBe(true));

@@ -62,6 +62,14 @@ class RuntimePlatformUnsupportedError(RuntimeError):
     """The pinned managed runtime has no asset for the server host."""
 
 
+class OAuthCredentialRejectedError(RuntimeError):
+    """Authoritative rejection of a refresh grant, requiring new authorization.
+
+    An expired access token, generic 401, or profile-only permission failure
+    does not establish this outcome. Exceptions must carry no secret material.
+    """
+
+
 @dataclass(frozen=True)
 class SourceBinding:
     """Engine-side registration of one hub-channel source (projection of config)."""
@@ -448,8 +456,53 @@ class EngineAdapter(Protocol):
         ``secret`` is transient: the adapter must never log it; L2 must never
         persist it (config stores refs only). Hub OAuth credentials never pass
         through here — they are created engine-side by the OAuth flow and
-        surfaced via ``OAuthFlowState.credential_ref``. Native OAuth material
-        remains CLI-owned and has no ref on this seam."""
+        surfaced via ``OAuthFlowState.credential_ref``."""
+        ...
+
+    async def provision_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        material: Mapping[str, object],
+    ) -> str:
+        """Stage a native OAuth grant outside CPA's watched auth directory.
+
+        ``material`` is transient and must never cross the L2 config boundary.
+        Return a durable opaque ref, with the provider, source, and prefix
+        already bound. Neither provisioning nor a restart may expose the staged
+        grant to CPA. Only ``activate_oauth_credential`` transfers refresh
+        ownership, after the caller has durably withdrawn native ownership.
+        """
+        ...
+
+    async def activate_oauth_credential(self, credential_ref: str) -> None:
+        """Publish a staged grant without ever overwriting a rotated live grant.
+
+        Idempotent and cancellation-safe. The caller must persist an activation
+        intent first and must not restore old native tokens after this call may
+        have started. Preserve the only recovery handle on any failure.
+        """
+        ...
+
+    async def validate_oauth_credential(self, credential_ref: str) -> None:
+        """Require credential-specific upstream acceptance, not auth inventory.
+
+        Used for imported grants, whose origin is not a completed engine OAuth
+        flow. Does not generate inference. Raise a sanitized error on denied or
+        inconclusive authentication; never equate an auth-file upload or the
+        engine's serving-protocol pin with upstream acceptance.
+        """
+        ...
+
+    async def matches_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        secret: str,
+        base_url: str | None,
+    ) -> bool:
+        """Compare transient native material inside custody; return no secrets."""
         ...
 
     async def retarget_api_key_credential(

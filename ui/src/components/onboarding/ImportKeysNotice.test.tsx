@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import type { MigrationItem } from '@/components/settings/models/types';
+import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 
 const showToast = vi.hoisted(() => vi.fn());
 const capability = vi.hoisted(() => ({ value: true as boolean | null }));
@@ -127,7 +128,7 @@ const renderNotice = (onApplied?: (applied: number) => void) =>
   );
 
 const openDialog = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(await screen.findByRole('button', { name: 'Review and import' }));
+  await user.click(await screen.findByRole('button', { name: 'Review and migrate' }));
   return screen.findByRole('dialog');
 };
 
@@ -145,12 +146,32 @@ afterEach(() => {
 });
 
 describe('ImportKeysNotice', () => {
+  it('rescans on return from Settings without remounting the setup notice', async () => {
+    serve([CLAUDE_KEY]);
+    const notice = (active: boolean) => (
+      <I18nextProvider i18n={i18n}>
+        <RouteSurfaceActiveContext.Provider value={active}>
+          <ImportKeysNotice />
+        </RouteSurfaceActiveContext.Provider>
+      </I18nextProvider>
+    );
+    const view = render(notice(true));
+    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+    view.rerender(notice(false));
+    stored = [];
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+    view.rerender(notice(true));
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Review and migrate' })).toBeNull());
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+  });
+
   it('counts the importable keys — not the rows the scan returned', async () => {
     serve(FULL_SCAN);
     renderNotice();
 
     // Three of five: the subscription and the reauth row are not offers.
-    expect(await screen.findByText('Found 3 API keys to import into Model Gateway')).toBeTruthy();
+    expect(await screen.findByText('Found 3 API keys to import into Model Hub')).toBeTruthy();
   });
 
   it('offers exactly the rows it counted, and no subscription or reauth row', async () => {
@@ -160,17 +181,19 @@ describe('ImportKeysNotice', () => {
 
     const dialog = await openDialog(user);
 
-    expect(within(dialog).getByText('Anthropic')).toBeTruthy();
+    expect(within(dialog).getAllByText('Anthropic').length).toBeGreaterThan(0);
     // `display_name` was only the provider id; the shared brand mapping names it.
     expect(within(dialog).getByText('Zhipu AI')).toBeTruthy();
     // No metadata at all: the composed detail stays the title rather than a
     // provider guessed from the backend that held the key.
     expect(within(dialog).getByText('自建中转 · sk-…abcd')).toBeTruthy();
 
-    expect(within(dialog).queryByText('Claude 账号登录（OAuth）')).toBeNull();
-    expect(within(dialog).queryByText(/Keep native/)).toBeNull();
+    expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
+    expect(
+      (within(dialog).getByRole('checkbox', { name: /Claude 账号登录/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
-    expect(within(dialog).getByRole('button', { name: /Import 3 items/ })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
 
   it('MH-MIG-004: submits only the rows still ticked', async () => {
@@ -180,8 +203,8 @@ describe('ImportKeysNotice', () => {
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('checkbox', { name: /Anthropic/ }));
-    await user.click(within(dialog).getByRole('button', { name: /Import 2 items/ }));
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…dd3c/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).toEqual(['mig_opencode_zhipu', 'mig_opencode_legacy']);
@@ -194,27 +217,32 @@ describe('ImportKeysNotice', () => {
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('checkbox', { name: /Anthropic/ }));
-    await user.click(within(dialog).getByRole('button', { name: /Import 2 items/ }));
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…dd3c/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     // The remainder is the server's answer after the rescan, not a subtraction.
-    expect(await screen.findByText('Imported 2 · 1 API key still available')).toBeTruthy();
+    expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
     // A partial selection can still be finished from here.
-    expect(screen.getByRole('button', { name: 'Review and import' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
   });
 
-  it('reports a finished import with no review action left', async () => {
+  it('keeps a blocked CLI group available after importing independent keys', async () => {
     serve(FULL_SCAN);
     renderNotice();
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('button', { name: /Import 3 items/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    expect(await screen.findByText('Imported 3 API keys into Model Gateway')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Review and import' })).toBeNull();
-    // The subscription and the reauth row are still on this machine, untouched.
-    expect(stored.map((i) => i.id)).toEqual(['mig_claude_oauth', 'mig_codex_reauth']);
+    expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
+    // The blocked Claude group remains on this machine, including its import
+    // row, and the unrelated reauth row is untouched.
+    expect(stored.map((i) => i.id)).toEqual([
+      'mig_claude_key',
+      'mig_claude_oauth',
+      'mig_codex_reauth',
+    ]);
   });
 
   it('remembers a dismissal so the same keys do not ask again', async () => {
@@ -243,7 +271,7 @@ describe('ImportKeysNotice', () => {
     stored = [...stored, { ...CLAUDE_KEY, id: 'mig_claude_key_2', masked_detail: 'sk-…7a10' }];
     renderNotice();
 
-    expect(await screen.findByText('Found 4 API keys to import into Model Gateway')).toBeTruthy();
+    expect(await screen.findByText('Found 4 API keys to import into Model Hub')).toBeTruthy();
   });
 
   it('says nothing when there is nothing to import', async () => {

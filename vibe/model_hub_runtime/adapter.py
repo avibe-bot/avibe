@@ -233,6 +233,16 @@ _REQUEST_ERROR_IDENTIFIERS = frozenset(
 )
 _MODEL_ERROR_IDENTIFIERS = frozenset({"model_not_found", "not_found_error"})
 _AUTHENTICATION_ERROR_IDENTIFIERS = frozenset({"authentication_error", "invalid_api_key", "permission_error"})
+_REFRESH_INVALIDATION_IDENTIFIERS = frozenset(
+    {
+        "invalid_grant",
+        "refresh_token_expired",
+        "refresh_token_invalid",
+        "refresh_token_invalidated",
+        "refresh_token_revoked",
+        "refresh_token_reused",
+    }
+)
 _SERVER_ERROR_IDENTIFIERS = frozenset({"api_error", "internal_error", "overloaded", "overloaded_error", "server_error"})
 _RATE_LIMIT_ERROR_IDENTIFIERS = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 
@@ -481,6 +491,30 @@ def _request_error_rejects_credential(
     )
 
 
+def _oauth_rejection_is_definitive(
+    status: int,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Recognize refresh-invalidating words, but not access-token expiry.
+
+    This helper is intentionally not sufficient on its own for takeover
+    validation: the protocol probe is an upstream request, not a refresh
+    endpoint. The pinned CPA inventory does not expose refresh provenance and
+    cannot turn these words into an authoritative grant-rejection verdict.
+    """
+
+    if status not in {*_REQUEST_ERROR_STATUSES, *_AUTHENTICATION_ERROR_STATUSES}:
+        return False
+    identifiers = set(_payload_identifiers(payload))
+    error = payload.get("error")
+    if isinstance(error, dict):
+        identifiers.update(_error_identifiers(error))
+        message = _normalized_identifier(str(error.get("message") or ""))
+        if any(token in message for token in _REFRESH_INVALIDATION_IDENTIFIERS):
+            return True
+    return not _REFRESH_INVALIDATION_IDENTIFIERS.isdisjoint(identifiers)
+
+
 def _payload_is_structured(payload: Mapping[str, Any]) -> bool:
     return (
         isinstance(payload.get("error"), dict)
@@ -561,6 +595,7 @@ def _parse_protocol_authenticated_evidence(
     *,
     vendor: str | None = None,
     request_root: str | None = None,
+    oauth: bool = False,
 ) -> _ProtocolEvidence:
     """Classify protocol shape without treating schema validation as login.
 
@@ -595,8 +630,19 @@ def _parse_protocol_authenticated_evidence(
             shape=_default_unproven_shape(status=status),
         )
 
+    if oauth and _oauth_rejection_is_definitive(status, payload):
+        return evidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            # The management probe is not CPA's refresh endpoint. Even an
+            # ``invalid_grant``-shaped upstream response is inconclusive. The
+            # pinned inventory also has no refresh-specific error provenance.
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
+
     top_level_identifiers = _payload_identifiers(payload)
     if (
+        not oauth
+        and
         status in _AUTHENTICATION_ERROR_STATUSES
         and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
     ):
@@ -605,7 +651,7 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.REJECTED,
         )
     error = payload.get("error")
-    if _request_error_rejects_credential(status, error):
+    if not oauth and _request_error_rejects_credential(status, error):
         return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
@@ -619,7 +665,7 @@ def _parse_protocol_authenticated_evidence(
                 authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
-        if wrapperless == "rejected":
+        if wrapperless == "rejected" and not oauth:
             return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.REJECTED,
@@ -632,6 +678,8 @@ def _parse_protocol_authenticated_evidence(
 
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
+        if oauth and rule.authentication is _AuthenticationEvidence.REJECTED:
+            continue
         if rule.matches(status, payload):
             return evidence(
                 protocol=rule.protocol,
@@ -734,6 +782,9 @@ class _AuthRecord:
     provider: str
     fingerprint: str
     account_id: str | None = None
+    status: str = ""
+    status_message: str = ""
+    unavailable: bool = False
 
 
 def _response_shape_proves_protocol(
@@ -1038,10 +1089,100 @@ def _probe_oauth_protocol_response(
             )
         body = payload.get("body")
         return _parse_protocol_authenticated_evidence(
-            protocol, status, body if isinstance(body, str) else "", vendor=vendor,
+            protocol,
+            status,
+            body if isinstance(body, str) else "",
+            vendor=vendor,
+            oauth=True,
         )
 
     return request(headers)
+
+
+_OAUTH_CONTROL_PLANE_URLS = {
+    "anthropic": "https://api.anthropic.com/api/oauth/profile",
+    "openai": "https://chatgpt.com/backend-api/wham/usage",
+    "codex": "https://chatgpt.com/backend-api/wham/usage",
+}
+
+
+def _parse_oauth_control_plane_witness(
+    vendor: str,
+    status: object,
+    body: object,
+) -> bool:
+    """Accept only the provider's model-free account/control-plane shape."""
+
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        return False
+    if not isinstance(body, (str, bytes, bytearray)):
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(payload, dict) or "error" in payload:
+        return False
+
+    if vendor == "anthropic":
+        account = payload.get("account")
+        uuid_value = account.get("uuid") if isinstance(account, dict) else None
+        return isinstance(uuid_value, str) and bool(uuid_value.strip())
+    if vendor in {"openai", "codex"}:
+        plan_type = payload.get("plan_type")
+        return isinstance(plan_type, str) and bool(plan_type.strip())
+    return False
+
+
+def _probe_oauth_control_plane_witness(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+) -> None:
+    """Use CPA's current auth record for a bodyless control-plane GET."""
+
+    normalized_vendor = vendor.strip().lower()
+    url = _OAUTH_CONTROL_PLANE_URLS.get(normalized_vendor)
+    if url is None:
+        raise EngineClientError("unsupported OAuth control-plane witness")
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer $TOKEN$",
+    }
+    if normalized_vendor == "anthropic":
+        headers.update(
+            {
+                "User-Agent": "axios/1.15.2",
+                "Cache-Control": "no-cache",
+            }
+        )
+    else:
+        headers["User-Agent"] = "codex-cli"
+        if auth.account_id:
+            headers["ChatGPT-Account-ID"] = auth.account_id
+
+    payload = client.management_request(
+        "POST",
+        "/api-call",
+        payload={
+            "auth_index": auth.auth_index,
+            "method": "GET",
+            "url": url,
+            "header": headers,
+        },
+    )
+    if not _parse_oauth_control_plane_witness(
+        normalized_vendor,
+        payload.get("status_code"),
+        payload.get("body"),
+    ):
+        raise EngineClientError(
+            "OAuth control-plane witness was inconclusive",
+            error_type="invalid_response",
+        )
 
 
 @dataclass
@@ -1591,6 +1732,174 @@ class CLIProxyEngineAdapter:
             base_url=base_url,
         )
 
+    async def provision_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        material: Mapping[str, object],
+    ) -> str:
+        normalized_vendor = vendor.strip().lower()
+        auth_type = {"anthropic": "claude", "openai": "codex"}.get(normalized_vendor)
+        if auth_type is None:
+            raise EngineStateError("native OAuth vendor is unsupported")
+        if not isinstance(material, Mapping):
+            raise EngineStateError("native OAuth material is invalid")
+        payload = dict(material)
+        payload["type"] = auth_type
+        auth_name = f"avibe-migration-{uuid.uuid4().hex}.json"
+        return await run_owned_in_thread(
+            self.state_store.stage_oauth_credential,
+            source_id,
+            normalized_vendor,
+            auth_name,
+            payload,
+        )
+
+    async def activate_oauth_credential(self, credential_ref: str) -> None:
+        """Publish a staged grant without replacing a live auth file."""
+
+        async with self._routing_lock:
+            await self._transports_idle.wait()
+            auth_name, payload, _prefix, _already_active = await run_owned_in_thread(
+                self.state_store.activate_oauth_auth_file,
+                credential_ref,
+            )
+            client = await asyncio.to_thread(self.supervisor.client_if_running)
+            if client is None:
+                # The next ordered lifecycle step starts CPA. The atomically
+                # published watched file is the source of truth; no management
+                # upload is needed while the engine is down.
+                return
+
+            expected_provider = str(payload.get("type") or "").strip().lower()
+            try:
+                inventory = await run_owned_in_thread(_auth_inventory, client)
+            except EngineClientError as exc:
+                raise EngineStateError(
+                    "OAuth activation could not inspect the engine"
+                ) from exc
+            matching = [
+                auth
+                for auth in inventory.values()
+                if auth.name == auth_name or auth.identity == auth_name
+            ]
+            if len(matching) > 1:
+                raise EngineStateError("OAuth activation auth record is ambiguous")
+            if matching:
+                if matching[0].provider != expected_provider:
+                    raise EngineStateError("OAuth activation auth record conflicts")
+                await run_owned_in_thread(
+                    self.state_store.mark_oauth_engine_published,
+                    credential_ref,
+                )
+                return
+
+            # The local file is already visible. A GET followed by POST is
+            # unsafe: CPA's watcher can register/rotate the file between those
+            # calls, after which POST would re-upload stale R0 bytes. Use the
+            # supervisor's existing watched-file reconcile path instead.
+            restart_if_running = getattr(self.supervisor, "restart_if_running", None)
+            if not callable(restart_if_running):
+                raise EngineStateError("OAuth activation could not reconcile engine")
+            try:
+                await run_owned_in_thread(restart_if_running)
+            except Exception as exc:
+                raise EngineStateError("OAuth activation could not reconcile engine") from exc
+
+            client = await asyncio.to_thread(self.supervisor.client_if_running)
+            if client is None:
+                raise EngineStateError("OAuth activation could not reconcile engine")
+            try:
+                inventory = await run_owned_in_thread(_auth_inventory, client)
+            except EngineClientError as exc:
+                raise EngineStateError(
+                    "OAuth activation could not inspect the engine"
+                ) from exc
+            matching = [
+                auth
+                for auth in inventory.values()
+                if auth.name == auth_name or auth.identity == auth_name
+            ]
+            if len(matching) > 1:
+                raise EngineStateError("OAuth activation auth record is ambiguous")
+            if not matching:
+                raise EngineStateError("OAuth activation could not reconcile engine")
+            if matching[0].provider != expected_provider:
+                raise EngineStateError("OAuth activation auth record conflicts")
+            await run_owned_in_thread(
+                self.state_store.mark_oauth_engine_published,
+                credential_ref,
+            )
+
+            return
+
+    async def validate_oauth_credential(self, credential_ref: str) -> None:
+        """Require an upstream authentication witness without inference."""
+
+        async with self._routing_lock:
+            await self._transports_idle.wait()
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            if metadata.get("activation_state") == "staged":
+                raise EngineStateError("OAuth credential is not active")
+            normalized_vendor = str(metadata.get("vendor") or "").strip().lower()
+            expected_provider = {
+                "anthropic": "claude",
+                "openai": "codex",
+            }.get(normalized_vendor)
+            if expected_provider is None:
+                raise EngineStateError("OAuth credential validation is unsupported")
+            client = await run_owned_in_thread(self.supervisor.client)
+            try:
+                inventory = await run_owned_in_thread(_auth_inventory, client)
+            except EngineClientError as exc:
+                raise EngineStateError(
+                    "OAuth credential validation could not inspect the engine"
+                ) from exc
+            auth_name = str(metadata.get("auth_name") or "")
+            matches = [
+                auth
+                for auth in inventory.values()
+                if (auth.name == auth_name or auth.identity == auth_name)
+                and auth.provider == expected_provider
+                and auth.auth_index
+            ]
+            if len(matches) != 1:
+                raise EngineStateError("OAuth credential validation is inconclusive")
+            # CPA v7.2.149 loses refresh failure details ("token expired") and
+            # also puts request failures in status_message. None of those
+            # inventory strings proves that a refresh grant was rejected.
+            try:
+                await run_owned_in_thread(
+                    _probe_oauth_control_plane_witness,
+                    client=client,
+                    auth=matches[0],
+                    vendor=normalized_vendor,
+                )
+            except (EngineClientError, OSError) as exc:
+                raise EngineStateError("OAuth credential validation failed") from exc
+
+    async def matches_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        secret: str,
+        base_url: str | None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.state_store.matches_api_key_credential,
+            credential_ref,
+            vendor,
+            protocol,
+            secret,
+            base_url,
+        )
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,
@@ -1661,20 +1970,27 @@ class CLIProxyEngineAdapter:
         )
         auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
         if auth_name:
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
-            if client is not None:
-                try:
-                    await asyncio.to_thread(
-                        client.management_request,
-                        "DELETE",
-                        "/auth-files",
-                        query={"name": str(auth_name)},
-                        timeout=1.0,
-                    )
-                except EngineClientError:
-                    pass
-            await asyncio.to_thread(self.state_store.delete_oauth_auth_file, str(auth_name))
-            await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
+            if metadata.get("activation_state") != "staged":
+                client = await asyncio.to_thread(self.supervisor.client_if_running)
+                if client is not None:
+                    try:
+                        await asyncio.to_thread(
+                            client.management_request,
+                            "DELETE",
+                            "/auth-files",
+                            query={"name": str(auth_name)},
+                            timeout=1.0,
+                        )
+                    except EngineClientError:
+                        pass
+                await asyncio.to_thread(
+                    self.state_store.delete_oauth_auth_file,
+                    str(auth_name),
+                )
+                await asyncio.to_thread(
+                    self.state_store.audit_auth_permissions,
+                    enforce=True,
+                )
         await asyncio.to_thread(self.supervisor.invalidate_configs)
         await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
 
@@ -2512,6 +2828,9 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
                 provider=provider,
                 fingerprint=fingerprint,
                 account_id=account_id,
+                status=str(item.get("status") or "").strip().lower(),
+                status_message=str(item.get("status_message") or "").strip(),
+                unavailable=bool(item.get("unavailable")),
             )
     return inventory
 

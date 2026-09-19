@@ -34,7 +34,7 @@ def _seed_native_configs(app, upstream_url: str) -> list[Path]:
         json.dumps(
             {
                 "env": {
-                    "ANTHROPIC_API_KEY": "sk-ant-e2e-copy-only-123456",
+                    "ANTHROPIC_API_KEY": "sk-ant-e2e-claude-independent-123456",
                     "ANTHROPIC_BASE_URL": upstream_url,
                 },
                 "permissions": {"allow": ["Read"]},
@@ -105,11 +105,11 @@ def _launch_seeded_app(model_hub_app_factory, mock_llm_upstream):
     return model_hub_app_factory(before_start=seed), seeded_paths
 
 
-def test_f1_native_scan_returns_the_copy_only_action_matrix(
+def test_f1_native_scan_returns_the_grouped_full_custody_action_matrix(
     model_hub_app_factory,
     mock_llm_upstream,
 ) -> None:
-    """F1: Claude key and Codex login map to import/keep-native actions."""
+    """F1: complete credentials import; blocked credentials stay visible."""
 
     launch, _ = _launch_seeded_app(
         model_hub_app_factory, mock_llm_upstream
@@ -120,53 +120,59 @@ def test_f1_native_scan_returns_the_copy_only_action_matrix(
         assert response.status == 200, body
         items = body["scan"]["items"]
         assert [
-            (item["backend"], item["kind"], item["proposed_action"])
+            (
+                item["backend"],
+                item["kind"],
+                item["proposed_action"],
+                item["selected"],
+            )
             for item in items
         ] == [
-            ("claude", "api_key", "import"),
-            ("codex", "oauth_native", "keep_native"),
+            ("claude", "api_key", "import", True),
+            ("codex", "oauth_native", "keep_native", False),
+            ("opencode", "api_key", "reauth", False),
         ]
-        assert all(item["selected"] is True for item in items)
         serialized = json.dumps(items)
         for secret in (
-            "sk-ant-e2e-copy-only-123456",
+            "sk-ant-e2e-claude-independent-123456",
             "codex-oauth-e2e-123456",
             "sk-unsupported-e2e-123456",
         ):
             assert secret not in serialized
 
 
-@pytest.mark.xfail(
-    reason=(
-        "F1 product/contract gap: unsupported OpenCode provider ids are silently "
-        "dropped and migration-scan.schema.json has no notice field"
-    )
-)
-def test_f1_unsupported_opencode_provider_ids_are_noted(
+def test_f1_unsupported_opencode_provider_ids_remain_visible_blockers(
     model_hub_app_factory,
     mock_llm_upstream,
 ) -> None:
-    """F1: an unsupported native OpenCode provider must be visible as a note."""
+    """F1: an unsupported native OpenCode provider blocks only OpenCode."""
 
     launch, _ = _launch_seeded_app(
         model_hub_app_factory, mock_llm_upstream
     )
     with launch as app:
         response = app.client.post("/api/models/migration/scan", {})
-        assert any(
-            item["backend"] == "opencode"
-            and item.get("notes_key")
+        opencode_items = [
+            item
             for item in response.json()["scan"]["items"]
+            if item["backend"] == "opencode"
+        ]
+        assert [
+            (item["kind"], item["proposed_action"], item["selected"])
+            for item in opencode_items
+        ] == [("api_key", "reauth", False)]
+        assert opencode_items[0]["notes_key"] == (
+            "settings.models.migration.blocked.credential"
         )
 
 
-def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
+def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
     model_hub_app_factory,
     mock_llm_upstream,
 ) -> None:
-    """F2: apply copies selected material and performs the one-time sort."""
+    """F2: grouped custody cleans the selected key without touching blockers."""
 
-    seeded_api_key = "sk-ant-e2e-copy-only-123456"
+    seeded_api_key = "sk-ant-e2e-claude-independent-123456"
     seeded_api_key_digest = hashlib.sha256(
         seeded_api_key.encode("utf-8")
     ).hexdigest()
@@ -183,7 +189,16 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
         scan = app.client.post("/api/models/migration/scan", {})
         scan_body = scan.json()
         assert scan.status == 200, scan_body
-        item_ids = [item["id"] for item in scan_body["scan"]["items"]]
+        item_ids = [
+            item["id"]
+            for item in scan_body["scan"]["items"]
+            if item["selected"] is True
+        ]
+        assert [
+            (item["backend"], item["kind"])
+            for item in scan_body["scan"]["items"]
+            if item["id"] in item_ids
+        ] == [("claude", "api_key")]
         mock_llm_upstream.reset_requests()
 
         applied = app.client.post(
@@ -191,15 +206,21 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
         )
         body = applied.json()
         assert applied.status == 200, body
-        assert body["applied"] == 2
+        assert body["applied"] == 1
         assert [
             (source["vendor"], source["kind"], source["supply_channel"])
             for source in body["sources"]
         ] == [
-            ("openai", "subscription", "native_cli"),
             ("anthropic", "api_key", "hub"),
         ]
-        assert all(path.read_bytes() == content for path, content in before.items())
+        claude_settings = seeded_paths[0]
+        assert json.loads(claude_settings.read_text(encoding="utf-8")) == {
+            "env": {},
+            "permissions": {"allow": ["Read"]},
+        }
+        assert all(
+            path.read_bytes() == before[path] for path in seeded_paths[1:]
+        )
 
         listed = app.client.get("/api/models/sources")
         assert listed.status == 200, listed.json()
@@ -207,7 +228,7 @@ def test_f2_apply_is_copy_only_and_places_native_login_before_keys(
             source["id"] for source in body["sources"]
         ]
         serialized = json.dumps(body)
-        assert "sk-ant-e2e-copy-only-123456" not in serialized
+        assert "sk-ant-e2e-claude-independent-123456" not in serialized
         assert "codex-oauth-e2e-123456" not in serialized
 
         captured_digests = set()

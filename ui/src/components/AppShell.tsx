@@ -292,8 +292,15 @@ export const AppShell: React.FC = () => {
     return <Navigate to="/" replace />;
   }
 
-  if (location.pathname === '/setup') {
-    return <><ConfigRecoveryNotice config={config} /><Outlet /></>;
+  if (location.pathname === '/setup' || settingsOverlayOrigin?.location.pathname === '/setup') {
+    return (
+      <>
+        <ConfigRecoveryNotice config={config} />
+        <SettingsOverlayNavigationBoundary desktop={isDesktop}>
+          <Outlet />
+        </SettingsOverlayNavigationBoundary>
+      </>
+    );
   }
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a

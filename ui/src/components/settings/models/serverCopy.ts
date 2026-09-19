@@ -11,8 +11,8 @@ import type { TranslationKey } from '@/i18n/types';
 // at runtime — a new adapter rev is enough.
 //
 // i18next's default for a missing key is the key itself, so the honest failure
-// mode without this helper is a machine string ("models.migration.keep_native.
-// sanctioned") rendered to a user as if it were a sentence. This turns that into
+// mode without this helper is a machine string ("models.migration.some_future_code")
+// rendered to a user as if it were a sentence. This turns that into
 // the generic copy the surrounding UI already has for the same situation.
 //
 // Not in format.ts on purpose: that module is deliberately i18n-free (its callers

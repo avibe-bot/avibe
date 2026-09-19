@@ -1,15 +1,9 @@
-import type { TranslationKey } from '@/i18n/types';
-// 迁移对话框 · 接入模型中枢 (frame 03). Non-destructive: a per-backend checklist of
-// detected native configs. Actions follow migration-scan.schema (spec v1.1,
-// Option 1): API keys / base URLs → import; subscription OAuth → keep_native.
-// controlled_import is reserved and not applicable in v3. Originals are never
-// modified or deleted.
-// Scans via POST /migration/scan; applies the selection via /migration/apply.
+// One-click native credential takeover. Each backend is one custody boundary:
+// unsupported native rows stay visible and block that backend as a group.
 import * as React from 'react';
-import { ArrowDownToLine, Bot, KeyRound, ShieldCheck, Sparkles } from 'lucide-react';
+import { ArrowDownToLine, Bot, KeyRound, Loader2, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -21,12 +15,13 @@ import {
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
+import type { TranslationKey } from '@/i18n/types';
 import { providerLabel, providerVendorId } from '../providers/providerIdentity';
-import { modelsApi } from './modelsApi';
+import { apiFailure, modelsApi } from './modelsApi';
 import { serverText } from './serverCopy';
 import { VendorGlyph } from './vendorGlyph';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
-import type { AgentBackend, MigrationItem, MigrationAction } from './types';
+import type { AgentBackend, MigrationItem } from './types';
 
 const BACKEND_ORDER: AgentBackend[] = ['claude', 'codex', 'opencode'];
 
@@ -59,26 +54,14 @@ function migrationVisual(item: MigrationItem): { Icon: React.ComponentType<{ siz
   return { Icon: KeyRound, accent };
 }
 
-const ActionBadge: React.FC<{ action: MigrationAction }> = ({ action }) => {
-  const { t } = useTranslation();
-  const map: Record<MigrationAction, { variant: 'success' | 'warning' | 'secondary'; key: TranslationKey }> = {
-    import: { variant: 'success', key: 'settings.models.migration.action.import' },
-    controlled_import: { variant: 'warning', key: 'settings.models.migration.action.controlledImport' },
-    keep_native: { variant: 'secondary', key: 'settings.models.migration.action.keepNative' },
-    reauth: { variant: 'warning', key: 'settings.models.migration.action.reauth' },
-  };
-  const { variant, key } = map[action];
-  return (
-    <Badge variant={variant} className="shrink-0 rounded-lg px-2.5 py-1 text-[12px] font-medium">
-      {t(key)}
-    </Badge>
-  );
-};
-
-const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void; selectable: boolean }> = ({ item, onToggle, selectable }) => {
+const ItemRow: React.FC<{
+  item: MigrationItem;
+  checked: boolean;
+  onToggle: () => void;
+  selectable: boolean;
+}> = ({ item, checked, onToggle, selectable }) => {
   const { t } = useTranslation();
   const { Icon, accent } = migrationVisual(item);
-  const note = serverText(t, item.notes_key);
   const provider = migrationProvider(item);
   const vendor = item.vendor?.trim();
   // The masked key and the source it came from are the two things that tell two
@@ -89,19 +72,14 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void; selectable:
   const origin = t(SOURCE_KEY[item.backend]);
   const detail = [maskedKey, origin].filter(Boolean).join(' · ');
   return (
-    // The action badge is nowrap and shrink-0 (up to ~151px), so beside the
-    // detail column it pushed this row's min-content to 374px — wider than the
-    // sheet's 348px content box, which grew the dialog's grid track and spilled
-    // the header, footnote and footer button off-screen. On phones the badge
-    // moves to its own line under the detail.
     <div
       className={cn(
         'flex flex-col gap-2 rounded-xl border px-3.5 py-3 sm:flex-row sm:items-center sm:gap-3',
-        item.selected ? 'border-mint/40 bg-mint-soft/40' : 'border-border',
+        checked ? 'border-mint/40 bg-mint-soft/40' : 'border-border',
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <Checkbox checked={item.selected} onCheckedChange={onToggle} disabled={!selectable} label={detail ? `${title} · ${detail}` : title} />
+        <Checkbox checked={checked} onCheckedChange={onToggle} disabled={!selectable} label={detail ? `${title} · ${detail}` : title} />
         <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
           {vendor
             ? <VendorGlyph vendor={providerVendorId(vendor)} className={cn('h-[14px] w-auto shrink-0 aspect-[10/7]', ACCENT_ICON[accent])} />
@@ -110,31 +88,47 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void; selectable:
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[14px] font-semibold text-foreground">{title}</span>
           {detail && <span className="truncate text-[12px] text-muted">{detail}</span>}
-          {/* `notes_key` is runtime-declared and optional, so an entry this
-              bundle doesn't carry drops the line instead of printing the key. */}
-          {note && <span className="truncate text-[12px] text-muted">{note}</span>}
         </div>
-      </div>
-      <div className="shrink-0 pl-[46px] sm:pl-0">
-        <ActionBadge action={item.proposed_action} />
       </div>
     </div>
   );
 };
 
-// The broad settings migration: everything the scan returned, minus the reauth
-// rows that need the interactive browser flow and so cannot be bulk-applied.
-const DEFAULT_ELIGIBLE = (item: MigrationItem) => item.proposed_action !== 'reauth';
+const DEFAULT_SCOPE = () => true;
+const isImportable = (item: MigrationItem) => item.proposed_action === 'import';
+const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
+  migration_native_busy: 'settings.models.migration.errors.nativeBusy',
+  migration_permission_needed: 'settings.models.migration.errors.permissionNeeded',
+  migration_recovery_pending: 'settings.models.migration.errors.recoveryPending',
+  migration_item_conflict: 'settings.models.migration.errors.itemConflict',
+  migration_configuration_blocked: 'settings.models.migration.errors.configurationBlocked',
+  migration_credentials_invalid: 'settings.models.migration.errors.credentialsInvalid',
+};
+const BLOCKED_NOTE_KEYS = new Set([
+  'settings.models.migration.blocked.config',
+  'settings.models.migration.blocked.environment',
+  'settings.models.migration.blocked.credential',
+]);
+const BLOCKED_FALLBACK_KEY = 'settings.models.migration.blocked.fallback' satisfies TranslationKey;
+
+function blockedMessage(
+  t: ReturnType<typeof useTranslation>['t'],
+  rows: MigrationItem[],
+): string {
+  const noteKey = rows
+    .map((item) => item.notes_key)
+    .find((key): key is string => Boolean(key && BLOCKED_NOTE_KEYS.has(key)));
+  return serverText(t, noteKey, BLOCKED_FALLBACK_KEY) ?? '';
+}
 
 export const MigrationDialog: React.FC<{
   open: boolean;
   onClose: () => void;
   /** Fired after a successful apply so callers can refresh sources/agents. */
   onApplied?: (applied: number) => void;
-  /** Narrows the dialog to one entry's candidates — the rows shown, the rows
-   *  selectable and the ids submitted all come from this one predicate, so a
-   *  caller's count can never describe a different set than the dialog applies.
-   *  Defaults to the broad settings migration. */
+  /** Scopes the dialog to backends represented by an entry point. It never
+   *  hides other native rows from those backends: a blocked row must remain
+   *  visible so the whole CLI cannot be partially migrated. */
   eligible?: (item: MigrationItem) => boolean;
 }> = ({ open, onClose, onApplied, eligible }) => {
   const { t } = useTranslation();
@@ -143,6 +137,8 @@ export const MigrationDialog: React.FC<{
   const [items, setItems] = React.useState<MigrationItem[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
+  const eligibleRef = React.useRef(eligible);
+  eligibleRef.current = eligible;
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
     aliveRef.current = true;
@@ -162,7 +158,33 @@ export const MigrationDialog: React.FC<{
       .scanMigration()
       .then((scan) => {
         if (cancelled) return;
-        setItems(scan.items);
+        const scopePredicate = eligibleRef.current ?? DEFAULT_SCOPE;
+        const scopedBackends = new Set(
+          scan.items.filter(scopePredicate).map((item) => item.backend),
+        );
+        const importable = scan.items.filter(
+          (item) => scopedBackends.has(item.backend) && isImportable(item),
+        );
+        const blockedBackends = new Set(
+          scan.items
+            .filter((item) => scopedBackends.has(item.backend) && !isImportable(item))
+            .map((item) => item.backend),
+        );
+        const backendSelection = new Map<AgentBackend, boolean>();
+        for (const backend of BACKEND_ORDER) {
+          const rows = importable.filter((item) => item.backend === backend);
+          if (rows.length > 0) {
+            backendSelection.set(
+              backend,
+              !blockedBackends.has(backend) && rows.every((item) => item.selected),
+            );
+          }
+        }
+        setItems(scan.items.map((item) => (
+          scopedBackends.has(item.backend) && isImportable(item)
+            ? { ...item, selected: backendSelection.get(item.backend) ?? false }
+            : item
+        )));
         setLoading(false);
       })
       .catch(() => {
@@ -175,15 +197,46 @@ export const MigrationDialog: React.FC<{
     };
   }, [open, showToast, t]);
 
-  const toggle = (id: string) =>
-    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, selected: !i.selected } : i)));
-
-  // One predicate decides what this dialog shows, what a person can tick, and
-  // what gets submitted — a row that fails it is never counted and never sent,
-  // even if the scan returned it pre-selected.
-  const isEligible = eligible ?? DEFAULT_ELIGIBLE;
-  const candidates = eligible ? items.filter(isEligible) : items;
-  const appliable = candidates.filter((i) => i.selected && isEligible(i));
+  const scopePredicate = eligible ?? DEFAULT_SCOPE;
+  const scopedBackends = new Set(
+    items.filter(scopePredicate).map((item) => item.backend),
+  );
+  const candidates = items.filter((item) => scopedBackends.has(item.backend));
+  const grouped = BACKEND_ORDER.map((backend) => {
+    const rows = candidates.filter((item) => item.backend === backend);
+    const importRows = rows.filter(isImportable);
+    const blockedRows = rows.filter((item) => !isImportable(item));
+    return {
+      backend,
+      rows,
+      importRows,
+      blockedRows,
+      blocked: blockedRows.length > 0,
+    };
+  }).filter((group) => group.rows.length > 0);
+  const selectedBackends = new Set(
+    grouped
+      .filter((group) => (
+        !group.blocked
+        && group.importRows.length > 0
+        && group.importRows.every((item) => item.selected)
+      ))
+      .map((group) => group.backend)
+  );
+  const toggle = (backend: AgentBackend) =>
+    setItems((prev) => {
+      const group = grouped.find((item) => item.backend === backend);
+      if (!group || group.blocked || group.importRows.length === 0) return prev;
+      const selected = group.importRows.every((item) => item.selected);
+      return prev.map((item) => (
+        item.backend === backend && isImportable(item)
+          ? { ...item, selected: !selected }
+          : item
+      ));
+    });
+  const appliable = items.filter(
+    (item) => selectedBackends.has(item.backend) && isImportable(item),
+  );
   const selectedCount = appliable.length;
 
   const apply = async () => {
@@ -196,17 +249,22 @@ export const MigrationDialog: React.FC<{
       showToast(t('settings.models.migration.applied', { count: result.applied }) as string, 'success');
       onApplied?.(result.applied);
       onClose();
-    } catch {
-      if (aliveRef.current) showToast(t('settings.models.migration.applyFailed') as string, 'error');
+    } catch (error) {
+      if (aliveRef.current) {
+        const code = apiFailure(error)?.code;
+        const key =
+          MIGRATION_ERROR_KEYS[code ?? ''] ??
+          'settings.models.migration.applyFailed';
+        showToast(t(key) as string, 'error');
+        if (code === 'migration_credentials_invalid') {
+          onApplied?.(0);
+          onClose();
+        }
+      }
     } finally {
       if (aliveRef.current) setApplying(false);
     }
   };
-
-  const grouped = BACKEND_ORDER.map((backend) => ({
-    backend,
-    rows: candidates.filter((i) => i.backend === backend),
-  })).filter((g) => g.rows.length > 0);
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && !applying && onClose()}>
@@ -232,26 +290,35 @@ export const MigrationDialog: React.FC<{
                 <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-normal text-muted">
                   {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
                 </span>
+                {group.blocked && (
+                  <div
+                    role="status"
+                    className="rounded-lg border border-gold/40 bg-gold/[0.08] px-3 py-2 text-[12px] leading-relaxed text-foreground"
+                  >
+                    {blockedMessage(t, group.blockedRows)}
+                  </div>
+                )}
                 {group.rows.map((item) => (
-                  <ItemRow key={item.id} item={item} selectable={isEligible(item)} onToggle={() => toggle(item.id)} />
+                  <ItemRow
+                    key={item.id}
+                    item={item}
+                    checked={!group.blocked && selectedBackends.has(group.backend)}
+                    selectable={!group.blocked && isImportable(item)}
+                    onToggle={() => toggle(group.backend)}
+                  />
                 ))}
               </div>
             ))}
           </div>
         )}
 
-        <p className="model-hub-ink-mint flex items-start gap-2 text-[12px] leading-relaxed">
-          <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-          {t('settings.models.migration.nonDestructive')}
-        </p>
-
         <div className="flex items-center justify-end gap-2 border-t border-border pt-4">
           <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={applying}>
             {t('settings.models.migration.later')}
           </Button>
           <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void apply()} disabled={selectedCount === 0 || applying}>
-            <ArrowDownToLine className="size-4" />
-            {t('settings.models.migration.apply', { count: selectedCount })}
+            {applying ? <Loader2 className="size-4 animate-spin" /> : <ArrowDownToLine className="size-4" />}
+            {t(applying ? 'settings.models.migration.applying' : 'settings.models.migration.apply')}
           </Button>
         </div>
       </DialogContent>

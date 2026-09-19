@@ -698,6 +698,7 @@
       "timedOut": "{backend} setup timed out. Start setup again to retry.",
       "success": "{backend} login is active again.",
       "loginInProgress": "A {vendor} login for {backend} is already in progress. Finish or cancel it before starting another.",
+      "hubOwned": "Manage {backend} authentication in Model Hub.",
       "failed": "{backend} setup failed: {detail}",
       "unknownFailure": "Unknown login failure."
     },

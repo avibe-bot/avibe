@@ -42,7 +42,9 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
 import { EFFORT_BY_BACKEND, sortEffortsByVocabulary } from '@/lib/effortOptions';
+import { HubOwnedAuthNotice } from '../shared/HubOwnedAuthNotice';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -60,6 +62,7 @@ type ProviderEditState = {
   removing: boolean;
   deletingProvider: boolean;
   error: string | null;
+  hubOwnedAuth: boolean;
   // Mirrors the Codex / Claude pattern: false = show ``api_key_masked``
   // read-only with a Replace button; true = empty editable input ready
   // for a fresh key. Toggled by the pencil button next to the masked
@@ -76,6 +79,7 @@ type CustomProviderDraft = {
   apiKey: string;
   saving: boolean;
   error: string | null;
+  hubOwnedAuth: boolean;
 };
 
 const BACKEND_ID = 'opencode';
@@ -111,6 +115,7 @@ const emptyEdit = (): ProviderEditState => ({
   removing: false,
   deletingProvider: false,
   error: null,
+  hubOwnedAuth: false,
   editingKey: false,
 });
 
@@ -128,6 +133,7 @@ const emptyCustomProviderDraft = (): CustomProviderDraft => ({
   apiKey: '',
   saving: false,
   error: null,
+  hubOwnedAuth: false,
 });
 
 const slugProviderId = (value: string): string =>
@@ -407,7 +413,7 @@ export const OpencodeProviderConfig: React.FC<{
       return;
     }
 
-    updateCustomProviderDraft({ saving: true, error: null });
+    updateCustomProviderDraft({ saving: true, error: null, hubOwnedAuth: false });
     try {
       const result = await api.saveOpencodeCustomProvider({
         provider_id: providerId,
@@ -417,6 +423,10 @@ export const OpencodeProviderConfig: React.FC<{
         ...(apiKey ? { api_key: apiKey } : {}),
       });
       if (!result.ok) {
+        if (isNativeAuthHubOwned(result)) {
+          updateCustomProviderDraft({ saving: false, error: null, hubOwnedAuth: true });
+          return;
+        }
         updateCustomProviderDraft({
           saving: false,
           error: result.message || (t('settings.backends.opencodeCustomProviderSaveFailed') as string),
@@ -483,10 +493,14 @@ export const OpencodeProviderConfig: React.FC<{
       t(confirmKey, { name: provider.name }) as string,
     );
     if (!confirmed) return;
-    updateEdit(provider.id, { removing: true, error: null });
+    updateEdit(provider.id, { removing: true, error: null, hubOwnedAuth: false });
     try {
       const result = await api.deleteOpencodeProviderAuth(provider.id);
       if (!result.ok) {
+        if (isNativeAuthHubOwned(result)) {
+          updateEdit(provider.id, { removing: false, error: null, hubOwnedAuth: true });
+          return;
+        }
         updateEdit(provider.id, {
           removing: false,
           error: result.message || (t('settings.backends.opencodeProviderRemoveFailed') as string),
@@ -951,6 +965,7 @@ export const OpencodeProviderConfig: React.FC<{
                       {customProviderDraft.error}
                     </div>
                   )}
+                  {customProviderDraft.hubOwnedAuth && <div className="mt-3"><HubOwnedAuthNotice /></div>}
                   <div className="mt-3 flex justify-end">
                     <Button
                       type="button"
@@ -1286,6 +1301,7 @@ export const OpencodeProviderConfig: React.FC<{
                                 </span>
                               )}
                             </div>
+                            {edit.hubOwnedAuth && <HubOwnedAuthNotice />}
 
                             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                               <div className="flex flex-col gap-3">

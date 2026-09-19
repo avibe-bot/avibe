@@ -64,7 +64,8 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
 
 1. Plaintext upstream credentials never appear in config, API payloads, events, logs,
    or Agent runtime configuration. Hub-held material is referenced by an opaque engine
-   credential id; native credentials remain in the sanctioned CLI store.
+   credential id; a retained `native_cli` Source remains in the sanctioned CLI store,
+   while an approved native migration explicitly transfers selected custody into Hub.
 2. Every persisted Source has a protocol with a named owner before commit: a shipped
    api-key vendor catalog pin, a user declaration on `custom`, or a matching
    protocol-shaped upstream response. `POST /api/models/sources/observe` is the
@@ -185,7 +186,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
-| `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
+| `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, persisted enablement intent, lifecycle, and health. |
 | `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
 | `api.md` | Routes, envelopes, default Source order and manual Route writes/Restore/preview, guards, OAuth/import results, provenance, usage, and runtime status. |

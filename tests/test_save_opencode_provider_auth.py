@@ -23,6 +23,15 @@ import pytest
 from vibe import api
 
 
+@pytest.fixture(autouse=True)
+def direct_native_auth():
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
+    config.model_hub.agents["opencode"].mode = "direct"
+    config.save()
+
+
 class _FakeServer:
     """Stand-in for the OpenCode HTTP daemon used by the save flow.
 
