@@ -3073,7 +3073,7 @@ export const QueueRow: React.FC<{
         aria-expanded={expanded}
         className={clsx(
           'min-w-0 flex-1 cursor-pointer select-text text-left text-[12px] text-foreground',
-          expanded ? 'whitespace-pre-wrap break-words' : 'truncate',
+          expanded ? 'self-start whitespace-pre-wrap break-words' : 'self-center truncate',
         )}
       >
         {annotationView && (
