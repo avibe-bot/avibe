@@ -210,6 +210,7 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 _NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
+_MAX_PREWRITE_START_ATTEMPTS = 3
 _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
     "Before any irreversible action, check whether the work is already complete.]\n\n"
@@ -4734,6 +4735,20 @@ class SessionTurnManager:
                                     "unknown start recovery lost a Delivery batch CAS"
                                 )
                     elif outcome == "not_written":
+                        receipt = {"kind": evidence_kind, **(evidence or {})}
+                        if (
+                            evidence_kind == "definitive_prewrite_failure"
+                            and receipt.get("reason") == SETTLED_BY_NO_TERMINAL_RESULT
+                            and any(
+                                delivery_store.consecutive_prewrite_start_failures(initial) + 1
+                                >= _MAX_PREWRITE_START_ATTEMPTS
+                                for initial in initial_batch
+                            )
+                        ):
+                            # No native write proves replay is safe, not that
+                            # another automatic attempt can succeed. Reuse the
+                            # existing durable explicit-recovery queue hold.
+                            receipt["requires_explicit_retry"] = True
                         for initial in initial_batch:
                             retire_unwritten = str(initial["id"]) in forced_retire_ids
                             owned_run_terminal = False
@@ -4777,7 +4792,7 @@ class SessionTurnManager:
                                 ),
                                 next_state=next_state,
                                 next_priority="p3",
-                                receipt={"kind": evidence_kind, **(evidence or {})},
+                                receipt=receipt,
                             )
                             if definitive is None:
                                 raise RuntimeError(

@@ -359,17 +359,48 @@ def failure_retry_state(delivery: dict[str, Any]) -> str:
     return state
 
 
-def requires_explicit_start_retry(delivery: dict[str, Any]) -> bool:
-    """An unwritten permanent failure stays queued until its owner retries it."""
+def explicit_start_retry_receipt(delivery: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the durable hold, never caller-supplied Message metadata."""
     for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
         if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
-            return False
+            return None
         if event.get("kind") == "start":
-            return (
+            receipt = event.get("receipt") or {}
+            if (
                 event.get("outcome") == "not_written"
-                and (event.get("receipt") or {}).get("requires_explicit_retry") is True
-            )
-    return False
+                and receipt.get("requires_explicit_retry") is True
+            ):
+                return dict(receipt)
+            return None
+    return None
+
+
+def requires_explicit_start_retry(delivery: dict[str, Any]) -> bool:
+    """An unwritten permanent failure stays queued until its owner retries it."""
+    return explicit_start_retry_receipt(delivery) is not None
+
+
+def consecutive_prewrite_start_failures(delivery: dict[str, Any]) -> int:
+    """Count startup failures since Retry, without charging concurrency refusal."""
+    count = 0
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            break
+        if event.get("kind") != "start":
+            continue
+        if event.get("outcome") in {"claimed", "opened"}:
+            continue
+        receipt = event.get("receipt") or {}
+        if receipt.get("reason") == "refused_concurrent_turn":
+            continue
+        if (
+            event.get("outcome") != "not_written"
+            or receipt.get("kind") != "definitive_prewrite_failure"
+            or receipt.get("reason") != "no_terminal_result"
+        ):
+            break
+        count += 1
+    return count
 
 
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
@@ -457,6 +488,7 @@ def _delivery_payload_from_snapshot(
 ) -> dict[str, Any]:
     content = _json_object(snapshot.get("content_json"))
     metadata = _json_object(snapshot.get("metadata_json"))
+    retry_receipt = explicit_start_retry_receipt(row) if row.get("state") == "queued" else None
     return {
         "id": row["id"],
         "delivery_id": row["id"],
@@ -485,6 +517,8 @@ def _delivery_payload_from_snapshot(
         "dispatch_text": row.get("dispatch_text") or "",
         "priority": row.get("priority"),
         "state": row.get("state"),
+        "requires_explicit_retry": retry_receipt is not None,
+        "retry_reason": retry_receipt.get("reason") if retry_receipt is not None else None,
         "created_at": row.get("submitted_at"),
         "submitted_at": row.get("submitted_at"),
         "updated_at": row.get("updated_at"),

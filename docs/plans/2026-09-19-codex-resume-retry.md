@@ -33,9 +33,13 @@ on the same process.
 4. Inputs requiring recovery remain queued with the same Delivery ID,
    snapshot, attachments, and FIFO position. Timer drains and restart recovery
    cannot replay them. The existing failure-notice Retry action and Send now
-   can retry them, and a new explicit attempt begins a new bounded budget.
+   can retry them. Validated failure-notice Retry resets the bounded budget;
+   Send now grants one attempt and does not replenish an exhausted budget.
    The budget derives from server-owned delivery history, not process memory
    or caller metadata.
+   The shared read payload projects `requires_explicit_retry` and `retry_reason`
+   from this receipt, for CLI queue inspection and the existing Web queue strip.
+   These fields never authorize dispatch; the claim owner rereads the history.
 5. Failure-triggered Codex transport replacement uses the existing durable
    ownership and live-turn checks. A still-live shared process cannot be
    replaced while another accepted turn or protected activity owns it.
@@ -48,13 +52,16 @@ on the same process.
 - `modules/agents/codex/agent.py` owns Codex resume and process replacement.
 - `core/native_dispatch_phase.py`, `core/session_turns.py`, and
   `storage/message_deliveries.py` own proof of no write, durable settlement,
-  the retry budget, and explicit claim provenance.
+  and the retry budget.
 - Existing Retry/Send now admission remains the recovery interface. No new
   queue state, schema migration, retry scheduler, or parallel queue is added.
+  The existing recovery cadence remains; this change bounds attempts rather
+  than introducing a second exponential-backoff scheduler.
 - The 128 MiB reader limit remains a resource boundary. Other oversized
   protocol messages fail visibly; this change does not add an unbounded parser.
 - Accepted or ambiguous native work is not blindly replayed after process
-  death: tools may already have produced side effects.
+  death: tools may already have produced side effects. Adapter-local recovery
+  requires explicit pre-write evidence, not merely a reconnectable exception.
 - No workstation service restart, remote regression, deployment, or merge is
   part of this implementation authorization.
 
@@ -70,3 +77,17 @@ on the same process.
   production adapter's excluded history still reaches the next model request.
 - Run focused Python suites and changed-file Ruff checks; require current-head
   Codex review, zero unresolved threads, and the complete GitHub CI workflow.
+
+### Local results
+
+- 611 focused Python tests and 50 subtests passed, including the retry FSM,
+  shared runtime ownership, CLI, UI stream, and message-delivery scenarios.
+- All 9 isolated native Codex contracts passed with 0.154.0. The new excluded
+  resume contract also passed against the official 0.153.2 binary: both resume
+  paths returned the expected model/effort, omitted turns, retained the old
+  non-ASCII input in the next model request, and preserved readable history.
+- 4,661 UI tests passed; UI production build, lint baseline, theme validation,
+  test typechecking, and changed-file Ruff passed.
+- No real model service, user Codex home, or credentials were used by the native
+  contracts. Full browser/IM operation against a deployed local Incus instance
+  remains a post-merge opt-in; the running workstation service was untouched.

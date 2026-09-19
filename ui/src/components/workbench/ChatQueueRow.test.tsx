@@ -120,6 +120,34 @@ const chips = () => [...document.querySelectorAll('[data-queue-attachment^="file
 const more = () => [...document.querySelectorAll('[data-queue-attachment-more="true"]')] as HTMLElement[];
 
 describe('QueueStrip — compatible queued messages read as one batch', () => {
+  it('MESSAGE-DELIVERY-031: shows the server-owned retry hold and preserves Send now', () => {
+    const onSendNow = vi.fn();
+    const items = [queued({
+      text: '请继续检查附件', content: {}, requires_explicit_retry: true,
+      retry_reason: 'no_terminal_result',
+    })];
+    const view = render(
+      <I18nextProvider i18n={i18n}>
+        <QueueStrip queue={items} onRemove={vi.fn()} onRecall={vi.fn()} onSendNow={onSendNow} />
+      </I18nextProvider>,
+    );
+    expect(screen.getByText('Retry needed · 1')).toBeTruthy();
+    expect(screen.getByText(/Automatic startup retries stopped/)).toBeTruthy();
+    expect(screen.getByText('请继续检查附件')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Send now' }));
+    expect(onSendNow).toHaveBeenCalledTimes(1);
+    view.rerender(
+      <I18nextProvider i18n={i18n}>
+        <QueueStrip
+          queue={[{ ...items[0], requires_explicit_retry: false, metadata: { requires_explicit_retry: true } }]}
+          onRemove={vi.fn()} onRecall={vi.fn()} onSendNow={onSendNow}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.queryByText(/Automatic startup retries stopped/)).toBeNull();
+    expect(screen.getByText('Queued · 1')).toBeTruthy();
+  });
+
   it('uses one shared bubble and reveals each original row boundary on hover or focus', () => {
     const html = wrap(
       <QueueStrip

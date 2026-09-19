@@ -228,6 +228,54 @@ def _request(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_excluded_resume_preserves_native_history_and_model_settings(tmp_path):
+    """MESSAGE-DELIVERY-034: response omission is not model-context truncation."""
+    async with _native_server(tmp_path) as harness:
+        marker = {}
+        agent = _agent(marker)
+        request = _request(tmp_path)
+        old_text = "原始上下文：保留编号 EXCLUDE-TURNS-2049 🧪"
+        agent._build_input = Mock(return_value=[{"type": "text", "text": old_text, "text_elements": []}])
+        thread_id = await agent._start_or_resume_thread(
+            harness.native, request, developer_instructions="Keep context.",
+        )
+        await agent._start_turn(harness.native, request, thread_id, developer_instructions="Keep context.")
+        await harness.finish_turn()
+        native = await harness.restart()
+
+        # Exercise both production resume producers and inspect their real responses.
+        agent = _agent(marker)
+        resumes = []
+        send_request = native.send_request
+
+        async def capture(method, params=None, **kwargs):
+            response = await send_request(method, params, **kwargs)
+            if method == "thread/resume":
+                resumes.append((params, response))
+            return response
+
+        native.send_request = capture
+        assert await agent._start_or_resume_thread(
+            native, request, developer_instructions="Keep context.",
+        ) == thread_id
+        assert agent._thread_model_settings["contract"] == (thread_id, MODEL, "high")
+        agent._caller_env_for_request = Mock(return_value={"AVIBE_CONTRACT": "更新"})
+        await agent._refresh_thread_developer_instructions_if_needed(native, request, thread_id)
+        assert len(resumes) == 2
+        for params, response in resumes:
+            assert params["excludeTurns"] is True
+            assert response["thread"]["id"] == thread_id
+            assert not response["thread"].get("turns")
+            assert response["model"] == MODEL
+            assert response["reasoningEffort"] == "high"
+        await agent._start_turn(native, request, thread_id, developer_instructions="Keep context.")
+        await harness.finish_turn()
+        assert old_text in json.dumps(harness.requests[-1]["input"], ensure_ascii=False)
+        history = await native.send_request("thread/read", {"threadId": thread_id, "includeTurns": True})
+        assert len(history["thread"]["turns"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_production_agent_instructions_are_last_in_native_baseline_and_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
     async with _native_server(tmp_path) as harness:
