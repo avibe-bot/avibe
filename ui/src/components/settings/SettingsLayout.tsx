@@ -132,7 +132,7 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
       title={t(item.labelKey)}
       className={clsx(
         'flex min-h-11 items-center gap-2 rounded-[9px] px-2.5 py-2 text-[12.5px] transition-colors md:min-h-[34px] md:py-0',
-        'md:justify-center lg:justify-start',
+        'md:justify-start',
         active
           ? 'bg-mint-soft font-semibold text-foreground'
           : 'font-medium text-muted hover:bg-foreground/[0.04] hover:text-foreground',
@@ -145,7 +145,7 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
           in English). Wrapping keeps every label readable in any language, and
           two lines at this size still fit the row's min height, so nothing moves
           for the labels that already fitted. */}
-      <span className="min-w-0 leading-[1.3] break-words md:hidden lg:block">{t(item.labelKey)}</span>
+      <span className="min-w-0 leading-[1.3] break-words">{t(item.labelKey)}</span>
     </NavLink>
   );
 };
@@ -168,23 +168,23 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
         onClick={() => setManualOpen(!open)}
         className={clsx(
           'flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 py-2 text-[12.5px] font-medium transition-colors md:min-h-[34px] md:py-0',
-          'md:justify-center lg:justify-start',
+          'md:justify-start',
           childActive
             ? 'text-foreground'
             : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
         )}
       >
         <Icon className={clsx('size-3.5 shrink-0', childActive ? 'text-mint-ink' : 'text-muted')} />
-        <span className="min-w-0 flex-1 leading-[1.3] break-words text-left md:hidden lg:block">{t(item.labelKey)}</span>
+        <span className="min-w-0 flex-1 leading-[1.3] break-words text-left">{t(item.labelKey)}</span>
         <ChevronDown
           className={clsx(
-            'size-3.5 shrink-0 text-muted transition-transform md:hidden lg:block',
+            'size-3.5 shrink-0 text-muted transition-transform',
             open && 'rotate-180',
           )}
         />
       </button>
       {open && (
-        <div className="ml-3 flex flex-col gap-0.5 border-l border-border pl-2 md:ml-0 md:border-l-0 md:pl-0 lg:ml-3 lg:border-l lg:pl-2">
+        <div className="ml-3 flex flex-col gap-0.5 border-l border-border pl-2">
           {children.map((child) => <SettingsNavLink key={child.path} item={child} />)}
         </div>
       )}
@@ -239,12 +239,10 @@ export const SettingsLayout: React.FC = () => {
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
-  // The shared `max-w-[1180px]` is a reading column for pages made of prose and
-  // form rows. General is not one: its source (r6G6P) draws content that simply
-  // fills whatever the rail leaves, so capping it would re-introduce a fixed
-  // column the design does not have. Opting one route out — the way Model Hub
-  // already does — leaves every other Settings page exactly as it was.
-  const isFluidContent = isModelHub || pathMatches(location.pathname, SETTINGS_LANDING_PATH);
+  // Settings is a standalone page: ordinary sections use one 944px outer
+  // frame with an 880px content column after 32px desktop padding. Model Hub
+  // keeps its full route-pane width and its own full-height surface.
+  const isFluidContent = isModelHub;
 
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
@@ -406,23 +404,23 @@ export const SettingsLayout: React.FC = () => {
           aria-label={t('settings.navigationLabel')}
           className={clsx(
             'min-h-0 shrink-0 border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
-            'w-full flex-col md:w-14 lg:w-[196px]',
+            'w-full flex-col md:w-[196px]',
             atRoot ? 'flex' : 'hidden md:flex',
           )}
         >
           <ReturnToApp
             aria-label={t('settings.backToApp')}
-            className="mb-2 hidden min-h-10 shrink-0 items-center gap-2.5 rounded-[9px] px-2.5 text-[14px] text-foreground transition-colors hover:bg-foreground/[0.05] md:flex md:justify-center lg:justify-start"
+            className="mb-2 hidden min-h-10 shrink-0 items-center gap-2.5 rounded-[9px] px-2.5 text-[14px] text-foreground transition-colors hover:bg-foreground/[0.05] md:flex md:justify-start"
           >
             <ArrowLeft className="size-[17px] shrink-0" />
-            <span className="truncate md:hidden lg:block">{t('settings.backToApp')}</span>
+            <span className="truncate">{t('settings.backToApp')}</span>
           </ReturnToApp>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             {visibleGroups.map((group) => (
               <div key={group.labelKey ?? group.items[0]?.path} className="mb-2 last:mb-0">
                 {group.labelKey && (
-                  <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted md:hidden lg:block">
+                  <div className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">
                     {t(group.labelKey)}
                   </div>
                 )}
@@ -448,9 +446,9 @@ export const SettingsLayout: React.FC = () => {
           <div
             key={location.pathname}
             className={clsx(
-              'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 motion-safe:animate-in motion-safe:slide-in-from-right-4 motion-safe:duration-200 md:px-6 md:pb-7 md:pt-7 md:animate-none lg:px-8',
+              'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 motion-safe:animate-in motion-safe:slide-in-from-right-4 motion-safe:duration-200 md:px-8 md:pb-7 md:pt-7 md:animate-none',
               isModelHub && 'min-h-full',
-              !isFluidContent && 'mx-auto max-w-[1180px]',
+              !isFluidContent && 'mx-auto max-w-[944px]',
             )}
           >
             <Outlet />

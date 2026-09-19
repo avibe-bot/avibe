@@ -1,9 +1,9 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Link,
   MemoryRouter,
@@ -23,11 +23,102 @@ import {
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
 import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
 
 let chatMounts = 0;
 let chatUnmounts = 0;
+
+const RetainedModalEditor = () => {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('保留');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const selectionRef = useRef({ start: 2, end: 2 });
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>open-retained-editor</button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent
+          aria-describedby={undefined}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            const input = inputRef.current;
+            input?.focus();
+            input?.setSelectionRange(selectionRef.current.start, selectionRef.current.end);
+          }}
+        >
+          <DialogTitle className="sr-only">retained editor</DialogTitle>
+          <input
+            ref={inputRef}
+            aria-label="retained editor input"
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              selectionRef.current = {
+                start: event.target.selectionStart ?? event.target.value.length,
+                end: event.target.selectionEnd ?? event.target.value.length,
+              };
+            }}
+            onSelect={(event) => {
+              selectionRef.current = {
+                start: event.currentTarget.selectionStart ?? 0,
+                end: event.currentTarget.selectionEnd ?? 0,
+              };
+            }}
+          />
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => navigate('/settings/replies')}
+          >
+            open-settings-from-editor
+          </button>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};
+
+type RetainedFocusOwnerKind = 'explicit-modal' | 'app-window' | 'popover';
+
+const RetainedFocusOwner = ({ kind }: { kind: RetainedFocusOwnerKind }) => {
+  const active = useRouteSurfaceActive();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (active && open) inputRef.current?.focus();
+  }, [active, open]);
+
+  const dialogProps = kind === 'explicit-modal'
+    ? { 'aria-modal': 'true' }
+    : kind === 'app-window'
+      ? { 'data-window-id': 'retained-window' }
+      : { 'data-state': 'open', 'aria-label': 'retained popover' };
+  const label = `retained ${kind} input`;
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>open-{kind}</button>
+      {open && active ? (
+        <div role="dialog" {...dialogProps}>
+          <input ref={inputRef} aria-label={label} defaultValue="保留" />
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => navigate('/settings/replies')}
+          >
+            open-settings-from-{kind}
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+};
 
 const ChatProbe = () => {
   const location = useLocation();
@@ -65,6 +156,13 @@ const ChatProbe = () => {
         {(location.state as { maintenance?: string } | null)?.maintenance ?? 'none'}
       </div>
       <button type="button" onClick={() => setCount((value) => value + 1)}>increment-chat</button>
+      <RetainedModalEditor />
+      <RetainedFocusOwner kind="explicit-modal" />
+      <RetainedFocusOwner kind="app-window" />
+      <RetainedFocusOwner kind="popover" />
+      <button type="button" onClick={() => navigate('/settings/replies')} onMouseDown={(event) => event.preventDefault()}>
+        open-settings-preserving-focus
+      </button>
       <Link to="/settings/replies">open-settings</Link>
       <Link to="/settings/diagnostics">open-diagnostics</Link>
       <Link to="/doctor">open-legacy-settings</Link>
@@ -148,6 +246,11 @@ const RemountingHarness = () => {
   return <Harness key={guardKey} desktop />;
 };
 
+const settleDeferredFocus = async () => {
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+};
+
 beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
@@ -183,6 +286,129 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'shell-settings' }));
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  it('maintains only the retained origin through data-router scoped replacement', async () => {
+    const user = userEvent.setup();
+    const router = createMemoryRouter([{ path: '*', element: <Harness desktop /> }], {
+      initialEntries: [{ pathname: '/chat/ses_1', search: '?view=chat', hash: '#tail', state: { maintenance: 'pending' } }],
+    });
+    render(<RouterProvider router={router} />);
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    await waitFor(() => expect(screen.getByTestId('chat-maintenance').textContent).toBe('done'));
+    expect(router.state.location.pathname).toBe('/settings/replies');
+    expect(screen.queryByText('escaped-route')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(router.state.location.pathname).toBe('/chat/ses_1');
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
+    expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
+  });
+
+  it('keeps a remounted retained modal editor focused for continued Unicode input', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-retained-editor' }));
+    const editorInput = screen.getByRole('textbox', { name: 'retained editor input' });
+    expect(document.activeElement).toBe(editorInput);
+    editorInput.setSelectionRange(1, 2);
+    fireEvent.select(editorInput);
+    expect(editorInput.selectionStart).toBe(1);
+    expect(editorInput.selectionEnd).toBe(2);
+
+    // The mousedown guard models a retained modal's explicit Settings handoff:
+    // navigation changes the foreground route without making the shell button
+    // the editor's new owner of focus.
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-editor' }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+
+    const resumedInput = await screen.findByRole('textbox', { name: 'retained editor input' });
+    expect(resumedInput).not.toBe(editorInput);
+    await settleDeferredFocus();
+    expect(document.activeElement).toBe(resumedInput);
+    expect((resumedInput as HTMLInputElement).selectionStart).toBe(1);
+    expect((resumedInput as HTMLInputElement).selectionEnd).toBe(2);
+    await user.keyboard('x');
+    expect((resumedInput as HTMLInputElement).value).toBe('保x');
+    expect(document.activeElement).toBe(resumedInput);
+    await user.keyboard('{End}续写🌱');
+    expect((resumedInput as HTMLInputElement).value).toBe('保x续写🌱');
+  });
+
+  it('keeps an explicit retained modal as the return-focus owner after its editor remounts', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-explicit-modal' }));
+    const editor = screen.getByRole('textbox', { name: 'retained explicit-modal input' });
+    expect(document.activeElement).toBe(editor);
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-explicit-modal' }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+
+    const resumedEditor = await screen.findByRole('textbox', { name: 'retained explicit-modal input' });
+    await settleDeferredFocus();
+    expect(document.activeElement).toBe(resumedEditor);
+  });
+
+  it.each([
+    ['app-window', 'retained app-window input'],
+    ['popover', 'retained popover input'],
+  ] as const)('falls back from a retained non-modal %s instead of restoring its input', async (kind, inputName) => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: `open-${kind}` }));
+    const input = screen.getByRole('textbox', { name: inputName });
+    expect(document.activeElement).toBe(input);
+    await user.click(screen.getByRole('button', { name: `open-settings-from-${kind}` }));
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+
+    await screen.findByRole('textbox', { name: inputName });
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('link', { name: 'shell-settings' }),
+    ));
+    expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: inputName }));
+  });
+
+  it('does not let a stale close callback focus the old origin after Settings reopens', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    const queuedFrames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      queuedFrames.push(callback);
+      return queuedFrames.length;
+    });
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(cancelFrame).toHaveBeenCalledWith(1);
+
+    queuedFrames[0](performance.now());
+    expect(screen.getByRole('dialog', { name: 'nav.settings' }).contains(document.activeElement)).toBe(true);
+
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
   });
 
   it('keeps the background route mounted across Settings navigation and close', async () => {
