@@ -34,8 +34,11 @@ export const buttonVariants = cva(
         // codebase has no `light:`/`dark:` Tailwind variant, so a per-theme value is
         // always a CSS variable. design.pen has no glow on any Button, so the value is
         // ours to hold, not the design's; keep the four in lockstep.
+        // Solid mint buttons use the semantic primary pair. This keeps the
+        // foreground contract owned by the theme (`--primary-foreground`) in
+        // both modes instead of coupling the variant to the palette alias.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-glow-cta-mint hover:bg-mint-hover disabled:shadow-none',
+          'gap-2 bg-primary font-bold text-primary-foreground shadow-glow-cta-mint hover:bg-primary-hover disabled:shadow-none',
         'brand-cyan':
           'gap-2 bg-cyan font-bold text-accent-foreground shadow-glow-cta-cyan hover:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
