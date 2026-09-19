@@ -233,6 +233,19 @@ _REQUEST_ERROR_IDENTIFIERS = frozenset(
 )
 _MODEL_ERROR_IDENTIFIERS = frozenset({"model_not_found", "not_found_error"})
 _AUTHENTICATION_ERROR_IDENTIFIERS = frozenset({"authentication_error", "invalid_api_key", "permission_error"})
+_DEFINITIVE_OAUTH_REJECTION_IDENTIFIERS = frozenset(
+    {
+        "authentication_error",
+        "invalid_api_key",
+        "invalid_grant",
+        "invalid_token",
+        "refresh_token_expired",
+        "refresh_token_invalid",
+        "token_expired",
+        "token_revoked",
+        "unauthorized",
+    }
+)
 _SERVER_ERROR_IDENTIFIERS = frozenset({"api_error", "internal_error", "overloaded", "overloaded_error", "server_error"})
 _RATE_LIMIT_ERROR_IDENTIFIERS = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 
@@ -481,6 +494,29 @@ def _request_error_rejects_credential(
     )
 
 
+def _oauth_rejection_is_definitive(
+    status: int,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Accept only explicit token/auth evidence as a reauthentication verdict."""
+
+    if status not in {*_REQUEST_ERROR_STATUSES, *_AUTHENTICATION_ERROR_STATUSES}:
+        return False
+    identifiers = set(_payload_identifiers(payload))
+    error = payload.get("error")
+    if isinstance(error, dict):
+        identifiers.update(_error_identifiers(error))
+        if (
+            status in _AUTHENTICATION_ERROR_STATUSES
+            and _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+        ):
+            return True
+        message = _normalized_identifier(str(error.get("message") or ""))
+        if any(token in message for token in _DEFINITIVE_OAUTH_REJECTION_IDENTIFIERS):
+            return True
+    return not _DEFINITIVE_OAUTH_REJECTION_IDENTIFIERS.isdisjoint(identifiers)
+
+
 def _payload_is_structured(payload: Mapping[str, Any]) -> bool:
     return (
         isinstance(payload.get("error"), dict)
@@ -561,6 +597,7 @@ def _parse_protocol_authenticated_evidence(
     *,
     vendor: str | None = None,
     request_root: str | None = None,
+    oauth: bool = False,
 ) -> _ProtocolEvidence:
     """Classify protocol shape without treating schema validation as login.
 
@@ -595,8 +632,16 @@ def _parse_protocol_authenticated_evidence(
             shape=_default_unproven_shape(status=status),
         )
 
+    if oauth and _oauth_rejection_is_definitive(status, payload):
+        return evidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
+
     top_level_identifiers = _payload_identifiers(payload)
     if (
+        not oauth
+        and
         status in _AUTHENTICATION_ERROR_STATUSES
         and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
     ):
@@ -605,7 +650,7 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.REJECTED,
         )
     error = payload.get("error")
-    if _request_error_rejects_credential(status, error):
+    if not oauth and _request_error_rejects_credential(status, error):
         return evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
@@ -619,7 +664,7 @@ def _parse_protocol_authenticated_evidence(
                 authentication=_AuthenticationEvidence.UNKNOWN,
                 shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
             )
-        if wrapperless == "rejected":
+        if wrapperless == "rejected" and not oauth:
             return evidence(
                 protocol=_ProtocolProof.UNPROVEN,
                 authentication=_AuthenticationEvidence.REJECTED,
@@ -632,6 +677,8 @@ def _parse_protocol_authenticated_evidence(
 
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
+        if oauth and rule.authentication is _AuthenticationEvidence.REJECTED:
+            continue
         if rule.matches(status, payload):
             return evidence(
                 protocol=rule.protocol,
@@ -1038,7 +1085,11 @@ def _probe_oauth_protocol_response(
             )
         body = payload.get("body")
         return _parse_protocol_authenticated_evidence(
-            protocol, status, body if isinstance(body, str) else "", vendor=vendor,
+            protocol,
+            status,
+            body if isinstance(body, str) else "",
+            vendor=vendor,
+            oauth=True,
         )
 
     return request(headers)
@@ -1606,33 +1657,169 @@ class CLIProxyEngineAdapter:
         payload = dict(material)
         payload["type"] = auth_type
         auth_name = f"avibe-migration-{uuid.uuid4().hex}.json"
-        await asyncio.to_thread(
-            self.state_store.write_oauth_auth_file,
+        return await run_owned_in_thread(
+            self.state_store.stage_oauth_credential,
+            source_id,
+            normalized_vendor,
             auth_name,
             payload,
         )
-        client = await asyncio.to_thread(self.supervisor.client_if_running)
-        try:
-            if client is not None:
-                await asyncio.to_thread(
-                    client.management_request,
-                    "POST",
-                    "/auth-files",
-                    query={"name": auth_name},
-                    payload=payload,
-                )
-            return await asyncio.to_thread(
-                self.state_store.bind_oauth_credential,
-                source_id,
-                normalized_vendor,
-                auth_name,
+
+    async def activate_oauth_credential(self, credential_ref: str) -> None:
+        """Publish a staged grant without replacing a live auth file."""
+
+        async with self._routing_lock:
+            await self._transports_idle.wait()
+            auth_name, payload, prefix, _already_active = await run_owned_in_thread(
+                self.state_store.activate_oauth_auth_file,
+                credential_ref,
             )
-        except BaseException:
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
+            client = await asyncio.to_thread(self.supervisor.client_if_running)
+            if client is None:
+                return
+
+            if not bool(metadata.get("engine_published")):
+                try:
+                    inventory = await run_owned_in_thread(_auth_inventory, client)
+                except EngineClientError as exc:
+                    raise EngineStateError(
+                        "OAuth activation could not inspect the engine"
+                    ) from exc
+                matching = [
+                    auth
+                    for auth in inventory.values()
+                    if auth.name == auth_name or auth.identity == auth_name
+                ]
+                if len(matching) > 1:
+                    raise EngineStateError("OAuth activation auth record is ambiguous")
+                if matching:
+                    expected_provider = str(payload.get("type") or "").strip().lower()
+                    if matching[0].provider != expected_provider:
+                        raise EngineStateError("OAuth activation auth record conflicts")
+                    await run_owned_in_thread(
+                        self.state_store.mark_oauth_engine_published,
+                        credential_ref,
+                    )
+                else:
+                    await run_owned_in_thread(
+                        self.state_store.assert_oauth_auth_file_unchanged,
+                        credential_ref,
+                    )
+                    try:
+                        await run_owned_in_thread(
+                            client.management_request,
+                            "POST",
+                            "/auth-files",
+                            query={"name": auth_name},
+                            payload=payload,
+                        )
+                    except EngineClientError as exc:
+                        raise EngineStateError("OAuth activation failed") from exc
+                    await run_owned_in_thread(
+                        self.state_store.mark_oauth_engine_published,
+                        credential_ref,
+                    )
+
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
+            if bool(metadata.get("prefix_published")):
+                return
+            await run_owned_in_thread(
+                self.state_store.assert_oauth_auth_file_unchanged,
+                credential_ref,
+            )
             try:
-                await asyncio.to_thread(self.state_store.delete_oauth_auth_file, auth_name)
-            except BaseException:
-                logger.warning("Failed to roll back imported OAuth auth file", exc_info=True)
-            raise
+                await run_owned_in_thread(
+                    client.management_request,
+                    "PATCH",
+                    "/auth-files/fields",
+                    payload={"name": auth_name, "prefix": prefix},
+                )
+            except EngineClientError as exc:
+                raise EngineStateError("OAuth activation metadata update failed") from exc
+            await run_owned_in_thread(
+                self.state_store.mark_oauth_prefix_published,
+                credential_ref,
+            )
+
+    async def validate_oauth_credential(self, credential_ref: str) -> None:
+        """Require an upstream authentication witness without inference."""
+
+        async with self._routing_lock:
+            await self._transports_idle.wait()
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            if metadata.get("activation_state") == "staged":
+                raise EngineStateError("OAuth credential is not active")
+            normalized_vendor = str(metadata.get("vendor") or "").strip().lower()
+            protocol = {
+                "anthropic": "anthropic",
+                "openai": "openai_responses",
+            }.get(normalized_vendor)
+            expected_provider = {
+                "anthropic": "claude",
+                "openai": "codex",
+            }.get(normalized_vendor)
+            if protocol is None or expected_provider is None:
+                raise EngineStateError("OAuth credential validation is unsupported")
+            client = await run_owned_in_thread(self.supervisor.client)
+            try:
+                inventory = await run_owned_in_thread(_auth_inventory, client)
+            except EngineClientError as exc:
+                raise EngineStateError(
+                    "OAuth credential validation could not inspect the engine"
+                ) from exc
+            auth_name = str(metadata.get("auth_name") or "")
+            matches = [
+                auth
+                for auth in inventory.values()
+                if (auth.name == auth_name or auth.identity == auth_name)
+                and auth.provider == expected_provider
+                and auth.auth_index
+            ]
+            if len(matches) != 1:
+                raise EngineStateError("OAuth credential validation is inconclusive")
+            try:
+                evidence = await run_owned_in_thread(
+                    _probe_oauth_protocol_response,
+                    client=client,
+                    auth=matches[0],
+                    vendor=normalized_vendor,
+                    protocol=protocol,
+                )
+            except (EngineClientError, OSError) as exc:
+                raise EngineStateError("OAuth credential validation failed") from exc
+            if evidence.authentication is not _AuthenticationEvidence.ACCEPTED:
+                if evidence.authentication is _AuthenticationEvidence.REJECTED:
+                    raise EngineStateError("oauth credential requires reauthentication")
+                raise EngineStateError("OAuth credential validation failed")
+
+    async def matches_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        secret: str,
+        base_url: str | None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.state_store.matches_api_key_credential,
+            credential_ref,
+            vendor,
+            protocol,
+            secret,
+            base_url,
+        )
 
     async def retarget_api_key_credential(
         self,
@@ -1704,20 +1891,27 @@ class CLIProxyEngineAdapter:
         )
         auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
         if auth_name:
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
-            if client is not None:
-                try:
-                    await asyncio.to_thread(
-                        client.management_request,
-                        "DELETE",
-                        "/auth-files",
-                        query={"name": str(auth_name)},
-                        timeout=1.0,
-                    )
-                except EngineClientError:
-                    pass
-            await asyncio.to_thread(self.state_store.delete_oauth_auth_file, str(auth_name))
-            await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
+            if metadata.get("activation_state") != "staged":
+                client = await asyncio.to_thread(self.supervisor.client_if_running)
+                if client is not None:
+                    try:
+                        await asyncio.to_thread(
+                            client.management_request,
+                            "DELETE",
+                            "/auth-files",
+                            query={"name": str(auth_name)},
+                            timeout=1.0,
+                        )
+                    except EngineClientError:
+                        pass
+                await asyncio.to_thread(
+                    self.state_store.delete_oauth_auth_file,
+                    str(auth_name),
+                )
+                await asyncio.to_thread(
+                    self.state_store.audit_auth_permissions,
+                    enforce=True,
+                )
         await asyncio.to_thread(self.supervisor.invalidate_configs)
         await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
 
