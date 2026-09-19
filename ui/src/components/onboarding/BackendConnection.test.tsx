@@ -9,7 +9,7 @@ import { CodexProviderConfig } from '../settings/providers/CodexProviderConfig';
 import { BackendConnectionForm } from '../settings/providers/BackendConnectionForm';
 import { BackendConnectionDialog } from './BackendConnectionDialog';
 import en from '../../i18n/en.json';
-import type { BackendConnectionState, ClaudeAuthState, CodexAuthState } from '../../context/ApiContext';
+import type { BackendConnectionState, ClaudeAuthState, CodexAuthState, OpencodeProvider } from '../../context/ApiContext';
 
 const mock = vi.hoisted(() => ({ toast: vi.fn(), api: {
   getConfig: vi.fn(), detectCli: vi.fn(), mutateConfig: vi.fn(), getBackendRuntime: vi.fn(), restartBackend: vi.fn(), claudeModels: vi.fn(), codexModels: vi.fn(),
@@ -28,6 +28,24 @@ const connection = (patch: Partial<BackendConnectionState> = {}): BackendConnect
 const native = (): ClaudeAuthState => ({ ok: true, auth_mode: 'api_key', active_auth_mode: 'api_key', has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', credential_type: 'api_key', has_oauth_credentials: true, settings_path: '/fixture/claude/settings.json', settings_exists: true, settings_env_has_key: true, settings_env_key_length: 20, settings_env_key_var: 'ANTHROPIC_API_KEY', settings_env_base_url: 'https://old.example', settings_conflict: false });
 const codexNative = (patch: Partial<CodexAuthState> = {}): CodexAuthState => ({ ok: true, auth_mode: 'api_key', active_auth_mode: 'api_key', has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', has_chatgpt_tokens: true, credentials_store: 'file', file_store_active: true, ...patch });
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
+/**
+ * A radio group, once it will actually answer.
+ *
+ * The method row is rendered while the connection read behind it is still in
+ * flight, and `BackendConnectionForm` disables its radios until that read lands
+ * (`disabled={busy || loading}`, and `onChange` refuses for the same reason). A
+ * click fired on existence alone is therefore not dropped by the test — it is
+ * refused by the product, the switch never happens, and whatever the test waits
+ * for next can never arrive. How many ticks the read takes is not this file's
+ * business, so every interaction starts where a person's would: at the point the
+ * control can be acted on.
+ */
+const interactiveRadios = async (name: string) => {
+  const group = await screen.findByRole('radiogroup', { name });
+  await waitFor(() => expect(within(group).getAllByRole('radio')
+    .every((radio) => !(radio as HTMLButtonElement).disabled)).toBe(true));
+  return group;
+};
 beforeEach(() => {
   vi.resetAllMocks();
   mock.api.getClaudeAuth.mockResolvedValue(native());
@@ -520,7 +538,7 @@ describe('shared Settings and onboarding connection owner', () => {
     mock.api.getClaudeAuth.mockResolvedValue(native());
     render(wrap(<BackendConnectionForm backend="claude" compact initialMethod="api_key" />));
     const credential = async (id: 'API Key' | 'Auth Token') => {
-      const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.credentialType });
+      const group = await interactiveRadios(en.onboarding.connection.credentialType);
       fireEvent.click(within(group).getByRole('radio', { name: id }));
     };
     // The stored key is an API key, so that side opens on its mask.
@@ -590,12 +608,12 @@ describe('connection dialog frame', () => {
   it.each(['claude', 'codex'] as const)('%s keeps one heading, description and footer across every method switch', async (backend) => {
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend, auth: 'none', ready: false, entry_eligible: false }));
     render(wrap(<BackendConnectionDialog backend={backend} method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
-    await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
+    const group = await interactiveRadios(en.onboarding.connection.method);
     const opened = frame();
     expect(opened.title).toBe(`Connect ${backend === 'claude' ? 'Claude Code' : 'Codex'}`);
     expect(opened.rows).toEqual([1, 1, 1]);
 
-    const tabs = screen.getAllByRole('radio');
+    const tabs = within(group).getAllByRole('radio');
     // Repeatedly, both directions: a heading computed from the method would
     // change here, and a changed heading is what used to move the frame.
     for (const tab of [...tabs].reverse().concat(tabs, [...tabs].reverse(), tabs)) {
@@ -603,18 +621,41 @@ describe('connection dialog frame', () => {
       expect(frame()).toEqual(opened);
     }
     // The method still actually changed the body underneath the fixed frame.
-    fireEvent.click(screen.getByRole('radio', { name: backend === 'claude' ? en.onboarding.connection.claudeCredentials : en.onboarding.connection.openaiKey }));
+    fireEvent.click(within(group).getByRole('radio', { name: backend === 'claude' ? en.onboarding.connection.claudeCredentials : en.onboarding.connection.openaiKey }));
     // `find`, not `get`: the dialog's own readiness read resolves on its own schedule and
     // re-renders the body, so the credential form is not guaranteed on the click's tick.
     expect(await screen.findByRole('button', { name: en.onboarding.connection.saveConnect })).toBeTruthy();
     expect(frame()).toEqual(opened);
   });
 
+  // The readiness the helper waits for, made deterministic rather than left to
+  // how many ticks a resolved mock happens to take: while the connection read is
+  // in flight the method row is already on screen and refuses to switch, so
+  // acting on its mere presence changes nothing — and nothing that a switch
+  // would have produced can ever arrive.
+  it('refuses a method switch until the connection read lands, then takes it', async () => {
+    const pending = deferred<BackendConnectionState>();
+    mock.api.getBackendConnection.mockReturnValue(pending.promise);
+    render(wrap(<BackendConnectionDialog backend="claude" method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
+    const credentials = () => within(group).getByRole('radio', { name: en.onboarding.connection.claudeCredentials });
+    expect((credentials() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(credentials());
+    expect(credentials().getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByRole('button', { name: en.onboarding.connection.saveConnect })).toBeNull();
+
+    await act(async () => pending.resolve(connection({ backend: 'claude', auth: 'none', ready: false, entry_eligible: false })));
+    await interactiveRadios(en.onboarding.connection.method);
+    fireEvent.click(credentials());
+    expect(credentials().getAttribute('aria-checked')).toBe('true');
+    expect(await screen.findByRole('button', { name: en.onboarding.connection.saveConnect })).toBeTruthy();
+  });
+
   it('moves the method with arrows, Home and End, and leaves focus on the selected tab', async () => {
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', auth: 'none', ready: false, entry_eligible: false }));
     render(wrap(<BackendConnectionDialog backend="claude" method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
-    const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
-    const [subscription, apiKey] = screen.getAllByRole('radio');
+    const group = await interactiveRadios(en.onboarding.connection.method);
+    const [subscription, apiKey] = within(group).getAllByRole('radio');
     expect(subscription.getAttribute('aria-checked')).toBe('true');
     // One tab stop, so Tab lands on the selection the arrows then continue from — the
     // other half of the pattern, and what stops focus resting on an unselected tab.
@@ -710,6 +751,61 @@ describe('connection dialog frame', () => {
     expect(frame().title).toBe('Connect OpenCode');
     expect(frame().rows).toEqual([1, 1, 1]);
     expect(screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen')?.textContent).toContain('Alibaba DashScope');
+  });
+
+  // A custom provider's id is whatever its author typed into Settings, and
+  // OpenCode reserves only the ids it ships itself — so a personal relay can be
+  // filed under `dashscope`, and every custom provider is reported configured,
+  // which is exactly what decides a brand slot. Left alone, the relay would BE
+  // the row someone picks to connect Qwen, and the key would go to the relay.
+  it('never lets a custom provider stand in for, or be named as, a native brand', async () => {
+    const entry = (id: string, name: string, patch: Partial<OpencodeProvider> = {}) =>
+      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [] as string[], ...patch });
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
+      entry('openai', 'OpenAI'), entry('alibaba-cn', 'Alibaba (China)'),
+      // Filed under a brand's alias, and holding a name of its author's own.
+      entry('dashscope', '内部中转', { configured: true, custom: true }),
+      // And one whose author left the name blank: the server echoes the id back,
+      // so the only thing left to read it as a brand with is the id itself.
+      entry('gemini', 'gemini', { configured: true, custom: true }),
+    ] });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
+    render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const nodes = () => screen.getAllByRole('button').filter((node) => node.querySelector('strong'));
+    const rows = () => nodes().map((node) => ({ title: node.querySelector('strong')?.textContent ?? '', id: node.querySelector('small')?.textContent ?? '' }));
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0));
+
+    // The slot goes to the entry OpenCode ships, even though the relay is the
+    // configured one; and a brand with nothing but a relay behind it gets no
+    // row at all, rather than one that would name an endpoint after it.
+    expect(rows()).toEqual([{ title: 'OpenAI', id: 'openai' }, { title: 'Qwen', id: 'alibaba-cn' }]);
+
+    fireEvent.click(screen.getByRole('button', { name: /More providers \(2\)/ }));
+    // Both stay reachable under More, under what they were configured as.
+    expect(rows().slice(2)).toEqual([{ title: 'gemini', id: 'gemini' }, { title: '内部中转', id: 'dashscope' }]);
+    // And they are drawn as what they are — an address you supply, the same
+    // mark the custom vendor has always used — not as the brand they sit next to.
+    const mark = (id: string) => nodes().find((node) => node.querySelector('small')?.textContent === id)
+      ?.querySelector('.connection-provider-mark')?.innerHTML;
+    expect(mark('dashscope')).toBe(mark('gemini'));
+    expect(mark('dashscope')).not.toBe(mark('alibaba-cn'));
+
+    // Searching a brand reaches the entries that brand actually ships — under
+    // their own names, since search lists rather than collapses — and never the
+    // relay wearing its id.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'qwen' } });
+    expect(rows()).toEqual([{ title: 'Alibaba (China)', id: 'alibaba-cn' }]);
+    // ...and the relay is found by the name its author gave it.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: '内部' } });
+    expect(rows()).toEqual([{ title: '内部中转', id: 'dashscope' }]);
+
+    // Including where it matters most: the capsule over the key field names the
+    // endpoint the key is about to be written to.
+    fireEvent.click(screen.getByRole('button', { name: /内部中转/ }));
+    expect(await screen.findByLabelText(en.onboarding.connection.apiKeyLabel)).toBeTruthy();
+    const capsule = screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen');
+    expect(capsule?.textContent).toContain('内部中转');
+    expect(capsule?.textContent).not.toContain('Qwen');
   });
 
   it('never offers a local provider for an API Key, and follows OAuth capability for subscriptions', async () => {

@@ -27,6 +27,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { BackendIcon } from '../visual';
 import { VendorGlyph } from '../settings/models/vendorGlyph';
+import { CUSTOM_VENDOR } from '../settings/models/apiKeyVendors';
 import { providerBrandLabel, providerLabel, providerVendorId, setupPrimaryRank, SETUP_PRIMARY_VENDORS } from '../settings/providers/providerIdentity';
 import { BackendConnectionForm } from '../settings/providers/BackendConnectionForm';
 import type { BackendId } from '../settings/shared/useBackendRuntime';
@@ -39,11 +40,31 @@ import type { BackendId } from '../settings/shared/useBackendRuntime';
  *  that brand's entries it is. */
 type PickerRow = { entry: OpencodeProvider; label: string };
 
+// A custom provider's id is whatever its author typed into Settings, and OpenCode
+// only reserves the ids it ships itself — so someone's own relay can be filed
+// under `dashscope`, or under a brand's own name. That id is not evidence of a
+// brand, and the catalog alias must not read it as one: a relay that inherited
+// Qwen's slot, name and mark would be the row a person picks to connect Qwen,
+// and the credential would be written to the relay. So identity for these rows
+// comes from what they were configured as, and they are never brand candidates.
+
+/** The mark a row draws. 自定义 has never had a logo — it takes the field's own
+ *  subject, an address you supply — and that is exactly what a custom provider
+ *  is, so it draws the same thing rather than borrowing a brand's. */
+const providerMark = (entry: OpencodeProvider) => entry.custom ? CUSTOM_VENDOR : providerVendorId(entry.id);
+
+/** What a row is called where it is not standing in a brand slot. `providerLabel`
+ *  would read a relay filed under `dashscope` as "Qwen" the moment its author
+ *  left the name blank, because the server echoes the id back as the name. */
+const providerTitle = (entry: OpencodeProvider) => entry.custom
+  ? entry.name?.trim() || entry.id
+  : providerLabel(entry.id, entry.name);
+
 function ProviderRow({ entry, label, onPick }: PickerRow & { onPick: () => void }) {
   const { t } = useTranslation();
   return (
     <button type="button" className="connection-provider focus-visible:outline-2 focus-visible:outline-ring" onClick={onPick}>
-      <span className="connection-provider-mark"><VendorGlyph vendor={providerVendorId(entry.id)} /></span>
+      <span className="connection-provider-mark"><VendorGlyph vendor={providerMark(entry)} /></span>
       <span className="connection-provider-text">
         <strong>{label}</strong>
         <small>{label.toLowerCase() === entry.id.toLowerCase() ? entry.description || entry.id : entry.id}</small>
@@ -105,12 +126,15 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
     // below are an API-key presentation order, not an authentication catalog.
     const eligible = providers.filter((entry) => (method === 'api_key' ? !entry.local : entry.oauth_available));
     // Both names are searchable, so "qwen" finds the row OpenCode calls
-    // "Alibaba (China)" and "alibaba" still finds it too.
-    const matching = eligible.filter((entry) => !term
-      || `${providerBrandLabel(entry.id, entry.name)} ${providerLabel(entry.id, entry.name)} ${entry.name} ${entry.id} ${entry.models.join(' ')}`.toLowerCase().includes(term));
-    const rank = (entry: OpencodeProvider) => method === 'api_key' ? setupPrimaryRank(entry.id) : null;
+    // "Alibaba (China)" and "alibaba" still finds it too. A custom provider is
+    // searched by what it is — its own name, its id, its models — and not by the
+    // brand its id happens to spell.
+    const haystack = (entry: OpencodeProvider) => [providerTitle(entry), entry.name, entry.id, entry.models.join(' '),
+      entry.custom ? '' : `${providerBrandLabel(entry.id, entry.name)} ${providerLabel(entry.id, entry.name)}`].join(' ').toLowerCase();
+    const matching = eligible.filter((entry) => !term || haystack(entry).includes(term));
+    const rank = (entry: OpencodeProvider) => method === 'api_key' && !entry.custom ? setupPrimaryRank(entry.id) : null;
     const row = (entry: OpencodeProvider, brand = false): PickerRow => ({ entry,
-      label: brand ? providerBrandLabel(entry.id, entry.name) : providerLabel(entry.id, entry.name) });
+      label: brand ? providerBrandLabel(entry.id, entry.name) : providerTitle(entry) });
     // No two rows on screen may read the same, or there is nothing to act on
     // the difference with. The first row to use a title keeps it — and a brand
     // slot is always first — so the eight always read as their brand, and a
@@ -134,12 +158,13 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
         if (a !== null) return -1;
         if (b !== null) return 1;
         if (left.configured !== right.configured) return left.configured ? -1 : 1;
-        return providerLabel(left.id, left.name).localeCompare(providerLabel(right.id, right.name));
+        return providerTitle(left).localeCompare(providerTitle(right));
       }).map((entry) => row(entry))),
       more: [] as PickerRow[],
     };
     const byVendor = new Map<string, OpencodeProvider[]>();
     for (const entry of matching) {
+      if (entry.custom) continue;
       const vendor = providerVendorId(entry.id);
       const group = byVendor.get(vendor);
       if (group) group.push(entry); else byVendor.set(vendor, [entry]);
@@ -150,7 +175,9 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
     // represents a brand is decided rather than incidental: one already holding
     // credentials, else the id that IS the brand, else the lowest id. So two
     // aliases of one brand can never both take the shortlist, and two reads of
-    // the same catalog can never trade them.
+    // the same catalog can never trade them. Only entries OpenCode ships are
+    // candidates: a brand with nothing but a custom relay behind it gets no row
+    // rather than a row that would name someone's endpoint after it.
     const chosen = SETUP_PRIMARY_VENDORS.flatMap((vendor) => {
       const group = byVendor.get(vendor);
       if (!group?.length) return [];
@@ -188,8 +215,8 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
         </div>
       ) : provider ? (
         <div className="connection-controls connection-chosen">
-          <span className="connection-provider-mark"><VendorGlyph vendor={providerVendorId(provider.id)} /></span>
-          <span className="connection-provider-text"><strong>{providerLabel(provider.id, provider.name)}</strong><small>{t('onboarding.connection.providerDescription')}</small></span>
+          <span className="connection-provider-mark"><VendorGlyph vendor={providerMark(provider)} /></span>
+          <span className="connection-provider-text"><strong>{providerTitle(provider)}</strong><small>{t('onboarding.connection.providerDescription')}</small></span>
           <Button variant="ghost" size="xs" disabled={busy} onClick={() => setProvider(undefined)}>{t('onboarding.connection.changeProvider')}</Button>
         </div>
       ) : null}

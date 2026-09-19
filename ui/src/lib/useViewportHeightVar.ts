@@ -5,8 +5,10 @@ import { isSoftKeyboardOpen, isTouchCapableDevice } from './softKeyboard';
 // virtual keyboard opens — only the VISUAL viewport shrinks — so a bottom-pinned
 // chat composer ends up stranded with a large gap above the keyboard (dvh alone
 // doesn't fix it on iOS, and interactive-widget=resizes-content isn't supported
-// there). Mirror window.visualViewport.height into the --app-vvh CSS var
-// (rAF-throttled).
+// there). Mirror window.visualViewport into the --app-vvh / --app-vvt CSS vars
+// (rAF-throttled): how much of the window a person can see, and where that band
+// starts, since iOS also PANS the visual viewport to keep a focused field in
+// sight and `position: fixed` is laid out against the layout viewport.
 //
 // NB: the MOBILE shell deliberately does NOT consume this — sizing the shell to
 // it mid-focus fought iOS's own scroll-into-view and flung the input off the top
@@ -46,9 +48,18 @@ export function useViewportHeightVar(): void {
       // closed; isSoftKeyboardOpen() is scale-aware, so it still fires while zoomed.
       if (vv.scale > 1 && !isSoftKeyboardOpen()) {
         document.documentElement.style.removeProperty('--app-vvh');
+        document.documentElement.style.removeProperty('--app-vvt');
         return;
       }
       document.documentElement.style.setProperty('--app-vvh', `${Math.round(vv.height)}px`);
+      // Where that height starts. iOS pans the visual viewport over the layout
+      // viewport to keep a focused field in sight, and `position: fixed` is laid
+      // out against the LAYOUT viewport — so a height alone describes how much a
+      // person can see but not which part, and anything centred on it drifts by
+      // the pan. Written and cleared with the height it belongs to, so the two
+      // are never read from different moments. (`scroll` is already listened to:
+      // a pan moves this without changing the height.)
+      document.documentElement.style.setProperty('--app-vvt', `${Math.round(vv.offsetTop)}px`);
     };
     const schedule = () => {
       if (raf) return;

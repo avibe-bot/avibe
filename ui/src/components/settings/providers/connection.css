@@ -39,15 +39,38 @@
   /* The middle of that room, which is not the middle of the window. A soft
      keyboard takes the bottom of the screen without moving the layout viewport,
      so a frame centred on the window keeps its lower half under the keyboard
-     even after it has shrunk enough to fit above it. Off a phone this is exactly
-     50% again: the room is the whole window. */
-  --connection-centre: calc((env(safe-area-inset-top, 0px) + var(--app-vvh, 100dvh) - env(safe-area-inset-bottom, 0px)) / 2);
+     even after it has shrunk enough to fit above it.
+
+     The room also moves. iOS pans the visual viewport over the layout viewport
+     to keep a focused field visible, and `position: fixed` is measured against
+     the LAYOUT viewport — so once it has panned, the top of what a person can
+     see is no longer 0. `--app-vvt` is that offset, mirrored beside the height
+     it belongs to; without it the frame is centred on a band that has scrolled
+     away, by exactly as much as the pan. Off a phone both terms are their
+     defaults and this is exactly 50% again: the room is the whole window. */
+  --connection-centre: calc(var(--app-vvt, 0px) + (env(safe-area-inset-top, 0px) + var(--app-vvh, 100dvh) - env(safe-area-inset-bottom, 0px)) / 2);
   width: min(568px, var(--connection-room-w)); max-width: 568px;
   height: min(var(--connection-h), var(--connection-room-h));
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--connection-head) var(--connection-desc) var(--connection-controls) minmax(0, 1fr) var(--connection-footer);
-  /* The frame never scrolls; its middle does. */
-  overflow: hidden;
+  /* The frame does not scroll; its middle does. Every band below sizes the rows
+     down as the room shrinks, and at each one the middle still absorbs what is
+     left — so in every room the design describes, this axis has nothing to do.
+
+     It is the last resort for the rooms it does not. Once the middle is at
+     nothing the frame still owes its rows, gaps and padding — 232 in the
+     shortest band — and there is no fifth row left to take it out of. A phone
+     held sideways is 390 tall before a keyboard takes any of it, so a keyboard
+     there is already under that floor. Sizing the rows off the measured height
+     moves the floor; it does not remove it. Under it, `hidden` lays the footer
+     out past the frame's edge and the one button that dismisses the dialog
+     cannot be reached at all.
+
+     So the frame scrolls rather than clips: still fixed, still anchored, still
+     five rows, and reachable end to end in a room smaller than its own chrome.
+     A guarantee, not a second layout — above the floor nothing here applies,
+     and below it a frame a person can scroll is one they can still finish. */
+  overflow-x: hidden; overflow-y: auto;
   padding: var(--connection-pad); gap: var(--connection-gap); border-radius: 16px;
   border-color: var(--border-strong); background: var(--surface-2);
   box-shadow: 0 18px 48px var(--desktop-overlay-shadow, var(--connection-overlay-shadow));

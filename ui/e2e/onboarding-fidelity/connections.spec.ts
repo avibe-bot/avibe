@@ -395,20 +395,36 @@ for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 300 }
  * soft keyboard can exist at all — and on a desktop it must NOT move, which is the
  * second half of this test.
  */
+/** Installed before the bundle, so the resting height the product measures at start-up
+ *  is the real one and only what a keyboard does to it afterwards is simulated. */
+const simulateSoftKeyboard = (page: Page) => page.addInitScript(() => {
+  const view = window.visualViewport;
+  if (!view) return;
+  const real = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(view), 'height')!.get!;
+  let keyboard = 0;
+  Object.defineProperty(view, 'height', { configurable: true, get: () => real.call(view) - keyboard });
+  Object.defineProperty(window, '__keyboard', { value: (height: number) => { keyboard = height; view.dispatchEvent(new Event('resize')); } });
+  // The other half of the same keyboard. iOS also PANS the visual viewport over the
+  // layout viewport to keep the focused field in sight: the room does not change
+  // size, it changes place — and `scroll`, not `resize`, is what the platform sends.
+  // A height alone says how much a person can see and not which part, so anything
+  // centred on the height alone is left behind by exactly this much.
+  let pan = 0;
+  Object.defineProperty(view, 'offsetTop', { configurable: true, get: () => pan });
+  Object.defineProperty(window, '__pan', { value: (top: number) => { pan = top; view.dispatchEvent(new Event('scroll')); } });
+});
+const softKeyboard = (page: Page, height: number) => page.evaluate((value) =>
+  (window as unknown as { __keyboard: (height: number) => void }).__keyboard(value), height);
+const panTo = (page: Page, top: number) => page.evaluate((value) =>
+  (window as unknown as { __pan: (top: number) => void }).__pan(value), top);
+const viewportVar = (page: Page, name: string) => page.evaluate((property) =>
+  document.documentElement.style.getPropertyValue(property), name);
+
 for (const touch of [true, false]) {
   test(`the frame ${touch ? 'gives way to the soft keyboard' : 'ignores a viewport no keyboard shrank'}`, async ({ browser }, info) => {
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: touch });
     const page = await context.newPage();
-    // Installed before the bundle so the resting height the product measures at start-up
-    // is the real one; only the shrink afterwards is simulated.
-    await page.addInitScript(() => {
-      const view = window.visualViewport;
-      if (!view) return;
-      const real = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(view), 'height')!.get!;
-      let keyboard = 0;
-      Object.defineProperty(view, 'height', { configurable: true, get: () => real.call(view) - keyboard });
-      Object.defineProperty(window, '__keyboard', { value: (height: number) => { keyboard = height; view.dispatchEvent(new Event('resize')); } });
-    });
+    await simulateSoftKeyboard(page);
     const denied = await serveProduct(page);
     await authFixtures(page);
     await openOnboarding(page, { realTime: true });
@@ -424,9 +440,9 @@ for (const touch of [true, false]) {
     // helper that this shrink is a keyboard and not a resized window.
     const resting = await page.evaluate(() => window.visualViewport!.height);
     await key.focus();
-    await page.evaluate(() => (window as unknown as { __keyboard: (height: number) => void }).__keyboard(420));
+    await softKeyboard(page, 420);
     if (touch) {
-      await expect.poll(() => page.evaluate(() => document.documentElement.style.getPropertyValue('--app-vvh'))).toBe(`${resting - 420}px`);
+      await expect.poll(() => viewportVar(page, '--app-vvh')).toBe(`${resting - 420}px`);
       const anchored = await expectFitsItsRoom(page, 620);
       // The field being typed into lives in the middle, and a keyboard this large
       // leaves the middle too short to show all of it at once. Reachable therefore
@@ -437,11 +453,29 @@ for (const touch of [true, false]) {
       expect((await settled(page)).frame).toEqual(anchored);
       await expectReachable(dialog);
       expect(await scrollers(page)).toEqual([]);
+
+      // Then the pan. The room keeps its size and moves down the screen, and the frame
+      // is `position: fixed` — laid out against the layout viewport, which did not move
+      // at all. So it has to be told, and it has to follow by the whole distance: a
+      // centre computed from the height alone stays exactly where it was, which is the
+      // half of this that a keyboard test measuring only `height` can never fail on.
+      await panTo(page, 120);
+      await expect.poll(() => viewportVar(page, '--app-vvt')).toBe('120px');
+      const panned = await expectFitsItsRoom(page, 620);
+      expect(panned.y - anchored.y, 'follows the room it is centred in').toBeCloseTo(120, 0);
+      expect(panned.height, 'a pan moves the room, it does not shrink it').toBeCloseTo(anchored.height, 0);
+      await expectReachable(dialog);
+
+      // And back: the field loses focus, the pan returns, and so does the frame.
+      await panTo(page, 0);
+      await expect.poll(() => viewportVar(page, '--app-vvt')).toBe('0px');
+      expect((await settled(page)).frame).toEqual(anchored);
     } else {
       // No soft keyboard exists here, so nothing may move: a shrunken visual viewport on
       // a desktop is a pinch-zoom or a trackpad gesture, not room the frame lost.
       await page.waitForTimeout(100);
-      expect(await page.evaluate(() => document.documentElement.style.getPropertyValue('--app-vvh'))).toBe('');
+      expect(await viewportVar(page, '--app-vvh')).toBe('');
+      expect(await viewportVar(page, '--app-vvt')).toBe('');
       expect((await settled(page)).frame!.height).toBeCloseTo(620, 0);
     }
     await settleEffects(page);
@@ -450,6 +484,70 @@ for (const touch of [true, false]) {
     await context.close();
   });
 }
+
+/**
+ * The room below the floor, which no band can size its way out of.
+ *
+ * A phone held sideways is 390 tall before a keyboard takes any of it, and the shortest
+ * band still owes 232 of that to rows, gaps and padding. The middle is what gives way,
+ * and here it is already at nothing — so the frame's own chrome is more than the room,
+ * and it is the FRAME that has to give. The bands cannot see this coming either: they
+ * are `max-height` on the layout viewport, which a soft keyboard never moves.
+ *
+ * What must survive is the part a person cannot recover from on their own. A clipped
+ * footer is a dialog with no way out; a frame they can scroll is one they can finish.
+ */
+test('a room smaller than the frame scrolls rather than clipping what it cannot hold', async ({ browser }, info) => {
+  const context = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true });
+  const page = await context.newPage();
+  await simulateSoftKeyboard(page);
+  const denied = await serveProduct(page);
+  await authFixtures(page);
+  await openOnboarding(page, { realTime: true });
+  await openSetup(page, 'en');
+  await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
+  const dialog = page.getByRole('dialog');
+  const key = dialog.getByLabel('API Key', { exact: true });
+  await expect(key).toBeVisible();
+  // Sideways with no keyboard is still a room the frame fits, and nothing scrolls but
+  // the middle. Everything below is what the keyboard alone does to it.
+  await expectFitsItsRoom(page, 620);
+  await expectReachable(dialog);
+  expect(await scrollers(page)).toEqual([]);
+
+  const resting = await page.evaluate(() => window.visualViewport!.height);
+  await key.focus();
+  await softKeyboard(page, 200);
+  await expect.poll(() => viewportVar(page, '--app-vvh')).toBe(`${resting - 200}px`);
+
+  // The frame still holds its room — centred in what is visible, margins on every side,
+  // never pushed against an edge. It just cannot hold itself.
+  const frame = await expectFitsItsRoom(page, 620);
+  const chrome = await dialog.evaluate((node) => node.scrollHeight);
+  expect(chrome, 'more frame than there is room').toBeGreaterThan(frame.height);
+
+  // So the frame is the scroller, and the only one: nothing else inside it was asked
+  // to hold more than it has room for.
+  const overflowing = await scrollers(page);
+  expect(overflowing, 'the frame, and nothing else').toHaveLength(1);
+  expect(overflowing[0]).toContain('connection-dialog');
+
+  // And the two things a person must be able to get to are reachable — by scrolling,
+  // which is the whole point, rather than by luck of where the clip happened to land.
+  for (const control of [dialog.getByRole('button', { name: 'Close' }), dialog.locator('.connection-actions button').last()]) {
+    await control.scrollIntoViewIfNeeded();
+    await expect(control).toBeInViewport();
+    expect(await control.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+    }), 'hit-testable at its centre').toBe(true);
+  }
+
+  await settleEffects(page);
+  await dialog.screenshot({ path: info.outputPath('claude-key-keyboard-844x390.png') });
+  expect(denied).toEqual([]);
+  await context.close();
+});
 
 /**
  * The same form, rendered where there is no dialog.
