@@ -180,6 +180,8 @@ async def test_fork_sets_target_baseline_but_inherits_source_history_identity():
 @pytest.mark.parametrize("prompt", [PROMPT_A, None, ""])
 @pytest.mark.parametrize("recover", [False, True])
 async def test_dispatch_renders_once_even_for_empty_prompt_and_transport_recovery(prompt, recover):
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+
     agent = _agent({})
     request = _request()
     agent._session_locks = {}
@@ -193,7 +195,7 @@ async def test_dispatch_renders_once_even_for_empty_prompt_and_transport_recover
     transport = _transport()
     fresh = _transport()
     agent._get_or_create_transport = AsyncMock(side_effect=[transport, fresh])
-    agent._drop_transport_after_failure = AsyncMock()
+    agent._drop_transport_after_failure = AsyncMock(return_value=True)
     agent._refresh_thread_developer_instructions_if_needed = AsyncMock()
     agent._bind_runtime_agent_session_id = Mock()
     agent._build_thread_developer_instructions = AsyncMock(return_value=prompt)
@@ -202,6 +204,7 @@ async def test_dispatch_renders_once_even_for_empty_prompt_and_transport_recover
         if recover else ["thread-contract"]
     )
     agent._start_turn = AsyncMock()
+    set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
     await agent.handle_message(request)
     agent._build_thread_developer_instructions.assert_awaited_once_with(request)
     assert agent._start_or_resume_thread.await_args_list == [

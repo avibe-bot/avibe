@@ -19,6 +19,7 @@ from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.base import BaseAgent as RealBaseAgent
 from modules.agents.codex.transport import CodexResponseTooLargeError, CodexRPCError
+from modules.agents.codex.session import CodexSessionManager as RealCodexSessionManager
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
@@ -50,11 +51,12 @@ class _BaseAgent:
 
     def ensure_agent_session_id(self, request, *, session_anchor=None):
         anchor = session_anchor or request.base_session_id
-        ensure = getattr(self.sessions, "ensure_agent_session_id", None)
+        sessions = getattr(self, "sessions", None)
+        ensure = getattr(sessions, "ensure_agent_session_id", None)
         if callable(ensure):
             session_id = ensure(request.session_key, self.name, anchor)
         else:
-            getter = getattr(self.sessions, "get_agent_session_row_id", None)
+            getter = getattr(sessions, "get_agent_session_row_id", None)
             session_id = getter(request.session_key, anchor, self.name) if callable(getter) else None
         if session_id:
             request.context.platform_specific["agent_session_id"] = session_id
@@ -1715,6 +1717,65 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._start_thread.assert_not_awaited()
         agent.controller.emit_agent_message.assert_not_awaited()
+
+    async def test_cold_resume_failure_binds_session_before_ownership_checks(self):
+        for incomplete_prior_binding in (False, True):
+            with self.subTest(incomplete_prior_binding=incomplete_prior_binding):
+                agent = object.__new__(CodexAgent)
+                request = SimpleNamespace(
+                    base_session_id="session-1", working_path="/tmp/work",
+                    context=SimpleNamespace(platform_specific={}),
+                    session_key="settings-1", ack_message_id=None,
+                )
+                set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
+                bad = SimpleNamespace(stop=AsyncMock(), is_alive=False)
+                fresh = SimpleNamespace(is_alive=True)
+                agent._session_locks = {}
+                agent._transport_locks = {}
+                agent._transports = {request.working_path: bad}
+                agent._transport_last_activity = {}
+                agent._session_mgr = RealCodexSessionManager()
+                if incomplete_prior_binding:
+                    agent._session_mgr.set_session_key("session-1", "settings-1")
+                    agent._session_mgr.set_cwd("session-1", request.working_path)
+                agent.sessions = SimpleNamespace(
+                    ensure_agent_session_id=Mock(return_value="ses-durable"),
+                )
+                agent._turn_registry = _HandleMessageTurnRegistry(active_turn=None)
+                agent._event_handler = SimpleNamespace(_release_stream_turn=Mock())
+                agent._delete_ack = AsyncMock()
+                agent._remove_ack_reaction = AsyncMock()
+                agent._touch_transport_activity = Mock()
+                agent._build_thread_developer_instructions = AsyncMock(return_value="prompt")
+                agent._start_or_resume_thread = AsyncMock(
+                    side_effect=[ConnectionError("stdout closed"), "thread-restored"],
+                )
+                agent._start_turn = AsyncMock()
+
+                def snapshot(target):
+                    self.assertEqual([binding.session_id for binding in target.bindings], ["ses-durable"])
+                    return SimpleNamespace(blocks_dead_transport_replacement=False)
+
+                agent.controller = SimpleNamespace(
+                    emit_agent_message=AsyncMock(),
+                    runtime_ownership=SimpleNamespace(snapshot=Mock(side_effect=snapshot)),
+                )
+
+                async def get_transport(_cwd):
+                    # Both initial acquisition and failure recovery must see a
+                    # complete producer-side binding, not a mocked predicate.
+                    target = agent._runtime_ownership_target_for_cwd(request.working_path)
+                    self.assertIsNotNone(target)
+                    self.assertEqual([binding.session_id for binding in target.bindings], ["ses-durable"])
+                    return agent._transports.get(request.working_path, fresh)
+
+                agent._get_or_create_transport = AsyncMock(side_effect=get_transport)
+                await agent.handle_message(request)
+                bad.stop.assert_awaited_once()
+                agent.controller.runtime_ownership.snapshot.assert_called_once()
+                self.assertEqual(agent._get_or_create_transport.await_count, 2)
+                agent._start_turn.assert_awaited_once()
+                agent.controller.emit_agent_message.assert_not_awaited()
 
     async def test_drop_transport_after_failure_keeps_other_sessions_when_transport_was_replaced(self):
         agent = object.__new__(CodexAgent)

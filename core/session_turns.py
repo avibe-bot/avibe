@@ -4602,6 +4602,7 @@ class SessionTurnManager:
         replayed_unknown_start = False
         unknown_start_exhausted = False
         unknown_start_run_ids: list[str] = []
+        requeued_input = False
         forced_retire_ids = retire_unwritten_delivery_ids or set()
         start_deferred = False
         linked_activation_deferred = False
@@ -4735,21 +4736,17 @@ class SessionTurnManager:
                                     "unknown start recovery lost a Delivery batch CAS"
                                 )
                     elif outcome == "not_written":
-                        receipt = {"kind": evidence_kind, **(evidence or {})}
-                        if (
-                            evidence_kind == "definitive_prewrite_failure"
-                            and receipt.get("reason") == SETTLED_BY_NO_TERMINAL_RESULT
-                            and any(
-                                delivery_store.consecutive_prewrite_start_failures(initial) + 1
-                                >= _MAX_PREWRITE_START_ATTEMPTS
-                                for initial in initial_batch
-                            )
-                        ):
-                            # No native write proves replay is safe, not that
-                            # another automatic attempt can succeed. Reuse the
-                            # existing durable explicit-recovery queue hold.
-                            receipt["requires_explicit_retry"] = True
                         for initial in initial_batch:
+                            receipt = {"kind": evidence_kind, **(evidence or {})}
+                            if (
+                                evidence_kind == "definitive_prewrite_failure"
+                                and receipt.get("reason") == SETTLED_BY_NO_TERMINAL_RESULT
+                                and delivery_store.consecutive_prewrite_start_failures(initial) + 1
+                                >= _MAX_PREWRITE_START_ATTEMPTS
+                            ):
+                                # Batch membership does not transfer one input's
+                                # exhausted retry budget to newer inputs.
+                                receipt["requires_explicit_retry"] = True
                             retire_unwritten = str(initial["id"]) in forced_retire_ids
                             owned_run_terminal = False
                             run_ids = (
@@ -4798,6 +4795,7 @@ class SessionTurnManager:
                                 raise RuntimeError(
                                     "terminal no-write evidence lost a Delivery batch CAS"
                                 )
+                            requeued_input = requeued_input or next_state == "queued"
                     else:
                         accepted = delivery_store.materialize_start_acceptance(
                             conn,
@@ -5069,6 +5067,8 @@ class SessionTurnManager:
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
+            if requeued_input:
+                self._publish_queue_update(session_id)
             self._publish_terminal_inbox_update(session_id)
         if status_changed and projected_status is not None:
             from core.inbox_events import bus

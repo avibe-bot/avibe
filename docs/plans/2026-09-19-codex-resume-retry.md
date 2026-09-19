@@ -28,23 +28,29 @@ on the same process.
    failure uses the existing `requires_explicit_retry` receipt contract.
 3. The shared Delivery/Turn settlement owner permits at most three automatic
    startup attempts ending in `definitive_prewrite_failure/no_terminal_result`
-   before requiring explicit recovery. Concurrency refusal and native
-   acceptance/unknown-start recovery keep their existing policies.
+   per Delivery before requiring explicit recovery. Batch membership never
+   transfers an older input's exhausted budget to newer inputs. Concurrency
+   refusal and native acceptance/unknown-start recovery keep their existing policies.
 4. Inputs requiring recovery remain queued with the same Delivery ID,
    snapshot, attachments, and FIFO position. Timer drains and restart recovery
    cannot replay them. The existing failure-notice Retry action and Send now
    can retry them. Validated failure-notice Retry resets the bounded budget;
    Send now grants one attempt and does not replenish an exhausted budget.
+   A concurrency refusal after Send now preserves the previous hold and reason.
    The budget derives from server-owned delivery history, not process memory
    or caller metadata.
    The shared read payload projects `requires_explicit_retry` and `retry_reason`
    from this receipt, for CLI queue inspection and the existing Web queue strip.
    These fields never authorize dispatch; the claim owner rereads the history.
+   Requeuing publishes the existing `queue.updated` event after commit so live
+   clients receive this projection without a reload.
 5. Failure-triggered Codex transport replacement uses the existing durable
    ownership and live-turn checks. A still-live shared process cannot be
    replaced while another accepted turn or protected activity owns it.
    Replacement of a definitively dead process retains the existing narrower
    ownership policy. A blocked replacement preserves session bookkeeping.
+   The adapter registers the complete durable Session binding before transport
+   acquisition or resume, including on the first turn after controller restart.
 
 ## Boundaries and intentional non-changes
 
@@ -91,3 +97,23 @@ on the same process.
 - No real model service, user Codex home, or credentials were used by the native
   contracts. Full browser/IM operation against a deployed local Incus instance
   remains a post-merge opt-in; the running workstation service was untouched.
+
+### Review follow-up
+
+The review of `805cfbc3b` is the first findings-bearing head (four threads,
+three root-cause classes: durable retry bookkeeping, runtime enrollment, and
+live projection). The orchestrator verified the full inventory and
+approved narrow contract-preserving corrections:
+
+- Per-input accounting: independently exhaust each Delivery in a mixed-age batch.
+- Runtime enrollment: produce the durable binding before any ownership-gated replacement.
+- Hold transition closure: a non-spending concurrency refusal cannot release an existing hold.
+- Live projection: publish the committed requeue through the existing queue event.
+
+Each was reproduced by a failing regression before correction. The tests use
+the real session-manager ownership target, mixed-age SQLite delivery batches,
+repeated manual retries/refusals, and a separate database connection observing
+the queue event after commit. The failing CI prompt-baseline fixture also now
+supplies real prewrite evidence and an explicit successful-replacement result.
+After these corrections, the expanded run passed 758 Python tests and 52
+subtests, including all 9 native Codex contracts. Changed-file Ruff also passed.

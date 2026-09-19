@@ -361,6 +361,7 @@ def failure_retry_state(delivery: dict[str, Any]) -> str:
 
 def explicit_start_retry_receipt(delivery: dict[str, Any]) -> dict[str, Any] | None:
     """Read the durable hold, never caller-supplied Message metadata."""
+    skipped_refusal = False
     for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
         if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
             return None
@@ -371,6 +372,15 @@ def explicit_start_retry_receipt(delivery: dict[str, Any]) -> dict[str, Any] | N
                 and receipt.get("requires_explicit_retry") is True
             ):
                 return dict(receipt)
+            if (
+                event.get("outcome") == "not_written"
+                and receipt.get("kind") == "definitive_prewrite_failure"
+                and receipt.get("reason") == "refused_concurrent_turn"
+            ):
+                skipped_refusal = True
+                continue
+            if skipped_refusal and event.get("outcome") in {"claimed", "opened"}:
+                continue
             return None
     return None
 

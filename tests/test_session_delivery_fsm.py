@@ -5723,11 +5723,11 @@ def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("retry", ["failure_notice", "send_now"])
-async def test_prewrite_retry_budget_survives_restart_and_preserves_original_input(managers, retry):
+async def test_prewrite_retry_budget_survives_restart_and_preserves_original_input(managers, retry, monkeypatch):
     """MESSAGE-DELIVERY-031: bounded failures retain FIFO input until explicit retry."""
     from tests.backend_failure_retry_helpers import reserve_failure_retry
 
-    manager, restarted, engine, _other, starts = managers
+    manager, restarted, engine, engine_b, starts = managers
     admitted = await manager.deliver(
         DeliveryRequest(
             session_id="ses_fsm", priority="p3", content="请继续检查附件 🧪",
@@ -5736,8 +5736,20 @@ async def test_prewrite_retry_budget_survives_restart_and_preserves_original_inp
         context=_context(),
     )
     original = _row(engine, admitted.delivery_id)["snapshot_json"]
+    queue_events = []
+
+    def observe_committed_queue(event, payload):
+        if event == "queue.updated":
+            assert payload == {"session_id": "ses_fsm"}
+            # A second connection proves the notification follows commit.
+            with engine_b.connect() as conn:
+                row = delivery_store.get_delivery(conn, admitted.delivery_id)
+            queue_events.append(delivery_store.public_delivery_payload(row))
+
+    monkeypatch.setattr("core.inbox_events.bus.publish", observe_committed_queue)
     for attempt in range(1, 4):
         assert len(starts) == attempt
+        queue_events.clear()
         manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
         retained = _row(engine, admitted.delivery_id)
         assert retained["state"] == "queued"
@@ -5746,6 +5758,11 @@ async def test_prewrite_retry_budget_survives_restart_and_preserves_original_inp
         public = delivery_store.public_delivery_payload(retained)
         assert public["requires_explicit_retry"] is (attempt == 3)
         assert public["retry_reason"] == (SETTLED_BY_NO_TERMINAL_RESULT if attempt == 3 else None)
+        assert queue_events[-1]["state"] == "queued"
+        assert queue_events[-1]["requires_explicit_retry"] is (attempt == 3)
+        before_duplicate_settle = len(queue_events)
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+        assert len(queue_events) == before_duplicate_settle
         await restarted.recover_durable_delivery_state("ses_fsm")
     for _ in range(3):
         assert not await manager.drain_delivery_queue("ses_fsm")
@@ -5815,6 +5832,66 @@ async def test_concurrent_start_refusal_does_not_spend_or_reset_prewrite_budget(
     retained = _row(engine, admitted.delivery_id)
     assert delivery_store.consecutive_prewrite_start_failures(retained) == 3
     assert delivery_store.requires_explicit_start_retry(retained)
+
+
+@pytest.mark.anyio
+async def test_prewrite_batched_retry_budget_is_per_input(managers):
+    manager, restarted, engine, _other, starts = managers
+    older = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="older"),
+        context=_context(),
+    )
+    manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+    await restarted.recover_durable_delivery_state("ses_fsm")
+    newer = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="新输入"),
+        context=_context(),
+    )
+    snapshot = _row(engine, newer.delivery_id)["snapshot_json"]
+    manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+    await restarted.recover_durable_delivery_state("ses_fsm")
+    assert len(starts) == 3
+    assert _row(engine, older.delivery_id)["turn_id"] == _row(engine, newer.delivery_id)["turn_id"]
+    manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+    assert delivery_store.requires_explicit_start_retry(_row(engine, older.delivery_id))
+    assert not delivery_store.requires_explicit_start_retry(_row(engine, newer.delivery_id))
+    assert delivery_store.consecutive_prewrite_start_failures(_row(engine, newer.delivery_id)) == 1
+    assert not await restarted.drain_delivery_queue("ses_fsm")
+    with engine.begin() as conn:
+        assert delivery_store.retire_queued(conn, "ses_fsm", older.delivery_id)
+    assert await restarted.drain_delivery_queue("ses_fsm")
+    assert len(starts) == 4
+    assert starts[-1][1] == "新输入"
+    assert _row(engine, newer.delivery_id)["snapshot_json"] == snapshot
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("permanent", [False, True])
+async def test_send_now_refusal_preserves_existing_retry_hold(managers, permanent):
+    manager, restarted, engine, _other, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="仍然保留"),
+        context=_context(),
+    )
+    reason = "codex_resume_unavailable" if permanent else SETTLED_BY_NO_TERMINAL_RESULT
+    for _ in range(1 if permanent else 3):
+        manager._settle_durable_prewrite_failure(
+            starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+            failure_evidence={"reason": reason, "requires_explicit_retry": True} if permanent else None,
+        )
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    for _ in range(3):
+        assert delivery_store.requires_explicit_start_retry(_row(engine, admitted.delivery_id))
+        result = await manager.send_now("ses_fsm", expected_delivery_id=admitted.delivery_id)
+        assert result["status"] == "claimed"
+        assert not delivery_store.requires_explicit_start_retry(_row(engine, admitted.delivery_id))
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome="refused_concurrent_turn")
+        count = len(starts)
+        await restarted.recover_durable_delivery_state("ses_fsm")
+        assert len(starts) == count
+        held = delivery_store.public_delivery_payload(_row(engine, admitted.delivery_id))
+        assert held["requires_explicit_retry"] is True
+        assert held["retry_reason"] == reason
 
 
 def test_definite_handler_prewrite_exception_requeues_through_terminal_boundary(

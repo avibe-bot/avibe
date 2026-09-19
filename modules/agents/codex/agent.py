@@ -409,6 +409,12 @@ class CodexAgent(BaseAgent):
         async with self._session_locks[request.base_session_id]:
             launch = None
             try:
+                # Register a complete durable binding before any transport
+                # acquisition or resume can fail and require ownership checks.
+                self.ensure_agent_session_id(request)
+                self._session_mgr.set_session_key(request.base_session_id, request.session_key)
+                self._session_mgr.set_cwd(request.base_session_id, request.working_path)
+                self._bind_runtime_agent_session_id(request)
                 if getattr(self.controller, "model_hub_runtime", None) is not None:
                     from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
@@ -459,9 +465,6 @@ class CodexAgent(BaseAgent):
                 self._event_handler._release_stream_turn(request.context)
                 return
 
-            # Resolve after queued turns, then bind this session to the runtime.
-            self._session_mgr.set_session_key(request.base_session_id, request.session_key)
-            self._session_mgr.set_cwd(request.base_session_id, request.working_path)
             self._touch_transport_activity(request.working_path)
             await self._delete_ack(request)
 
@@ -473,7 +476,6 @@ class CodexAgent(BaseAgent):
                 thread_id = self._session_mgr.get_thread_id(request.base_session_id)
 
                 if not thread_id:
-                    self.ensure_agent_session_id(request)
                     developer_instructions = await self._build_thread_developer_instructions(request)
                     prompt_rendered = True
                     thread_id = await self._start_or_resume_thread(
@@ -510,7 +512,6 @@ class CodexAgent(BaseAgent):
                 # Render once at the actual Turn boundary. Besides keeping the
                 # payload byte-stable, this avoids repeating Memory admission
                 # side effects while the same request refreshes and starts.
-                self.ensure_agent_session_id(request)
                 if not prompt_rendered:
                     developer_instructions = await self._build_thread_developer_instructions(request)
                     prompt_rendered = True
