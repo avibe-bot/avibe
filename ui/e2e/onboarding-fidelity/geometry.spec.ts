@@ -1,24 +1,26 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   PHASES, VIEWPORTS, cssEffects, freezeAt, openOnboarding, openSetup, renderedPhase,
-  serveProduct, setDocumentHidden, settleEffects, size, storeThemePreference,
+  serveModelHub, serveProduct, setDocumentHidden, settleEffects, size, storeThemePreference,
 } from './support';
 
 /**
- * The 2026-09-17 design is a set of exact numbers, so this suite measures the shipped
- * component in a browser instead of asserting that nothing overflows. Screenshots are
- * written as artifacts from the same runs that make the assertions, so the evidence and
- * the guard can never describe two different builds.
+ * The design is a set of exact relations, so this suite measures the shipped component in
+ * a browser instead of asserting that nothing overflows. Screenshots are written as
+ * artifacts from the same runs that make the assertions, so the evidence and the guard can
+ * never describe two different builds.
  *
  * Sizes: a Playwright viewport IS the web content box, so nothing is subtracted for
- * chrome. The design's own 1200x800 frames include the native 44px titlebar above the
- * web view, which makes the design's content box 1200x756 — that is the size to overlay
- * a frame against (DESIGN_FRAME below). The dispatch's 1200x800 of effective content is
- * the larger window that same content box needs, and is what the matrix captures.
+ * chrome. The design's own 1200x800 frames include the native 44px titlebar above the web
+ * view, which makes the design's content box 1200x756 — that is the size to overlay a
+ * frame against (DESIGN_FRAME below).
  *
- * The owner accepted 1104 as the desktop content cap on 2026-09-17, superseding the
- * frames' authored 880. Every number below is that decision applied to the frame's
- * proportion (1104/880 = 1.2545...), not a re-measured design.
+ * What is asserted is the RULE, not a row of copied numbers. The composition is one
+ * content column whose width is `clamp(976px, 62.5vw, 1200px)` inside the shell's gutter,
+ * and one card height taken from the window; everything else is a ratio of those two. So
+ * the helpers below re-derive the column and the card from what the browser reports, and
+ * the tests check that every dependent box is the share of them the design draws. A test
+ * that hard-coded 976 and 299 would pass on a layout that had stopped deriving them.
  */
 const DESIGN_FRAME = { width: 1200, height: 756 };
 /**
@@ -30,6 +32,15 @@ const DESIGN_FRAME = { width: 1200, height: 756 };
  */
 const CAPTURE_PHASE = 'codex-working';
 const CAPTURE_STATES = ['complete', 'working', 'waiting'];
+
+/** The card's share of the content column: three 299s and two 39.5 gaps in 976, which is
+ *  the same fraction as three 367s in 1200. One percentage, both authored rows. */
+const CARD_SHARE = 0.306352;
+/** The diagram is the card plus the return wire's band beneath it (271 drawn around 232). */
+const DIAGRAM_RATIO = 271 / 232;
+/** What the stage reserves beyond the card, spent by the introduction on the return band
+ *  and by the connection on the 20 + 44 import capsule. */
+const STAGE_EXTRA = 64;
 
 const box = async (page: Page, selector: string, index = 0) => {
   const rect = await page.locator(selector).nth(index).boundingBox();
@@ -47,103 +58,199 @@ const boxes = (page: Page, selector: string) =>
 const round = (value: number) => Math.round(value * 100) / 100;
 const spread = (values: number[]) => Math.max(...values) - Math.min(...values);
 
+/**
+ * Returns whatever is scrolled to the top, so a measurement is of the LAYOUT rather than of
+ * where a click left the view. A phone composition is taller than the screen, and reaching
+ * the button that advances the step carries the page down with it; comparing two steps'
+ * viewport coordinates across that would compare positions that never coexisted.
+ */
+const toTop = (page: Page) => page.evaluate(() => {
+  document.scrollingElement?.scrollTo(0, 0);
+  for (const node of document.querySelectorAll<HTMLElement>('*')) if (node.scrollTop) node.scrollTop = 0;
+});
+
+/**
+ * The two numbers the whole composition is derived from, read from the page rather than
+ * from the requested viewport: `vw` and `dvh` are the window including its scrollbar,
+ * which is not always the size a test asked for, and the gutter is a band the stylesheet
+ * chooses. Deriving the expectation from these is what makes the checks below a test of
+ * the RULE at whatever size the browser actually produced.
+ */
+async function frame(page: Page) {
+  const window = await page.evaluate(() => {
+    const shell = document.querySelector('.onboarding-shell') as HTMLElement;
+    const content = document.querySelector('.onboarding-shell-content') as HTMLElement;
+    return {
+      vw: globalThis.innerWidth,
+      vh: globalThis.innerHeight,
+      gutter: parseFloat(getComputedStyle(shell).paddingLeft),
+      available: content.getBoundingClientRect().width,
+    };
+  });
+  const clamp = Math.min(Math.max(976, 0.625 * window.vw), 1200);
+  // Stacked, the three cards ARE the composition, so the phone band gives them the height
+  // the reference draws rather than a share of a window that should scroll instead.
+  const stacked = window.vw < 760;
+  return {
+    ...window,
+    column: Math.min(clamp, window.available),
+    card: stacked ? 258 : Math.min(window.vh * 0.3, Math.min(window.available, clamp) * 0.3),
+    stacked,
+  };
+}
+
 test.describe('desktop reference geometry', () => {
   test.use({ viewport: { width: 1200, height: 800 } });
 
-  test('welcome matches the accepted 1104 collaboration and 802.9 access spans', async ({ page }, info) => {
+  test('the welcome draws the content column, its three card tracks and their handoff gaps', async ({ page }, info) => {
     const denied = await serveProduct(page);
     await openOnboarding(page);
     await freezeAt(page, PHASES['codex-working']);
+    const reference = await frame(page);
+    // The reference's own numbers, reached by the rule at its own frame size: a 976
+    // column of three 299 cards with 39.5 between them. Stated once, here, so a reader
+    // can see that the ratios below are the design and not an arbitrary proportion.
+    expect(round(reference.column)).toBe(976);
+    expect(round(reference.card)).toBe(240);
 
-    const collaboration = await box(page, '.onboarding-collaboration');
-    expect(round(collaboration.width)).toBe(1104);
-    expect(collaboration.height).toBeCloseTo(341.24, 1);
-    // Card size comes from a percentage track and the diagram's own width, so the
-    // proportion holds at every width; those ratios are not representable on the
-    // engine's 1/64px grid, so the numbers are met to within a sixty-fourth of a pixel.
-    for (let index = 0; index < 3; index += 1) {
-      const card = await box(page, '.onboarding-collaboration-card', index);
-      expect(card.width).toBeCloseTo(301.09, 1);
-      expect(card.height).toBeCloseTo(286.04, 1);
+    const welcome = await box(page, '.onboarding-welcome');
+    expect(welcome.width).toBeCloseTo(reference.column, 1);
+
+    const cards = await boxes(page, '.onboarding-collaboration-card');
+    expect(cards).toHaveLength(3);
+    for (const card of cards) {
+      expect(card.width).toBeCloseTo(reference.column * CARD_SHARE, 1);
+      expect(card.height).toBeCloseTo(reference.card, 1);
     }
-    const [first, second, third] = await Promise.all([0, 1, 2].map((index) => box(page, '.onboarding-collaboration-card', index)));
-    expect(second.x - (first.x + first.width)).toBeCloseTo(100.36, 1);
-    expect(third.x - (second.x + second.width)).toBeCloseTo(100.36, 1);
-    // What has to be exact is that the wire endpoints sit on the card edges: both are
-    // driven by the same percentage basis, so a port can never drift off its card.
-    const port = await box(page, '.onboarding-port', 0);
-    expect(port.x + port.width / 2).toBeCloseTo(first.x + first.width, 1);
+    const gaps = [1, 2].map((index) => cards[index].x - (cards[index - 1].x + cards[index - 1].width));
+    for (const gap of gaps) expect(gap).toBeCloseTo((reference.column - 3 * cards[0].width) / 2, 1);
+    // 39.5, to the tenth: the track is a percentage, so the browser's own rounding of it
+    // lands a hundredth away and a stricter claim would only be testing that.
+    expect(gaps[0]).toBeCloseTo(39.5, 1);
 
-    const access = await box(page, '.onboarding-access');
-    expect(access.width).toBeCloseTo(802.91, 1);
-    expect(access.x - collaboration.x).toBeCloseTo(150.55, 1);
+    // The diagram is sized from the card it contains, which is what keeps the handoff
+    // wire on the cards' midline at every window rather than only at the authored one.
+    const collaboration = await box(page, '.onboarding-collaboration');
+    expect(collaboration.width).toBeCloseTo(reference.column, 1);
+    expect(collaboration.height).toBeCloseTo(reference.card * DIAGRAM_RATIO, 1);
 
-    const action = await box(page, '.onboarding-primary-action');
-    expect(round(action.height)).toBe(44);
-    expect(action.width).toBeGreaterThanOrEqual(144);
+    // What has to be exact is that the wire endpoints sit on the card edges: the stretched
+    // viewBox and the card grid answer to the same width, so a port cannot drift off. To
+    // the pixel — a card sized by a percentage has edges on halves, so a tighter claim
+    // would be about which way the browser rounded rather than about where the wire is.
+    const ports = await boxes(page, '.onboarding-port');
+    expect(ports).toHaveLength(4);
+    const onPixel = (value: number, target: number) => expect(Math.abs(value - target)).toBeLessThanOrEqual(1);
+    onPixel(ports[0].x + ports[0].width / 2, cards[0].x + cards[0].width);
+    onPixel(ports[1].x + ports[1].width / 2, cards[1].x);
+    onPixel(ports[2].x + ports[2].width / 2, cards[1].x + cards[1].width);
+    onPixel(ports[3].x + ports[3].width / 2, cards[2].x);
+    // And the handoff runs along the cards' shared midline.
+    const midline = cards[0].y + reference.card * 116 / 232;
+    for (const port of ports) onPixel(port.y + port.height / 2, midline);
 
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath('welcome-1200x800-dark-en.png') });
     expect(denied).toEqual([]);
   });
 
-  // The design stacks the welcome with one rhythm: a 79 tall message block, then 24
-  // between every block (frame bi8Au, whose blocks sit at y=65/168/464/648 of its 756
-  // content box). The 1104 amendment makes the collaboration taller, so the blocks below
-  // it move down by that much and no other number changes.
-  test('welcome keeps the design vertical rhythm between its blocks', async ({ page }) => {
+  /**
+   * The reference stacks both steps with one rhythm — heading, 20, stage, 20, action — and
+   * reserves the stage at the card plus 64 in both. That reservation is the whole reason
+   * the two steps' buttons land on the same coordinates, so it is measured directly rather
+   * than inferred from the two steps agreeing.
+   */
+  test('the welcome spends its column on the reference rhythm', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await openOnboarding(page);
+    await freezeAt(page, PHASES['codex-working']);
+    const reference = await frame(page);
+
+    const heading = await box(page, '.onboarding-heading');
+    const stage = await box(page, '.onboarding-stage');
+    const action = await box(page, '.onboarding-primary-action');
+    const access = await box(page, '.onboarding-access');
+    expect(stage.y - (heading.y + heading.height)).toBeCloseTo(20, 0);
+    expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
+    expect(stage.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
+
+    // The access row is an epilogue under the action, not a block inside the stage: the
+    // connection step has no counterpart to it, and the stage is what the two steps share.
+    expect(access.y).toBeGreaterThan(action.y + action.height);
+    expect(denied).toEqual([]);
+  });
+
+  /**
+   * "Align Get started and Enter Workbench at identical coordinates and dimensions,
+   * centered under the Codex column on desktop and as wide as its card."
+   *
+   * Three claims, each measured: the action is the middle card's column, the cards are the
+   * same boxes in both steps, and the action does not move between them. The last one is
+   * what a person actually feels — a button that shifts under a pointer when the screen
+   * changes — so it is asserted as exact box equality, not as a tolerance.
+   */
+  test('both steps put the same action under the same middle card', async ({ page }, info) => {
     const denied = await serveProduct(page);
     await openOnboarding(page);
     await freezeAt(page, PHASES['codex-working']);
 
-    const heading = await box(page, '.onboarding-heading');
-    // The same type the design specifies: a 34/1.35 title, a 10 gap and a 14/1.57
-    // subtitle. The design reports 79 because it rounds each text box up on its own
-    // (46 + 10 + 23); the browser stacks the unrounded boxes to 77.9.
-    expect(heading.height).toBeCloseTo(78, 1);
+    const introCards = await boxes(page, '.onboarding-collaboration-card');
+    const introIdentities = await boxes(page, '.onboarding-card-identity');
+    const introAction = await box(page, '.onboarding-primary-action');
+    const introHeader = await box(page, '.onboarding-shell > header');
+    // Centred on the middle card, and exactly its width.
+    expect(introAction.x).toBeCloseTo(introCards[1].x, 1);
+    expect(introAction.width).toBeCloseTo(introCards[1].width, 1);
+    expect(round(introAction.height)).toBe(52);
+    // The introduction's trailing slot is the assistant's role.
+    await expect(page.locator('.onboarding-card-role')).toHaveCount(3);
 
-    const story = await box(page, '.onboarding-story');
-    const access = await box(page, '.onboarding-access');
-    const action = await box(page, '.onboarding-primary-action');
-    expect(story.y - (heading.y + heading.height)).toBeCloseTo(24, 0);
-    expect(access.y - (story.y + story.height)).toBeCloseTo(24, 0);
-    expect(action.y - (access.y + access.height)).toBeCloseTo(24, 0);
-    // The access block's own height is content, not cap: two 42 rows, an 8 gap, the
-    // caption and 17 of padding — the design's 160 at any width.
-    expect(round(access.height)).toBe(160);
+    await openSetup(page, 'en');
+    const setupCards = await boxes(page, '.onboarding-assistant');
+    const setupIdentities = await boxes(page, '.onboarding-card-identity');
+    const setupAction = await box(page, '.onboarding-primary-action');
+    const setupHeader = await box(page, '.onboarding-shell > header');
+
+    // The top bar does not move, and neither does the action.
+    expect(setupHeader).toEqual(introHeader);
+    for (const key of ['x', 'y', 'width', 'height'] as const) {
+      expect(round(setupAction[key])).toBeCloseTo(round(introAction[key]), 1);
+    }
+    // Same three columns, so the cards read as taking on work rather than being replaced.
+    for (let index = 0; index < 3; index += 1) {
+      expect(setupCards[index].x).toBeCloseTo(introCards[index].x, 1);
+      expect(setupCards[index].width).toBeCloseTo(introCards[index].width, 1);
+      expect(setupCards[index].y).toBeCloseTo(introCards[index].y, 1);
+      // The connection's card may grow for an error or a wrapped action; it may not shrink.
+      expect(setupCards[index].height).toBeGreaterThanOrEqual(introCards[index].height - 1);
+      // "The assistant logo and name stay at the top in both states; connection state
+      // replaces roles with enable switches" — the identity header, same offset into the
+      // same card, in both steps.
+      expect(setupIdentities[index].y - setupCards[index].y)
+        .toBeCloseTo(introIdentities[index].y - introCards[index].y, 1);
+      expect(setupIdentities[index].x).toBeCloseTo(introIdentities[index].x, 1);
+    }
+    // …and the trailing slot is now the enable switch, in the header rather than below it.
+    await expect(page.locator('.onboarding-card-identity .onboarding-assistant-enable')).toHaveCount(3);
+    expect(spread(setupIdentities.map((one) => one.y))).toBeLessThanOrEqual(1);
+
+    // The way back is the same object one row down, per the reference.
+    const back = await box(page, '.onboarding-back-action');
+    expect(back.x).toBeCloseTo(setupAction.x, 1);
+    expect(back.width).toBeCloseTo(setupAction.width, 1);
+
+    await settleEffects(page);
+    await page.screenshot({ path: info.outputPath('setup-1200x800-dark-en.png') });
     expect(denied).toEqual([]);
   });
 
-  for (const lang of ['en', 'zh']) {
-    for (const viewport of [{ width: 1200, height: 800 }, { width: 1200, height: 1200 }, { width: 390, height: 844 }]) {
-      test(`Welcome → setup preserves title/subtitle anchors ${lang} ${size(viewport)}`, async ({ page }) => {
-        await page.setViewportSize(viewport);
-        const denied = await serveProduct(page);
-        await openOnboarding(page, { lang });
-        const title = await box(page, '.onboarding-heading h1');
-        const subtitle = await box(page, '.onboarding-heading p');
-        await expect(page.getByRole('img', { name: 'avibe', exact: true })).toBeVisible();
-        await openSetup(page, lang);
-        const nextTitle = await box(page, '.onboarding-heading h2');
-        const nextSubtitle = await box(page, '.onboarding-heading p');
-        expect(nextTitle.y).toBeCloseTo(title.y, 0);
-        expect(nextSubtitle.y).toBeCloseTo(subtitle.y, 0);
-        expect(nextTitle.height).toBeCloseTo(title.height, 0);
-        const action = page.locator('.onboarding-setup .onboarding-primary-action');
-        await action.scrollIntoViewIfNeeded();
-        await expect(action).toBeInViewport();
-        expect(denied).toEqual([]);
-      });
-    }
-  }
-
   /**
-   * A short window used to buy about 30px by taking the step gaps from 24 to 16 and
-   * squeezing the access block — spending the design's own spacing at 1200x800, the
-   * reference's own frame size, where nothing was wrong. Whitespace IS the composition,
-   * so the shell scrolls instead and nothing about the type or the controls changes.
+   * A short window used to buy about 30px by taking the step gaps down and squeezing the
+   * access block — spending the design's own spacing at the reference's own frame size,
+   * where nothing was wrong. Whitespace IS the composition, so the card answers to the
+   * window height instead and anything left over scrolls.
    */
-  test('a short window scrolls rather than compressing the composition', async ({ page }) => {
+  test('a short window shortens the card rather than the composition', async ({ page }) => {
     await serveProduct(page);
     await openOnboarding(page);
     const metrics = () => page.evaluate(() => {
@@ -152,107 +259,77 @@ test.describe('desktop reference geometry', () => {
         const style = node ? getComputedStyle(node) : null;
         return style ? `${style.fontSize}/${style.lineHeight}` : 'missing';
       };
-      const rect = (selector: string) => {
-        const found = document.querySelector(selector)?.getBoundingClientRect();
-        return found ? `${Math.round(found.width)}x${Math.round(found.height)}` : 'missing';
-      };
-      return {
-        type: [read('.onboarding-heading :is(h1, h2)'), read('.onboarding-heading p'), read('.onboarding-access-tile span')],
-        action: [rect('.onboarding-primary-action'), read('.onboarding-primary-action')],
-        access: rect('.onboarding-access'),
-      };
+      return [read('.onboarding-heading :is(h1, h2)'), read('.onboarding-heading p'),
+        read('.onboarding-access-tile span'), read('.onboarding-primary-action')];
     });
     const tall = await metrics();
 
     await page.setViewportSize(DESIGN_FRAME);
     await freezeAt(page, PHASES['codex-working']);
+    // Type never pays for a short window.
     expect(await metrics()).toEqual(tall);
-
+    const reference = await frame(page);
     const heading = await box(page, '.onboarding-heading');
-    const story = await box(page, '.onboarding-story');
-    const access = await box(page, '.onboarding-access');
+    const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
-    for (const gap of [story.y - (heading.y + heading.height), access.y - (story.y + story.height), action.y - (access.y + access.height)]) {
-      expect(gap).toBeCloseTo(24, 0);
-    }
-    // Scrolling is the accepted outcome, and it has to actually be reachable.
-    expect(await page.evaluate(() => document.documentElement.scrollHeight > window.innerHeight
-      || (document.querySelector('.onboarding-shell') as HTMLElement).scrollHeight > window.innerHeight)).toBe(true);
-    await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
-    await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
+    expect(stage.y - (heading.y + heading.height)).toBeCloseTo(20, 0);
+    expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
+    // The card, and the whole composition with it, follows the window: 30% of 756.
+    const card = await box(page, '.onboarding-collaboration-card');
+    expect(card.height).toBeCloseTo(reference.card, 1);
+    expect(round(card.height)).toBe(226.8);
+
+    // And at the reference's own frame the composition then fits it exactly: the card
+    // paying for the window is what removes the scroll, not a shorter gap or smaller type.
+    const overflows = () => page.evaluate(() =>
+      (document.querySelector('.onboarding-shell') as HTMLElement).scrollHeight > globalThis.innerHeight);
+    expect(await overflows()).toBe(false);
+    await expect(page.locator('.onboarding-access')).toBeInViewport();
+
+    // Shorter than the frame it was drawn at, the card keeps paying and the leftover
+    // scrolls — the spacing and the type are never the budget, at any height.
+    await page.setViewportSize({ width: DESIGN_FRAME.width, height: 520 });
+    await freezeAt(page, 0);
+    expect(await metrics()).toEqual(tall);
+    const short = { heading: await box(page, '.onboarding-heading'), stage: await box(page, '.onboarding-stage') };
+    const shortAction = await box(page, '.onboarding-primary-action');
+    expect(short.stage.y - (short.heading.y + short.heading.height)).toBeCloseTo(20, 0);
+    expect(shortAction.y - (short.stage.y + short.stage.height)).toBeCloseTo(20, 0);
+    expect(round((await box(page, '.onboarding-collaboration-card')).height)).toBe(156);
+    expect(await overflows()).toBe(true);
+    await page.locator('.onboarding-access').scrollIntoViewIfNeeded();
+    await expect(page.locator('.onboarding-access')).toBeInViewport();
   });
 
-  test('assistant setup keeps the shared width, 88px rows and 12px spacing', async ({ page }, info) => {
-    const denied = await serveProduct(page);
-    await openOnboarding(page);
-    const welcomeTitle = await box(page, '.onboarding-heading :is(h1, h2)');
-    await openSetup(page, 'en');
-
-    const setupTitle = await box(page, '.onboarding-heading :is(h1, h2)');
-    // The title's box is shared between the steps; only its y differs, because only the
-    // welcome is centred. Asserting the height keeps the two from drifting apart.
-    expect(round(setupTitle.height)).toBe(round(welcomeTitle.height));
-
-    const assistants = await box(page, '.onboarding-assistants');
-    expect(round(assistants.width)).toBe(1104);
-    // The block keeps native sNs1V's 360 slot as a reserved minimum: small content growth
-    // — a detection error, an install chip — is absorbed by the slack already there
-    // instead of moving the button, and anything larger grows the block naturally.
-    expect(await page.locator('.onboarding-assistants').evaluate((node) => getComputedStyle(node).minHeight)).toBe('360px');
-    expect(assistants.height).toBeGreaterThanOrEqual(360);
-    await expect(page.locator('.onboarding-assistant')).toHaveCount(3);
-    for (let index = 0; index < 3; index += 1) {
-      const row = await box(page, '.onboarding-assistant', index);
-      // Width follows the shared cap; height stays the design's 88 because the row's
-      // content fits it, not because a fixed height forces it.
-      expect([round(row.width), round(row.height)]).toEqual([1104, 88]);
-      // Inside the row nothing was rescaled: a 44 well 20 from the edge, then identity
-      // 16 further in, exactly as frame i3vw9 lays every backend row out.
-      const logo = await box(page, '.onboarding-assistant-logo', index);
-      expect([round(logo.width), round(logo.height)]).toEqual([44, 44]);
-      expect(round(logo.x - row.x)).toBe(20);
-      expect(round(logo.y - row.y)).toBe(22);
-      const identity = await box(page, '.onboarding-assistant-identity', index);
-      expect(round(identity.x - row.x)).toBe(80);
-    }
-    // 12 between the section bar and the first row, and between rows (design pitch 100).
-    const header = await box(page, '.onboarding-assistants-header');
-    const [firstRow, secondRow] = await Promise.all([0, 1].map((index) => box(page, '.onboarding-assistant', index)));
-    expect(firstRow.y - (header.y + header.height)).toBeCloseTo(12, 0);
-    expect(round(secondRow.y - firstRow.y)).toBe(100);
-    // The setup heading keeps the welcome's 24 to the block below it.
-    const setupHeading = await box(page, '.onboarding-heading');
-    expect(header.y - (setupHeading.y + setupHeading.height)).toBeCloseTo(24, 0);
-    // And the same 24 below the slot, which puts the button 52 under the last row: the
-    // slot's own spare height plus that gap. Measuring both is what proves the 52 comes
-    // from the 360 slot rather than from a margin someone tuned to match it.
-    const footer = await box(page, '.onboarding-setup-footer');
-    const lastRow = await box(page, '.onboarding-assistant', 2);
-    const cta = await box(page, '.onboarding-primary-action');
-    expect(footer.y - (assistants.y + assistants.height)).toBeCloseTo(24, 0);
-    expect(cta.y - (lastRow.y + lastRow.height)).toBeCloseTo(52, 0);
-
-    await settleEffects(page);
-    await page.screenshot({ path: info.outputPath('setup-1200x800-dark-en.png') });
-    expect(denied).toEqual([]);
-  });
-
-  // The live design sets one headline everywhere: 34/1.35/600 at -1.6 tracking (XKQOx,
-  // Igagh and hv9DA all agree), which is tighter than the browser default this shipped
-  // with. Both steps read it from the same rule, so both are checked.
-  test('both steps use the live design headline tracking', async ({ page }) => {
-    await serveProduct(page);
-    await openOnboarding(page);
-    const type = () => page.evaluate(() => {
-      const node = document.querySelector('.onboarding-heading :is(h1, h2)');
-      const style = node ? getComputedStyle(node) : null;
-      return style ? { size: style.fontSize, tracking: style.letterSpacing, weight: style.fontWeight } : null;
+  /**
+   * The reference's four headline rows are one rule, not four sizes: 32 at 1366, 34 at
+   * 1440, 50 at 1920 and 30 on a phone are all `3.333vw - 14` held between 30 and 50, with
+   * the tracking following the size proportionally so a larger headline is never tighter
+   * than the one drawn. Both steps read it from the same rule, so both are checked.
+   */
+  for (const width of [1920, 1440, 1366, 1200, 390]) {
+    test(`the headline follows the design's own size rule at ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await serveProduct(page);
+      await openOnboarding(page);
+      const type = () => page.evaluate(() => {
+        const node = document.querySelector('.onboarding-heading :is(h1, h2)')!;
+        const style = getComputedStyle(node);
+        return {
+          vw: globalThis.innerWidth,
+          size: parseFloat(style.fontSize),
+          tracking: parseFloat(style.letterSpacing),
+          weight: style.fontWeight,
+        };
+      });
+      const intro = await type();
+      expect(intro.size).toBeCloseTo(Math.min(Math.max(30, 3.333 * intro.vw / 100 - 14), 50), 1);
+      expect(intro.tracking / intro.size).toBeCloseTo(-0.047, 3);
+      expect(intro.weight).toBe('600');
+      await openSetup(page, 'en');
+      expect(await type()).toEqual(intro);
     });
-    const expected = { size: '34px', tracking: '-1.6px', weight: '600' };
-    expect(await type()).toEqual(expected);
-    await openSetup(page, 'en');
-    expect(await type()).toEqual(expected);
-  });
+  }
 
   test('every handoff pulse rides the wire that connects its two cards', async ({ page }, info) => {
     const denied = await serveProduct(page);
@@ -277,15 +354,30 @@ test.describe('capped fluid width', () => {
       const denied = await serveProduct(page);
       await openOnboarding(page);
       await freezeAt(page, PHASES['codex-working']);
+      const reference = await frame(page);
 
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-      const collaboration = await box(page, '.onboarding-collaboration');
-      // Capped fluid: never wider than the accepted cap, never wider than the viewport.
-      expect(collaboration.width).toBeLessThanOrEqual(1104);
-      expect(collaboration.width).toBeLessThanOrEqual(viewport.width);
-      const wires = await box(page, '.onboarding-wires');
-      // The stretched wire box always covers the cards, so no pulse can detach.
-      expect(round(wires.width)).toBe(round(collaboration.width));
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
+      // Capped fluid: the rule's own width, never wider than the window's content box.
+      const welcome = await box(page, '.onboarding-welcome');
+      expect(welcome.width).toBeCloseTo(reference.column, 1);
+      expect(welcome.width).toBeLessThanOrEqual(reference.available + 0.5);
+
+      const cards = await boxes(page, '.onboarding-collaboration-card');
+      if (reference.stacked) {
+        // Stacked: one column, and each card the height the reference draws.
+        expect(spread(cards.map((card) => card.x))).toBeLessThanOrEqual(1);
+        for (const card of cards) expect(card.height).toBeGreaterThanOrEqual(reference.card - 1);
+      } else {
+        const collaboration = await box(page, '.onboarding-collaboration');
+        for (const card of cards) {
+          expect(card.width).toBeCloseTo(reference.column * CARD_SHARE, 1);
+          expect(card.height).toBeCloseTo(reference.card, 1);
+        }
+        // The stretched wire box always covers the cards, so no pulse can detach.
+        const wires = await box(page, '.onboarding-wires');
+        expect(round(wires.width)).toBe(round(collaboration.width));
+        expect(collaboration.height).toBeCloseTo(reference.card * DIAGRAM_RATIO, 1);
+      }
 
       // The primary action stays reachable: short viewports scroll rather than clip.
       const action = page.locator('.onboarding-primary-action');
@@ -301,62 +393,224 @@ test.describe('capped fluid width', () => {
   }
 
   /**
-   * The access block is drawn 640 wide on the diagram's own 880 box, so its edges land
-   * on the vertical legs of the return wire — the ports at x=120 and x=760. Checking
-   * that at the cap alone would pass on a block sized from a fixed number that happens
-   * to agree there, so it is checked at every width in between: only a width derived
-   * from the diagram's ACTUAL width can hold the relation at all of them.
+   * "Six access points … using circular logo containers, compact spacing and names
+   * underneath", drawn as a centred 560 row. It is the one block here that does not grow
+   * with the window, and deliberately: stretching six destinations to 1200 turns a row of
+   * logos into a rule across the bottom of the page. So the span is checked at widths where
+   * everything else around it is a different size.
    */
-  for (const width of [1440, 1200, 1100, 1024, 900, 768]) {
-    test(`the access block spans the return wire legs at ${width}`, async ({ page }) => {
+  for (const width of [1920, 1366, 1024, 768]) {
+    test(`the access row is a centred 560 of six circles at ${width}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await serveProduct(page);
       await openOnboarding(page);
-      await freezeAt(page, PHASES['codex-working']);
 
       const access = await box(page, '.onboarding-access');
-      // PORTS index 5 is the x=120 leg and index 4 the x=760 one; `preserveAspectRatio`
-      // is none, so each maps to that share of the rendered width.
-      const left = await box(page, '.onboarding-port', 5);
-      const right = await box(page, '.onboarding-port', 4);
-      expect(access.x).toBeCloseTo(left.x + left.width / 2, 0);
-      expect(access.x + access.width).toBeCloseTo(right.x + right.width / 2, 0);
+      const welcome = await box(page, '.onboarding-welcome');
+      expect(round(access.width)).toBe(560);
+      expect(access.x + access.width / 2).toBeCloseTo(welcome.x + welcome.width / 2, 0);
+
+      const tiles = await boxes(page, '.onboarding-access-tile');
+      expect(tiles).toHaveLength(6);
+      // One row, on the 560/6 pitch the tracks produce rather than a gap someone typed.
+      expect(spread(tiles.map((tile) => tile.y))).toBeLessThanOrEqual(1);
+      for (let index = 1; index < tiles.length; index += 1) {
+        expect(tiles[index].x - tiles[index - 1].x).toBeCloseTo(560 / 6, 1);
+      }
+      const icons = await page.locator('.onboarding-access-icon').evaluateAll((nodes) => nodes.map((node) => {
+        const rect = node.getBoundingClientRect();
+        return { width: rect.width, height: rect.height, radius: getComputedStyle(node).borderRadius };
+      }));
+      for (const icon of icons) expect(icon).toEqual({ width: 52, height: 52, radius: '50%' });
     });
   }
 
-  /**
-   * The one documented exception. Two columns of 640/880 of a phone would be about
-   * 200px of tiles inside a 360px screen, so below 600 the block takes the full content
-   * width and the tiles stay a readable target — deliberately leaving the wire relation
-   * rather than following it into an unusable size.
-   */
-  test('phones take the full content width instead, on purpose', async ({ page }) => {
+  test('phones fold the access row into two rows of three and keep full labels', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await serveProduct(page);
     await openOnboarding(page);
     const access = await box(page, '.onboarding-access');
     const welcome = await box(page, '.onboarding-welcome');
+    // Six 52px circles cannot sit on one 350px row, so the fixed span is given up here.
     expect(round(access.width)).toBe(round(welcome.width));
-  });
 
-  test('access tiles drop to two columns on phones and keep full labels', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await serveProduct(page);
-    await openOnboarding(page);
     const tiles = page.locator('.onboarding-access-tile');
     await expect(tiles).toHaveCount(6);
-    const rects = await tiles.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().top));
-    expect(new Set(rects.map((top) => Math.round(top))).size).toBe(3);
-    const labels = await tiles.evaluateAll((nodes) => nodes.map((node) => node.scrollWidth <= node.clientWidth + 1));
+    const rows = await tiles.evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)));
+    expect(new Set(rows).size).toBe(2);
+    const labels = await page.locator('.onboarding-access-label')
+      .evaluateAll((nodes) => nodes.map((node) => node.scrollWidth <= node.clientWidth + 1));
     expect(labels).toEqual([true, true, true, true, true, true]);
   });
 });
 
 /**
+ * The reservation, checked where it is hardest rather than only where it was designed.
+ * The action's coordinates are shared by the two steps at every accepted size and in both
+ * languages, which is a claim about the HEADING and the STAGE holding their heights when
+ * the copy, the step and the locale all change under them. A screen-sized tolerance would
+ * make it vacuous, so this is exact box equality.
+ */
+test.describe('shared action anchor', () => {
+  for (const viewport of [
+    { width: 1920, height: 1080 }, { width: 1366, height: 768 }, { width: 1200, height: 800 },
+    { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 568 },
+  ]) {
+    for (const lang of ['en', 'zh'] as const) {
+      test(`${size(viewport)} ${lang} keeps one action anchor across both steps`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const denied = await serveProduct(page);
+        await openOnboarding(page, { lang });
+        await toTop(page);
+        const heading = await box(page, '.onboarding-heading');
+        const title = await box(page, '.onboarding-heading h1');
+        const subtitle = await box(page, '.onboarding-heading p');
+        const stage = await box(page, '.onboarding-stage');
+        const action = await box(page, '.onboarding-primary-action');
+        await expect(page.getByRole('img', { name: 'avibe', exact: true })).toBeVisible();
+
+        await openSetup(page, lang);
+        await toTop(page);
+        const nextHeading = await box(page, '.onboarding-heading');
+        const nextTitle = await box(page, '.onboarding-heading h2');
+        const nextSubtitle = await box(page, '.onboarding-heading p');
+        const nextStage = await box(page, '.onboarding-stage');
+        const nextAction = await box(page, '.onboarding-primary-action');
+
+        // The heading block is reserved, so a title that wraps in one step or one language
+        // and not in the other cannot move the stage below it.
+        expect(round(nextHeading.height)).toBeCloseTo(round(heading.height), 1);
+        expect(nextTitle.y).toBeCloseTo(title.y, 0);
+        expect(nextSubtitle.y).toBeCloseTo(subtitle.y, 0);
+        expect(round(nextStage.height)).toBeCloseTo(round(stage.height), 1);
+        for (const key of ['x', 'y', 'width', 'height'] as const) {
+          expect(round(nextAction[key])).toBeCloseTo(round(action[key]), 1);
+        }
+        await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
+        await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
+        expect(denied).toEqual([]);
+      });
+    }
+  }
+});
+
+/**
+ * The import offer. Everything about WHICH keys it counts is a component-level rule and is
+ * tested there; what only a browser can show is that the capsule is an aside rather than a
+ * banner, that refusing it does not move the button underneath, and that its help text can
+ * actually be reached by a pointer, a keyboard and a finger.
+ */
+test.describe('import capsule', () => {
+  test('is a centred capsule whose dismissal leaves the action where it was', async ({ page }, info) => {
+    await page.setViewportSize({ width: 1200, height: 800 });
+    const denied = await serveProduct(page);
+    await serveModelHub(page);
+    await openOnboarding(page, { lang: 'zh' });
+    await openSetup(page, 'zh');
+
+    const notice = page.locator('.onboarding-import-notice');
+    // Three importable keys among five scanned rows: the two native subscription tokens
+    // are the settings migration's business, never this entry's.
+    await expect(notice).toHaveText(/发现 3 个可导入模型网关的 API Key/);
+
+    const capsule = await box(page, '.onboarding-import-notice');
+    const cards = await box(page, '.onboarding-assistants');
+    const action = await box(page, '.onboarding-primary-action');
+    expect(round(capsule.height)).toBe(44);
+    // Content width, centred under the cards — not a full-width banner.
+    expect(capsule.width).toBeLessThan(cards.width);
+    expect(capsule.x + capsule.width / 2).toBeCloseTo(cards.x + cards.width / 2, 0);
+    expect(capsule.y - (cards.y + cards.height)).toBeCloseTo(20, 0);
+    expect(action.y - (capsule.y + capsule.height)).toBeCloseTo(20, 0);
+    expect(await page.locator('.onboarding-import-notice').evaluate((node) => getComputedStyle(node).boxShadow)).toBe('none');
+
+    await settleEffects(page);
+    await page.screenshot({ path: info.outputPath('import-capsule-1200x800-dark-zh.png') });
+
+    // The layout space is reserved, so refusing the offer moves nothing.
+    await page.getByRole('button', { name: '关闭导入提示' }).click();
+    await expect(notice).toHaveCount(0);
+    const after = await box(page, '.onboarding-primary-action');
+    expect(round(after.y)).toBe(round(action.y));
+    expect(round(after.x)).toBe(round(action.x));
+    expect(denied).toEqual([]);
+  });
+
+  test('phones put the offer and its refusal on one line and the actions on the next', async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await serveProduct(page);
+    await serveModelHub(page);
+    await openOnboarding(page, { lang: 'zh' });
+    await openSetup(page, 'zh');
+
+    const text = await box(page, '.onboarding-import-notice-text');
+    const dismiss = await box(page, '.onboarding-import-notice-dismiss');
+    const actions = await box(page, '.onboarding-import-notice-actions');
+    expect(dismiss.y).toBeCloseTo(text.y + text.height / 2 - dismiss.height / 2, 0);
+    expect(actions.y).toBeGreaterThanOrEqual(text.y + text.height);
+    // The full Chinese sentence at the verified width: wrapped if it must be, never cut.
+    const intact = await page.locator('.onboarding-import-notice-text')
+      .evaluate((node) => node.scrollWidth <= node.clientWidth + 1 && getComputedStyle(node).textOverflow !== 'ellipsis');
+    expect(intact).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
+    await settleEffects(page);
+    await page.screenshot({ path: info.outputPath('import-capsule-390x844-dark-zh.png') });
+  });
+
+  // A real touch context, because the whole point of the hint's pointer handling is that
+  // a finger and a mouse arrive differently: Chromium only reports `pointerType: 'touch'`
+  // when the context actually has a touchscreen, so a synthetic event could not show that
+  // a tap produces one clean toggle instead of hover-open-then-click-closed.
+  test.describe(() => {
+    test.use({ hasTouch: true });
+
+    test('the help text opens on hover, on focus and on tap, and closes on Escape or outside', async ({ page }) => {
+      await page.setViewportSize({ width: 1200, height: 800 });
+      await serveProduct(page);
+      await serveModelHub(page);
+      await openOnboarding(page, { lang: 'zh' });
+      await openSetup(page, 'zh');
+
+      const help = page.getByRole('button', { name: '什么是模型网关？' });
+      const body = page.getByText(/模型网关集中管理 API Key 和模型连接/);
+
+      // Pointer: the panel is portalled, so it must survive the trip from trigger to panel.
+      await help.hover();
+      await expect(body).toBeVisible();
+      await body.hover();
+      await expect(body).toBeVisible();
+      await page.mouse.move(10, 10);
+      // Leaving defers the close by 120ms, which is exactly what let the pointer make
+      // the trip above. The fixture's clock is frozen, so that delay has to be spent.
+      await expect(body).toBeVisible();
+      await page.clock.runFor(200);
+      await expect(body).toBeHidden();
+
+      // Keyboard: focus reveals it and Escape takes it back, without trapping the tab order.
+      await help.focus();
+      await expect(body).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(body).toBeHidden();
+      await expect(help).toBeFocused();
+
+      // Touch: one clean toggle, and a tap elsewhere dismisses it.
+      const target = (await help.boundingBox())!;
+      await page.touchscreen.tap(target.x + target.width / 2, target.y + target.height / 2);
+      await expect(body).toBeVisible();
+      // The dismissable layer arms its outside listener in a zero-delay timeout, which a
+      // frozen clock never reaches. Spending it is the fixture's business, not a wait.
+      await page.clock.runFor(50);
+      await page.touchscreen.tap(8, 400);
+      await expect(body).toBeHidden();
+    });
+  });
+});
+
+/**
  * Narrow widths are where a card stops being a scaled copy of the design and becomes an
- * adaptation, so the thing to check is that the adaptation is ONE arrangement rather
- * than whichever one each label's length happens to produce. Every assertion here reads
- * real bounding boxes: three status rows that start and end together, three identities
+ * adaptation, so the thing to check is that the adaptation is ONE arrangement rather than
+ * whichever one each label's length happens to produce. Every assertion here reads real
+ * bounding boxes: three identity headers that start and end together, three status rows
  * that do, and no label clipped or truncated to make that true.
  */
 test.describe('narrow identity alignment', () => {
@@ -379,37 +633,43 @@ test.describe('narrow identity alignment', () => {
             // freezeAt advances the clock; these phase offsets are absolute.
             await freezeAt(page, elapsed - previous);
             previous = elapsed;
+            const identities = await boxes(page, '.onboarding-card-identity');
             const statuses = await boxes(page, '.onboarding-story-status');
             const skeletons = await boxes(page, '.onboarding-skeleton');
-            const identities = await boxes(page, '.onboarding-story-identity');
             const cards = await boxes(page, '.onboarding-collaboration-card');
-            expect([statuses.length, identities.length]).toEqual([3, 3]);
-            // The header and footer boundaries belong to the row, not to whichever
-            // caption happens to be short enough at this point in the animation.
-            for (const row of [statuses, skeletons, identities]) {
-              expect(spread(row.map((one) => one.y))).toBeLessThanOrEqual(1);
+            expect([identities.length, statuses.length, skeletons.length]).toEqual([3, 3, 3]);
+            // The header and status boundaries belong to the arrangement, not to whichever
+            // caption happens to be short enough at this point in the animation. Below 760
+            // the three cards stack, so the boundary they share is the offset INSIDE the
+            // card: the same claim, and on one row the same measurement.
+            for (const row of [identities, statuses, skeletons]) {
+              expect(spread(row.map((one, index) => one.y - cards[index].y))).toBeLessThanOrEqual(1);
               expect(spread(row.map((one) => one.height))).toBeLessThanOrEqual(1);
             }
+            // Side by side, that offset is also one screen row; stacked, it cannot be.
+            expect(spread(cards.map((card) => card.y)) <= 1).toBe(viewport.width >= 760);
             for (let index = 0; index < cards.length; index++) {
-              for (const row of [statuses, skeletons, identities]) {
+              for (const row of [identities, statuses, skeletons]) {
                 expect(row[index].x).toBeGreaterThanOrEqual(cards[index].x);
                 expect(row[index].x + row[index].width).toBeLessThanOrEqual(cards[index].x + cards[index].width);
               }
               expect(skeletons[index].height).toBeGreaterThan(0);
+              // Identity first, then the status line, then the work — in both steps.
+              expect(identities[index].y).toBeGreaterThanOrEqual(cards[index].y - 1);
+              expect(identities[index].y + identities[index].height).toBeLessThanOrEqual(statuses[index].y + 1);
               expect(statuses[index].y + statuses[index].height).toBeLessThanOrEqual(skeletons[index].y + 1);
-              expect(skeletons[index].y + skeletons[index].height).toBeLessThanOrEqual(identities[index].y + 1);
-              expect(identities[index].y + identities[index].height).toBeLessThanOrEqual(cards[index].y + cards[index].height);
+              expect(skeletons[index].y + skeletons[index].height).toBeLessThanOrEqual(cards[index].y + cards[index].height + 1);
             }
 
-            // Equal rows must not be bought with clipping, truncation or overflow
-            // into an adjacent row/card. Check the actual visible label boxes.
+            // Equal rows must not be bought with clipping, truncation or overflow into an
+            // adjacent row/card. Check the actual visible label boxes.
             const clipped = await page.locator(
-              '.onboarding-story-identity strong, .onboarding-story-identity > span:last-child, .onboarding-status-text',
+              '.onboarding-card-name, .onboarding-card-role, .onboarding-status-text',
             ).evaluateAll((nodes) => nodes
               .filter((node) => {
                 const style = getComputedStyle(node);
                 const label = node.getBoundingClientRect();
-                const row = node.closest('.onboarding-story-status, .onboarding-story-identity')!.getBoundingClientRect();
+                const row = node.closest('.onboarding-card-identity, .onboarding-story-status')!.getBoundingClientRect();
                 return node.scrollWidth > node.clientWidth + 1
                   || node.scrollHeight > node.clientHeight + 1
                   || style.textOverflow === 'ellipsis'
@@ -421,9 +681,9 @@ test.describe('narrow identity alignment', () => {
           });
         }
         // …and the labels are still the product's own words at a readable size.
-        const names = await page.locator('.onboarding-story-identity strong').allInnerTexts();
+        const names = await page.locator('.onboarding-card-name').allInnerTexts();
         expect(names.map((name) => name.replace(/\s+/g, ' ').trim())).toEqual(['Claude Code', 'Codex', 'OpenCode']);
-        const smallest = await page.locator('.onboarding-story-identity > span:last-child')
+        const smallest = await page.locator('.onboarding-card-role')
           .evaluateAll((nodes) => Math.min(...nodes.map((node) => parseFloat(getComputedStyle(node).fontSize))));
         expect(smallest).toBeGreaterThanOrEqual(10);
 
@@ -525,7 +785,7 @@ test.describe('motion lifecycle', () => {
       scroller.scrollTop += amount;
     }, delta);
 
-    await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
+    await page.locator('.onboarding-access').scrollIntoViewIfNeeded();
     expect((await rect()).bottom).toBeLessThanOrEqual(0);
     expect(await page.evaluate(() => document.hidden)).toBe(false);
     await expect(diagram).toHaveAttribute('data-motion', 'paused');
@@ -652,6 +912,7 @@ test.describe('capture', () => {
         test(`${size(viewport)} ${theme} ${lang}`, async ({ page }, info) => {
           await page.setViewportSize(viewport);
           await serveProduct(page);
+          await serveModelHub(page);
           await openOnboarding(page, { lang, theme });
           await freezeAt(page, PHASES[CAPTURE_PHASE]);
           expect((await renderedPhase(page)).states).toEqual(CAPTURE_STATES);
@@ -665,23 +926,20 @@ test.describe('capture', () => {
     }
   }
 
-  // The design's own content box, for overlaying an exported frame at 1:1. This still is
-  // a VIEWPORT CROP, not the whole composition: at 756 the primary action sits below the
-  // fold, which is the accepted outcome rather than a layout the product should shrink to
-  // fit. The companion below shows it scrolled to, so the pair covers what one cannot.
+  // The design's own content box, for overlaying an exported frame at 1:1. A viewport crop
+  // is the whole composition here — both steps end inside 756 with nothing cut off — so
+  // these stills are directly comparable to the exported frames and not a partial view.
   test('design frame content box', async ({ page }, info) => {
     await page.setViewportSize(DESIGN_FRAME);
     await serveProduct(page);
     await openOnboarding(page);
     await freezeAt(page, PHASES[CAPTURE_PHASE]);
     expect((await renderedPhase(page)).states).toEqual(CAPTURE_STATES);
+    await expect(page.locator('.onboarding-access')).toBeInViewport({ ratio: 1 });
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath(`welcome-design-frame-1200x756-${CAPTURE_PHASE}.png`) });
-    await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
-    await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
-    await settleEffects(page);
-    await page.screenshot({ path: info.outputPath(`welcome-design-frame-1200x756-cta-${CAPTURE_PHASE}.png`) });
     await openSetup(page, 'en');
+    await expect(page.locator('.onboarding-primary-action')).toBeInViewport({ ratio: 1 });
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath('setup-design-frame-1200x756.png') });
   });
