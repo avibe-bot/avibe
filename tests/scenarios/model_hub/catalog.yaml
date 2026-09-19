@@ -758,7 +758,7 @@ scenarios:
     test: "ui/src/components/onboarding/ImportKeysNotice.test.tsx::MH-MIG-004: submits only the rows still ticked"
     related_tests:
       - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
-      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies a keep_native row — it is a real action here, not a leftover
+      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies only complete backend groups with one migration action
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered
@@ -1089,17 +1089,19 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_usage_events.py::test_e3_event_feed_paginates_and_never_persists_credentials
   - id: F1
-    name: Native scan produces the copy-only migration action matrix
-    status: xfail
-    kind: migration
-    layer: e2e-auto
-    test: tests/e2e/test_model_hub_migration.py::test_f1_unsupported_opencode_provider_ids_are_noted
-  - id: F2
-    name: Migration copies original API-key bytes without changing native files
+    name: Native scan groups complete custody and visible blockers
     status: assert
     kind: migration
     layer: e2e-auto
-    test: tests/e2e/test_model_hub_migration.py::test_f2_apply_is_copy_only_and_places_native_login_before_keys
+    test: tests/e2e/test_model_hub_migration.py::test_f1_native_scan_returns_the_grouped_full_custody_action_matrix
+    related_tests:
+      - tests/e2e/test_model_hub_migration.py::test_f1_unsupported_opencode_provider_ids_remain_visible_blockers
+  - id: F2
+    name: Migration takes over a complete API key and preserves blocked native material
+    status: assert
+    kind: migration
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_migration.py::test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material
   - id: F3
     name: First Model Hub visit surfaces importable native configuration
     status: skip
@@ -1166,6 +1168,5 @@ next_priority:
   - B8
   - B9
   - D1
-  - F1
   - G2
   - G3
