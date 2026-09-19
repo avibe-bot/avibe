@@ -17,6 +17,10 @@ files, but every credential-bearing copy must have same-account evidence.
 The selection revision binds all file states, including absence. Journal file
 operations include unchanged states as guards; callers must retain them when
 coalescing edits so a newly appeared fallback login cannot escape cleanup.
+A Claude Keychain containing only unrelated data also remains a no-op guard
+when OAuth is imported from a file. Its observed metadata revision remains in
+the selection and its exact value is retained for the journal's clean-store
+check; it is never exported as the credential payload.
 
 Metadata scans use ``kSecUseAuthenticationUIFail`` and temporarily disable the
 legacy process-wide Keychain interaction switch. The explicit-consent
@@ -1429,17 +1433,24 @@ def _read_keychain_snapshot(
     else:
         supported = _claude_oauth_payload(payload) is not None
         after_payload = _remove_claude_oauth(payload)
-    if not supported:
+    if not supported and backend != "claude":
         return None
 
-    after_value = json.dumps(after_payload, ensure_ascii=False, indent=2)
-    after_state: dict[str, Any] = (
-        {"exists": False} if not after_payload else {"exists": True, "value": after_value}
-    )
+    before_state = {"exists": True, "value": read.value, "revision": metadata.revision}
+    if supported:
+        after_value = json.dumps(after_payload, ensure_ascii=False, indent=2)
+        after_state: dict[str, Any] = (
+            {"exists": False} if not after_payload else {"exists": True, "value": after_value}
+        )
+    else:
+        # Keep an inspected, non-OAuth Claude container as evidence for a file
+        # fallback. Neither reserialize it nor lose its selection revision.
+        # The Claude resolver excludes this payload from credential candidates.
+        after_state = dict(before_state)
     operation = _keychain_operation(
         service,
         account,
-        {"exists": True, "value": read.value, "revision": metadata.revision},
+        before_state,
         after_state,
         isolated=isolated,
         persistent_reference=(
@@ -1527,7 +1538,10 @@ def _read_claude_files(
         if payload is not None and _claude_oauth_payload(payload) is not None
     ]
     if keychain_snapshot is not None and keychain_snapshot.exportable:
-        if keychain_snapshot.payload is not None:
+        if (
+            keychain_snapshot.payload is not None
+            and _claude_oauth_payload(keychain_snapshot.payload) is not None
+        ):
             payloads.insert(0, keychain_snapshot.payload)
     # Compare every pair: a primary lacking identity must not hide contradictory
     # identity evidence between two fallback files sharing its refresh grant.
