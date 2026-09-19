@@ -10,7 +10,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Iterable, Mapping
+from typing import AsyncIterator, Callable, Iterable, Mapping
 
 from config.v2_config import (
     ModelHubAgentSourcesConfig,
@@ -157,8 +157,12 @@ class ModelHubScenarioAdapter:
         vendor: str,
         secret: str,
         base_url: str | None,
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         ref = f"cred_observation_{len(self.provisioned_transient) + 1}"
+        if on_reserved is not None:
+            on_reserved(ref)
         self.provisioned_transient.append(ref)
         return ref
 
@@ -168,8 +172,12 @@ class ModelHubScenarioAdapter:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         ref = f"cred_source_{len(self.provisioned) + 1}"
+        if on_reserved is not None:
+            on_reserved(ref)
         self.provisioned.append(ref)
         return ref
 
