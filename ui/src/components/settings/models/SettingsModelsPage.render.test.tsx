@@ -75,6 +75,13 @@ const migrationCandidate: MigrationItem = {
   masked_credential: null,
 };
 
+const blockedMigrationCandidate: MigrationItem = {
+  ...migrationCandidate,
+  id: 'mig_claude_keychain',
+  masked_detail: 'Claude native login',
+  proposed_action: 'keep_native',
+};
+
 /** The row every re-auth journey starts from: a subscription that stopped. */
 const blockedSubscription: Source = {
   ...nativeSubscription,
@@ -210,6 +217,21 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
     await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('keeps Direct mode and blocks migration when only unsupported native auth exists', async () => {
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [blockedMigrationCandidate] });
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode')
+      .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
+    renderPage([], [directAgent('claude')]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Use the existing Add flow|现有的添加流程/)).toBeTruthy();
+    expect(
+      (within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(setMode).not.toHaveBeenCalled();
   });
 
   it('opens the same migration dialog from an existing Hub user entry', async () => {

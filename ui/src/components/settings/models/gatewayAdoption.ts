@@ -43,8 +43,8 @@ const backendRow = (agents: AgentSupply[], backend: AgentBackend): AgentSupply |
 
 /**
  * Prepares a Direct backend for adoption without changing authentication or
- * routing. A caller opens the shared migration dialog when candidates exist;
- * the migration apply owns the backend mode and native cleanup.
+ * routing. A caller opens the shared migration dialog whenever any native row
+ * exists; the dialog decides whether the backend is fully importable.
  */
 export async function resumeGatewayAdoption(
   api: Pick<ModelsApi, 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'scanMigration'>,
@@ -97,9 +97,7 @@ export async function resumeGatewayAdoption(
 
   try {
     const scan = await api.scanMigration();
-    const candidates = scan.items.filter(
-      (item) => item.backend === backend && item.proposed_action === 'import',
-    );
+    const candidates = scan.items.filter((item) => item.backend === backend);
     return { ok: true, agent: current, runtime, candidates };
   } catch (error) {
     return {

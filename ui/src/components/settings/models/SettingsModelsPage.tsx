@@ -1547,7 +1547,7 @@ export const SettingsModelsPage: React.FC = () => {
         <MigrationDialog
           open
           eligible={migrationBackend
-            ? (item) => item.backend === migrationBackend && item.proposed_action === 'import'
+            ? (item) => item.backend === migrationBackend
             : undefined}
           onClose={() => {
             setMigrationOpen(false);

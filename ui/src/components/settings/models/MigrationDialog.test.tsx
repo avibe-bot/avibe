@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
 // The settings migration and setup's key-import entry share the same takeover
-// dialog. Only rows the gateway can actually import are shown; unsupported
-// actions stay out of the user-facing checklist.
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+// dialog. A backend is one custody boundary: unsupported rows stay visible and
+// block that CLI, while a complete backend can still migrate independently.
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,7 +16,7 @@ vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
 
 import { MigrationDialog } from './MigrationDialog';
 import { isImportableKey } from './migrationScan';
-import { modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi } from './modelsApi';
 
 const SUBSCRIPTION: MigrationItem = {
   id: 'mig_claude_oauth',
@@ -106,17 +106,19 @@ afterEach(() => {
 });
 
 describe('MigrationDialog — the settings default', () => {
-  it('shows only rows that can be taken over', async () => {
+  it('shows blocked native rows and keeps a complete backend actionable', async () => {
     serve();
     renderDialog();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
-    expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
+    expect((within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).getByText('Use the existing Add flow for this CLI, then scan again.')).toBeTruthy();
+    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('applies every selected import row with one migration action', async () => {
+  it('applies only complete backend groups with one migration action', async () => {
     serve();
     renderDialog();
     const user = userEvent.setup();
@@ -126,8 +128,8 @@ describe('MigrationDialog — the settings default', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
-    expect(applied[0]).toContain('mig_claude_oauth');
-    expect(applied[0]).toEqual(['mig_claude_oauth', 'mig_codex_key', 'mig_opencode_legacy']);
+    expect(applied[0]).toEqual(['mig_codex_key', 'mig_opencode_legacy']);
+    expect(applied[0]).not.toContain('mig_claude_oauth');
   });
 
   it('selects and submits every import candidate for a backend as one group', async () => {
@@ -148,28 +150,37 @@ describe('MigrationDialog — the settings default', () => {
     expect(applied[0]).not.toContain('mig_claude_oauth_2');
   });
 
-  it('does not show or submit a reauth row, even when it is pre-selected', async () => {
+  it('shows but never submits a reauth row, even when it is pre-selected', async () => {
     serve();
     renderDialog();
     const user = userEvent.setup();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    expect(within(dialog).queryByRole('checkbox', { name: /sk-ant-…4b7e/ })).toBeNull();
+    expect((within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).not.toContain('mig_claude_reauth');
   });
 
-  it('narrows to a caller-supplied predicate without changing its own default', async () => {
-    serve();
-    renderDialog({ eligible: isImportableKey });
+  it('uses eligible as a backend scope without hiding blocked rows in that backend', async () => {
+    const claudeKey: MigrationItem = {
+      ...CODEX_KEY,
+      id: 'mig_claude_key',
+      backend: 'claude',
+      masked_detail: 'sk-ant-…1234',
+      vendor: 'anthropic',
+      display_name: 'Anthropic',
+      masked_credential: 'sk-ant-…1234',
+    };
+    serve([claudeKey, SUBSCRIPTION, REAUTH]);
+    renderDialog({ eligible: (item) => item.backend === 'claude' && isImportableKey(item) });
 
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    expect(within(dialog).queryByText(/Claude 账号登录/)).toBeNull();
-    expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
+    await waitFor(() => expect(within(dialog).getAllByText('Anthropic').length).toBeGreaterThan(0));
+    expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
+    expect((within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
 
@@ -208,6 +219,53 @@ describe('MigrationDialog — the settings default', () => {
     await user.click(start);
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(modelsApi.applyMigration).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the migrating state while apply is waiting', async () => {
+    const pending = new Promise<{ applied: number; sources: never[] }>(() => {});
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockReturnValue(pending);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await waitFor(() => expect((within(dialog).getByRole('button', { name: 'Migrating…' }) as HTMLButtonElement).disabled).toBe(true));
+  });
+
+  it.each([
+    ['migration_native_busy', 'Close the CLI or finish its tasks, then retry.'],
+    ['migration_permission_needed', 'Allow credential access, then retry.'],
+    ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
+    ['migration_item_conflict', 'The native configuration changed. Scan again.'],
+    ['migration_configuration_blocked', 'Adjust the native configuration, then scan again.'],
+  ] as const)('maps %s to concise localized copy', async (code, message) => {
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError(code));
+    renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(message, 'error'));
+  });
+
+  it.each([
+    ['settings.models.migration.blocked.config', "Adjust this CLI's configuration, then scan again."],
+    ['settings.models.migration.blocked.environment', 'Close the CLI or finish its current task, then retry.'],
+    ['settings.models.migration.blocked.credential', 'Allow credential access, then retry.'],
+    ['settings.models.migration.blocked.unknown', 'Use the existing Add flow for this CLI, then scan again.'],
+  ] as const)('maps blocked note %s to actionable copy', async (notes_key, message) => {
+    const blocked = { ...REAUTH, notes_key };
+    serve([CODEX_KEY, blocked]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    expect((within(dialog).getByRole('status') as HTMLElement).textContent).toContain(message);
   });
 });
 

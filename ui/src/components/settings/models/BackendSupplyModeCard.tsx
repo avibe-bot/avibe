@@ -159,9 +159,8 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
   const mode = agent.mode;
   const hubOutcome = connectOutcome(agent, null);
-  // Only surface the import strip for configs the migration dialog can actually
-  // apply — a reauth-only scan would open a dead-end dialog (reauth rows are
-  // disabled and excluded from apply), so those don't count as importable.
+  // The strip advertises an actionable import row. A blocked-only native
+  // configuration is still handled by the Direct → Hub migration dialog.
   const importable = detected.filter((i) => i.proposed_action === 'import');
   const detectItem = importable.find((i) => i.kind === 'api_key' || i.kind === 'opencode_provider') ?? importable[0] ?? null;
 
@@ -253,7 +252,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
       <MigrationDialog
         open={migrateOpen}
-        eligible={(item) => item.backend === backend && item.proposed_action === 'import'}
+        eligible={(item) => item.backend === backend}
         onClose={() => setMigrateOpen(false)}
         onApplied={() => {
           setMigrateOpen(false);

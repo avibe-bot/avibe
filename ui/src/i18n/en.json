@@ -1604,6 +1604,20 @@
         "empty": "No configuration found to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Migration failed, please retry",
+        "blocked": {
+          "config": "Adjust this CLI's configuration, then scan again.",
+          "environment": "Close the CLI or finish its current task, then retry.",
+          "credential": "Allow credential access, then retry.",
+          "fallback": "Use the existing Add flow for this CLI, then scan again."
+        },
+        "applying": "Migrating…",
+        "errors": {
+          "nativeBusy": "Close the CLI or finish its tasks, then retry.",
+          "permissionNeeded": "Allow credential access, then retry.",
+          "recoveryPending": "Migration is unfinished. Retry to continue.",
+          "itemConflict": "The native configuration changed. Scan again.",
+          "configurationBlocked": "Adjust the native configuration, then scan again."
+        },
         "applied_one": "Migration complete",
         "applied_other": "Migration complete",
         "later": "Later",

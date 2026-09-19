@@ -52,7 +52,7 @@ describe('resumeGatewayAdoption', () => {
     expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 
-  it('returns every import candidate for the selection dialog', async () => {
+  it('returns every detected native row for the selection dialog', async () => {
     const client = api({
       scanMigration: vi.fn().mockResolvedValue({
         items: [
@@ -65,7 +65,7 @@ describe('resumeGatewayAdoption', () => {
 
     await expect(adopt(client)).resolves.toMatchObject({
       ok: true,
-      candidates: [{ id: 'oauth' }],
+      candidates: [{ id: 'oauth' }, { id: 'keep' }],
     });
     expect(client.applyMigration).not.toHaveBeenCalled();
     expect(client.setAgentMode).not.toHaveBeenCalled();

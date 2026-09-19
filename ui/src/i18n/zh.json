@@ -1604,6 +1604,20 @@
         "empty": "没有检测到可迁移的配置。",
         "scanFailed": "扫描 Agent 配置失败，请重试",
         "applyFailed": "迁移失败，请重试",
+        "blocked": {
+          "config": "请先调整此 CLI 的配置，再重新扫描。",
+          "environment": "请先关闭 CLI 或完成当前任务，再重试。",
+          "credential": "请允许访问凭据，再重试。",
+          "fallback": "请先用现有的添加流程处理此 CLI，再重新扫描。"
+        },
+        "applying": "迁移中…",
+        "errors": {
+          "nativeBusy": "请先关闭 CLI 或完成任务，再重试。",
+          "permissionNeeded": "请允许访问凭据，再重试。",
+          "recoveryPending": "迁移尚未完成，请重试以继续。",
+          "itemConflict": "原生配置已变化，请重新扫描。",
+          "configurationBlocked": "请先调整原生配置，再重新扫描。"
+        },
         "applied_one": "迁移完成",
         "applied_other": "迁移完成",
         "later": "稍后",

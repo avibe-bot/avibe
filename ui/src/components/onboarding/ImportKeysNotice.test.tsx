@@ -160,15 +160,17 @@ describe('ImportKeysNotice', () => {
 
     const dialog = await openDialog(user);
 
-    expect(within(dialog).getByText('Anthropic')).toBeTruthy();
+    expect(within(dialog).getAllByText('Anthropic').length).toBeGreaterThan(0);
     // `display_name` was only the provider id; the shared brand mapping names it.
     expect(within(dialog).getByText('Zhipu AI')).toBeTruthy();
     // No metadata at all: the composed detail stays the title rather than a
     // provider guessed from the backend that held the key.
     expect(within(dialog).getByText('自建中转 · sk-…abcd')).toBeTruthy();
 
-    expect(within(dialog).queryByText('Claude 账号登录（OAuth）')).toBeNull();
-    expect(within(dialog).queryByText(/Keep native/)).toBeNull();
+    expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
+    expect(
+      (within(dialog).getByRole('checkbox', { name: /Claude 账号登录/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
     expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
@@ -180,7 +182,7 @@ describe('ImportKeysNotice', () => {
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('checkbox', { name: /Anthropic/ }));
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…dd3c/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
@@ -194,7 +196,7 @@ describe('ImportKeysNotice', () => {
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('checkbox', { name: /Anthropic/ }));
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…dd3c/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     // The remainder is the server's answer after the rescan, not a subtraction.
@@ -203,7 +205,7 @@ describe('ImportKeysNotice', () => {
     expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
   });
 
-  it('reports a finished import with no review action left', async () => {
+  it('keeps a blocked CLI group available after importing independent keys', async () => {
     serve(FULL_SCAN);
     renderNotice();
     const user = userEvent.setup();
@@ -211,10 +213,15 @@ describe('ImportKeysNotice', () => {
     const dialog = await openDialog(user);
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    expect(await screen.findByText('Migrated 3 API keys into Model Hub')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Review and migrate' })).toBeNull();
-    // The subscription and the reauth row are still on this machine, untouched.
-    expect(stored.map((i) => i.id)).toEqual(['mig_claude_oauth', 'mig_codex_reauth']);
+    expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
+    // The blocked Claude group remains on this machine, including its import
+    // row, and the unrelated reauth row is untouched.
+    expect(stored.map((i) => i.id)).toEqual([
+      'mig_claude_key',
+      'mig_claude_oauth',
+      'mig_codex_reauth',
+    ]);
   });
 
   it('remembers a dismissal so the same keys do not ask again', async () => {
