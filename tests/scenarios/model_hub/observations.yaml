@@ -1,6 +1,13 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-009
+    source: codex-0.154.0-hermetic-native-wire-2026-09-19
+    summary: Route-bound bearer tokens caused model changes to replace shared Codex processes. Per-turn responsesapiClientMetadata survives concurrent threads, tool continuations, retries and local automatic compaction in both the native metadata header and body. The header provides identity before body parsing; a legacy remote compact wire-only probe carries metadata only in its header.
+    affects:
+      - MH-CODEX-ROUTING-001
+      - MH-CODEX-ROUTING-002
+      - MH-CODEX-METADATA-001
   - id: MH-OBS-008
     source: local-codex-gateway-investigation-2026-09-08
     summary: A shared transport budget also limited response headers, first bytes, first model output, and buffered inference completion. Prior tests explicitly required these premature timeouts. Delayed loopback HTTP fixtures now assert completion and cancellation across all supported protocols independently of the connection budget.
