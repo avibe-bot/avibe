@@ -3554,11 +3554,14 @@ class ModelHubAgentSupplyConfig:
 
 @dataclass
 class ModelHubConfig:
-    enabled: bool = False
+    # Model Hub is the default runtime for both new installations and configs
+    # that do not carry an explicit value. An explicitly persisted ``false``
+    # remains a deliberate opt-out.
+    enabled: bool = True
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct") for backend in MODEL_HUB_BACKENDS
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in MODEL_HUB_BACKENDS
         }
     )
 
@@ -3602,7 +3605,7 @@ class ModelHubConfig:
             raise ValueError("Config 'model_hub' must be an object")
         if set(payload) - {"enabled", "sources", "agents"}:
             raise ValueError("Config 'model_hub' contains unknown fields")
-        enabled = payload.get("enabled", False)
+        enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("Config 'model_hub.enabled' must be a boolean")
         sources_payload = payload.get("sources") or []
@@ -3641,6 +3644,9 @@ class ModelHubConfig:
         agents = {}
         for backend in MODEL_HUB_BACKENDS:
             if backend not in agents_payload:
+                # An omitted legacy backend is not consent to change its
+                # working authentication. Fresh installs use the dataclass
+                # defaults; the migration transaction adopts selected backends.
                 raw_agent = ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload()
             else:
                 raw_agent = agents_payload[backend]
@@ -4244,9 +4250,9 @@ class V2Config:
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:
-            # Existing installs predate Model Hub and remain in Direct mode until
-            # the user explicitly opts in after the release capability is enabled.
-            model_hub = ModelHubConfig()
+            # Enable the gateway runtime on upgrade without changing the
+            # authentication owner of existing native CLI installations.
+            model_hub = ModelHubConfig.from_payload({})
         else:
             # The one repairing door, because this is the one caller parsing a
             # document a previous release wrote. Every other entry into these

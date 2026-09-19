@@ -361,6 +361,14 @@ class UnavailableEngineAdapter:
     async def provision_credential(self, vendor: str, protocol: str, secret: str, base_url: str | None) -> str:
         raise EngineUnavailableError
 
+    async def provision_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        material: Mapping[str, object],
+    ) -> str:
+        raise EngineUnavailableError
+
     async def provision_transient_credential(self, vendor: str, secret: str, base_url: str | None) -> str:
         raise EngineUnavailableError
 
@@ -1563,6 +1571,42 @@ class ModelHubService:
         payload: Mapping[str, Any],
     ) -> SourceObservation:
         return await self._observe_source_payload(payload, require_proven=True)
+
+    async def _provision_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        material: Mapping[str, object],
+    ) -> str:
+        return await self.adapter.provision_oauth_credential(
+            source_id,
+            vendor,
+            material,
+        )
+
+    async def _observe_oauth_credential(
+        self,
+        vendor: str,
+        credential_ref: str,
+        protocol: str,
+    ) -> SourceObservation:
+        observation = await self._observe_provisioned_credential(
+            vendor,
+            None,
+            credential_ref,
+            (protocol,),
+        )
+        if (
+            observation.outcome is not ObservationOutcome.OBSERVED
+            or observation.protocol != protocol
+            or observation.authenticated is False
+        ):
+            raise ModelHubError(
+                "discovery_failed",
+                status=422,
+                data={"observation": self._observation_payload(observation)},
+            )
+        return observation
 
     async def observe_source(self, payload: object) -> dict:
         if not isinstance(payload, dict):
@@ -4189,32 +4233,6 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
-            if agent.mode == "direct" and mode == "hub":
-                native_items = await asyncio.to_thread(
-                    scan_native_configs,
-                    config,
-                    mask_credential=_mask_credential,
-                    home=self.migration_home,
-                    claude_oauth_probe=self.migration_claude_oauth_probe,
-                    validate_base_url=_validated_base_url,
-                )
-                native_item = next(
-                    (
-                        item
-                        for item in native_items
-                        if item.backend == backend
-                        and item.proposed_action == "keep_native"
-                    ),
-                    None,
-                )
-                if native_item is not None:
-                    source = build_native_migration_source(
-                        native_item,
-                        now=self.now(),
-                        validate_base_url=_validated_base_url,
-                    )
-                    config.sources.append(source)
-                    self._apply_source_placement(config, source)
             agent.mode = mode
             await self._commit_synced(previous, config)
             committed = self.store.load()

@@ -213,6 +213,23 @@ class EngineStateStore:
             )
             return credential_ref
 
+    def write_oauth_auth_file(self, auth_name: str, payload: dict[str, Any]) -> None:
+        """Write an imported OAuth grant into the engine auth directory."""
+        normalized = auth_name.strip()
+        if (
+            not normalized
+            or "\x00" in normalized
+            or "\\" in normalized
+            or Path(normalized).name != normalized
+            or not normalized.lower().endswith(".json")
+        ):
+            raise EngineStateError("invalid OAuth auth file name")
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise EngineStateError("invalid OAuth auth payload")
+        with self._lock:
+            self.audit_auth_permissions(enforce=True)
+            self._secure_write_json(self.auth_dir / normalized, payload)
+
     def sync_sources(self, bindings: Sequence[Any]) -> list[SourceRecord]:
         """Atomically replace the engine projection using opaque credential refs."""
         with self._lock:

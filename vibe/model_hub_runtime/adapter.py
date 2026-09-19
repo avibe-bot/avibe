@@ -1591,6 +1591,49 @@ class CLIProxyEngineAdapter:
             base_url=base_url,
         )
 
+    async def provision_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        material: Mapping[str, object],
+    ) -> str:
+        normalized_vendor = vendor.strip().lower()
+        auth_type = {"anthropic": "claude", "openai": "codex"}.get(normalized_vendor)
+        if auth_type is None:
+            raise EngineStateError("native OAuth vendor is unsupported")
+        if not isinstance(material, Mapping):
+            raise EngineStateError("native OAuth material is invalid")
+        payload = dict(material)
+        payload["type"] = auth_type
+        auth_name = f"avibe-migration-{uuid.uuid4().hex}.json"
+        await asyncio.to_thread(
+            self.state_store.write_oauth_auth_file,
+            auth_name,
+            payload,
+        )
+        client = await asyncio.to_thread(self.supervisor.client_if_running)
+        try:
+            if client is not None:
+                await asyncio.to_thread(
+                    client.management_request,
+                    "POST",
+                    "/auth-files",
+                    query={"name": auth_name},
+                    payload=payload,
+                )
+            return await asyncio.to_thread(
+                self.state_store.bind_oauth_credential,
+                source_id,
+                normalized_vendor,
+                auth_name,
+            )
+        except BaseException:
+            try:
+                await asyncio.to_thread(self.state_store.delete_oauth_auth_file, auth_name)
+            except BaseException:
+                logger.warning("Failed to roll back imported OAuth auth file", exc_info=True)
+            raise
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,

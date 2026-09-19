@@ -6,6 +6,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 import pytest
 from jsonschema import Draft7Validator
@@ -64,6 +65,7 @@ class MemoryStore:
 class MigrationAdapter:
     def __init__(self) -> None:
         self.provisioned: list[tuple[str, int, str]] = []
+        self.oauth_provisioned: list[tuple[str, str, dict[str, object]]] = []
         self.revoked: list[str] = []
         self.transient_refs: list[str] = []
         self.transient_revoked: list[str] = []
@@ -124,6 +126,16 @@ class MigrationAdapter:
     ) -> str:
         credential_ref = f"cred_migration_{len(self.provisioned) + 1}"
         self.provisioned.append((vendor, len(secret), credential_ref))
+        return credential_ref
+
+    async def provision_oauth_credential(
+        self,
+        source_id: str,
+        vendor: str,
+        material: Mapping[str, object],
+    ) -> str:
+        credential_ref = f"cred_oauth_migration_{len(self.oauth_provisioned) + 1}"
+        self.oauth_provisioned.append((source_id, vendor, dict(material)))
         return credential_ref
 
     async def discover_models(
@@ -246,7 +258,14 @@ def _write_claude(home: Path, *, malformed: bool = False) -> None:
 def _write_claude_oauth(home: Path) -> None:
     _write(
         home / ".claude" / ".credentials.json",
-        json.dumps({"claudeAiOauth": {"accessToken": "claude-oauth-token"}}),
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "claude-oauth-token",
+                    "refreshToken": "claude-refresh-token",
+                }
+            }
+        ),
     )
 
 
@@ -283,7 +302,11 @@ def _write_codex_oauth(home: Path) -> None:
         json.dumps(
             {
                 "auth_mode": "chatgpt",
-                "tokens": {"access_token": "codex-access-123456"},
+                "tokens": {
+                    "access_token": "codex-access-123456",
+                    "refresh_token": "codex-refresh-123456",
+                    "account_id": "acct_codex_test",
+                },
             }
         ),
     )
@@ -544,7 +567,7 @@ def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
         )
 
 
-def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
+def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -555,6 +578,9 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     _write_codex(native_home)
     _write_opencode(native_home)
     _isolate_native_home(monkeypatch, native_home)
+    before_claude_oauth = (
+        native_home / ".claude" / ".credentials.json"
+    ).read_bytes()
     before = _tree_digest(native_home)
 
     service, store, adapter = _service(tmp_path)
@@ -589,7 +615,24 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert adapter.revoked == []
     assert adapter.transient_revoked == adapter.transient_refs
     assert len(adapter.observed) == len(adapter.transient_refs)
-    assert before == _tree_digest(native_home)
+    assert before != _tree_digest(native_home)
+    claude_settings = json.loads(
+        (native_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert claude_settings["env"] == {}
+    assert claude_settings["permissions"] == {"allow": ["Read"]}
+    assert (
+        native_home / ".claude" / ".credentials.json"
+    ).read_bytes() == before_claude_oauth
+    codex_auth = json.loads(
+        (native_home / ".codex" / "auth.json").read_text(encoding="utf-8")
+    )
+    assert "OPENAI_API_KEY" not in codex_auth
+    assert "tokens" not in codex_auth
+    assert "auth_mode" not in codex_auth
+    assert "model_provider" not in (native_home / ".codex" / "config.toml").read_text(
+        encoding="utf-8"
+    )
     reloaded = _assert_canonical_round_trip(store.config)
     assert all(
         model.reasoning_efforts == []
@@ -646,7 +689,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
 
 
 @pytest.mark.parametrize("discovery", (ObservationDiscovery.SUCCEEDED, ObservationDiscovery.FAILED))
-def test_mh_mig_001_long_manual_inventory_is_copy_only_even_when_discovery_fails(
+def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery: ObservationDiscovery,
 ) -> None:
     """MH-MIG-001: new manual imports share admission without rewriting native files."""
@@ -684,12 +727,20 @@ def test_mh_mig_001_long_manual_inventory_is_copy_only_even_when_discovery_fails
     assert [(model.id, model.display_name) for model in manual] == [(identity, "Long manual")]
     assert all(model.id not in invalid for model in source.models)
     assert source.state.status == ("error" if discovery is ObservationDiscovery.FAILED else "standby")
-    assert _tree_digest(native_home) == before
+    assert _tree_digest(native_home) != before
+    config_payload = json.loads(
+        (native_home / ".config" / "opencode" / "opencode.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    provider = config_payload["provider"]["openrouter"]
+    assert "apiKey" not in provider.get("options", {})
+    assert provider["models"]["  " + identity + "  "] == {"name": "Long manual"}
     assert adapter.transient_revoked == adapter.transient_refs
     assert "sk-fabricated-never-persist-this" not in json.dumps(result)
 
 
-def test_mh_mig_002_oauth_defaults_to_native_sources(
+def test_mh_mig_002_oauth_grants_move_into_engine_custody(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -705,7 +756,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     scan = service.migration_scan()["items"]
     oauth_items = [item for item in scan if item["kind"] == "oauth_native"]
     assert {item["backend"] for item in oauth_items} == {"claude", "codex"}
-    assert {item["proposed_action"] for item in oauth_items} == {"keep_native"}
+    assert {item["proposed_action"] for item in oauth_items} == {"import"}
 
     result = asyncio.run(service.migration_apply([item["id"] for item in oauth_items]))
     assert result["applied"] == 2
@@ -713,31 +764,27 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
         source.id for source in store.config.sources
     }
     assert {
-        (source.vendor, source.kind, source.supply_channel, source.credential_ref) for source in store.config.sources
+        (source.vendor, source.kind, source.supply_channel, bool(source.credential_ref))
+        for source in store.config.sources
     } == {
-        ("anthropic", "subscription", "native_cli", None),
-        ("openai", "subscription", "native_cli", None),
+        ("anthropic", "subscription", "hub", True),
+        ("openai", "subscription", "hub", True),
     }
     assert adapter.provisioned == []
-    from vibe.backend_model_catalog import (
-        bundled_catalog_reasoning_efforts_for_model,
-    )
-
-    for source in store.config.sources:
-        assert source.models
-        for model in source.models:
-            assert model.reasoning_efforts_source == "catalog"
-            assert tuple(model.reasoning_efforts) == (
-                bundled_catalog_reasoning_efforts_for_model(model.id)
-            )
-    reloaded = _assert_canonical_round_trip(store.config)
-    assert {
-        (source.vendor, source.kind, source.supply_channel, source.credential_ref)
-        for source in reloaded.sources
-    } == {
-        ("anthropic", "subscription", "native_cli", None),
-        ("openai", "subscription", "native_cli", None),
+    assert {vendor for _source_id, vendor, _material in adapter.oauth_provisioned} == {
+        "anthropic",
+        "openai",
     }
+    assert {
+        material["refresh_token"]
+        for _source_id, _vendor, material in adapter.oauth_provisioned
+    } == {"claude-refresh-token", "codex-refresh-123456"}
+    assert not (native_home / ".claude" / ".credentials.json").exists()
+    assert json.loads(
+        (native_home / ".codex" / "auth.json").read_text(encoding="utf-8")
+    ) == {}
+    reloaded = _assert_canonical_round_trip(store.config)
+    assert all(source.credential_ref for source in reloaded.sources)
 
 
 @pytest.mark.parametrize(
@@ -1386,8 +1433,8 @@ def test_subscription_rows_carry_a_name_but_no_credential(tmp_path: Path) -> Non
     _validate_scan({"items": rows})
 
     assert {(row["backend"], row["kind"], row["proposed_action"]) for row in rows} == {
-        ("claude", "oauth_native", "keep_native"),
-        ("codex", "oauth_native", "keep_native"),
+        ("claude", "oauth_native", "import"),
+        ("codex", "oauth_native", "import"),
     }
     for row in rows:
         assert row["vendor"] and row["display_name"]

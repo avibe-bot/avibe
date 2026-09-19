@@ -86,3 +86,24 @@ UI checks cover both entry points, dismissal with no mutation, no automatic
 migration on runtime start, exact approved copy, locale parity, and truthful
 completion/failure states. Real-account refresh and inference remain a separate
 explicitly authorized acceptance check.
+
+## Implementation seams
+
+- `EngineAdapter.provision_oauth_credential(source_id, vendor, material) -> str`
+  stages only, outside the watched auth directory.
+- `EngineAdapter.activate_oauth_credential(credential_ref) -> None` publishes
+  idempotently after the durable ownership decision; a retry never overwrites
+  an existing live (possibly rotated) grant.
+- `EngineAdapter.validate_oauth_credential(credential_ref) -> None` requires
+  credential-specific upstream acceptance, without inference. The existing
+  `observe_source` protocol pin is insufficient for imported grants.
+- `ModelHubService.migration_guard` is a callable taking
+  `tuple[BackendName, ...]` and returning an asynchronous context manager.
+  Entering it closes managed native admission, waits for active work (without
+  a forced cancellation), strictly retires credential-bearing idle processes,
+  and checks for external CLI users. It is acquired before `_mutation_lock`.
+  Production installs wire it from the Controller; no production no-op.
+- `ModelHubService.migration_blocked_backends` is a set of backend names that
+  must remain blocked after the guard exits if durable takeover recovery is
+  incomplete. Completed or fully reverted transactions remove their names.
+  Startup recovery restores this set before runtime startup or admission.
