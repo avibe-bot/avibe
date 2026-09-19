@@ -115,6 +115,8 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const [pathInput, setPathInput] = useState('');
   const [pathError, setPathError] = useState<string | null>(null);
   const pathInputRef = useRef<HTMLInputElement | null>(null);
+  const pathEditRevision = useRef(0);
+  const pathSelection = useRef<{ start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null>(null);
 
   // OS-appropriate quick-access shortcuts, resolved + existence-checked by the
   // backend (macOS Finder entries, Linux /tmp·/data·roots, Windows drives…).
@@ -242,30 +244,48 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   }, [api]);
 
   useEffect(() => {
-    if (pathEditing) {
-      // Pre-fill with the current path so the user can edit it instead
-      // of typing from scratch — that's the common case.
+    if (pathEditing && foreground.current) {
+      pathInputRef.current?.focus();
+      pathInputRef.current?.select();
+    }
+  }, [pathEditing]);
+
+  const togglePathEditing = () => {
+    if (!foreground.current) return;
+    pathEditRevision.current++;
+    if (!pathEditing) {
+      // Snapshot only when an edit begins. Later browse responses update the
+      // directory and history, not the user's unconfirmed text or selection.
       setPathInput(currentPath);
       setPathError(null);
-      if (foreground.current) {
-        pathInputRef.current?.focus();
-        pathInputRef.current?.select();
-      }
+      pathSelection.current = null;
     }
-  }, [pathEditing, currentPath]);
+    setPathEditing(!pathEditing);
+  };
+
+  const cancelPathEditing = () => {
+    pathEditRevision.current++;
+    setPathEditing(false);
+  };
 
   const submitManualPath = async () => {
     if (!foreground.current) return;
     const target = pathInput.trim();
     if (!target) return;
+    const editRevision = pathEditRevision.current;
     setPathError(null);
-    const resolved = await fetchPath(target);
+    const request = fetchPath(target);
+    const requestId = reqIdRef.current;
+    const resolved = await request;
+    if (!mountedRef.current || reqIdRef.current !== requestId) return;
     if (resolved) {
       // Mirror `navigate` history bookkeeping so the back arrow works.
       setHistory((prev) => [...prev.slice(0, historyIndex + 1), resolved]);
       setHistoryIndex((prev) => prev + 1);
-      setPathEditing(false);
-    } else {
+      // A submitted target may resolve after the user starts another edit.
+      // Keep its navigation result without dismissing that newer draft.
+      if (pathEditRevision.current === editRevision) setPathEditing(false);
+    } else if (pathEditRevision.current === editRevision) {
       setPathError(t('directoryBrowser.pathNotFound'));
     }
   };
@@ -343,6 +363,10 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
           if (editor) {
             event.preventDefault();
             editor.focus();
+            if (editor === pathInputRef.current && pathSelection.current) {
+              const { start, end, direction } = pathSelection.current;
+              editor.setSelectionRange(start, end, direction);
+            }
           }
         }}
         onCloseAutoFocus={(event) => { if (!foreground.current) event.preventDefault(); }}
@@ -354,7 +378,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             setCreating(false);
             setNewFolderName('');
             setCreateError(null);
-            setPathEditing(false);
+            cancelPathEditing();
           }
         }}
         className="flex h-[80dvh] max-h-[720px] min-h-0 w-full max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl border-border-strong bg-surface p-0 max-md:h-[90dvh] max-md:p-0 max-md:pb-0"
@@ -416,7 +440,11 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                   ref={pathInputRef}
                   type="text"
                   value={pathInput}
-                  onChange={(e) => setPathInput(e.target.value)}
+                  onChange={(e) => { pathEditRevision.current++; setPathInput(e.target.value); }}
+                  onSelect={(event) => {
+                    const { selectionStart, selectionEnd, selectionDirection } = event.currentTarget;
+                    pathSelection.current = { start: selectionStart ?? 0, end: selectionEnd ?? 0, direction: selectionDirection ?? 'none' };
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -462,7 +490,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
 
           <button
             type="button"
-            onClick={() => setPathEditing((prev) => !prev)}
+            onClick={togglePathEditing}
             aria-label={t('directoryBrowser.editPath')}
             title={t('directoryBrowser.editPath')}
             className={clsx(

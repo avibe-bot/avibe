@@ -33,6 +33,151 @@ test.afterEach(async ({ page }) => {
   expect(await page.evaluate(() => window.homeMedia.unexpectedRequests)).toEqual([]);
 });
 const back = (page: Page) => page.getByRole('button', { name: 'Back to app' }).click();
+const picker = (page: Page) => page.getByRole('dialog', { name: en.directoryBrowser.title });
+const manualPath = (page: Page) => page.getByPlaceholder(en.directoryBrowser.editPathPlaceholder);
+const resolvedPath = (page: Page) => picker(page).locator('code');
+async function openProjectPicker(page: Page) {
+  await open(page);
+  await page.getByRole('button', { name: en.newSession.newProject, exact: true }).click();
+  await expect(resolvedPath(page)).toHaveText('/fixture');
+  await expect(picker(page).getByRole('button', { name: en.directoryBrowser.select, exact: true })).toBeEnabled();
+}
+const holdBrowse = (page: Page, path: string) => page.evaluate((path) => { window.homeMedia.heldBrowsePaths.push(path); }, path);
+const pendingBrowse = (page: Page, path: string) => expect.poll(() => page.evaluate((path) => window.homeMedia.pendingBrowses.some((request) => request.path === path), path)).toBe(true);
+const releaseBrowse = (page: Page, path: string) => page.evaluate((path) => {
+  const index = window.homeMedia.pendingBrowses.findIndex((request) => request.path === path);
+  if (index < 0) throw new Error(`No held browse for ${path}`);
+  window.homeMedia.pendingBrowses.splice(index, 1)[0].release();
+  window.homeMedia.heldBrowsePaths = window.homeMedia.heldBrowsePaths.filter((held) => held !== path);
+}, path);
+const selection = (page: Page) => manualPath(page).evaluate((input: HTMLInputElement) => ({ start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection }));
+
+for (const width of [390, 1366]) for (const suspended of [false, true]) {
+  test(`directory draft ${width}: pending browse preserves text and selection ${suspended ? 'through Settings' : 'in foreground'}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 768 });
+    await openProjectPicker(page);
+    const destination = '/fixture/另一个项目';
+    await holdBrowse(page, destination);
+    await picker(page).getByRole('button', { name: '另一个项目', exact: true }).click();
+    await pendingBrowse(page, destination);
+    await picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true }).click();
+    const text = '/未确认的路径/草稿🌱';
+    await manualPath(page).fill(text);
+    for (let index = 0; index <= text.length; index++) await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Shift+ArrowRight');
+    await page.keyboard.press('Shift+ArrowRight');
+    const selected = await selection(page);
+    expect(selected).toMatchObject({ start: 1, end: 3 });
+    const settingsInput = page.getByRole('textbox', { name: 'Settings value' });
+    if (suspended) {
+      await settings(page);
+      await settingsInput.focus();
+    }
+    await releaseBrowse(page, destination);
+    await expect.poll(() => page.evaluate((path) => window.homeMedia.browseCompletions.includes(path), destination)).toBe(true);
+    if (suspended) {
+      await expect(settingsInput).toBeFocused();
+      await expect(picker(page)).toHaveCount(0);
+      await back(page);
+    }
+    await expect(resolvedPath(page)).toHaveText(destination);
+    await expect(manualPath(page)).toHaveValue(text);
+    await expect(manualPath(page)).toBeFocused();
+    expect(await selection(page)).toEqual(selected);
+    // An ordinary key must land at the retained selection, without refocusing
+    // or manually restoring the caret after the browse response.
+    await page.keyboard.press('x');
+    await expect(manualPath(page)).toHaveValue('/x认的路径/草稿🌱');
+
+    await page.keyboard.press('Escape');
+    await picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true }).click();
+    await expect(manualPath(page)).toHaveValue(destination);
+    const target = '/手动选择/最终目录';
+    await manualPath(page).fill(target);
+    await page.keyboard.press('Enter');
+    await expect(manualPath(page)).toHaveCount(0);
+    await expect(resolvedPath(page)).toHaveText(target);
+    expect((await writes(page, '/api/browse')).at(-1)?.body.path).toBe(target);
+    await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
+    await expect(resolvedPath(page)).toHaveText(destination);
+    await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
+    await expect(resolvedPath(page)).toHaveText(target);
+  });
+}
+
+test('directory draft survives history and hidden refresh while an obsolete browse cannot replace a manual target', async ({ page }) => {
+  await openProjectPicker(page);
+  const start = '/fixture';
+  const destination = '/fixture/另一个项目';
+  await picker(page).getByRole('button', { name: '另一个项目', exact: true }).click();
+  await expect(resolvedPath(page)).toHaveText(destination);
+  await holdBrowse(page, start);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
+  await pendingBrowse(page, start);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true }).click();
+  await manualPath(page).fill('/历史期间草稿');
+  await releaseBrowse(page, start);
+  await expect(resolvedPath(page)).toHaveText(start);
+  await expect(manualPath(page)).toHaveValue('/历史期间草稿');
+  await holdBrowse(page, destination);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
+  await pendingBrowse(page, destination);
+  await manualPath(page).fill('/隐藏文件刷新草稿');
+  await releaseBrowse(page, destination);
+  await expect(resolvedPath(page)).toHaveText(destination);
+  await expect(manualPath(page)).toHaveValue('/隐藏文件刷新草稿');
+  await holdBrowse(page, destination);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.hiddenFiles, exact: true }).click();
+  await pendingBrowse(page, destination);
+  const target = '/用户明确提交的路径';
+  await manualPath(page).fill(target);
+  await page.keyboard.press('Enter');
+  await expect(manualPath(page)).toHaveCount(0);
+  await expect(resolvedPath(page)).toHaveText(target);
+  await releaseBrowse(page, destination);
+  await expect(resolvedPath(page)).toHaveText(target);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
+  await expect(resolvedPath(page)).toHaveText(destination);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
+  await expect(resolvedPath(page)).toHaveText(target);
+  await picker(page).getByRole('button', { name: en.directoryBrowser.select, exact: true }).click();
+  await page.getByRole('button', { name: en.workbench.newProjectDialog.create, exact: true }).click();
+  await expect(draft(page)).toBeVisible();
+  expect((await writes(page, '/api/projects')).at(-1)?.body.folder_path).toBe(target);
+});
+
+for (const reopen of [false, true]) test(`directory manual submit cannot close a ${reopen ? 'reopened' : 'newer'} editor draft`, async ({ page }) => {
+  await openProjectPicker(page);
+  const edit = picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true });
+  await edit.click();
+  const submitted = '/已提交的目录';
+  await manualPath(page).fill(submitted);
+  await holdBrowse(page, submitted);
+  await page.keyboard.press('Enter');
+  await pendingBrowse(page, submitted);
+  if (reopen) {
+    await page.keyboard.press('Escape');
+    await expect(manualPath(page)).toHaveCount(0);
+    await edit.click();
+    await expect(manualPath(page)).toHaveValue('/fixture');
+  }
+  await manualPath(page).fill('/提交后的新草稿🌱');
+  await releaseBrowse(page, submitted);
+  await expect(resolvedPath(page)).toHaveText(submitted);
+  await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱');
+  await expect(manualPath(page)).toBeFocused();
+  await page.keyboard.press('x');
+  await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱x');
+  await page.keyboard.press('Escape');
+  await edit.click();
+  await expect(manualPath(page)).toHaveValue(submitted);
+  await page.keyboard.press('Escape');
+  await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
+  await expect(resolvedPath(page)).toHaveText('/fixture');
+  await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
+  await expect(resolvedPath(page)).toHaveText(submitted);
+});
 
 for (const width of [390, 1366]) test(`sheet ${width} keeps Unicode draft and selected project/Agent while its open picker loses all modal effects`, async ({ page }) => {
   await page.setViewportSize({ width, height: 768 });

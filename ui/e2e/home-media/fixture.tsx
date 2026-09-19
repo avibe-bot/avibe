@@ -49,6 +49,9 @@ const control = {
   releaseProject: () => {},
   messageCompletions: 0,
   projectCompletions: 0,
+  heldBrowsePaths: [] as string[],
+  pendingBrowses: [] as Array<{ path: string; release: () => void }>,
+  browseCompletions: [] as string[],
 };
 declare global { interface Window { homeMedia: typeof control } }
 window.homeMedia = control;
@@ -76,7 +79,13 @@ window.fetch = async (input, init) => {
     return reply(project);
   }
   if (path === '/api/projects' || path === '/api/workbench/projects-bootstrap') return reply({ projects, sessions: {} });
-  if (path === '/api/browse') return reply({ ok: true, path: body.path || '/fixture', parent: '/fixture', dirs: [{ name: '另一个项目', path: '/fixture/另一个项目' }] });
+  if (path === '/api/browse') {
+    if (control.heldBrowsePaths.includes(body.path)) {
+      await new Promise<void>((resolve) => { control.pendingBrowses.push({ path: body.path, release: resolve }); });
+    }
+    control.browseCompletions.push(body.path);
+    return reply({ ok: true, path: body.path === '~' ? '/fixture' : body.path || '/fixture', parent: '/fixture', dirs: [{ name: '另一个项目', path: '/fixture/另一个项目' }] });
+  }
   if (path === '/api/browse/favorites') return reply({ ok: true, favorites: [{ key: 'home', path: '/fixture' }] });
   if (path === '/api/sessions' && init?.method === 'POST') {
     if (control.holdCreate) await new Promise<void>((resolve) => { control.releaseCreate = resolve; });
