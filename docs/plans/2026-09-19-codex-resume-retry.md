@@ -36,7 +36,8 @@ on the same process.
    cannot replay them. The existing failure-notice Retry action and Send now
    can retry them. Validated failure-notice Retry resets the bounded budget;
    Send now grants one attempt and does not replenish an exhausted budget.
-   A concurrency refusal after Send now preserves the previous hold and reason.
+   Any definitively unwritten Send now attempt preserves an existing hold,
+   regardless of its failure kind; only validated failure-notice Retry resets it.
    The budget derives from server-owned delivery history, not process memory
    or caller metadata.
    The shared read payload projects `requires_explicit_retry` and `retry_reason`
@@ -117,3 +118,37 @@ the queue event after commit. The failing CI prompt-baseline fixture also now
 supplies real prewrite evidence and an explicit successful-replacement result.
 After these corrections, the expanded run passed 758 Python tests and 52
 subtests, including all 9 native Codex contracts. Changed-file Ruff also passed.
+
+### Circuit-breaker diagnosis after the second reviewed head
+
+The orchestrator fetched the complete review inventory before editing:
+`805cfbc3b` has four findings (all resolved); `6e58847eb` has one open finding,
+comment `4052408717`. Durable retry bookkeeping therefore appears on two
+findings-bearing heads and trips the review-loop breaker. Runtime enrollment
+and live projection have no new findings. The exact-head `lint` inventory
+contains one run, `35425310211`; its six Python shards passed and the remaining
+UI check was still running at diagnosis.
+
+Inspection of the previous diff and its real-SQLite consuming test confirms
+that the refusal-only history traversal encoded one error type instead of the
+one-shot authorization boundary. A permanent hold followed by Send now and an
+ordinary no-write failure drops the hold even though no Retry event occurred.
+Changing error classes must not implicitly authorize more dispatches.
+
+Scope decision: generalize the existing receipt reader to traverse completed
+`not_written` starts, independently of receipt kind/reason, while keeping a
+current claim/open and accepted/unknown/restart outcomes as boundaries. A
+validated `backend_failure_retry` event still releases the hold. Do not alter
+budget accounting, settlement ownership, native recovery policy, or the schema.
+Exercise held and unheld inputs, repeated explicit no-write attempts (including
+exact native-start absence), Retry reset, and accepted/unknown boundaries.
+This is a narrow, reversible correction of the shipped contract, not a new
+state machine or a reason to add another failure-specific exception.
+
+The expanded transition tests failed in five combinations before the fix:
+permanent hold followed by an ordinary failure, and either hold followed by a
+different transient failure or exact native-start absence. After correction,
+457 shared-delivery/retry/CLI/ownership tests and 309 Codex tests passed (766
+total, plus 52 subtests), including all 9 isolated native Codex contracts.
+Changed-file Ruff and whitespace checks passed. The sole previous-head `lint`
+run subsequently completed successfully; new-head review and CI remain required.
