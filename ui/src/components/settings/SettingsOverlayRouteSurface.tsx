@@ -94,7 +94,9 @@ export const SettingsOverlayRouteSurface = ({
               // left border would draw a hairline down the screen edge and make
               // Settings-from-home look different from a direct Settings link.
               // There is no sidebar to divide from until the offset applies.
-              className="border-l-0 md:left-[var(--app-sidebar-w)] md:border-l"
+              className={origin.location.pathname === '/setup'
+                ? 'border-l-0 md:left-0'
+                : 'border-l-0 md:left-[var(--app-sidebar-w)] md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;

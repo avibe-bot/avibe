@@ -10,6 +10,8 @@ import { useApi } from '@/context/ApiContext';
 import type { BackendAuthTestResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
+import { HubOwnedAuthNotice } from './shared/HubOwnedAuthNotice';
 
 export type OpencodeProviderTestPanelProps = {
   providerId: string;
@@ -86,7 +88,7 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
           t('settings.backends.testConnectionSuccessToast', { ms: result.duration_ms ?? '?' }),
           'success',
         );
-      } else {
+      } else if (!isNativeAuthHubOwned(result)) {
         showToast(failureSentence(result), 'error');
       }
     } catch (err) {
@@ -103,6 +105,7 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
 
   const resultLine = (() => {
     if (!lastResult) return null;
+    if (isNativeAuthHubOwned(lastResult)) return null;
     if (lastResult.ok) {
       return t('settings.backends.testConnectionLastOk', {
         ms: lastResult.duration_ms ?? '?',
@@ -159,6 +162,7 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
           {testing ? t('common.testing') : t('settings.backends.testConnectionRun')}
         </Button>
       </div>
+      {lastResult && isNativeAuthHubOwned(lastResult) && <HubOwnedAuthNotice />}
       {resultLine && (
         <p
           className={clsx(
@@ -179,7 +183,7 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
           </p>
         </div>
       )}
-      {lastResult && !lastResult.ok && lastResult.detail && (
+      {lastResult && !lastResult.ok && !isNativeAuthHubOwned(lastResult) && lastResult.detail && (
         <details className="rounded-md border border-destructive/30 bg-destructive/[0.04] px-3 py-2 [&[open]>summary]:mb-2">
           <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wide text-destructive-ink">
             {t('settings.backends.testConnectionRawOutputLabel')}

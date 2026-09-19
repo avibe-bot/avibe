@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi, type OAuthWebStartResult, type OAuthWebState } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
 
 export type OAuthBackend = 'claude' | 'codex' | 'opencode';
 const POLL_INTERVAL_MS = 2000;
@@ -31,6 +32,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
   const [submitting, setSubmitting] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hubOwnedAuth, setHubOwnedAuth] = useState(false);
   const owner = useRef({ generation: 0, mounted: true, flowId: '', busy: false, submitting: false, deadline: 0 });
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const callbacks = useRef({ onSuccess, onFailure, onCancel, onActiveChange, onPendingChange });
@@ -79,13 +81,33 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     owner.current.flowId = '';
     owner.current.busy = false;
     owner.current.submitting = false;
-    setState('idle'); setUrl(null); setDeviceCode(null); setCode(''); setError(null);
+    setState('idle'); setUrl(null); setDeviceCode(null); setCode(''); setError(null); setHubOwnedAuth(false);
     setStarting(false); setSubmitting(false);
+    callbacks.current.onActiveChange?.(false);
+  };
+  const settleHubOwnedAuth = (generation: number) => {
+    stopPolling();
+    owner.current.generation += 1;
+    owner.current.flowId = '';
+    owner.current.busy = false;
+    owner.current.submitting = false;
+    setStarting(false);
+    setSubmitting(false);
+    setHubOwnedAuth(true);
+    setError(null);
+    setState('failed');
+    settled(generation);
     callbacks.current.onActiveChange?.(false);
   };
   const accept = async (data: OAuthWebStartResult, generation: number) => {
     if (!current(generation)) return;
-    if (!data.ok) throw new Error(data.detail || data.error || 'flow_not_found');
+    if (!data.ok) {
+      if (isNativeAuthHubOwned(data)) {
+        settleHubOwnedAuth(generation);
+        return;
+      }
+      throw new Error(data.detail || data.error || 'flow_not_found');
+    }
     if (data.callback_kind) setCallbackKind(data.callback_kind);
     if (data.url) setUrl(data.url);
     if (data.device_code) setDeviceCode(data.device_code);
@@ -104,6 +126,10 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
       return;
     }
     if (data.state === 'failed' || data.state === 'cancelled') {
+      if (data.state === 'failed' && isNativeAuthHubOwned(data)) {
+        settleHubOwnedAuth(generation);
+        return;
+      }
       if (data.state === 'failed') await callbacks.current.onFailure?.(data.error || data.state);
       if (!current(generation)) return;
       throw new Error(data.error || data.state);
@@ -115,6 +141,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
   const fail = (err: unknown, generation: number) => {
     if (!current(generation)) return;
     stopPolling();
+    setHubOwnedAuth(false);
     setError(errorMessage(err) || 'auth_failed'); setState('failed');
     // Cancel a failed local polling attempt as well; it must not finish later
     // behind a newly selected method. Server cancellation never logs out.
@@ -138,7 +165,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     callbacks.current.onPendingChange?.(true);
     owner.current.busy = true;
     owner.current.deadline = Date.now() + POLL_DEADLINE_MS;
-    setStarting(true); setState('starting'); setError(null); setCode(''); setUrl(null); setDeviceCode(null); setCallbackKind(null);
+    setStarting(true); setState('starting'); setError(null); setHubOwnedAuth(false); setCode(''); setUrl(null); setDeviceCode(null); setCallbackKind(null);
     callbacks.current.onActiveChange?.(true);
     try {
       const result = backend === 'opencode'
@@ -150,7 +177,12 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
         return;
       }
       owner.current.flowId = result.flow_id || '';
-      if (!result.flow_id) throw new Error(result.detail || result.error || 'start_failed');
+      // Terminal ownership refusals do not create a local OAuth flow. Let the
+      // shared response consumer classify that payload before applying the
+      // ordinary missing-flow failure.
+      if (!result.flow_id && !isNativeAuthHubOwned(result)) {
+        throw new Error(result.detail || result.error || 'start_failed');
+      }
       await accept(result, generation);
     } catch (err) { if (current(generation)) fail(err, generation); else settled(generation); }
     finally { if (current(generation)) setStarting(false); }
@@ -180,7 +212,13 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     try {
       const result = await api.submitOAuthWebCode(backend, owner.current.flowId, code.trim());
       if (!current(generation)) return;
-      if (!result.ok) throw new Error(result.detail || result.error || 'submit_failed');
+      if (!result.ok) {
+        if (isNativeAuthHubOwned(result)) {
+          settleHubOwnedAuth(generation);
+          return;
+        }
+        throw new Error(result.detail || result.error || 'submit_failed');
+      }
       setState('verifying');
     } catch (err) { if (current(generation)) setError(errorMessage(err) || 'submit_failed'); }
     finally {
@@ -194,7 +232,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     catch { showToast(t('common.copyFailed'), 'error'); }
   };
   const isActive = state === 'starting' || state === 'awaiting_code' || state === 'verifying';
-  return { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
+  return { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError, hubOwnedAuth,
     isActive, startFlow, cancelFlow, submitCallback, resetToIdle,
     copyUrl: (e?: React.MouseEvent) => copy(url, e), copyDeviceCode: (e?: React.MouseEvent) => copy(deviceCode, e) };
 }

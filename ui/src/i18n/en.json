@@ -558,6 +558,8 @@
       "oauthRemoved": "Credentials removed.",
       "oauthRemoveFailed": "Could not remove credentials: {{detail}}",
       "oauthRemovePartial": "Credentials cleared from Avibe, but the backend CLI logout reported a problem: {{detail}}. The CLI's own files may still be present.",
+      "nativeAuthHubOwned": "Authentication is managed by Model Hub.",
+      "openModelHub": "Open Model Hub",
       "oauthFlowLockedToast": "OAuth login is in progress — finish or cancel it before switching auth mode.",
       "testConnectionTitle": "Test connection",
       "testConnectionSubtitle": "Send a one-token \"Hi\" prompt to verify the session, the model, and any custom Base URL.",

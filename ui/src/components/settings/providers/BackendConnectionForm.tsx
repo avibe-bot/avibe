@@ -4,10 +4,12 @@ import { CheckCircle2, ExternalLink, Eye, EyeOff, KeyRound, LoaderCircle, Pencil
 import { useApi, type ClaudeAuthState, type CodexAuthState, type OpencodeProvider, type OAuthWebMutationResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { MethodRadio } from './MethodRadio';
+import { HubOwnedAuthNotice } from '../shared/HubOwnedAuthNotice';
 import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendOAuth, type OAuthBackend } from '../oauth/useBackendOAuth';
 import { BackendOAuthPanel } from '../BackendOAuthPanel';
@@ -141,6 +143,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [active, setActive] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
   const [authReadable, setAuthReadable] = useState(false);
+  const [hubOwnedAuth, setHubOwnedAuth] = useState(false);
   const observation = useRef(0);
   const touched = useRef(new Set<Editable>());
   /**
@@ -197,6 +200,26 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     const token = ++observation.current;
     const current = () => lifetime.current.mounted && token === observation.current;
     setConnected(false); setSavedDisabled(false); setError(receiptError);
+    const [application] = await Promise.allSettled([api.getBackendConnection(backend)]);
+    if (!current()) return false;
+    const messages = receiptError ? [receiptError] : [];
+    const connection = application.status === 'fulfilled' ? application.value : null;
+    const applied = connection?.ok && ['applied', 'stopped'].includes(connection.application);
+    if (!applied) messages.push(application.status === 'rejected' ? errorMessage(application.reason) || t('onboarding.connection.readFailed') : connection?.message || t('onboarding.connection.applyPending'));
+    const supplyMode = connection?.ok === true ? connection.supply_mode : undefined;
+    setHubOwnedAuth(supplyMode === 'hub');
+    if (supplyMode === 'hub') {
+      setLoading(false);
+      setAuthReadable(false);
+      setNative(null);
+      setCurrentProvider(provider);
+      setError([...new Set(messages)].join(' '));
+      setApplyPending(messages.length > 0);
+      setConnected(false);
+      setSavedDisabled(false);
+      return messages.length === 0;
+    }
+
     const pristine = () => touched.current.size === 0;
     const nativeRead = read().then((fresh) => {
       if (current()) {
@@ -215,13 +238,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       if (current()) setAuthReadable(false);
       throw cause;
     });
-    const [auth, application] = await Promise.allSettled([nativeRead, api.getBackendConnection(backend)]);
+    const [auth] = await Promise.allSettled([nativeRead]);
     if (!current()) return false;
     setLoading(false);
-    const messages = receiptError ? [receiptError] : [];
-    const connection = application.status === 'fulfilled' ? application.value : null;
-    const applied = connection?.ok && ['applied', 'stopped'].includes(connection.application);
-    if (!applied) messages.push(application.status === 'rejected' ? errorMessage(application.reason) || t('onboarding.connection.readFailed') : connection?.message || t('onboarding.connection.applyPending'));
     let hasAuth = false;
     let keylessSettings = false;
     if (auth.status === 'rejected') messages.push(errorMessage(auth.reason) || t('onboarding.connection.readFailed'));
@@ -316,6 +335,12 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   };
   const removed = async (result: OAuthWebMutationResult) => {
     pendingConfirmation.current = null;
+    if (isNativeAuthHubOwned(result)) {
+      setHubOwnedAuth(true);
+      setError('');
+      setApplyPending(false);
+      return false;
+    }
     return observe({ receiptError: !result.ok ? result.error || result.detail || t('onboarding.connection.saveFailed')
       : result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '' });
   };
@@ -337,10 +362,10 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     try { const url = new URL(baseUrl.trim()); return ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname); }
     catch { return false; }
   })();
-  const canSave = !loading && authReadable && !busy && urlValid && Boolean(key.trim() || (hasKey && !editing) || (!compact && currentProvider?.custom && currentProvider.configured && !editing));
+  const canSave = !loading && !hubOwnedAuth && authReadable && !busy && urlValid && Boolean(key.trim() || (hasKey && !editing) || (!compact && currentProvider?.custom && currentProvider.configured && !editing));
   const save = async () => {
     if (!canSave || lifetime.current.busy) return;
-    lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
+    lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false); setHubOwnedAuth(false);
     // What this write carries, decided here rather than when the receipt lands: by
     // then the visible type may be the other one, and the draft or the address may
     // be newer work than the one that went out. `sent` follows the payload exactly
@@ -352,7 +377,15 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
         : backend === 'codex' ? await api.saveCodexAuth(payload)
         : await api.setOpencodeProviderAuth(provider!.id, payload.api_key, payload.base_url);
       if (!lifetime.current.mounted) return;
-      if (!result.ok) throw new Error(result.message || t('onboarding.connection.saveFailed'));
+      if (!result.ok) {
+        if (isNativeAuthHubOwned(result)) {
+          pendingConfirmation.current = null;
+          setHubOwnedAuth(true);
+          setApplyPending(false);
+          return;
+        }
+        throw new Error(result.message || t('onboarding.connection.saveFailed'));
+      }
       if ('notices' in result) surfaceBackendNotices(result.notices, showToast, t);
       if ('partial' in result && result.partial) showToast(result.detail || result.warning || t('onboarding.connection.partial'), 'warning');
       await confirm(submitted, result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '');
@@ -366,12 +399,20 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   };
   const remove = async (onlyKey: boolean) => {
     if (lifetime.current.busy || !window.confirm(t('onboarding.connection.removeConfirm'))) return;
-    lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
+    lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false); setHubOwnedAuth(false);
     try {
       const result = backend === 'opencode' ? await api.deleteOpencodeProviderAuth(provider!.id)
         : onlyKey ? await api.removeBackendApiKey(backend) : await api.removeBackendAuth(backend);
       if (!lifetime.current.mounted) return;
-      if (!result.ok) throw new Error(('message' in result ? result.message : 'detail' in result ? result.detail : undefined) || t('onboarding.connection.saveFailed'));
+      if (!result.ok) {
+        if (isNativeAuthHubOwned(result)) {
+          pendingConfirmation.current = null;
+          setHubOwnedAuth(true);
+          setApplyPending(false);
+          return;
+        }
+        throw new Error(('message' in result ? result.message : 'detail' in result ? result.detail : undefined) || t('onboarding.connection.saveFailed'));
+      }
       if ('notices' in result) surfaceBackendNotices(result.notices, showToast, t);
       await removed(result);
     } catch (err) {
@@ -400,7 +441,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   // their own rows of the dialog grid, which is what keeps the heading, tabs and
   // footer still while the body changes underneath them.
   return <div className="backend-connection-form">
-    {!(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <MethodRadio
+    {!hubOwnedAuth && !(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <MethodRadio
       value={method} onChange={(value) => { if (!busy && !loading) { pendingConfirmation.current = null; touched.current.add('method'); setMethod(value); setError(''); setConnected(false); } }} disabled={busy || loading}
       ariaLabel={t('onboarding.connection.method')}
       options={[{ id: 'oauth', label: backend === 'claude' ? t('onboarding.connection.claudeLogin') : backend === 'codex' ? t('onboarding.connection.codexSignIn') : t('onboarding.connection.subscription') },
@@ -409,12 +450,13 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     {loading && <div className="connection-loading" role="status"><LoaderCircle className="animate-spin" size={16} />{t('common.loading')}</div>}
     {/* The method's own instructions live here, not in the dialog heading: the
         heading and description are anchored and method-independent. */}
-    {!loading && compact && <p className="connection-intro">{t(method === 'api_key'
+    {!loading && !hubOwnedAuth && compact && <p className="connection-intro">{t(method === 'api_key'
       ? backend === 'claude' ? 'onboarding.connection.claudeKeyIntro' : backend === 'codex' ? 'onboarding.connection.codexKeyIntro' : 'onboarding.connection.providerKeyIntro'
       : backend === 'claude' ? active ? 'onboarding.connection.claudeCompleteIntro' : 'onboarding.connection.claudeIntro'
       : backend === 'codex' ? active ? 'onboarding.connection.codexCompleteIntro' : 'onboarding.connection.codexIntro'
       : 'onboarding.connection.providerIntro', { name: provider?.name })}</p>}
-    {!loading && <>
+    {!loading && hubOwnedAuth && <HubOwnedAuthNotice onNavigate={compact ? onCancel : undefined} />}
+    {!loading && !hubOwnedAuth && <>
     {uncertain && <p className="connection-notice">{t('onboarding.connection.uncertain')}</p>}
     {native && 'file_store_active' in native && method === 'api_key' && !native.file_store_active && !uncertain && <p className="connection-notice">{t('settings.backends.codexCredentialsStoreKeyringWarn', { store: native.credentials_store })}</p>}
     {native && 'settings_conflict' in native && native.settings_conflict && <p className="connection-notice">{t('settings.backends.claudeSettingsConflictTitle')}: {t('settings.backends.claudeSettingsConflictBody', { var: native.settings_env_key_var || 'ANTHROPIC_API_KEY', path: native.settings_path })}</p>}
@@ -426,7 +468,8 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={setActive}
       canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.has_oauth_credentials : native.has_chatgpt_tokens))}
       signedInDetail={native && 'chatgpt_account' in native && native.chatgpt_account ? [native.chatgpt_account.email, native.chatgpt_account.plan_type, (native.chatgpt_account.organizations?.find((org) => org.is_default) || native.chatgpt_account.organizations?.[0])?.title].filter(Boolean).join(' · ') : undefined} /> : <>
-      {oauth.error && <p className="connection-error" role="alert">{oauth.error}</p>}
+      {oauth.hubOwnedAuth && <HubOwnedAuthNotice onNavigate={onCancel} />}
+      {oauth.error && !oauth.hubOwnedAuth && <p className="connection-error" role="alert">{oauth.error}</p>}
       {!oauth.isActive ? <div className="connection-account"><h3>{title}</h3><p>{hint}</p>
         {signedIn && <p className="connection-confirmed">{t('onboarding.connection.savedSubscription')}</p>}
         <div><Button variant="brand" onClick={() => void oauth.startFlow()} disabled={oauth.starting}><ExternalLink size={15} />{startLabel}</Button></div>
@@ -458,11 +501,11 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     </>}
     </>}
     </div>
-    {(compact || method === 'api_key') && <div className="connection-actions">
+    {(compact || (!hubOwnedAuth && method === 'api_key')) && <div className="connection-actions">
       {compact && <Button variant="secondary" onClick={onCancel}>{t('common.cancel')}</Button>}
-      {!compact && hasKey && method === 'api_key' && <Button variant="ghost" disabled={busy} onClick={() => void remove(true)}>{t('settings.backends.claudeApiKeyRemove')}</Button>}
-      {method === 'api_key' && <Button variant="brand" disabled={!canSave} onClick={() => void save()}>{saving ? t(compact ? 'onboarding.connection.connecting' : 'common.saving') : t(compact ? 'onboarding.connection.saveConnect' : 'common.save')}</Button>}
-      {compact && needsCode && <Button variant="brand" disabled={!oauth.code.trim() || oauth.submitting} onClick={() => void oauth.submitCallback()}>{oauth.submitting ? t('onboarding.connection.connecting') : t('onboarding.connection.finishConnect')}</Button>}
+      {!hubOwnedAuth && !compact && hasKey && method === 'api_key' && <Button variant="ghost" disabled={busy} onClick={() => void remove(true)}>{t('settings.backends.claudeApiKeyRemove')}</Button>}
+      {!hubOwnedAuth && method === 'api_key' && <Button variant="brand" disabled={!canSave} onClick={() => void save()}>{saving ? t(compact ? 'onboarding.connection.connecting' : 'common.saving') : t(compact ? 'onboarding.connection.saveConnect' : 'common.save')}</Button>}
+      {!hubOwnedAuth && compact && needsCode && <Button variant="brand" disabled={!oauth.code.trim() || oauth.submitting} onClick={() => void oauth.submitCallback()}>{oauth.submitting ? t('onboarding.connection.connecting') : t('onboarding.connection.finishConnect')}</Button>}
     </div>}
   </div>;
 }
