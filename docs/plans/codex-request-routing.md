@@ -19,7 +19,10 @@ restart is part of this change.
   model name. Existing route registrations own their lifecycle; no per-turn
   tombstone cache, second scheduler, or native Codex patch is introduced.
 - Native Codex serializes these entries into the JSON string at
-  `client_metadata["x-codex-turn-metadata"]`. The gateway validates the supplied
+  `client_metadata["x-codex-turn-metadata"]` and the compatibility HTTP header
+  `x-codex-turn-metadata`. Use the header to acquire ownership before body parsing
+  (including compact requests, whose body may omit client metadata), and check
+  any body-carried Avibe identity agrees with it. The gateway validates the supplied
   route within the authenticated scope, checks its accepted wire model, and
   correlates only the explicitly named, still-admitted turn with that route.
 - Route identity remains usable after its turn settles, for native continuations
@@ -32,6 +35,23 @@ restart is part of this change.
 - Non-Codex credential routing and native/direct channel behavior are unchanged.
   Older Codex clients that cannot carry the required metadata must not silently
   use active-turn inference.
+
+### Internal interfaces
+
+- `credentials(..., request_scoped=True)` enables explicit request identity on a
+  Codex process scope; the default preserves credential-bound consumers.
+- `prepare_gateway_turn(...)` continues registering the route. In an explicit
+  scope its returned route handle is not a bearer credential.
+- `gateway_request_metadata(backend=..., token=..., turn_id=...)` returns
+  `{"avibe_route_id": ..., "avibe_turn_id": ...}` for the prepared launch.
+- `gateway_terminalizer(..., request_metadata=...)` accepts the decoded header
+  mapping. Explicit scopes never fall back to inferred sole-active-turn ownership.
+  Missing/unknown identity yields no owner and no route; terminalizer model
+  validation must not mutate an unrelated trace.
+- `ModelHubTurnGateway.endpoint(..., request_scoped=False)` keeps its two-value
+  return shape; explicit mode returns the scope token, not a route credential.
+  The runtime router enables it only for Codex and populates launch metadata
+  through the registry. Other consumers continue unchanged.
 
 ## Acceptance evidence
 
