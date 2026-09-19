@@ -384,7 +384,7 @@ export const AppShell: React.FC = () => {
           )}
         </div>
 
-        {/* Bottom cluster (design VDs23): Apps + Settings as two equal buttons,
+        {/* Bottom cluster: Apps fills the row beside the compact Settings icon,
             then version on the left and the live service status on the right.
             AppsLauncher keeps its layout slot here while its interactive surface
             floats above app windows. */}
@@ -404,20 +404,20 @@ export const AppShell: React.FC = () => {
                   else navigate('/');
                 }}
                 title={t('appShell.openControlPanel')}
-                className="group flex flex-1 items-center justify-center gap-2 rounded-[10px] border border-mint/40 bg-mint/[0.08] text-[13px] font-semibold text-foreground transition-colors"
+                aria-label={t('appShell.openControlPanel')}
+                className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint/[0.08] text-foreground transition-colors"
               >
-                <Settings className="size-4 shrink-0 text-mint-ink" />
-                <span className="truncate">{t('appShell.openControlPanel')}</span>
+                <Settings className="size-[18px] text-mint-ink" />
               </button>
             ) : (
               <Link
                 data-settings-toggle="true"
                 to={SETTINGS_LANDING_PATH}
                 title={t('appShell.openControlPanel')}
-                className="group flex flex-1 items-center justify-center gap-2 rounded-[10px] border border-border-strong bg-foreground/[0.03] text-[13px] text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+                aria-label={t('appShell.openControlPanel')}
+                className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
               >
-                <Settings className="size-4 shrink-0" />
-                <span className="truncate">{t('appShell.openControlPanel')}</span>
+                <Settings className="size-[18px] text-muted group-hover:text-foreground" />
               </Link>
             )}
           </div>

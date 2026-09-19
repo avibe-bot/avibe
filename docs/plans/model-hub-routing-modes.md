@@ -185,7 +185,11 @@ Approved design: `avibe-docs/design.pen`, frames `bmi25` (dark), `ziils` (light)
   the row dialog. Escape and outside interaction dismiss help. Avoid nested buttons.
 - Rename Adjust priority to Default routing. It edits one backend's default
   membership/order; manual routes are independent. Show affected inherited/manual
-  counts without implying historical authorship or runtime health.
+  counts without implying historical authorship or runtime health. One Save authorizes
+  the inherited-route impact without a second user confirmation. On a named impact
+  refusal, echo the exact server plan once; a changed plan or another failure preserves
+  the draft. Read canonical defaults after an ambiguous write before writing again.
+  This does not remove the server guard or change manual-route/Source confirmations.
 - Owner amendment 2026-09-08: route dialogs open directly editable. Only actual
   edits or explicit Pin current route stage manual intent; opening/picker dismissal
   and no-op edits preserve inheritance. Keep add/edit/remove/reorder and exact

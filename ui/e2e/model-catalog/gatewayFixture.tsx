@@ -13,6 +13,7 @@ export function GatewayFixture() {
   const backend = requestedBackend === 'claude' || requestedBackend === 'codex' ? requestedBackend : 'opencode';
   const direct = params.get('mode') === 'direct';
   const ids = ['claude-fable-5', 'claude-opus-4-8', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5'];
+  const origins = ['automatic', 'passthrough', 'manual', 'automatic', 'automatic'] as const;
   const source: Source = {
     id: 'src_fixture', display_name: 'Primary', kind: 'api_key', vendor: 'anthropic',
     protocol: 'anthropic', supply_channel: 'hub', billing: 'metered', last_discovered_at: null,
@@ -24,7 +25,7 @@ export function GatewayFixture() {
     catalog_models: status === 'empty' ? [] : ids.map((id) => ({ ...blankBackendModel(), id })),
     sources: { order: [source.id], eligibility: [{ source_id: source.id, eligible: true }] },
     model_supply: status === 'unknown' ? [] : ids.map((model_id, index) => ({
-      model_id, route_origin: 'automatic', chain_length: status === 'unconfigured' ? 0 : 1,
+      model_id, route_origin: origins[index], chain_length: status === 'unconfigured' ? 0 : 1,
       has_runnable_hop: status === 'available' || (status === 'partial' && index === 0),
     })),
     named_agents: [{
@@ -33,8 +34,9 @@ export function GatewayFixture() {
       route_reason: 'route_unconfigured', supply_status: 'interrupted',
     }],
   };
-  const chains = Object.fromEntries(ids.map((model_id) => [modelChainKey(backend, model_id), readyRegion<AgentChain>({
-    contract_version: 10, backend, model_id, route_origin: 'automatic', manual_override: null,
+  const chains = Object.fromEntries(ids.map((model_id, index) => [modelChainKey(backend, model_id), readyRegion<AgentChain>({
+    contract_version: 10, backend, model_id, route_origin: origins[index],
+    manual_override: origins[index] === 'manual' ? { hops: [{ source_id: source.id, model_id }] } : null,
     current: { source_id: source.id, model_id }, supply_state: 'ok',
     chain: [{ source_id: source.id, model_id, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
   })]));

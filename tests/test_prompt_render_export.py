@@ -22,6 +22,18 @@ from modules.im import MessageContext
 from vibe import cli
 
 
+_PREVIOUS_VERIFICATION_PRINCIPLE = (
+    "- **Verify and communicate.** Confirm outcomes with evidence appropriate to the matter, "
+    "and be honest about uncertainty. When reporting, lead with the conclusion and explain "
+    "implications and matters that need the other person's decision."
+)
+_EVIDENCE_LED_PRINCIPLE = (
+    "- **Verify and communicate.** Proactively seek evidence and deepen understanding. "
+    "Ground judgments in facts and take responsibility for their reliability and practical value. "
+    "Turn uncertainty into motivation for exploration and action, rather than an excuse to stop prematurely."
+)
+
+
 def _inputs(backend="codex", memory=True, history="managed", skill_mode="pages"):
     options = {
         "context": {
@@ -139,6 +151,27 @@ def test_custom_instructions_only_change_the_final_content_block(monkeypatch, ba
     assert [block["id"] for block in catalog][-2:] == [
         "runtime-agent-instructions", "runtime-runtime-snapshot-close",
     ]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_evidence_led_principle_is_shared_by_production_export_and_studio(monkeypatch, backend):
+    _environment(monkeypatch)
+    request = _inputs(backend)
+    rendered = render_prompt_context(request)
+    options = dict(request["options"])
+    options["context"] = MessageContext(**options["context"])
+    production = build_system_prompt_injection(agent_instructions=request["agent_instructions"], **options)
+    if backend == "codex":
+        production = CodexAgent._render_developer_prompt_snapshot(production)
+    studio = next(
+        block for block in export_prompt_studio_catalog()["documents"][0]["blocks"]
+        if block["id"] == "runtime-agent-working-principles"
+    )
+    assert rendered["text"] == production
+    assert studio["source_path"] == "core/prompts/agent-working-principles.md"
+    for text in (prompt_text("agent-working-principles"), production, studio["source"]):
+        assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
+        assert _PREVIOUS_VERIFICATION_PRINCIPLE not in text
 
 
 def test_runtime_snapshot_has_only_tags_and_verbatim_content():
@@ -439,7 +472,7 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
     assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
 
 
-def test_skill_loading_guidance_preserves_all_other_injection_bytes(monkeypatch):
+def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
     changed = {"skills-prompt", "skills-manual-prompt"}
     for backend, memory, history, skill_mode in itertools.product(
@@ -447,8 +480,11 @@ def test_skill_loading_guidance_preserves_all_other_injection_bytes(monkeypatch)
     ):
         _environment(monkeypatch, history, skill_mode)
         blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
-        outputs.append("".join(block["text"] for block in blocks if block["id"] not in changed))
+        text = "".join(block["text"] for block in blocks if block["id"] not in changed)
+        assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
+        outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
-    # omitting only the two approved Skill-loading guidance blocks.
+    # omitting only the two approved Skill-loading guidance blocks and restoring
+    # the previous verification principle. Every other byte/order stays pinned.
     assert digest == "fd82657d51e3193f54f939a3f159e7c7034a40d0b44388399e34a4aa17b14ea6"

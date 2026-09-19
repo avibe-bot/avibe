@@ -26,7 +26,11 @@ from core.managed_skills import (
     managed_skill_environment,
     managed_skill_project_base,
 )
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.native_dispatch_phase import (
+    backend_dispatch_attempted,
+    mark_backend_dispatch_attempted,
+    mark_prewrite_recovery_required,
+)
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
@@ -54,7 +58,7 @@ from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.session import CodexSessionManager
-from modules.agents.codex.transport import CodexRPCError, CodexTransport
+from modules.agents.codex.transport import CodexResponseTooLargeError, CodexRPCError, CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
 from vibe.i18n import t as i18n_t
@@ -405,6 +409,12 @@ class CodexAgent(BaseAgent):
         async with self._session_locks[request.base_session_id]:
             launch = None
             try:
+                # Register a complete durable binding before any transport
+                # acquisition or resume can fail and require ownership checks.
+                self.ensure_agent_session_id(request)
+                self._session_mgr.set_session_key(request.base_session_id, request.session_key)
+                self._session_mgr.set_cwd(request.base_session_id, request.working_path)
+                self._bind_runtime_agent_session_id(request)
                 if getattr(self.controller, "model_hub_runtime", None) is not None:
                     from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
@@ -455,9 +465,6 @@ class CodexAgent(BaseAgent):
                 self._event_handler._release_stream_turn(request.context)
                 return
 
-            # Resolve after queued turns, then bind this session to the runtime.
-            self._session_mgr.set_session_key(request.base_session_id, request.session_key)
-            self._session_mgr.set_cwd(request.base_session_id, request.working_path)
             self._touch_transport_activity(request.working_path)
             await self._delete_ack(request)
 
@@ -469,7 +476,6 @@ class CodexAgent(BaseAgent):
                 thread_id = self._session_mgr.get_thread_id(request.base_session_id)
 
                 if not thread_id:
-                    self.ensure_agent_session_id(request)
                     developer_instructions = await self._build_thread_developer_instructions(request)
                     prompt_rendered = True
                     thread_id = await self._start_or_resume_thread(
@@ -506,7 +512,6 @@ class CodexAgent(BaseAgent):
                 # Render once at the actual Turn boundary. Besides keeping the
                 # payload byte-stable, this avoids repeating Memory admission
                 # side effects while the same request refreshes and starts.
-                self.ensure_agent_session_id(request)
                 if not prompt_rendered:
                     developer_instructions = await self._build_thread_developer_instructions(request)
                     prompt_rendered = True
@@ -527,36 +532,39 @@ class CodexAgent(BaseAgent):
                 # Safety net: if the thread is stale (e.g. Codex server-side
                 # expiry, or the proactive invalidation in _get_or_create_transport
                 # was bypassed by a race), invalidate and retry once.
-                if self._is_recoverable_transport_error(e):
+                if (
+                    self._is_recoverable_transport_error(e)
+                    and backend_dispatch_attempted(request.context) is False
+                ):
                     logger.warning(
                         "Recoverable Codex transport failure for session %s, restarting transport and retrying: %s",
                         request.base_session_id,
                         e,
                     )
-                    await self._drop_transport_after_failure(request.working_path, transport, request)
-                    try:
-                        if launch is None:
-                            transport = await self._get_or_create_transport(request.working_path)
-                        else:
-                            transport = await self._get_or_create_transport(request.working_path, launch)
-                        self._touch_transport_activity(request.working_path)
-                        if not prompt_rendered:
-                            self.ensure_agent_session_id(request)
-                            developer_instructions = await self._build_thread_developer_instructions(request)
-                            prompt_rendered = True
-                        thread_id = await self._start_or_resume_thread(
-                            transport, request, developer_instructions=developer_instructions
-                        )
-                        self._bind_runtime_agent_session_id(request)
-                        await self._start_turn(
-                            transport,
-                            request,
-                            thread_id,
-                            developer_instructions=developer_instructions,
-                        )
-                        return  # retry succeeded
-                    except Exception as retry_err:
-                        e = retry_err  # fall through to normal error handling
+                    if await self._drop_transport_after_failure(request.working_path, transport, request):
+                        try:
+                            if launch is None:
+                                transport = await self._get_or_create_transport(request.working_path)
+                            else:
+                                transport = await self._get_or_create_transport(request.working_path, launch)
+                            self._touch_transport_activity(request.working_path)
+                            if not prompt_rendered:
+                                self.ensure_agent_session_id(request)
+                                developer_instructions = await self._build_thread_developer_instructions(request)
+                                prompt_rendered = True
+                            thread_id = await self._start_or_resume_thread(
+                                transport, request, developer_instructions=developer_instructions
+                            )
+                            self._bind_runtime_agent_session_id(request)
+                            await self._start_turn(
+                                transport,
+                                request,
+                                thread_id,
+                                developer_instructions=developer_instructions,
+                            )
+                            return  # retry succeeded
+                        except Exception as retry_err:
+                            e = retry_err  # fall through to normal error handling
 
                 # FAIL LOUD on a server-side "thread not found": the conversation is
                 # gone, so surface the error instead of silently clearing the
@@ -564,6 +572,8 @@ class CodexAgent(BaseAgent):
                 # The mapping is kept so the failure is consistent until the user
                 # explicitly starts a new session (product decision: no silent
                 # fallbacks).
+                if isinstance(e, (CodexResumeUnavailableError, CodexResponseTooLargeError)):
+                    mark_prewrite_recovery_required(request.context, "codex_resume_unavailable")
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
@@ -1017,6 +1027,12 @@ class CodexAgent(BaseAgent):
         setter(request.base_session_id, session_id)
 
     def _error_display_text(self, error: BaseException) -> str:
+        if isinstance(error, CodexResponseTooLargeError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t('error.codexResponseTooLarge', language, limitMiB=error.limit // (1024 * 1024))}"
         if isinstance(error, CodexPromptRefreshUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
@@ -1581,6 +1597,8 @@ class CodexAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _is_recoverable_transport_error(self, error: Exception) -> bool:
+        if isinstance(error, CodexResponseTooLargeError):
+            return False
         if isinstance(error, (ConnectionError, TimeoutError)):
             return True
 
@@ -1599,12 +1617,27 @@ class CodexAgent(BaseAgent):
             )
         )
 
+    async def _transport_replacement_is_safe(self, cwd: str, transport: CodexTransport) -> bool:
+        """Recheck durable ownership and live turns inside retirement."""
+        ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
+        dead = self._transport_alive(transport) is False
+        blocked = getattr(
+            ownership,
+            "blocks_dead_transport_replacement" if dead else "blocks_transport_replacement",
+            True,
+        )
+        return bool(
+            ownership is not None
+            and not blocked
+            and (dead or not self._has_active_turns_for_cwd(cwd))
+        )
+
     async def _drop_transport_after_failure(
         self,
         cwd: str,
         transport: CodexTransport,
         request: AgentRequest,
-    ) -> None:
+    ) -> bool:
         """Remove a broken app-server and clear stale in-memory request state."""
         lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
         async with lock:
@@ -1615,6 +1648,7 @@ class CodexAgent(BaseAgent):
                     detached = await self._stop_and_detach_transport_generation(
                         cwd,
                         transport,
+                        final_predicate=lambda: self._transport_replacement_is_safe(cwd, transport),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -1622,9 +1656,10 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    return
+                    return False
                 if not detached:
-                    return
+                    logger.warning("Codex failure recovery cannot replace an owned transport for cwd=%s", cwd)
+                    return False
             elif current is None:
                 identity = self._transport_activation_identity(transport)
                 registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
@@ -1633,7 +1668,7 @@ class CodexAgent(BaseAgent):
                         "Refusing to stop an untracked current Codex generation for cwd=%s",
                         cwd,
                     )
-                    return
+                    return False
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -1642,7 +1677,7 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    return
+                    return False
             else:
                 identity = self._transport_activation_identity(transport)
                 registry = getattr(
@@ -1657,7 +1692,7 @@ class CodexAgent(BaseAgent):
                         "Refusing to stop a replaced but still-current Codex generation for cwd=%s",
                         cwd,
                     )
-                    return
+                    return False
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -1666,7 +1701,7 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    return
+                    return False
 
             if should_invalidate_cwd_sessions:
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
@@ -1679,6 +1714,7 @@ class CodexAgent(BaseAgent):
         self._session_mgr.invalidate_thread(request.base_session_id)
         self._clear_thread_developer_instructions(request.base_session_id)
         self._turn_registry.clear_session(request.base_session_id)
+        return True
 
     async def _get_or_create_transport(
         self,
@@ -1697,10 +1733,6 @@ class CodexAgent(BaseAgent):
             async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
-                existing_dead = bool(
-                    existing is not None
-                    and self._transport_alive(existing) is False
-                )
                 desired_fingerprint = launch.fingerprint if launch is not None else "direct"
                 existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
                 runtime_changed = existing_fingerprint != desired_fingerprint
@@ -1756,32 +1788,10 @@ class CodexAgent(BaseAgent):
 
                     # Stop stale transport if any
                     if existing:
-                        async def replacement_is_safe() -> bool:
-                            ownership = (
-                                await self._runtime_ownership_snapshot_for_cwd_async(cwd)
-                            )
-                            replacement_blocked = getattr(
-                                ownership,
-                                (
-                                    "blocks_dead_transport_replacement"
-                                    if existing_dead
-                                    else "blocks_transport_replacement"
-                                ),
-                                True,
-                            )
-                            return bool(
-                                ownership is not None
-                                and not replacement_blocked
-                                and (
-                                    existing_dead
-                                    or not self._has_active_turns_for_cwd(cwd)
-                                )
-                            )
-
                         detached = await self._stop_and_detach_transport_generation(
                             cwd,
                             existing,
-                            final_predicate=replacement_is_safe,
+                            final_predicate=lambda: self._transport_replacement_is_safe(cwd, existing),
                         )
                         if not detached:
                             raise RuntimeError(
@@ -2402,6 +2412,7 @@ class CodexAgent(BaseAgent):
                 self.bind_agent_session_id(request, persisted)
                 resume_params: Dict[str, Any] = {
                     "threadId": persisted,
+                    "excludeTurns": True,
                 }
                 if developer_instructions:
                     resume_params["developerInstructions"] = await self._native_thread_prompt(
@@ -2445,7 +2456,7 @@ class CodexAgent(BaseAgent):
                     if isinstance(thread_obj, dict):
                         thread_id = thread_obj.get("id", "")
             except Exception as e:
-                if isinstance(e, CodexPromptRefreshUnavailableError):
+                if isinstance(e, (CodexPromptRefreshUnavailableError, CodexResponseTooLargeError)):
                     raise
                 if self._is_recoverable_transport_error(e):
                     # Transient: reconnect the SAME thread (handled by the outer
@@ -2726,6 +2737,7 @@ class CodexAgent(BaseAgent):
         if len(resume_params) == 1:
             return
 
+        resume_params["excludeTurns"] = True
         await transport.send_request(
             "thread/resume",
             resume_params,
@@ -3335,6 +3347,16 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandboxPolicy": {"type": "dangerFullAccess"},
         }
+        from modules.agents.model_hub import launch_for_context
+
+        launch = launch_for_context(getattr(request, "context", None))
+        if (
+            launch is not None and launch.backend == "codex" and launch.channel == "hub"
+            and launch.gateway_request_metadata
+        ):
+            # Process authentication stays stable; native tool loops and retries
+            # carry this turn's route instead of inheriting a peer's launch.
+            turn_params["responsesapiClientMetadata"] = dict(launch.gateway_request_metadata)
         if effective_model is not None or model_explicit:
             turn_params["model"] = effective_model
         if effective_effort is not None or effort_explicit:

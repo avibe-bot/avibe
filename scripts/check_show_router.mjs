@@ -20,6 +20,18 @@ if (!values["runtime-root"]) throw new Error("--runtime-root is required")
 const runtimeRoot = resolve(values["runtime-root"])
 const { startShowRuntimeServer } = await import(pathToFileURL(join(runtimeRoot, "packages/runtime/dist/server.js")).href)
 const temporary = await mkdtemp(join(tmpdir(), "avibe-python-router-check-"))
+const executablePath = process.env.PATH
+for (const key of Object.keys(process.env)) delete process.env[key]
+Object.assign(process.env, {
+  PATH: executablePath,
+  HOME: join(temporary, "home"),
+  AVIBE_HOME: temporary,
+  XDG_CONFIG_HOME: join(temporary, "config"),
+  XDG_DATA_HOME: join(temporary, "data"),
+  XDG_CACHE_HOME: join(temporary, "cache-home"),
+  XDG_STATE_HOME: join(temporary, "state-home"),
+  AVIBE_ALLOW_DEV_STATE_MIGRATION: "1"
+})
 const workspaceRoot = join(temporary, "show")
 const sessions = ["sesfresh", "seslegacylf", "seslegacycrlf"]
 const originalRouters = new Map()
@@ -143,6 +155,13 @@ export default function Item({ params, query }: PageProps) {
       `${sessionId}: initialization or rendering changed the editable router`)
   }
   console.log(`Show router integration passed: fresh nested SSR, Unicode, queries, links, HTML, private + public; legacy LF/CRLF ${values["legacy-router-ssr"] ? "nested SSR" : "root fallback"}, route fields, read-only root location + static motion; source files unchanged.`)
+  if (!values["legacy-router-ssr"]) {
+    execFileSync(values.python, ["-m", "pytest", "tests/test_show_api_integration.py", "-q"], {
+      cwd: repository,
+      env: { ...process.env, AVIBE_SHOW_API_RUNTIME_ROOT: runtimeRoot },
+      stdio: "inherit"
+    })
+  }
 } finally {
   await server?.close()
   await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })

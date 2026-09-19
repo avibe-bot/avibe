@@ -10,6 +10,7 @@ import {
   CATALOG_VENDOR_IDS,
   PROVIDER_VENDOR_ALIAS,
   SETUP_PRIMARY_VENDORS,
+  providerBrandLabel,
   providerLabel,
   providerVendorId,
   setupPrimaryRank,
@@ -71,6 +72,26 @@ describe('providerLabel', () => {
   it('keeps the slug when neither the catalog nor the server knows the name', () => {
     expect(providerLabel('my-internal-relay')).toBe('my-internal-relay');
     expect(providerLabel('my-internal-relay', 'my-internal-relay')).toBe('my-internal-relay');
+  });
+});
+
+describe('providerBrandLabel', () => {
+  it('names the brand, not the variant, when a row stands in a brand slot', () => {
+    // The same row reads two ways on purpose: "Qwen" in the slot it fills,
+    // "Alibaba (China)" under More where its job is to be told apart from the
+    // other Qwen rows.
+    expect(providerBrandLabel('alibaba-cn', 'Alibaba (China)')).toBe(apiKeyVendorPreset('qwen')?.label);
+    expect(providerLabel('alibaba-cn', 'Alibaba (China)')).toBe('Alibaba (China)');
+  });
+
+  it('agrees with providerLabel when the server added nothing', () => {
+    expect(providerBrandLabel('google')).toBe(providerLabel('google'));
+    expect(providerBrandLabel('moonshot', 'moonshot')).toBe(providerLabel('moonshot', 'moonshot'));
+  });
+
+  it('leaves a provider with no brand slot exactly as it was', () => {
+    expect(providerBrandLabel('my-internal-relay', '内部中转')).toBe('内部中转');
+    expect(providerBrandLabel('my-internal-relay')).toBe('my-internal-relay');
   });
 });
 

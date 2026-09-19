@@ -60,6 +60,7 @@ jobs:
           npm run test:project-order
           npm run test:inbox-return
           npm run test:badge-triggers
+          npm run test:workbench-general -- sidebar-floating.spec.ts
 
   show-router-integration:
     runs-on: ubuntu-latest

@@ -103,6 +103,52 @@ _PROTOCOL_HEADERS: Final = frozenset(
     }
 )
 
+_CODEX_TURN_METADATA: Final = "x-codex-turn-metadata"
+_CODEX_ROUTE_FIELDS: Final = ("avibe_route_id", "avibe_turn_id")
+
+
+def _codex_request_metadata(raw: str | None) -> dict | None:
+    """Read native request identity without inferring from active turns."""
+
+    if raw is None:
+        return None
+    try:
+        metadata = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    route_id = metadata.get("avibe_route_id")
+    turn_id = metadata.get("avibe_turn_id")
+    if (
+        not isinstance(route_id, str) or not route_id.strip() or not route_id.isascii()
+        or not isinstance(turn_id, str) or (turn_id != "" and not turn_id.strip())
+    ):
+        return None
+    return {key: metadata[key] for key in _CODEX_ROUTE_FIELDS}
+
+
+def _consume_codex_request_metadata(payload: dict, header: dict | None) -> bool:
+    """Verify duplicate identity and keep private routing fields local."""
+
+    client_metadata = payload.get("client_metadata")
+    if not isinstance(client_metadata, dict) or _CODEX_TURN_METADATA not in client_metadata:
+        return True
+    raw = client_metadata[_CODEX_TURN_METADATA]
+    try:
+        metadata = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    if any(key in metadata for key in _CODEX_ROUTE_FIELDS):
+        if header is None or any(metadata.get(key) != header[key] for key in _CODEX_ROUTE_FIELDS):
+            return False
+        for key in _CODEX_ROUTE_FIELDS:
+            metadata.pop(key)
+        client_metadata[_CODEX_TURN_METADATA] = json.dumps(metadata, ensure_ascii=True)
+    return True
+
 
 @dataclass
 class _TurnExecution:
@@ -438,16 +484,19 @@ class ModelHubTurnGateway:
         source_id: Optional[str] = None,
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
+        request_scoped: bool = False,
     ) -> tuple[str, str]:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable", status=409)
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
-        token = self.correlation.credentials(backend, scope, turn_id)
+        token = self.correlation.credentials(
+            backend, scope, turn_id, request_scoped=request_scoped,
+        )
         if requested_model_id and resolved_model_id and source_id:
-            # Preparing the route hands back the credential bound to it. The
-            # launch must authenticate with that one: routing is answered from
-            # the credential, and the scope credential names only the process.
-            token = self.correlation.prepare_gateway_turn(
+            # Credential-bound clients carry their route in authentication.
+            # Multiplexed Codex keeps authentication stable and carries this
+            # route's handle on each request instead.
+            route_token = self.correlation.prepare_gateway_turn(
                 backend=backend,
                 token=token,
                 turn_id=turn_id,
@@ -457,6 +506,8 @@ class ModelHubTurnGateway:
                 via_mapping=via_mapping,
                 gateway_request_model_id=gateway_request_model_id,
             )
+            if not request_scoped:
+                token = route_token
         await self._ensure_started()
         assert self._base_url is not None
         return f"{self._base_url}/{backend}", token
@@ -572,6 +623,10 @@ class ModelHubTurnGateway:
         terminalizer = self.correlation.gateway_terminalizer(
             backend=backend,
             token=token,
+            request_metadata=(
+                _codex_request_metadata(request.headers.get(_CODEX_TURN_METADATA))
+                if backend == "codex" else None
+            ),
         )
         execution = _TurnExecution()
         with self._own_turn_request(terminalizer, execution), terminalizer:
@@ -785,6 +840,17 @@ class ModelHubTurnGateway:
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         if not isinstance(payload, dict):
+            terminalizer.fail("invalid_parameter")
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
+                status=400,
+                code="invalid_request_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
+        if backend == "codex" and not _consume_codex_request_metadata(
+            payload, _codex_request_metadata(request.headers.get(_CODEX_TURN_METADATA)),
+        ):
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
                 execution,

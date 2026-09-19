@@ -721,15 +721,18 @@ def public_url(share_id: str | None, *, config: V2Config | None = None) -> str |
 
 
 class ShowPageStore:
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None, *, read_only: bool = False):
         self.db_path = db_path or paths.get_sqlite_state_path()
-        if db_path is None:
-            ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-        else:
-            from storage.migrations import run_migrations
+        if not read_only:
+            if db_path is None:
+                ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+            else:
+                from storage.migrations import run_migrations
 
-            run_migrations(self.db_path)
-        self.engine = create_sqlite_engine(self.db_path)
+                run_migrations(self.db_path)
+        self.engine = (
+            create_sqlite_engine(self.db_path, read_only=True) if read_only else create_sqlite_engine(self.db_path)
+        )
 
     def close(self) -> None:
         self.engine.dispose()

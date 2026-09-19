@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from modules.agents.codex.transport import (
     AVIBE_APP_SERVER_CONFIG_OVERRIDES,
     CodexRPCError,
+    CodexResponseTooLargeError,
     CodexTransport,
     STREAM_BUFFER_LIMIT,
 )
@@ -24,6 +25,34 @@ def _forced_config_args() -> tuple[str, ...]:
 
 
 class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oversized_stdout_fails_all_pending_requests_with_typed_cause(self):
+        """MESSAGE-DELIVERY-032: preserve framing failure instead of retryable EOF."""
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        stdout = asyncio.StreamReader(limit=64)
+        stdout.feed_data(b'{"result":"' + b"x" * 100 + b'"}\n')
+        transport._process = SimpleNamespace(stdout=stdout, returncode=None)
+        pending = [asyncio.get_running_loop().create_future() for _ in range(2)]
+        transport._pending = dict(enumerate(pending))
+        transport._reader_task = asyncio.create_task(transport._reader_loop())
+        await transport._reader_task
+        for future in pending:
+            with self.assertRaises(CodexResponseTooLargeError) as caught:
+                await future
+            self.assertNotIsInstance(caught.exception, ConnectionError)
+        self.assertFalse(transport.is_alive)
+        self.assertEqual(transport._pending, {})
+
+    async def test_normal_stdout_eof_remains_a_connection_error(self):
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        stdout = asyncio.StreamReader()
+        stdout.feed_eof()
+        transport._process = SimpleNamespace(stdout=stdout, returncode=None)
+        pending = asyncio.get_running_loop().create_future()
+        transport._pending[1] = pending
+        await transport._reader_loop()
+        with self.assertRaisesRegex(ConnectionError, "stdout closed"):
+            await pending
+
     async def test_rpc_errors_preserve_protocol_rejection_identity(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")
         for code in (-32600, -32601, -32602, -32603, -32000):

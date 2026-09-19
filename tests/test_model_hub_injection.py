@@ -279,7 +279,10 @@ def test_route_alias_keeps_its_own_planning_metadata(tmp_path, monkeypatch, back
     store = MemoryModelHubStore(config)
     router = ModelHubRuntimeRouter(
         service=service_for(tmp_path, store, ModelHubScenarioAdapter()),
-        turn_gateway=SimpleNamespace(endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "fixture-token"))),
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "fixture-token")),
+            correlation=SimpleNamespace(gateway_request_metadata=lambda **_kwargs: {}),
+        ),
         overlay_path=tmp_path / "overlay.json",
     )
 
