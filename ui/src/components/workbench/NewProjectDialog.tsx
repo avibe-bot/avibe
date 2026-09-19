@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Folder, FolderOpen, Loader2, X } from 'lucide-react';
 
@@ -8,6 +8,7 @@ import { DirectoryBrowser } from '../ui/directory-browser';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { errorMessage } from '@/lib/errorMessage';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 
 interface NewProjectDialogProps {
   initialPath?: string;
@@ -27,17 +28,40 @@ interface NewProjectDialogProps {
 export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onCreated, initialPath }) => {
   const { t } = useTranslation();
   const { createProject } = useWorkbenchProjectsActions();
+  const surfaceActive = useRouteSurfaceActive();
+  const lifetime = useRef({ mounted: true, cancelled: false, active: surfaceActive, submitting: false });
+  useLayoutEffect(() => { lifetime.current.active = surfaceActive; }, [surfaceActive]);
+  useEffect(() => {
+    const current = lifetime.current;
+    current.mounted = true;
+    return () => { current.mounted = false; };
+  }, []);
   const [phase, setPhase] = useState<'pick' | 'confirm'>('pick');
   const [folderPath, setFolderPath] = useState<string>('');
   const [displayName, setDisplayName] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [completion, setCompletion] = useState<{ project: WorkbenchProject | null } | null>(null);
+  const delivered = useRef<typeof completion>(null);
+  const close = () => {
+    if (!lifetime.current.active) return;
+    lifetime.current.cancelled = true;
+    onClose();
+  };
+  useEffect(() => {
+    if (!surfaceActive || !completion || delivered.current === completion
+      || lifetime.current.cancelled || !lifetime.current.mounted) return;
+    delivered.current = completion;
+    // A null result is the provider's authorization fence, not a new project.
+    if (completion.project) onCreated(completion.project);
+    else onClose();
+  }, [completion, onClose, onCreated, surfaceActive]);
 
   if (phase === 'pick') {
     return (
       <DirectoryBrowser
         initialPath={folderPath || initialPath}
-        onClose={onClose}
+        onClose={close}
         onSelect={(path) => {
           setFolderPath(path);
           setPhase('confirm');
@@ -49,7 +73,8 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
   const folderBasename = folderPath.split('/').filter(Boolean).pop() || folderPath || '—';
 
   const submit = async () => {
-    if (!folderPath || submitting) return;
+    if (!folderPath || lifetime.current.submitting || !lifetime.current.active || lifetime.current.cancelled) return;
+    lifetime.current.submitting = true;
     setSubmitting(true);
     setError(null);
     try {
@@ -57,18 +82,17 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
         folder_path: folderPath,
         display_name: displayName.trim() || undefined,
       });
-      // null = created, but an authorization change landed while we waited, so
-      // this document no longer holds a tree to place it in. Just close.
-      if (!project) {
-        onClose();
-        return;
-      }
-      onCreated(project);
+      if (!lifetime.current.mounted || lifetime.current.cancelled) return;
+      setCompletion({ project });
     } catch (err) {
+      if (!lifetime.current.mounted || lifetime.current.cancelled) return;
+      lifetime.current.submitting = false;
       setError(errorMessage(err) ?? String(err));
       setSubmitting(false);
     }
   };
+
+  if (!surfaceActive || completion) return null;
 
   return (
     <div
@@ -76,7 +100,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
       role="dialog"
       aria-modal="true"
       aria-label={t('workbench.newProjectDialog.title')}
-      onClick={onClose}
+      onClick={close}
     >
       <div
         className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border-strong bg-surface p-5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
@@ -94,7 +118,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={close}
             aria-label={t('workbench.newProjectDialog.cancel')}
             className="text-muted transition hover:text-foreground"
           >
@@ -146,7 +170,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
         )}
 
         <div className="flex items-center justify-end gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={submitting}>
+          <Button type="button" variant="outline" size="sm" onClick={close} disabled={submitting}>
             {t('workbench.newProjectDialog.cancel')}
           </Button>
           <Button
