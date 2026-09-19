@@ -117,9 +117,11 @@ def _codex_request_metadata(raw: str | None) -> dict | None:
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(metadata, dict) or any(
-        not isinstance(metadata.get(key), str) or not metadata[key]
+        not isinstance(metadata.get(key), str) or not metadata[key].strip()
         for key in _CODEX_ROUTE_FIELDS
     ):
+        return None
+    if not metadata["avibe_route_id"].isascii():
         return None
     return {key: metadata[key] for key in _CODEX_ROUTE_FIELDS}
 

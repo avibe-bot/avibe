@@ -153,7 +153,10 @@ async def test_codex_shared_transport_routes_overlapping_aliases(runtime):
     assert {model for _source, model, _origin in runtime.adapter.invocations} == {"same-upstream"}
 
 
-@pytest.mark.parametrize("bad_identity", ["missing", "malformed", "unknown", "foreign", "mismatched-body"])
+@pytest.mark.parametrize("bad_identity", [
+    "missing", "malformed", "unknown", "unicode-route", "foreign",
+    "mismatched-body", "wrong-model", "wrong-live-turn",
+])
 async def test_codex_invalid_identity_cannot_route_or_poison_peer(runtime, bad_identity):
     launch = await _launch(runtime, "healthy")
     headers = _headers(launch)
@@ -162,17 +165,28 @@ async def test_codex_invalid_identity_cannot_route_or_poison_peer(runtime, bad_i
         headers.pop(METADATA)
     elif bad_identity == "malformed":
         headers[METADATA] = "{"
-    elif bad_identity == "unknown":
-        headers[METADATA] = json.dumps({"avibe_route_id": "unknown", "avibe_turn_id": "healthy"})
+    elif bad_identity in {"unknown", "unicode-route"}:
+        headers[METADATA] = json.dumps({
+            "avibe_route_id": "未知路由" if bad_identity == "unicode-route" else "unknown",
+            "avibe_turn_id": "healthy",
+        })
         payload.pop("client_metadata")
     elif bad_identity == "foreign":
         foreign = await _launch(runtime, "foreign", scope="another-process")
         headers[METADATA] = json.dumps(foreign.gateway_request_metadata)
         payload = _body(foreign)
-    else:
+    elif bad_identity == "mismatched-body":
         payload["client_metadata"][METADATA] = json.dumps({
             **launch.gateway_request_metadata, "avibe_turn_id": "some-peer",
         })
+    elif bad_identity == "wrong-model":
+        payload["model"] = "never-launched"
+    else:
+        await _launch(runtime, "peer", ALIASES[1])
+        headers[METADATA] = json.dumps({
+            **launch.gateway_request_metadata, "avibe_turn_id": "peer",
+        })
+        payload.pop("client_metadata")
     status, _ = await _post(launch, headers=headers, payload=payload)
     assert status in {400, 409}
     assert runtime.adapter.invocations == []

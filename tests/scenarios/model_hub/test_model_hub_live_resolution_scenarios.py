@@ -488,7 +488,10 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
                     requested_model,
                 )
             else:
-                recovered_launch = await router.resolve(backend, requested_model)
+                recovered_launch = await router.resolve(
+                    backend, requested_model,
+                    process_scope="scenario-fallback", turn_id="turn_recovered",
+                )
             assert not any(event["kind"] == "recover" for event in service.list_events(limit=10))
             recovered_status, recovered_body = await _post_turn(
                 recovered_launch,
@@ -771,7 +774,10 @@ def test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes(
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            launch = await router.resolve("codex", _requested_model("codex"))
+            launch = await router.resolve(
+                "codex", _requested_model("codex"),
+                process_scope="scenario-effort", turn_id="turn_effort",
+            )
             status, body = await _post_turn(
                 launch,
                 endpoint="responses",
