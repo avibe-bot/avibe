@@ -15,8 +15,97 @@ import { OAuthDeviceCodeRow, OAuthLinkRow } from '../oauth/OAuthFlowParts';
 import './connection.css';
 
 type Method = 'oauth' | 'api_key';
+type Credential = 'api_key' | 'auth_token';
 type NativeState = ClaudeAuthState | CodexAuthState;
-export type ConnectionHeading = { method: Method; active: boolean; credential: 'api_key' | 'auth_token' };
+export type ConnectionHeading = { method: Method; active: boolean; credential: Credential };
+
+/**
+ * One unsent secret, per credential type.
+ *
+ * An API key and an auth token are different credentials, not two spellings of
+ * one: they are issued separately, formatted differently and sent under
+ * different keys. A single draft therefore carried a half-typed key into the
+ * Auth Token field the moment someone checked what the other option was — and
+ * the same shared `editing` flag decided, for both, whether the stored mask was
+ * showing. Keeping a draft per credential type means switching only ever
+ * changes which draft is on screen, which is also what makes switching back
+ * safe.
+ */
+type Draft = { value: string; editing: boolean };
+const CREDENTIALS: readonly Credential[] = ['api_key', 'auth_token'];
+const EMPTY_DRAFTS: Readonly<Record<Credential, Draft>> = {
+  api_key: { value: '', editing: false },
+  auth_token: { value: '', editing: false },
+};
+/** Typed, or asked to replace what is stored — either way, something is on screen to lose. */
+const unsaved = (draft: Draft) => draft.value !== '' || draft.editing;
+
+/**
+ * What a confirmation is allowed to spend, and what it has to prove.
+ *
+ * A receipt settles one submission, so the only work it may release is the work
+ * that submission actually carried: signing in sends no credential and no URL at
+ * all, and a save sends at most one type's value alongside one URL. Carrying the
+ * work itself as well as its name is what makes a late receipt safe — anything
+ * changed since the write went out is no longer what was sent, so it outlives
+ * its own submission's receipt rather than being erased by it. A deferred
+ * confirmation therefore settles what was submitted rather than whatever happens
+ * to be on screen when it lands.
+ *
+ * `sent` is the **whole draft** that went out, not its value, because a draft is
+ * a value *and* whether someone is part-way through replacing what is stored.
+ * Those two states can share a value: an empty field nobody has opened and a
+ * field just opened by Replace both read `''`, and only one of them is the state
+ * that was submitted. It is `null` when the payload omitted the credential
+ * altogether — a save that changes only the address sends no key, so its receipt
+ * has no credential work to spend, and modelling that as an empty draft would
+ * make it spend one.
+ *
+ * `credential` is the type the write *declared*, which is not the same question:
+ * Claude sends `credential_type` on every save, including one that carries no
+ * key, so the type a receipt must prove outlives the draft it may or may not
+ * have sent. `null` says this write declared no type at all.
+ *
+ * `baseUrl` is the URL exactly as it stood in the field, not the trimmed payload:
+ * the question it answers is whether the person has moved on since, and `null`
+ * says this write carried no URL to settle.
+ */
+type Submission = { method: Method; baseUrl: string | null; credential: Credential | null; sent: Draft | null };
+const sameDraft = (left: Draft, right: Draft) => left.value === right.value && left.editing === right.editing;
+
+/**
+ * What one receipt releases, decided once.
+ *
+ * Every question here is the same question — did this submission carry this
+ * editable, and does the screen still read the way it was sent — and the answers
+ * are wanted in three places: the drafts to keep, the ownership to give back, and
+ * whether the form may follow the server again. Answering it once and reading the
+ * answer three times is the whole point of the type; computing it once by
+ * comparison and again by assumption is how a retained draft lost its ownership.
+ */
+type Settlement = { drafts: Record<Credential, Draft>; baseUrl: boolean; method: boolean; credentialType: boolean };
+const settle = (submission: Submission, showing: { baseUrl: string; method: Method; credential: Credential; drafts: Record<Credential, Draft> }): Settlement => {
+  const { credential, sent } = submission;
+  const released = credential !== null && sent !== null && sameDraft(showing.drafts[credential], sent);
+  return {
+    drafts: released && credential !== null ? { ...showing.drafts, [credential]: EMPTY_DRAFTS[credential] } : showing.drafts,
+    baseUrl: submission.baseUrl !== null && showing.baseUrl === submission.baseUrl,
+    method: showing.method === submission.method,
+    credentialType: credential !== null && showing.credential === credential,
+  };
+};
+
+/**
+ * Something on this form a person can change, and an observation can seed over.
+ *
+ * The four are one list because they share one rule — a reseed follows the
+ * server only where nobody has said otherwise — and they are tracked apart
+ * because they are released apart. One shared flag would answer "has anything
+ * been touched", which is the right question to ask before seeding and the wrong
+ * one to answer after a receipt: settling a credential would clear a URL that
+ * write never carried.
+ */
+type Editable = Credential | 'base_url' | 'method' | 'credential_type';
 
 /** Settings and onboarding share persistence, validation, effective readback and cancellation. */
 export function BackendConnectionForm({ backend, provider, initialMethod = 'oauth', compact = false,
@@ -39,9 +128,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [native, setNative] = useState<NativeState | null>(null);
   const [currentProvider, setCurrentProvider] = useState(provider);
   const [method, setMethod] = useState<Method>(backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
-  const [credential, setCredential] = useState<'api_key' | 'auth_token'>('api_key');
-  const [key, setKey] = useState('');
-  const [editing, setEditing] = useState(false);
+  const [credential, setCredential] = useState<Credential>('api_key');
+  const [drafts, setDrafts] = useState<Record<Credential, Draft>>(EMPTY_DRAFTS);
+  const { value: key, editing } = drafts[credential];
   const [reveal, setReveal] = useState(false);
   const [baseUrl, setBaseUrl] = useState('');
   const [loading, setLoading] = useState(true);
@@ -53,8 +142,34 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [applyPending, setApplyPending] = useState(false);
   const [authReadable, setAuthReadable] = useState(false);
   const observation = useRef(0);
-  const draftTouched = useRef(false);
-  const pendingConfirmation = useRef<Method | null>(null);
+  const touched = useRef(new Set<Editable>());
+  /**
+   * What the person is looking at right now.
+   *
+   * A receipt is read in the render that dispatched the write, and the gap this
+   * whole type closes is exactly the one where the field moved on while that
+   * write was in flight. So the comparison a receipt makes is against the live
+   * values, kept the same way `onConnectedRef` is.
+   */
+  const onScreen = useRef({ baseUrl, method, credential, drafts });
+  onScreen.current = { baseUrl, method, credential, drafts };
+  /**
+   * Edits only ever reach the credential type currently on screen.
+   *
+   * Ownership is read off the draft the edit produces rather than asserted by the
+   * act of editing, because not every edit leaves something to lose: Cancel puts
+   * the field back exactly as an untouched one, and a form that still claimed it
+   * would stop following the server for the rest of its life over nothing.
+   */
+  const patchDraft = useCallback((patch: Partial<Draft>) => {
+    setDrafts((current) => {
+      const next = { ...current[credential], ...patch };
+      if (unsaved(next)) touched.current.add(credential);
+      else touched.current.delete(credential);
+      return { ...current, [credential]: next };
+    });
+  }, [credential]);
+  const pendingConfirmation = useRef<Submission | null>(null);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
   const lifetime = useRef({ mounted: true, busy: false });
   const onConnectedRef = useRef(onConnected); onConnectedRef.current = onConnected;
@@ -76,20 +191,21 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   }, [api, backend, provider?.id, t]);
   // Native persistence and controller application are independent observations.
   // A failed IPC read must not discard a successful post-commit credential read.
-  const observe = useCallback(async ({ expectedMethod, receiptError = '' }: {
-    expectedMethod?: Method; receiptError?: string;
+  const observe = useCallback(async ({ expected, receiptError = '' }: {
+    expected?: Submission; receiptError?: string;
   } = {}) => {
     const token = ++observation.current;
     const current = () => lifetime.current.mounted && token === observation.current;
     setConnected(false); setSavedDisabled(false); setError(receiptError);
+    const pristine = () => touched.current.size === 0;
     const nativeRead = read().then((fresh) => {
       if (current()) {
         setNative(fresh.native); setCurrentProvider(fresh.provider); setAuthReadable(true);
-        if (!draftTouched.current) {
+        if (pristine()) {
           setBaseUrl(fresh.native?.base_url || fresh.provider?.base_url || '');
           if (fresh.native && 'credential_type' in fresh.native) setCredential(fresh.native.credential_type || 'api_key');
         }
-        if (!compact && !draftTouched.current) {
+        if (!compact && pristine()) {
           const effective = fresh.native?.active_auth_mode;
           setMethod(effective && effective !== 'none' ? effective : fresh.provider?.active_auth_type === 'api' ? 'api_key' : backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
         }
@@ -115,7 +231,22 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       const uncertain = fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain;
       hasAuth = ['oauth', 'api_key'].includes(effective) && !uncertain;
       keylessSettings = !compact && Boolean(fresh.provider?.custom && fresh.provider.configured && effective === 'none');
-      if (expectedMethod && ((!keylessSettings && effective !== expectedMethod) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
+      if (expected && ((!keylessSettings && effective !== expected.method) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
+      // Claude's two credential types are one method. `active_auth_mode` reads
+      // `api_key` for a token exactly as it does for a key, so the method above
+      // cannot tell a token write that landed from one that did not — only the
+      // type the readback reports can. Absent or mismatched is unconfirmed: the
+      // producer emits this field for every stored credential, including its
+      // legacy API-key fallback, so nothing to compare means nothing observed,
+      // not licence to settle on the weaker half of the question. Backends with
+      // no such discriminator keep the method answer they have always had. The
+      // claim is the type the write DECLARED, not the draft it happened to carry:
+      // a save that only changes the address still declares one, and a receipt
+      // that cannot see it land has still not seen the write land.
+      if (expected?.credential && backend === 'claude') {
+        const stored = fresh.native && 'credential_type' in fresh.native ? fresh.native.credential_type : null;
+        if (stored !== expected.credential) messages.push(t('onboarding.connection.unconfirmed'));
+      }
     }
     setError([...new Set(messages)].join(' '));
     setApplyPending(messages.length > 0);
@@ -136,19 +267,44 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     return () => { observation.current += 1; };
   }, [connectionRevision, observe]);
 
-  const confirm = async (expectedMethod: Method = method, receiptError = '') => {
-    pendingConfirmation.current = expectedMethod;
-    if (!await observe({ expectedMethod, receiptError })) return false;
+  // Release what this receipt paid for, and only that. One settlement decides it,
+  // and the drafts it hands back are the same ones the ownership is then read off
+  // — so a credential the comparison refused to release cannot lose its ownership
+  // to a second, more optimistic answer. Anything the submission did not carry, or
+  // that has changed since it went out, is newer work than the receipt and stays.
+  //
+  // It is done inside the updater because `current` is the only authoritative
+  // draft state, and everything it writes is derived from the state it returns
+  // rather than added to what was there before — so an updater React chooses to
+  // run twice reaches the same answer both times.
+  const consume = (submission: Submission) => {
+    setDrafts((current) => {
+      const settled = settle(submission, { ...onScreen.current, drafts: current });
+      // A credential counts as work only while something is on screen to lose, so
+      // one emptied by this receipt — or by the person — stops counting either way.
+      for (const type of CREDENTIALS) if (!unsaved(settled.drafts[type])) touched.current.delete(type);
+      if (settled.baseUrl) touched.current.delete('base_url');
+      if (settled.method) touched.current.delete('method');
+      if (settled.credentialType) touched.current.delete('credential_type');
+      return settled.drafts;
+    });
+  };
+  const confirm = async (submission: Submission, receiptError = '') => {
+    pendingConfirmation.current = submission;
+    if (!await observe({ expected: submission, receiptError })) return false;
     pendingConfirmation.current = null;
-    setKey(''); setEditing(false); draftTouched.current = false;
+    consume(submission);
     await onConnectedRef.current?.();
     return true;
   };
+  // Signing in settles the account, not the key someone was part-way through
+  // typing, and not an address they were part-way through changing either.
+  const OAUTH: Submission = { method: 'oauth', baseUrl: null, credential: null, sent: null };
   const confirmOAuth = async () => {
-    if (!await confirm('oauth')) throw new Error(t('onboarding.connection.applyPending'));
+    if (!await confirm(OAUTH)) throw new Error(t('onboarding.connection.applyPending'));
   };
   const observeOAuthFailure = async (receiptError: string) => {
-    pendingConfirmation.current = 'oauth';
+    pendingConfirmation.current = OAUTH;
     await observe({ receiptError });
   };
   const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirmOAuth,
@@ -166,7 +322,13 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const busy = saving || active;
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   useEffect(() => { onHeading?.({ method, active, credential }); }, [method, active, credential, onHeading]);
-  const hasKey = authReadable && (backend === 'opencode' ? Boolean(currentProvider?.api_key_masked) : Boolean(native?.has_api_key));
+  // What is stored is one credential of one type. A mask only answers for the
+  // type it was saved under, so selecting Auth Token while an API key is stored
+  // shows an empty field to fill rather than a mask that means something else —
+  // and `canSave` then requires a real token instead of accepting "keep".
+  const storedCredential: Credential = native && 'credential_type' in native ? native.credential_type || 'api_key' : 'api_key';
+  const hasKey = authReadable && (backend === 'opencode' ? Boolean(currentProvider?.api_key_masked)
+    : Boolean(native?.has_api_key) && (backend !== 'claude' || storedCredential === credential));
   const mask = native?.api_key_masked || currentProvider?.api_key_masked || '••••••••';
   const uncertain = native && 'auth_mode_uncertain' in native && native.auth_mode_uncertain;
   const signedIn = authReadable && (native?.active_auth_mode === 'oauth' || currentProvider?.active_auth_type === 'oauth');
@@ -179,8 +341,13 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const save = async () => {
     if (!canSave || lifetime.current.busy) return;
     lifetime.current.busy = true; observation.current += 1; writeState.current?.(true); setSaving(true); setError(''); setConnected(false); setSavedDisabled(false);
+    // What this write carries, decided here rather than when the receipt lands: by
+    // then the visible type may be the other one, and the draft or the address may
+    // be newer work than the one that went out. `sent` follows the payload exactly
+    // — an omitted key is no credential work, not empty credential work.
+    const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
+    const submitted: Submission = { method: 'api_key', baseUrl, credential, sent: payload.api_key ? drafts[credential] : null };
     try {
-      const payload = { auth_mode: 'api_key' as const, api_key: key.trim() || undefined, base_url: baseUrl.trim() || null };
       const result = backend === 'claude' ? await api.saveClaudeAuth({ ...payload, credential_type: credential })
         : backend === 'codex' ? await api.saveCodexAuth(payload)
         : await api.setOpencodeProviderAuth(provider!.id, payload.api_key, payload.base_url);
@@ -188,10 +355,10 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.saveFailed'));
       if ('notices' in result) surfaceBackendNotices(result.notices, showToast, t);
       if ('partial' in result && result.partial) showToast(result.detail || result.warning || t('onboarding.connection.partial'), 'warning');
-      await confirm('api_key', result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '');
+      await confirm(submitted, result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '');
     } catch (err) {
       if (lifetime.current.mounted) {
-        pendingConfirmation.current = 'api_key';
+        pendingConfirmation.current = submitted;
         await observe({ receiptError: errorMessage(err) || t('onboarding.connection.saveFailed') });
       }
     }
@@ -234,7 +401,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   // footer still while the body changes underneath them.
   return <div className="backend-connection-form">
     {!(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <MethodRadio
-      value={method} onChange={(value) => { if (!busy && !loading) { pendingConfirmation.current = null; draftTouched.current = true; setMethod(value); setError(''); setConnected(false); } }} disabled={busy || loading}
+      value={method} onChange={(value) => { if (!busy && !loading) { pendingConfirmation.current = null; touched.current.add('method'); setMethod(value); setError(''); setConnected(false); } }} disabled={busy || loading}
       ariaLabel={t('onboarding.connection.method')}
       options={[{ id: 'oauth', label: backend === 'claude' ? t('onboarding.connection.claudeLogin') : backend === 'codex' ? t('onboarding.connection.codexSignIn') : t('onboarding.connection.subscription') },
         { id: 'api_key', label: backend === 'claude' ? t('onboarding.connection.claudeCredentials') : backend === 'codex' ? t('onboarding.connection.openaiKey') : apiKeyLabel }]} />}
@@ -274,17 +441,17 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       </div>}
     </>)}
     {method === 'api_key' && <>
-      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><MethodRadio value={credential} onChange={(value) => { draftTouched.current = true; setCredential(value); }} disabled={busy} ariaLabel={credentialLabel}
+      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><MethodRadio value={credential} onChange={(value) => { touched.current.add('credential_type'); setCredential(value); setReveal(false); }} disabled={busy} ariaLabel={credentialLabel}
         options={[{ id: 'api_key', label: apiKeyLabel }, { id: 'auth_token', label: tokenLabel }]} /></div>}
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-key`}>{secretLabel}</Label>
-        {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => { draftTouched.current = true; setEditing(true); setKey(''); }}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
-          : <div className="connection-secret"><KeyRound size={15} /><Input id={`${prefix}-connection-key`} type={reveal ? 'text' : 'password'} value={key} onChange={(event) => { draftTouched.current = true; setKey(event.target.value); }} disabled={busy} autoComplete="off" spellCheck={false} placeholder={credential === 'auth_token' ? t('settings.backends.claudeAuthTokenPlaceholder') : backend === 'claude' ? 'sk-ant-…' : 'sk-…'} />
+        {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => patchDraft({ editing: true, value: '' })}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
+          : <div className="connection-secret"><KeyRound size={15} /><Input id={`${prefix}-connection-key`} type={reveal ? 'text' : 'password'} value={key} onChange={(event) => patchDraft({ value: event.target.value })} disabled={busy} autoComplete="off" spellCheck={false} placeholder={credential === 'auth_token' ? t('settings.backends.claudeAuthTokenPlaceholder') : backend === 'claude' ? 'sk-ant-…' : 'sk-…'} />
             <Button variant="ghost" size="icon" aria-label={t(reveal ? 'onboarding.connection.hideKey' : 'onboarding.connection.showKey')} onClick={() => setReveal(!reveal)}>{reveal ? <EyeOff size={15} /> : <Eye size={15} />}</Button></div>}
         <p>{backend === 'opencode' ? t('onboarding.connection.providerCredentialHint', { name: provider?.name }) : t(backend === 'claude' && credential === 'auth_token' ? 'onboarding.connection.tokenHint' : 'onboarding.connection.keyHint')}</p>
-        {editing && hasKey && <Button variant="link" size="xs" onClick={() => { setEditing(false); setKey(''); }}>{t('common.cancel')}</Button>}
+        {editing && hasKey && <Button variant="link" size="xs" onClick={() => patchDraft({ editing: false, value: '' })}>{t('common.cancel')}</Button>}
       </div>
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-url`}>{t('onboarding.connection.baseUrl')}</Label>
-        <Input id={`${prefix}-connection-url`} type="url" value={baseUrl} onChange={(event) => { draftTouched.current = true; setBaseUrl(event.target.value); }} disabled={busy} autoComplete="off" placeholder={backend === 'claude' ? 'https://api.anthropic.com' : backend === 'codex' ? 'https://api.openai.com/v1' : t('onboarding.connection.providerDefault')} />
+        <Input id={`${prefix}-connection-url`} type="url" value={baseUrl} onChange={(event) => { touched.current.add('base_url'); setBaseUrl(event.target.value); }} disabled={busy} autoComplete="off" placeholder={backend === 'claude' ? 'https://api.anthropic.com' : backend === 'codex' ? 'https://api.openai.com/v1' : t('onboarding.connection.providerDefault')} />
         <p>{t(backend === 'claude' ? 'onboarding.connection.claudeUrlHint' : 'onboarding.connection.urlHint')}</p>
         {!urlValid && <p className="connection-error">{t('onboarding.connection.invalidUrl')}</p>}
       </div>

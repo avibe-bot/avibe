@@ -9,7 +9,7 @@ import { CodexProviderConfig } from '../settings/providers/CodexProviderConfig';
 import { BackendConnectionForm } from '../settings/providers/BackendConnectionForm';
 import { BackendConnectionDialog } from './BackendConnectionDialog';
 import en from '../../i18n/en.json';
-import type { BackendConnectionState, ClaudeAuthState, CodexAuthState } from '../../context/ApiContext';
+import type { BackendConnectionState, ClaudeAuthState, CodexAuthState, OpencodeProvider } from '../../context/ApiContext';
 
 const mock = vi.hoisted(() => ({ toast: vi.fn(), api: {
   getConfig: vi.fn(), detectCli: vi.fn(), mutateConfig: vi.fn(), getBackendRuntime: vi.fn(), restartBackend: vi.fn(), claudeModels: vi.fn(), codexModels: vi.fn(),
@@ -28,6 +28,24 @@ const connection = (patch: Partial<BackendConnectionState> = {}): BackendConnect
 const native = (): ClaudeAuthState => ({ ok: true, auth_mode: 'api_key', active_auth_mode: 'api_key', has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', credential_type: 'api_key', has_oauth_credentials: true, settings_path: '/fixture/claude/settings.json', settings_exists: true, settings_env_has_key: true, settings_env_key_length: 20, settings_env_key_var: 'ANTHROPIC_API_KEY', settings_env_base_url: 'https://old.example', settings_conflict: false });
 const codexNative = (patch: Partial<CodexAuthState> = {}): CodexAuthState => ({ ok: true, auth_mode: 'api_key', active_auth_mode: 'api_key', has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', has_chatgpt_tokens: true, credentials_store: 'file', file_store_active: true, ...patch });
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
+/**
+ * A radio group, once it will actually answer.
+ *
+ * The method row is rendered while the connection read behind it is still in
+ * flight, and `BackendConnectionForm` disables its radios until that read lands
+ * (`disabled={busy || loading}`, and `onChange` refuses for the same reason). A
+ * click fired on existence alone is therefore not dropped by the test — it is
+ * refused by the product, the switch never happens, and whatever the test waits
+ * for next can never arrive. How many ticks the read takes is not this file's
+ * business, so every interaction starts where a person's would: at the point the
+ * control can be acted on.
+ */
+const interactiveRadios = async (name: string) => {
+  const group = await screen.findByRole('radiogroup', { name });
+  await waitFor(() => expect(within(group).getAllByRole('radio')
+    .every((radio) => !(radio as HTMLButtonElement).disabled)).toBe(true));
+  return group;
+};
 beforeEach(() => {
   vi.resetAllMocks();
   mock.api.getClaudeAuth.mockResolvedValue(native());
@@ -512,6 +530,512 @@ describe('shared Settings and onboarding connection owner', () => {
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
     await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: 'fixture-token', base_url: 'https://old.example' }));
   });
+  // An API key and an auth token are different credentials, not two spellings
+  // of one. So the two sides of the credential switch own their own unsent
+  // value AND their own answer to "is something already stored here" — a mask
+  // saved as an API key says nothing about the token side.
+  it('keeps the Claude API Key and Auth Token drafts independent of each other', async () => {
+    mock.api.getClaudeAuth.mockResolvedValue(native());
+    render(wrap(<BackendConnectionForm backend="claude" compact initialMethod="api_key" />));
+    const credential = async (id: 'API Key' | 'Auth Token') => {
+      const group = await interactiveRadios(en.onboarding.connection.credentialType);
+      fireEvent.click(within(group).getByRole('radio', { name: id }));
+    };
+    // The stored key is an API key, so that side opens on its mask.
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace' }));
+    fireEvent.change(screen.getByLabelText('API Key', { exact: true }), { target: { value: 'sk-ant-半成品' } });
+
+    await credential('Auth Token');
+    // Nothing stored under this type, so no mask to replace and nothing typed.
+    expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
+    expect((screen.getByLabelText('Auth Token', { exact: true }) as HTMLInputElement).value).toBe('');
+    // Saving is not allowed on the strength of the other type's stored key.
+    expect((screen.getByRole('button', { name: en.onboarding.connection.saveConnect }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Auth Token', { exact: true }), { target: { value: '中转令牌' } });
+
+    await credential('API Key');
+    expect((screen.getByLabelText('API Key', { exact: true }) as HTMLInputElement).value).toBe('sk-ant-半成品');
+    await credential('Auth Token');
+    expect((screen.getByLabelText('Auth Token', { exact: true }) as HTMLInputElement).value).toBe('中转令牌');
+
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
+  });
+  // Saving is the other half of keeping the two drafts apart. A receipt settles
+  // ONE submission, so it may only spend the draft that submission actually sent:
+  // the type that was not saved still holds work nobody has stored anywhere, and
+  // clearing it is the same loss as typing it into the wrong field.
+  const settingsCredential = async (label: string) => {
+    const group = await interactiveRadios(en.settings.backends.claudeCredentialTypeLabel);
+    fireEvent.click(within(group).getByRole('radio', { name: label }));
+  };
+  const API_KEY = en.settings.backends.claudeCredentialTypeApiKey;
+  const AUTH_TOKEN = en.settings.backends.claudeCredentialTypeAuthToken;
+  const draftValue = (label: string) => (screen.getByLabelText(label, { exact: true }) as HTMLInputElement).value;
+  const REPLACE = en.settings.backends.replaceApiKey;
+  const noDraft = (label: string) => screen.queryByLabelText(label, { exact: true });
+  /**
+   * A save the next read can see.
+   *
+   * The plain fixture answers every read with the same pre-save account, which
+   * lets a draft test agree with itself: the type just saved still reports the
+   * OTHER one as stored, so its field stays an empty textbox and a spent draft
+   * looks exactly like an untouched one. A real save moves the stored type, its
+   * mask and its URL, and the very next read says so — which is also what puts a
+   * mask and a Replace in front of the field somebody comes back to, and what
+   * makes a read that DISAGREES with the write a thing a test can stage at all.
+   *
+   * No credential is modelled here. The mask is a shape that changes when the
+   * account changes, derived from the write's ordinal rather than from anything
+   * that was sent, so nothing in this fixture can be read back as a secret.
+   */
+  const statefulClaudeAuth = () => {
+    let stored = native();
+    let writes = 0;
+    let view: ((state: ClaudeAuthState) => ClaudeAuthState) | null = null;
+    let restart: { ok: boolean; message?: string } = { ok: true };
+    mock.api.getClaudeAuth.mockImplementation(async () => (view ? view({ ...stored }) : { ...stored }));
+    mock.api.saveClaudeAuth.mockImplementation(async (payload: { credential_type?: 'api_key' | 'auth_token'; base_url?: string | null }) => {
+      const credential_type = payload.credential_type || 'api_key';
+      writes += 1;
+      stored = { ...stored, credential_type, has_api_key: true, base_url: payload.base_url ?? null,
+        api_key_masked: `${credential_type === 'auth_token' ? 'tok' : 'sk'}-•••${writes}` };
+      return { ok: true, restart };
+    });
+    return {
+      stored: () => stored,
+      /** Answer reads with something other than what is stored. */
+      show: (lens: (state: ClaudeAuthState) => ClaudeAuthState) => { view = lens; },
+      /** And go back to answering with the account itself. */
+      truth: () => { view = null; },
+      /** Whether the runtime manages to pick the write up. Storage is unaffected. */
+      applies: (next: { ok: boolean; message?: string }) => { restart = next; },
+    };
+  };
+  it('a Settings save spends only the credential it sent, in both directions', async () => {
+    const account = statefulClaudeAuth();
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    // The stored credential is an API key, so that side opens on its mask.
+    fireEvent.click(await screen.findByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-半成品' } });
+    await settingsCredential(AUTH_TOKEN);
+    // Nothing is stored under this type, so there is no mask on this side to replace.
+    expect(screen.queryByRole('button', { name: REPLACE })).toBeNull();
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    // The account really moved, and the read that confirmed it is the read that
+    // says so: this is the stored type now, so where the draft was there is the
+    // mask a save leaves behind — not an empty box that could equally mean the
+    // write never happened.
+    expect(account.stored().credential_type).toBe('auth_token');
+    await waitFor(() => expect(noDraft(AUTH_TOKEN)).toBeNull());
+    expect(screen.getByRole('button', { name: REPLACE })).toBeTruthy();
+    expect(screen.getByText(account.stored().api_key_masked!)).toBeTruthy();
+    // And the type nobody saved still holds the work nobody stored anywhere.
+    await settingsCredential(API_KEY);
+    expect(draftValue(API_KEY)).toBe('sk-ant-半成品');
+
+    // The other direction, with fresh work waiting on the token side — reached the
+    // way it is now reached, through the mask that side is showing.
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.click(screen.getByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌-改' } });
+    await settingsCredential(API_KEY);
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenLastCalledWith({ auth_mode: 'api_key', credential_type: 'api_key', api_key: 'sk-ant-半成品', base_url: 'https://old.example' }));
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(2));
+    // Spending the API key draft returns that side to the mask this write left...
+    expect(account.stored().credential_type).toBe('api_key');
+    await waitFor(() => expect(noDraft(API_KEY)).toBeNull());
+    expect(screen.getByText(account.stored().api_key_masked!)).toBeTruthy();
+    // ...and leaves the token nobody saved untouched, in a field again because the
+    // stored type moved back and there is no token mask to stand in front of it.
+    await settingsCredential(AUTH_TOKEN);
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+  });
+  // A confirmation can arrive long after the write: through Refresh, and with the
+  // person now looking at the other credential. What it settles is the submission,
+  // so the type on screen at that moment decides nothing.
+  it('a deferred confirmation spends the credential that was submitted, not the one on screen', async () => {
+    const account = statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
+    // The write landed — the account stores a token now, and the field shows the
+    // mask it left — but the runtime has not confirmed it took effect, so nothing
+    // has been spent and nobody has been told the connection works.
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+    expect(saved).not.toHaveBeenCalled();
+    expect(noDraft(AUTH_TOKEN)).toBeNull();
+    expect(screen.getByText(account.stored().api_key_masked!)).toBeTruthy();
+
+    // Meanwhile the other side is filled in, and left on screen. It is an open
+    // field now rather than a mask: the account this form has read moved to the
+    // token, so there is no API key stored under the type on screen to replace.
+    await settingsCredential(API_KEY);
+    expect(screen.queryByRole('button', { name: REPLACE })).toBeNull();
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-半成品' } });
+
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    // The API key on screen was never submitted, so the receipt has no claim on it.
+    expect(draftValue(API_KEY)).toBe('sk-ant-半成品');
+    // The token that was submitted is spent, and the account says why: the mask
+    // this write left is what stands there now.
+    await settingsCredential(AUTH_TOKEN);
+    expect(noDraft(AUTH_TOKEN)).toBeNull();
+    expect(screen.getByText(account.stored().api_key_masked!)).toBeTruthy();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // The narrower version of the same rule: the submitted type is right, but the
+  // value is not the one that was sent any more. A receipt settles the write it
+  // belongs to, and a replacement typed since is a newer intention than that write.
+  it('a newer edit outlives the receipt for the write it replaced, and keeps the field it is in', async () => {
+    const account = statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    const props = (revision: number) => ({ backend: 'claude' as const, initialMethod: 'api_key' as const, onConnected: saved, connectionRevision: revision });
+    const view = render(wrap(<BackendConnectionForm {...props(0)} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+
+    // Typing again goes through Replace, because the write did land — the account
+    // now stores a token and shows its mask — it simply has not been confirmed to
+    // have taken effect. So this is a second intention, later than the write.
+    fireEvent.click(screen.getByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌-改' } });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+
+    // Surviving the receipt is only half of surviving. Work the receipt kept must
+    // keep its claim on the field it is in, or the very next observation — the
+    // revision this write's own restart will raise — seeds the server's answer
+    // straight over it: the type it reports takes the radio, and the address it
+    // reports takes the box. The read is deferred and resolved here so the moment
+    // it lands is a moment this test chooses, rather than one it infers from a
+    // call count that was already past any threshold three reads ago. That the
+    // mechanism can reseed at all is the matched Cancel test below; here it must
+    // not, and the only difference between the two is whether anything was left.
+    const late = deferred<ClaudeAuthState>();
+    const before = mock.api.getClaudeAuth.mock.calls.length;
+    mock.api.getClaudeAuth.mockImplementationOnce(() => late.promise);
+    view.rerender(wrap(<BackendConnectionForm {...props(1)} />));
+    await waitFor(() => expect(mock.api.getClaudeAuth.mock.calls.length).toBeGreaterThan(before));
+    await act(async () => { late.resolve({ ...account.stored(), credential_type: 'api_key', base_url: 'https://server-moved.example' }); await late.promise; });
+
+    const group = await interactiveRadios(en.settings.backends.claudeCredentialTypeLabel);
+    expect(within(group).getByRole('radio', { name: AUTH_TOKEN }).getAttribute('aria-checked')).toBe('true');
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌-改');
+    expect((screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement).value).toBe('https://old.example');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // The narrowest version again, and the one that says what a draft actually is.
+  // A field somebody has deliberately reopened is not the field that was sent,
+  // even when they then retype the very same characters into it: the value agrees
+  // and the state does not, and the state is the half that says whether there is
+  // an editor on screen to close.
+  it('an editor reopened on the same value is still later work than the write that carried it', async () => {
+    statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+
+    // The write landed, so the field is behind its mask again. Reopening it and
+    // typing the same thing is a second intention that happens to look identical.
+    fireEvent.click(screen.getByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌');
+    expect(screen.queryByRole('button', { name: REPLACE })).toBeNull();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // The other side of that pair. Cancel puts the field back exactly as an
+  // untouched one, so there is nothing left to protect — and a form that went on
+  // protecting it would quietly stop following the server for the rest of its
+  // life. Same staged read as above, opposite outcome, and the only difference is
+  // whether any work survived.
+  it('cancelling a replacement hands the field back, so the form follows the server again', async () => {
+    const account = statefulClaudeAuth();
+    const props = (revision: number) => ({ backend: 'claude' as const, initialMethod: 'api_key' as const, connectionRevision: revision });
+    const view = render(wrap(<BackendConnectionForm {...props(0)} />));
+    const url = () => screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement;
+    await waitFor(() => expect(url().value).toBe('https://old.example'));
+    fireEvent.click(await screen.findByRole('button', { name: REPLACE }));
+    fireEvent.click(screen.getByRole('button', { name: en.common.cancel }));
+    expect(noDraft(API_KEY)).toBeNull();
+    expect(screen.getByText('sk-•••old')).toBeTruthy();
+
+    const late = deferred<ClaudeAuthState>();
+    const before = mock.api.getClaudeAuth.mock.calls.length;
+    mock.api.getClaudeAuth.mockImplementationOnce(() => late.promise);
+    view.rerender(wrap(<BackendConnectionForm {...props(1)} />));
+    await waitFor(() => expect(mock.api.getClaudeAuth.mock.calls.length).toBeGreaterThan(before));
+    await act(async () => { late.resolve({ ...account.stored(), base_url: 'https://server-moved.example' }); await late.promise; });
+    await waitFor(() => expect(url().value).toBe('https://server-moved.example'));
+    expect(mock.api.saveClaudeAuth).not.toHaveBeenCalled();
+  });
+  // A save does not have to carry a credential at all: leaving the stored key
+  // alone and changing only the address sends no key, and its receipt therefore
+  // has no credential work to spend. An empty field nobody has opened and a field
+  // just opened by Replace read the same value, so a receipt that recognised its
+  // own submission by value alone could not tell "what I sent" from "what somebody
+  // started after I was sent" — and cancelled the replacement to prove it.
+  it('a save that carries no credential has none to spend, and cannot cancel a replacement begun after it', async () => {
+    statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    const url = () => screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement;
+    await waitFor(() => expect(url().value).toBe('https://old.example'));
+    // The stored key is left where it is — the field is showing its mask, not an
+    // editor — and only the address is changed.
+    expect(screen.getByText('sk-•••old')).toBeTruthy();
+    fireEvent.change(url(), { target: { value: 'https://relay.example' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    expect(mock.api.saveClaudeAuth.mock.calls[0]![0].api_key).toBeUndefined();
+
+    // The runtime has not picked it up yet, so the receipt is still outstanding —
+    // and that is exactly when somebody starts replacing the key. An editor opened
+    // and not yet typed into is the literal state this is about: an empty field
+    // with somebody's hand on it, which reads the same as an empty field nobody
+    // has touched and is not the same thing at all.
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+    fireEvent.click(screen.getByRole('button', { name: REPLACE }));
+    expect(draftValue(API_KEY)).toBe('');
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+
+    // The receipt spent the address it carried. The editor it never carried is
+    // still open, and still nobody's to close.
+    expect(draftValue(API_KEY)).toBe('');
+    expect(screen.queryByRole('button', { name: REPLACE })).toBeNull();
+    expect(url().value).toBe('https://relay.example');
+    // And it is still a live field: what goes into it stays there.
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-新' } });
+    expect(draftValue(API_KEY)).toBe('sk-ant-新');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // What a Claude receipt has to observe is not "a key is in use" — both credential
+  // types answer that identically, so a token write that never landed reads exactly
+  // like one that did. Only the stored type can tell them apart.
+  it('a readback still reporting the other credential type confirms nothing, and a later matching one settles it once', async () => {
+    const account = statefulClaudeAuth();
+    // Everything except the type agrees with the write: the runtime is applied and
+    // reports api_key in use, which is what a landed token looks like too. So the
+    // only thing left that can refuse this receipt is the type itself.
+    account.show((state) => ({ ...state, credential_type: 'api_key' }));
+    const saved = vi.fn();
+    const view = render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} connectionRevision={0} />));
+    // Half-finished work on the side this write will not carry.
+    fireEvent.click(await screen.findByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-半成品' } });
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(screen.getByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+
+    // Refused. Nobody is told the connection works, the submitted work is still on
+    // screen to retry with, and the observational way back is offered.
+    await screen.findByText(en.onboarding.connection.unconfirmed);
+    expect(saved).not.toHaveBeenCalled();
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌');
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+    await settingsCredential(API_KEY);
+    expect(draftValue(API_KEY)).toBe('sk-ant-半成品');
+    await settingsCredential(AUTH_TOKEN);
+
+    // The readback catches up with the account. The submission that has been
+    // pending all along settles — on an observation, not on a second write.
+    account.truth();
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(noDraft(AUTH_TOKEN)).toBeNull();
+    expect(screen.getByText(account.stored().api_key_masked!)).toBeTruthy();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+    await settingsCredential(API_KEY);
+    expect(draftValue(API_KEY)).toBe('sk-ant-半成品');
+
+    // Once, and once only: the runtime settling again is an observation with
+    // nothing left to settle. Waited out on a read whose result reaches the screen,
+    // so this is the state after that read rather than before it.
+    account.show((state) => ({ ...state, api_key_masked: 'sk-•••again' }));
+    view.rerender(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} connectionRevision={1} />));
+    await settingsCredential(AUTH_TOKEN);
+    await screen.findByText('sk-•••again');
+    expect(saved).toHaveBeenCalledOnce();
+  });
+  // And the same answer when there is nothing to compare at all. The producer emits
+  // this field for every stored credential, so a read without one has not observed
+  // the account — which is a reason to keep asking, not a reason to fall back on the
+  // half of the question both types answer the same way.
+  it('a readback carrying no credential type at all confirms nothing either', async () => {
+    const account = statefulClaudeAuth();
+    account.show(({ credential_type: _dropped, ...rest }) => rest as ClaudeAuthState);
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    await screen.findByText(en.onboarding.connection.unconfirmed);
+    expect(saved).not.toHaveBeenCalled();
+    expect(draftValue(AUTH_TOKEN)).toBe('中转令牌');
+
+    // Still the same submission, and still settled by observation alone.
+    account.truth();
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.refresh }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(noDraft(AUTH_TOKEN)).toBeNull();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+  });
+  // Storage and application are separate observations, and a form that is going
+  // away is neither.
+  it('a write the runtime cannot pick up keeps its submission, and leaving with one pending settles nothing', async () => {
+    const account = statefulClaudeAuth();
+    account.applies({ ok: false, message: 'restart refused' });
+    const saved = vi.fn();
+    const view = render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={saved} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await screen.findByText(/restart refused/);
+    expect(saved).not.toHaveBeenCalled();
+    // The credential did land, so the field is showing its mask — but the receipt
+    // is unspent, which is why the retry below costs no second write.
+    expect(noDraft(AUTH_TOKEN)).toBeNull();
+    account.applies({ ok: true });
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.refresh }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+
+    // And a second form taken off screen with a submission of its OWN still
+    // outstanding, which is the state worth proving: the read that would have
+    // settled it is still in flight when the form goes, so the answer arrives for
+    // nobody. No consumer is called and nothing throws into the void.
+    view.unmount();
+    account.applies({ ok: false, message: 'restart refused again' });
+    const second = vi.fn();
+    const leaving = render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={second} />));
+    // A token is what is stored now, so the API Key side is an empty field again.
+    await settingsCredential(API_KEY);
+    fireEvent.change(await screen.findByLabelText(API_KEY, { exact: true }), { target: { value: 'sk-ant-未定' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await screen.findByText(/restart refused again/);
+    expect(second).not.toHaveBeenCalled();
+
+    const late = deferred<ClaudeAuthState>();
+    const before = mock.api.getClaudeAuth.mock.calls.length;
+    mock.api.getClaudeAuth.mockImplementation(() => late.promise);
+    account.applies({ ok: true });
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.refresh }));
+    await waitFor(() => expect(mock.api.getClaudeAuth.mock.calls.length).toBeGreaterThan(before));
+    leaving.unmount();
+    await act(async () => { late.resolve(account.stored()); await late.promise; });
+    expect(second).not.toHaveBeenCalled();
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledTimes(2);
+  });
+  // Signing in settles the account. It sends no credential at all, so there is
+  // nothing for its receipt to spend — including the key someone was part-way
+  // through typing when they decided to try the subscription instead.
+  it('an OAuth confirmation spends neither credential draft, nor the address beside them', async () => {
+    const account = statefulClaudeAuth();
+    account.show((state) => ({ ...state, active_auth_mode: 'api_key' }));
+    const saved = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" compact initialMethod="api_key" onConnected={saved} />));
+    fireEvent.click(await screen.findByRole('button', { name: REPLACE }));
+    fireEvent.change(screen.getByLabelText('API Key', { exact: true }), { target: { value: 'sk-ant-半成品' } });
+    const credentials = await interactiveRadios(en.onboarding.connection.credentialType);
+    fireEvent.click(within(credentials).getByRole('radio', { name: 'Auth Token' }));
+    fireEvent.change(screen.getByLabelText('Auth Token', { exact: true }), { target: { value: '中转令牌' } });
+    const url = () => screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement;
+    fireEvent.change(url(), { target: { value: 'https://newer.example' } });
+
+    const method = await interactiveRadios(en.onboarding.connection.method);
+    fireEvent.click(within(method).getByRole('radio', { name: en.onboarding.connection.claudeLogin }));
+    mock.api.startOAuthWeb.mockResolvedValue({ ok: true, flow_id: 'draft-safe', state: 'success' });
+    account.show((state) => ({ ...state, active_auth_mode: 'oauth' }));
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.claudeSignIn }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+
+    fireEvent.click(within(await interactiveRadios(en.onboarding.connection.method)).getByRole('radio', { name: en.onboarding.connection.claudeCredentials }));
+    expect(draftValue('Auth Token')).toBe('中转令牌');
+    fireEvent.click(within(await interactiveRadios(en.onboarding.connection.credentialType)).getByRole('radio', { name: 'API Key' }));
+    expect(draftValue('API Key')).toBe('sk-ant-半成品');
+    // Signing in carried no address either, so the one being typed is still there
+    // and the server's is still only the server's.
+    expect(url().value).toBe('https://newer.example');
+    expect(account.stored().base_url).toBe('https://old.example');
+    expect(mock.api.saveClaudeAuth).not.toHaveBeenCalled();
+  });
+  // The same rule, reaching past the credential drafts to the other thing on this
+  // form a person can type into. A receipt releases the work it carried; a URL
+  // typed after the write went out was never in it, and the next observation —
+  // which a settling runtime causes by itself — must not seed over it.
+  it('a newer Base URL outlives the receipt for the write it was typed after', async () => {
+    const account = statefulClaudeAuth();
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', application: 'draining', ready: false }));
+    const saved = vi.fn();
+    const props = (revision: number) => ({ backend: 'claude' as const, initialMethod: 'api_key' as const, onConnected: saved, connectionRevision: revision });
+    const view = render(wrap(<BackendConnectionForm {...props(0)} />));
+    await settingsCredential(AUTH_TOKEN);
+    fireEvent.change(await screen.findByLabelText(AUTH_TOKEN, { exact: true }), { target: { value: '中转令牌' } });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce());
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+
+    // Typed while the write is still unconfirmed, so no save has ever carried it.
+    const url = () => screen.getByLabelText(en.onboarding.connection.baseUrl, { exact: true }) as HTMLInputElement;
+    fireEvent.change(url(), { target: { value: 'https://newer.example' } });
+    expect(url().value).toBe('https://newer.example');
+
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude' }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(url().value).toBe('https://newer.example');
+
+    // And the runtime settles, which is what a save is for: the consumer bumps the
+    // revision and the form observes again. The credential this receipt paid for is
+    // gone, the URL it never carried is not.
+    //
+    // Counting reads would not prove that: three have already gone out by here, so
+    // any threshold is satisfied before the one this rerender causes has come back.
+    // So this read is made recognisable instead — a mask nothing else in this test
+    // produces, and a server address that has moved on — and the wait is for its
+    // result to be ON SCREEN. That is the moment a reseed would have happened, and
+    // the only moment at which "the URL survived" means anything.
+    account.show((state) => ({ ...state, api_key_masked: 'tok-•••moved', base_url: 'https://server-moved.example' }));
+    view.rerender(wrap(<BackendConnectionForm {...props(1)} />));
+    await screen.findByText('tok-•••moved');
+    expect(url().value).toBe('https://newer.example');
+    expect(mock.api.saveClaudeAuth).toHaveBeenCalledOnce();
+    // Nobody saved the newer address, so the account still holds the one the write
+    // carried. The field is a pending intention, not a claim about the server.
+    expect(account.stored().base_url).toBe('https://old.example');
+  });
   it('Codex saves through its native owner and refuses uncertain keychain readback', async () => {
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ auth_mode_uncertain: true }));
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', ok: true, application: 'applied', ready: false, entry_eligible: false, auth: 'unknown' }));
@@ -559,12 +1083,12 @@ describe('connection dialog frame', () => {
   it.each(['claude', 'codex'] as const)('%s keeps one heading, description and footer across every method switch', async (backend) => {
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend, auth: 'none', ready: false, entry_eligible: false }));
     render(wrap(<BackendConnectionDialog backend={backend} method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
-    await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
+    const group = await interactiveRadios(en.onboarding.connection.method);
     const opened = frame();
     expect(opened.title).toBe(`Connect ${backend === 'claude' ? 'Claude Code' : 'Codex'}`);
     expect(opened.rows).toEqual([1, 1, 1]);
 
-    const tabs = screen.getAllByRole('radio');
+    const tabs = within(group).getAllByRole('radio');
     // Repeatedly, both directions: a heading computed from the method would
     // change here, and a changed heading is what used to move the frame.
     for (const tab of [...tabs].reverse().concat(tabs, [...tabs].reverse(), tabs)) {
@@ -572,18 +1096,41 @@ describe('connection dialog frame', () => {
       expect(frame()).toEqual(opened);
     }
     // The method still actually changed the body underneath the fixed frame.
-    fireEvent.click(screen.getByRole('radio', { name: backend === 'claude' ? en.onboarding.connection.claudeCredentials : en.onboarding.connection.openaiKey }));
+    fireEvent.click(within(group).getByRole('radio', { name: backend === 'claude' ? en.onboarding.connection.claudeCredentials : en.onboarding.connection.openaiKey }));
     // `find`, not `get`: the dialog's own readiness read resolves on its own schedule and
     // re-renders the body, so the credential form is not guaranteed on the click's tick.
     expect(await screen.findByRole('button', { name: en.onboarding.connection.saveConnect })).toBeTruthy();
     expect(frame()).toEqual(opened);
   });
 
+  // The readiness the helper waits for, made deterministic rather than left to
+  // how many ticks a resolved mock happens to take: while the connection read is
+  // in flight the method row is already on screen and refuses to switch, so
+  // acting on its mere presence changes nothing — and nothing that a switch
+  // would have produced can ever arrive.
+  it('refuses a method switch until the connection read lands, then takes it', async () => {
+    const pending = deferred<BackendConnectionState>();
+    mock.api.getBackendConnection.mockReturnValue(pending.promise);
+    render(wrap(<BackendConnectionDialog backend="claude" method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
+    const credentials = () => within(group).getByRole('radio', { name: en.onboarding.connection.claudeCredentials });
+    expect((credentials() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(credentials());
+    expect(credentials().getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByRole('button', { name: en.onboarding.connection.saveConnect })).toBeNull();
+
+    await act(async () => pending.resolve(connection({ backend: 'claude', auth: 'none', ready: false, entry_eligible: false })));
+    await interactiveRadios(en.onboarding.connection.method);
+    fireEvent.click(credentials());
+    expect(credentials().getAttribute('aria-checked')).toBe('true');
+    expect(await screen.findByRole('button', { name: en.onboarding.connection.saveConnect })).toBeTruthy();
+  });
+
   it('moves the method with arrows, Home and End, and leaves focus on the selected tab', async () => {
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'claude', auth: 'none', ready: false, entry_eligible: false }));
     render(wrap(<BackendConnectionDialog backend="claude" method="oauth" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
-    const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.method });
-    const [subscription, apiKey] = screen.getAllByRole('radio');
+    const group = await interactiveRadios(en.onboarding.connection.method);
+    const [subscription, apiKey] = within(group).getAllByRole('radio');
     expect(subscription.getAttribute('aria-checked')).toBe('true');
     // One tab stop, so Tab lands on the selection the arrows then continue from — the
     // other half of the pattern, and what stops focus resting on an unselected tab.
@@ -599,50 +1146,227 @@ describe('connection dialog frame', () => {
     expect(subscription.getAttribute('aria-checked')).toBe('true');
   });
 
-  it('offers the eight setup providers first, keeps a configured one out of More, and lets search reach the rest', async () => {
-    const entry = (id: string, name: string, patch: Partial<{ configured: boolean; models: string[] }> = {}) =>
-      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [], ...patch });
-    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
-      // `alibaba-cn`, `moonshot` and `google` arrive as bare ids — the case the
-      // brand table exists for. `mistral` arrives with a real name of its own.
-      entry('mistral', 'Mistral AI'), entry('openrouter', 'OpenRouter'), entry('alibaba-cn', 'alibaba-cn', { configured: true }),
-      entry('openai', 'OpenAI'), entry('moonshot', 'moonshot'), entry('google', 'google'),
-      entry('deepseek', 'DeepSeek'), entry('anthropic', 'Anthropic'), entry('xai', 'xAI'),
-      entry('cerebras', 'Cerebras', { configured: true }), entry('groq', 'Groq', { models: ['llama-3.3-70b'] }),
-      entry('ollama', 'Ollama local', { configured: false }),
-    ] });
+  // The picker's whole job in one fixture: every alias the brand table knows,
+  // two brands that arrive under more than one id, a configured provider that
+  // is NOT one of the eight, and the two ids the contract refuses to promote.
+  const PICKER = [
+    ['mistral', 'Mistral AI', { configured: true }], ['openrouter', 'OpenRouter', {}],
+    ['alibaba-cn', 'Alibaba (China)', {}], ['alibaba', 'alibaba', {}], ['dashscope', 'Alibaba DashScope', { configured: true }],
+    ['openai', 'OpenAI', {}], ['moonshot', 'moonshot', {}], ['moonshotai', 'Moonshot AI', {}],
+    ['google', 'google', {}], ['google-vertex', 'google-vertex', {}], ['zhipu', 'zhipu', {}],
+    ['deepseek', 'DeepSeek', {}], ['anthropic', 'Anthropic', {}], ['xai', 'xAI', {}],
+    ['cerebras', 'Cerebras', {}], ['groq', 'Groq', { models: ['llama-3.3-70b'] }],
+    ['zen', 'Zen', {}], ['go', 'Go', {}],
+    ['ollama', 'Ollama local', { local: true }],
+  ] as const;
+  const pickerProvider = ([id, name, patch]: (typeof PICKER)[number]) =>
+    ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [] as string[], ...patch });
+
+  it('gives each prioritised brand exactly one row, and keeps every other native provider reachable', async () => {
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: PICKER.map(pickerProvider) });
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
     render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
 
-    const names = () => screen.getAllByRole('button').map((node) => node.querySelector('strong')?.textContent).filter(Boolean);
+    // A row is its title and the id it is filed under — the second line, which
+    // is what the rest of OpenCode, its config and its model ids actually use.
+    const rows = () => screen.getAllByRole('button').filter((node) => node.querySelector('strong'))
+      .map((node) => ({ title: node.querySelector('strong')?.textContent ?? '', id: node.querySelector('small')?.textContent ?? '' }));
+    const names = () => rows().map((row) => row.title);
     await waitFor(() => expect(names().length).toBeGreaterThan(0));
-    // The ratified default order, by friendly name rather than by the internal
-    // id: `google`, `moonshot` and `alibaba-cn` are not what anyone calls them.
-    expect(names().slice(0, 8)).toEqual(['OpenAI', 'Anthropic', 'xAI', 'Gemini', 'DeepSeek', 'Qwen', 'Kimi', 'OpenRouter']);
-    // A configured provider outside the eight stays reachable without More.
-    expect(names()).toContain('Cerebras');
+
+    // Eight rows, one per brand, in the approved order and under the approved
+    // names — `google`, `moonshot` and the Alibaba ids are not what anyone
+    // calls them, and none of them may appear twice.
+    expect(names()).toEqual(['OpenAI', 'Anthropic', 'xAI', 'Gemini', 'DeepSeek', 'Qwen', 'Kimi', 'OpenRouter']);
+    // Which entry stands in a slot is decided, not incidental: the configured
+    // one where a brand has one, else the lowest id.
+    expect(rows().map((row) => row.id)).toEqual(['openai', 'anthropic', 'xai', 'google', 'deepseek', 'dashscope', 'moonshot', 'openrouter']);
+    // Being configured is not a promotion: Mistral holds credentials and still
+    // does not take a ninth slot.
     expect(names()).not.toContain('Mistral AI');
-    // The id it is filed under stays on the row, next to the brand name.
-    expect(screen.getByRole('button', { name: /Qwen/ }).textContent).toContain('alibaba-cn');
+    // And the two ids the contract refuses to offer as an official choice
+    // cannot reach the default list, because only the eight brands can.
+    expect(names()).not.toContain('Zen');
+    expect(names()).not.toContain('Go');
 
-    fireEvent.click(screen.getByRole('button', { name: /More providers \(3\)/ }));
-    // A server that already sent a friendly name keeps it; nothing is renamed
-    // to a catalog brand it did not claim.
-    expect(names()).toContain('Mistral AI');
+    const eligible = PICKER.filter(([, , patch]) => !('local' in patch)).map(([id]) => id);
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(`More providers \\(${eligible.length - 8}\\)`) }));
+    // Nothing the runtime offers is unreachable: the two lists together are
+    // exactly the providers an API key can be saved for, each one once.
+    expect(rows().map((row) => row.id).sort()).toEqual([...eligible].sort());
+    const [shortlist, more] = [rows().slice(0, 8), rows().slice(8)];
+    // Credentials already held are a reason to be easy to find, so More opens
+    // on them; the rest follow by name.
+    expect(more[0]).toEqual({ title: 'Mistral AI', id: 'mistral' });
+    const rest = more.slice(1).map((row) => row.title);
+    expect(rest).toEqual([...rest].sort((left, right) => left.localeCompare(right)));
+    expect(more.map((row) => row.title)).toContain('Zen');
+    expect(more.map((row) => row.title)).toContain('Go');
+    // No two rows may read the same. A brand's remaining entries keep their own
+    // name when the server sent one, and fall back to their id when it did not
+    // — `alibaba` would otherwise read "Qwen" twice over.
+    expect(new Set(names()).size).toBe(names().length);
+    expect(more).toContainEqual({ title: 'Alibaba (China)', id: 'alibaba-cn' });
+    expect(more).toContainEqual({ title: 'alibaba', id: 'alibaba' });
+    expect(more).toContainEqual({ title: 'Moonshot AI', id: 'moonshotai' });
+    expect(more).toContainEqual({ title: 'Zhipu AI', id: 'zhipu' });
+    expect(shortlist).toContainEqual({ title: 'Gemini', id: 'google' });
 
-    // Search reaches a provider that More would otherwise hold, by model id too.
-    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'llama-3.3' } });
-    expect(names()).toEqual(['Groq']);
+    // Search reaches every variant, under the brand name as well as the id.
+    const search = () => screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder);
+    const shortlistNames = names();
+    fireEvent.change(search(), { target: { value: 'qwen' } });
+    expect(rows().map((row) => row.id)).toEqual(['alibaba-cn', 'alibaba', 'dashscope']);
     expect(screen.queryByRole('button', { name: /More providers/ })).toBeNull();
+    // And every row still reads what it read a moment ago. A name that changed
+    // when the list narrowed would mean the one way to look for what you can see
+    // is the one way to make it unrecognisable.
+    expect(rows().map((row) => row.title)).toEqual(['Alibaba (China)', 'alibaba', 'Qwen']);
+    fireEvent.change(search(), { target: { value: 'llama-3.3' } });
+    expect(names()).toEqual(['Groq']);
+    // Including the eight: searching them finds them by the names they wear.
+    for (const brand of shortlistNames) {
+      fireEvent.change(search(), { target: { value: brand } });
+      expect(names()).toContain(brand);
+    }
 
     // Picking one hands the middle to the form and keeps the same frame rows.
-    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'Qwen' } });
+    fireEvent.change(search(), { target: { value: 'dashscope' } });
     fireEvent.click(screen.getByRole('button', { name: /Qwen/ }));
     expect(await screen.findByLabelText(en.onboarding.connection.apiKeyLabel)).toBeTruthy();
     expect(frame().title).toBe('Connect OpenCode');
     expect(frame().rows).toEqual([1, 1, 1]);
-    // The internal id the rest of OpenCode uses stays visible after the choice.
+    // The capsule names the row that was picked, not a second opinion about the
+    // same entry: this is Qwen's own endpoint, standing in Qwen's slot, and the
+    // key is being written to `dashscope` either way.
     expect(screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen')?.textContent).toContain('Qwen');
+    expect(mock.api.setOpencodeProviderAuth).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(en.onboarding.connection.apiKeyLabel), { target: { value: 'sk-relay' } });
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+    await waitFor(() => expect(mock.api.setOpencodeProviderAuth).toHaveBeenCalledWith('dashscope', 'sk-relay', null));
+  });
+
+  // A custom provider's id is whatever its author typed into Settings, and
+  // OpenCode reserves only the ids it ships itself — so a personal relay can be
+  // filed under `dashscope`, and every custom provider is reported configured,
+  // which is exactly what decides a brand slot. Left alone, the relay would BE
+  // the row someone picks to connect Qwen, and the key would go to the relay.
+  it('never lets a custom provider stand in for, or be named as, a native brand', async () => {
+    const entry = (id: string, name: string, patch: Partial<OpencodeProvider> = {}) =>
+      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [] as string[], ...patch });
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
+      entry('openai', 'OpenAI'), entry('alibaba-cn', 'Alibaba (China)'),
+      // Filed under a brand's alias, and holding a name of its author's own.
+      entry('dashscope', '内部中转', { configured: true, custom: true }),
+      // And one whose author left the name blank: the server echoes the id back,
+      // so the only thing left to read it as a brand with is the id itself.
+      entry('gemini', 'gemini', { configured: true, custom: true }),
+    ] });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
+    render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const nodes = () => screen.getAllByRole('button').filter((node) => node.querySelector('strong'));
+    const rows = () => nodes().map((node) => ({ title: node.querySelector('strong')?.textContent ?? '', id: node.querySelector('small')?.textContent ?? '' }));
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0));
+
+    // The slot goes to the entry OpenCode ships, even though the relay is the
+    // configured one; and a brand with nothing but a relay behind it gets no
+    // row at all, rather than one that would name an endpoint after it.
+    expect(rows()).toEqual([{ title: 'OpenAI', id: 'openai' }, { title: 'Qwen', id: 'alibaba-cn' }]);
+
+    fireEvent.click(screen.getByRole('button', { name: /More providers \(2\)/ }));
+    // Both stay reachable under More, under what they were configured as.
+    expect(rows().slice(2)).toEqual([{ title: 'gemini', id: 'gemini' }, { title: '内部中转', id: 'dashscope' }]);
+    // And they are drawn as what they are — an address you supply, the same
+    // mark the custom vendor has always used — not as the brand they sit next to.
+    const mark = (id: string) => nodes().find((node) => node.querySelector('small')?.textContent === id)
+      ?.querySelector('.connection-provider-mark')?.innerHTML;
+    expect(mark('dashscope')).toBe(mark('gemini'));
+    expect(mark('dashscope')).not.toBe(mark('alibaba-cn'));
+
+    // Searching a brand reaches the entries that brand actually ships — under the
+    // same name they wear in the list, so what was found is recognisably what was
+    // there — and never the relay wearing its id.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'qwen' } });
+    expect(rows()).toEqual([{ title: 'Qwen', id: 'alibaba-cn' }]);
+    // ...and the relay is found by the name its author gave it.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: '内部' } });
+    expect(rows()).toEqual([{ title: '内部中转', id: 'dashscope' }]);
+
+    // Including where it matters most: the capsule over the key field names the
+    // endpoint the key is about to be written to.
+    fireEvent.click(screen.getByRole('button', { name: /内部中转/ }));
+    expect(await screen.findByLabelText(en.onboarding.connection.apiKeyLabel)).toBeTruthy();
+    const capsule = screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen');
+    expect(capsule?.textContent).toContain('内部中转');
+    expect(capsule?.textContent).not.toContain('Qwen');
+  });
+
+  // A custom provider's name is whatever its author typed, so it can spell another
+  // row's brand, another row's id, or the composition of the two. Each of those is
+  // a name this list would otherwise hand out twice — and two rows reading alike is
+  // two endpoints a person cannot choose between, holding different keys.
+  it('hands out one name per row even when a custom name spells the fallback of another', async () => {
+    const entry = (id: string, name: string, patch: Partial<OpencodeProvider> = {}) =>
+      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [] as string[], ...patch });
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
+      // Already holding credentials, so this is the entry that takes Qwen's slot.
+      entry('openai', 'OpenAI'), entry('alibaba-cn', 'Alibaba (China)', { configured: true }),
+      // Named for the very id the native `alibaba` row falls back to...
+      entry('mirror', 'alibaba', { configured: true, custom: true }),
+      // ...and named for the composition after that, so the ladder has to widen.
+      entry('decoy', 'Qwen (alibaba)', { configured: true, custom: true }),
+      // Which leaves this one — a real Qwen entry — with nothing of its own left:
+      // the brand went to the slot, the id and the composition to the two above.
+      entry('alibaba', 'alibaba'),
+    ] });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
+    render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
+    const nodes = () => screen.getAllByRole('button').filter((node) => node.querySelector('strong'));
+    const rows = () => nodes().map((node) => ({ title: node.querySelector('strong')?.textContent ?? '', id: node.querySelector('small')?.textContent ?? '' }));
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0));
+
+    // The slots are untouched by any of it: native entries, brand order, brand names.
+    expect(rows()).toEqual([{ title: 'OpenAI', id: 'openai' }, { title: 'Qwen', id: 'alibaba-cn' }]);
+    fireEvent.click(screen.getByRole('button', { name: /More providers \(3\)/ }));
+    const all = rows();
+    // Every eligible provider is reachable, each once, under its real id.
+    expect(all.map((row) => row.id).sort()).toEqual(['alibaba', 'alibaba-cn', 'decoy', 'mirror', 'openai']);
+    // And no two of them read alike, however the names were spelled.
+    const titles = all.map((row) => row.title.toLowerCase());
+    expect(new Set(titles).size).toBe(titles.length);
+    // Each row got the first name still free when its turn came: the custom pair
+    // kept what they were configured as, and the row they crowded out says which
+    // brand it is AND which entry of it, which is the whole point of falling back.
+    expect(all).toContainEqual({ title: 'alibaba', id: 'mirror' });
+    expect(all).toContainEqual({ title: 'Qwen (alibaba)', id: 'decoy' });
+    expect(all).toContainEqual({ title: 'Qwen (alibaba 2)', id: 'alibaba' });
+    // Neither relay took a brand's mark on the way past.
+    const mark = (id: string) => nodes().find((node) => node.querySelector('small')?.textContent === id)
+      ?.querySelector('.connection-provider-mark')?.innerHTML;
+    expect(mark('mirror')).toBe(mark('decoy'));
+    expect(mark('mirror')).not.toBe(mark('alibaba-cn'));
+    expect(mark('alibaba')).toBe(mark('alibaba-cn'));
+
+    // Search finds each of them by the exact text it is showing — including the
+    // one whose name this list invented, which nothing but the list could know.
+    const search = () => screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder);
+    for (const row of all) {
+      fireEvent.change(search(), { target: { value: row.title } });
+      expect(rows()).toContainEqual(row);
+    }
+    // A brand search still reaches every entry of that brand, unchanged by having
+    // been searched for.
+    // The brand's own entries lead, then the relay that matched only because the
+    // name this list gave it happens to contain the word.
+    fireEvent.change(search(), { target: { value: 'qwen' } });
+    expect(rows().map((row) => row.id)).toEqual(['alibaba-cn', 'alibaba', 'decoy']);
+
+    // And the name is only ever a name: the key goes to the id that was picked.
+    fireEvent.click(screen.getByRole('button', { name: /Qwen \(alibaba 2\)/ }));
+    fireEvent.change(await screen.findByLabelText(en.onboarding.connection.apiKeyLabel), { target: { value: 'sk-qwen' } });
+    expect(screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen')?.textContent).toContain('Qwen (alibaba 2)');
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+    await waitFor(() => expect(mock.api.setOpencodeProviderAuth).toHaveBeenCalledWith('alibaba', 'sk-qwen', null));
   });
 
   it('never offers a local provider for an API Key, and follows OAuth capability for subscriptions', async () => {
