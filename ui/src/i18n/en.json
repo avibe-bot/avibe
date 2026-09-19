@@ -1647,34 +1647,27 @@
           "title": "Gateway mode",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
-          "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models. {{backend}}'s native config is left untouched, and you can switch away anytime."
+          "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models."
         },
         "direct": {
           "title": "Direct mode",
-          "description": "{{backend}} uses its own native config (settings.json / CLI sign-in); Avibe only launches the process and doesn't manage models. Good for troubleshooting or fully self-managed setups.",
+          "description": "{{backend}} uses its own configuration. Avibe does not manage its credentials or model routes.",
           "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
           "import": "Import to gateway…"
         },
         "fixHint": "Add or enable a source on the Models page to bring it back."
       },
       "migration": {
-        "title": "Connect to the model gateway",
-        "subtitle": "Move your existing sign-ins and API keys into the gateway in one pass — each Agent then keeps its own sources and order.",
-        "empty": "No native configuration detected to migrate.",
+        "open": "Migrate configuration",
+        "title": "Migrate to the Model Hub",
+        "subtitle": "After migration, the CLI's credentials will be managed by Model Hub.",
+        "empty": "No configuration found to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
-        "applyFailed": "Import failed, please retry",
-        "applied_one": "Imported {{count}} item",
-        "applied_other": "Imported {{count}} items",
-        "later": "Maybe later",
-        "apply_one": "Import {{count}} item and enable the gateway",
-        "apply_other": "Import {{count}} items and enable the gateway",
-        "nonDestructive": "Non-destructive: native configs are never changed or deleted — importing only copies them; you can switch back to Direct on the Backends page anytime.",
-        "action": {
-          "import": "Import as source",
-          "controlledImport": "Controlled import · reserved",
-          "keepNative": "Keep native",
-          "reauth": "Re-authorize · one-click in browser"
-        },
+        "applyFailed": "Migration failed, please retry",
+        "applied_one": "Migration complete",
+        "applied_other": "Migration complete",
+        "later": "Later",
+        "apply": "Start migration",
         "notes": {
           "customBaseUrl": "Includes a custom Base URL",
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",

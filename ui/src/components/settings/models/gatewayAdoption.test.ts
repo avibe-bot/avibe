@@ -19,13 +19,18 @@ const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependen
   status: { installed_version: health === 'not_installed' ? null : '1', verified: health !== 'not_installed', health },
 });
 
-type GatewayClient = Pick<ModelsApi, 'listAgents' | 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode'>;
+type GatewayClient = Pick<
+  ModelsApi,
+  'listAgents' | 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'scanMigration' | 'applyMigration' | 'setAgentMode'
+>;
 
 const api = (overrides: Partial<GatewayClient> = {}): GatewayClient => ({
   listAgents: vi.fn().mockResolvedValue([agent('direct')]),
   getRuntimeStatus: vi.fn().mockResolvedValue(runtime('ok')),
   installRuntime: vi.fn().mockResolvedValue(runtime('not_started')),
   startRuntime: vi.fn().mockResolvedValue(runtime('ok')),
+  scanMigration: vi.fn().mockResolvedValue({ items: [] }),
+  applyMigration: vi.fn().mockResolvedValue({ applied: 0, sources: [] }),
   setAgentMode: vi.fn().mockResolvedValue(agent('hub')),
   ...overrides,
 });

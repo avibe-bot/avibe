@@ -1647,34 +1647,27 @@
           "title": "模型网关 · Gateway",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "登录、API Key 和模型路由都在「设置 → 模型」中管理。不改动 {{backend}} 自己的配置，随时可切换。"
+          "description": "登录、API Key 和模型路由都在「设置 → 模型」中管理。"
         },
         "direct": {
           "title": "直连模式 · Direct",
-          "description": "{{backend}} 使用自己的配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不管理模型。适合排查问题，或想完全自行管理配置的用户。",
+          "description": "{{backend}} 使用自己的配置，Avibe 不接管认证和模型路由。",
           "detected": "检测到现有直连配置：{{detail}}，可一键导入模型网关",
           "import": "导入模型网关…"
         },
         "fixHint": "去「模型」页添加或启用供应商即可恢复。"
       },
       "migration": {
-        "title": "接入模型网关",
-        "subtitle": "把现有登录和 API Key 一次导入模型网关；导入后每个 Agent 各自选择供应商和优先级。",
-        "empty": "没有检测到可导入的 Agent 配置。",
+        "open": "迁移配置",
+        "title": "迁移到模型网关",
+        "subtitle": "迁移后，CLI的认证信息将完全交由模型网关管理",
+        "empty": "没有检测到可迁移的配置。",
         "scanFailed": "扫描 Agent 配置失败，请重试",
-        "applyFailed": "导入失败，请重试",
-        "applied_one": "已导入 {{count}} 项",
-        "applied_other": "已导入 {{count}} 项",
-        "later": "稍后再说",
-        "apply_one": "导入 {{count}} 项并启用模型网关",
-        "apply_other": "导入 {{count}} 项并启用模型网关",
-        "nonDestructive": "导入只会复制配置，不会改动或删除 Agent 自己的配置；随时可在「后端」页切回直连。",
-        "action": {
-          "import": "导入为模型供应商",
-          "controlledImport": "受控导入 · 预留",
-          "keepNative": "保留给 Agent 管理",
-          "reauth": "需重新授权 · 浏览器一键"
-        },
+        "applyFailed": "迁移失败，请重试",
+        "applied_one": "迁移完成",
+        "applied_other": "迁移完成",
+        "later": "稍后",
+        "apply": "开始迁移",
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
           "keepNativeSanctioned": "保留在 Agent 自己的凭据库（受官方认可）",

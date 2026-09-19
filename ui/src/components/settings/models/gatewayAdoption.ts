@@ -47,7 +47,7 @@ const backendRow = (agents: AgentSupply[], backend: AgentBackend): AgentSupply |
  * resumes at the first step the server state has not already confirmed.
  */
 export async function resumeGatewayAdoption(
-  api: Pick<ModelsApi, 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode'>,
+  api: Pick<ModelsApi, 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode' | 'scanMigration' | 'applyMigration'>,
   agentReads: CollectionReadAuthority<AgentSupply[]>,
   backend: AgentBackend,
   installPollIntervalMs = 2_000,
@@ -91,6 +91,20 @@ export async function resumeGatewayAdoption(
       failure: runtimeSequence.error
         ? classifiedFailure(runtimeSequence.error, 'start', 'POST /api/models/runtime/start')
         : { step: 'start', request: 'POST /api/models/runtime/start', reason: 'notReady' },
+      runtime,
+    };
+  }
+
+  try {
+    const scan = await api.scanMigration();
+    const itemIds = scan.items
+      .filter((item) => item.backend === backend && item.proposed_action === 'import')
+      .map((item) => item.id);
+    if (itemIds.length > 0) await api.applyMigration(itemIds);
+  } catch (error) {
+    return {
+      ok: false,
+      failure: classifiedFailure(error, 'mode', 'POST /api/models/migration/apply'),
       runtime,
     };
   }

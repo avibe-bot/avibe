@@ -2,12 +2,10 @@
 // keys already on this machine the Model Gateway can take over, with a way to look
 // at them before anything happens.
 //
-// It is deliberately narrower than the settings migration. That surface legitimately
-// offers native OAuth rows and `keep_native`, which is a real applied action there;
-// this one is about keys and only keys, so the sentence, the rows in the dialog, the
-// batch submitted and the count left afterwards all read the single
-// `isImportableKey` predicate. A number produced by a different rule than the rows
-// behind it is the failure this shape exists to make impossible.
+// It is deliberately narrower than the settings migration: this entry is about
+// keys only, while OAuth takeover and re-authentication stay in Settings. The
+// sentence, the rows in the dialog, the batch submitted and the count left
+// afterwards all read the single `isImportableKey` predicate.
 //
 // It stays visible after an import to say what happened and what is left, so a
 // partial selection can be finished without hunting for the entry again.

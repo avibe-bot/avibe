@@ -36,8 +36,6 @@ const CLASSIFIED: Record<string, string> = {
   'gateway.fail.switchToDirect': 'Reports a failed user-triggered switch; it does not promise an automatic fallback.',
   'adopt.undo.1': 'Names the manual, user-triggered undo promised by the adoption dialog.',
   'adopt.undo.2': 'Names the exact location of that manual undo control.',
-  'migration.nonDestructive':
-    'Describes a manual switch the user may make on the Backends page, not something the Hub does on their behalf.',
 };
 
 type Leaf = { key: string; text: string };

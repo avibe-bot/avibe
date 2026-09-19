@@ -1,11 +1,8 @@
 // @vitest-environment jsdom
 //
-// The settings migration, which is deliberately broader than setup's key-import
-// entry. `keep_native` is a real applied action here — it files the native CLI
-// login as a native_cli-channel source — so narrowing the dialog for one caller
-// must not quietly narrow it for this one. That, and the row's own presentation
-// rules: a provider name only when the server sent the metadata for it, never
-// one inferred from whichever backend happened to hold the key.
+// The settings migration and setup's key-import entry share the same takeover
+// dialog. Only rows the gateway can actually import are shown; unsupported
+// actions stay out of the user-facing checklist.
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
@@ -26,7 +23,7 @@ const SUBSCRIPTION: MigrationItem = {
   backend: 'claude',
   kind: 'oauth_native',
   masked_detail: 'Claude 账号登录（OAuth）',
-  proposed_action: 'keep_native',
+  proposed_action: 'import',
   selected: true,
   notes_key: null,
   vendor: 'anthropic',
@@ -47,7 +44,7 @@ const CODEX_KEY: MigrationItem = {
   masked_credential: 'sk-…9f21',
 };
 
-// Pre-selected by the scan, and still never batchable: it needs the browser flow.
+// Pre-selected by the scan, but not batchable: it needs the browser flow.
 const REAUTH: MigrationItem = {
   id: 'mig_claude_reauth',
   backend: 'claude',
@@ -103,41 +100,39 @@ afterEach(() => {
 });
 
 describe('MigrationDialog — the settings default', () => {
-  it('shows every scanned row, subscriptions included', async () => {
+  it('shows only rows that can be taken over', async () => {
     serve();
     renderDialog();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
-    expect(within(dialog).getByText('Keep native')).toBeTruthy();
-    expect(within(dialog).getByText(/Re-authorize/)).toBeTruthy();
+    expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
   });
 
-  it('applies a keep_native row — it is a real action here, not a leftover', async () => {
+  it('applies every selected import row with one migration action', async () => {
     serve();
     renderDialog();
     const user = userEvent.setup();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    // Three of the four: everything except the reauth row.
-    await user.click(within(dialog).getByRole('button', { name: /Import 3 items/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).toContain('mig_claude_oauth');
     expect(applied[0]).toEqual(['mig_claude_oauth', 'mig_codex_key', 'mig_opencode_legacy']);
   });
 
-  it('never submits a reauth row, even pre-selected', async () => {
+  it('does not show or submit a reauth row, even when it is pre-selected', async () => {
     serve();
     renderDialog();
     const user = userEvent.setup();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    expect(within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ })).toHaveProperty('disabled', true);
-    await user.click(within(dialog).getByRole('button', { name: /Import 3 items/ }));
+    expect(within(dialog).queryByRole('checkbox', { name: /sk-ant-…4b7e/ })).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).not.toContain('mig_claude_reauth');
@@ -151,7 +146,7 @@ describe('MigrationDialog — the settings default', () => {
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     expect(within(dialog).queryByText(/Claude 账号登录/)).toBeNull();
     expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
-    expect(within(dialog).getByRole('button', { name: /Import 2 items/ })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
 });
 

@@ -16,6 +16,7 @@ import { createAgentCollectionReadAuthority } from './collectionReadAuthority';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { MigrationDialog } from './MigrationDialog';
+import { resumeGatewayAdoption } from './gatewayAdoption';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import type { AgentBackend, AgentMode, AgentSupply, MigrationItem } from './types';
 
@@ -119,7 +120,13 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
     if (!agent || agent.mode === mode || switching) return;
     setSwitching(mode);
     try {
-      const next = await modelsApi.setAgentMode(backend, mode);
+      const next = mode === 'hub'
+        ? await (async () => {
+            const result = await resumeGatewayAdoption(modelsApi, agentReads, backend);
+            if (!result.ok) throw new Error(result.failure.reason);
+            return result.agent;
+          })()
+        : await modelsApi.setAgentMode(backend, mode);
       if (!aliveRef.current) return;
       setAgent(next);
       if (mode === 'direct') {

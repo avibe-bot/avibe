@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
+import { ArrowDownToLine, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -13,9 +13,9 @@ import { ToggleSwitch } from '../SettingsPrimitives';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
-import { EnableGatewayDialog } from './EnableGatewayDialog';
 import { GatewayModule } from './GatewayModule';
 import { InstallGatewayDialog } from './InstallGatewayDialog';
+import { MigrationDialog } from './MigrationDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
@@ -66,6 +66,7 @@ import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, ru
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { useSourceMutationReport } from './useSourceMutationReport';
 import { handOffProviderTab } from './providerTab';
+import { resumeGatewayAdoption } from './gatewayAdoption';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
@@ -364,6 +365,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [installOpen, setInstallOpen] = React.useState(false);
+  const [migrationOpen, setMigrationOpen] = React.useState(false);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
@@ -837,6 +839,35 @@ export const SettingsModelsPage: React.FC = () => {
       }
     });
   };
+  const switchToGateway = (agent: AgentSupply) => {
+    if (agentWrites.has(agent.backend)) return;
+    setAdoptAgent(agent);
+    setSwitchFailures((previous) => {
+      const next = new Set(previous);
+      next.delete(agent.backend);
+      return next;
+    });
+    void agentWriteRegistry.track(agent.backend, async () => {
+      try {
+        const result = await resumeGatewayAdoption(modelsApi, agentCollectionReads, agent.backend);
+        if (result.runtime) setRuntimeRead(readyRegion(result.runtime));
+        if (!result.ok) {
+          setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+          return;
+        }
+        setSwitchFailures((previous) => {
+          const next = new Set(previous);
+          next.delete(agent.backend);
+          return next;
+        });
+        await agentSaved(result.agent);
+      } catch {
+        setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+      } finally {
+        if (aliveRef.current) setAdoptAgent(null);
+      }
+    });
+  };
   const loadOlderEvents = React.useCallback(async () => {
     const cursor = feedTailCursor(feed);
     if (!cursor) return;
@@ -1223,6 +1254,18 @@ export const SettingsModelsPage: React.FC = () => {
                 stopping={stoppingRuntime}
                 directCount={directEmpty ? installedAgents.length : undefined}
               />
+              {runtimeConfigurationVisible && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5 rounded-lg px-2.5 text-[11px] font-semibold"
+                  onClick={() => setMigrationOpen(true)}
+                >
+                  <ArrowDownToLine className="size-3.5" aria-hidden="true" />
+                  {t('settings.models.migration.open')}
+                </Button>
+              )}
               {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
               {runtimeConfigurationVisible && <Button
                 type="button"
@@ -1257,7 +1300,7 @@ export const SettingsModelsPage: React.FC = () => {
                   <HubTabs tab={tab} onChange={setTab} />
                   {tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
+                    : directEmpty ? <DirectHome agents={installedAgents} onSwitch={switchToGateway} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
@@ -1360,7 +1403,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1484,20 +1527,6 @@ export const SettingsModelsPage: React.FC = () => {
           })();
         }}
       />
-      {adoptAgent && (
-        <EnableGatewayDialog
-          key={adoptAgent.backend}
-          agent={adoptAgent}
-          runtime={runtimeRead}
-          agentReads={agentCollectionReads}
-          onClose={() => setAdoptAgent(null)}
-          onAdopted={agentSaved}
-          onRuntime={(next) => {
-            setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
-          }}
-          trackWrite={(work) => agentWriteRegistry.track(adoptAgent.backend, work)}
-        />
-      )}
       </>}
       {installOpen && retainedRuntime && (
         <InstallGatewayDialog
@@ -1506,6 +1535,17 @@ export const SettingsModelsPage: React.FC = () => {
           onRuntime={(next) => {
             setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
             setRuntimeRecoveryPending(next === null);
+          }}
+        />
+      )}
+      {migrationOpen && (
+        <MigrationDialog
+          open
+          onClose={() => setMigrationOpen(false)}
+          onApplied={() => {
+            setMigrationOpen(false);
+            void refresh();
+            void refreshAgentPresence();
           }}
         />
       )}
