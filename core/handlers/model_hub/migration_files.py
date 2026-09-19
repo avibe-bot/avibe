@@ -133,10 +133,15 @@ def plan_native_cleanup(
                 raise TakeoverStateError("conflicting native credential snapshots")
             edits[path] = edit
 
-    def edit_json(path: Path, transform, *, jsonc: bool = False) -> None:
+    def edit_json(path: Path, transform, *, jsonc: bool = False, guard_unchanged: bool = False) -> None:
         path = path.absolute()
         staged = edits.get(path)
         original = staged.before if staged else _read_regular(path)
+        if guard_unchanged and staged is None:
+            # Model-only and currently absent OpenCode layers also determine
+            # the consented inventory. Preserve their exact snapshots through
+            # asynchronous proof/provision and journaled cleanup/recovery.
+            edits[path] = NativeFileEdit(path, original, original)
         if original is None:
             return
         working = staged.after if staged else original
@@ -268,11 +273,11 @@ def plan_native_cleanup(
                         provider.pop("options", None)
 
         for path in opencode_config_paths(home, project_roots):
-            edit_json(path, clear_providers, jsonc=True)
+            edit_json(path, clear_providers, jsonc=True, guard_unchanged=True)
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
                 payload.pop(vendor, None)
 
-        edit_json(opencode_auth_path(home), clear_provider_auth)
+        edit_json(opencode_auth_path(home), clear_provider_auth, guard_unchanged=True)
     return list(edits.values())

@@ -1794,7 +1794,14 @@ guard; deferred still has explanatory copy even though it is not selectable.
 compatible refresh-capable grant does not require a new browser login. If a matching
 native Source already exists, takeover upgrades that Source in place: its Source ID,
 user-owned default membership, and Route identities remain intact while custody changes
-from `native_cli` to `hub`. A duplicate Source is never created. The import entry
+from `native_cli` to `hub`. If a reused API-key or native Source is absent from both
+the consenting backend's defaults and explicit Routes, append it to that backend's
+defaults before cleanup; preserve all other memberships and Routes. A duplicate
+Source is never created. Shared OpenCode credentials resolving to the same vendor,
+protocol and target across config layers produce one candidate with the union of
+manual model IDs; consent still binds every contributing layer and cleanup journals
+every physical path, including no-op snapshots for model-only and absent OpenCode
+layers so asynchronous provisioning cannot hide a changed credential or model. The import entry
 points are the setup wizard, the backend-page migration dialog, and One-click migration
 for existing Hub users.
 - **Add-source closing loop (v3).** Creating a Source returns

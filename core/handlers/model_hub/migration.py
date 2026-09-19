@@ -130,6 +130,8 @@ class MigrationHost(Protocol):
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
+    def _reconcile_native_auth(self, backends: tuple[str, ...]) -> None: ...
+
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None: ...
 
     async def _rollback_credential(
@@ -838,6 +840,38 @@ def _opencode_candidates(
     return items
 
 
+def _deduplicate_opencode_items(
+    items: list[NativeMigrationItem],
+    validate_base_url: Callable[[object], Optional[str]] | None,
+) -> list[NativeMigrationItem]:
+    """One logical credential/target, with consent covering every native copy."""
+    groups: dict[tuple[str, str, str | None, str], list[NativeMigrationItem]] = {}
+    for item in items:
+        if item.kind == "opencode_provider" and item.proposed_action == "import" and item.secret:
+            target = validate_base_url(item.base_url) if validate_base_url else item.base_url
+            groups.setdefault((item.vendor, item.protocol, target, item.secret), []).append(item)
+    replacements: dict[str, NativeMigrationItem] = {}
+    duplicates: set[str] = set()
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        first = group[0]
+        models: dict[str, NativeManualModel] = {}
+        for item in group:
+            for model in item.manual_models:
+                # Keep the complete model union; the later configuration layer
+                # supplies a label when the same model is named in both.
+                models[model.id] = model
+        # Layer order also owns repeated model labels, so it is consent-bound.
+        revision = _stable_suffix(*(item.id for item in group))
+        replacements[first.id] = replace(
+            first, id=f"mig_{revision}", source_id=f"src_{revision}",
+            manual_models=tuple(models.values()),
+        )
+        duplicates.update(item.id for item in group[1:])
+    return [replacements.get(item.id, item) for item in items if item.id not in duplicates]
+
+
 def scan_native_configs(
     config: ModelHubConfig,
     *,
@@ -914,6 +948,7 @@ def scan_native_configs(
                 continue
             valid_items.append(item)
         items = valid_items
+    items = _deduplicate_opencode_items(items, validate_base_url)
     existing_native_sources = {
         source.vendor: source
         for source in config.sources
@@ -1015,6 +1050,19 @@ def _native_auth_snapshot(host: MigrationHost, backends: tuple[str, ...]) -> dic
     return reader(backends) if callable(reader) else {}
 
 
+def _ensure_takeover_placement(
+    config: ModelHubConfig, source: ModelHubSourceConfig, backend: str,
+) -> None:
+    """Identity reuse still owes the consenting backend a configured placement."""
+    if not config.source_eligible_for_backend(source, backend):
+        raise MigrationConflictError
+    agent = config.agents[backend]
+    if source.id not in agent.sources.order and not any(
+        hop.source_id == source.id for route in agent.routes.values() for hop in route.hops
+    ):
+        agent.sources.order.append(source.id)
+
+
 async def _prepare_takeover(
     host: MigrationHost,
     previous: ModelHubConfig,
@@ -1068,11 +1116,12 @@ async def _prepare_takeover(
                     ):
                         # Identity reuse is not current authentication proof.
                         # Observe the exact existing target/ref without changing
-                        # its inventory, state, order, or user-owned routes.
+                        # its inventory, state, or user-owned routes.
                         await host._require_proven_observation(
                             candidate.vendor, candidate.base_url,
                             candidate.credential_ref, (candidate.protocol,),
                         )
+                        _ensure_takeover_placement(updated, candidate, item.backend)
                         source_ids.append(candidate.id)
                         break
                 else:
@@ -1146,6 +1195,7 @@ async def _prepare_takeover(
                     replacement["models"] = [model.to_payload() for model in source.models]
                 source = ModelHubSourceConfig.from_payload(replacement)
                 updated.sources = [source if value.id == source.id else value for value in updated.sources]
+                _ensure_takeover_placement(updated, source, item.backend)
             else:
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
@@ -1222,6 +1272,7 @@ async def _revert_takeover(host: MigrationHost, record: dict[str, Any]) -> None:
             credential["source_id"],
             credential["credential_ref"],
         )
+    host._reconcile_native_auth(tuple(record["backends"]))
     host.migration_journal.forget()
     host.migration_blocked_backends.difference_update(record["backends"])
 
@@ -1298,6 +1349,7 @@ async def _resume_takeover(
             # sync_sources is a runtime write, not a config-only operation.
             host._save_config(updated)
             host._engine_synced = False
+            host._reconcile_native_auth(tuple(record["backends"]))
             # This durable marker precedes any credential exposure to CPA.
             # An empty-container-only confirmation transferred no grant and
             # changed no native bytes: keep it reversible through runtime start
@@ -1309,6 +1361,10 @@ async def _resume_takeover(
             ):
                 record["phase"] = "exposed"
             host.migration_journal.save(record)
+        else:
+            # Recovery may start with an equal persisted Hub config but stale
+            # launch consumers. Reconcile before any possible publication.
+            host._reconcile_native_auth(tuple(record["backends"]))
         for raw in record["files"]:
             NativeFileEdit.from_payload(raw).check(applied=True)
         # Store mutations are replayable and must still match their cleaned
@@ -1373,6 +1429,7 @@ async def _resume_takeover(
             }
             host.migration_journal.save(record)
             return _finish_rejected_takeover(host, record)
+        host._reconcile_native_auth(tuple(record["backends"]))
         host.migration_journal.complete(record)
         host.migration_blocked_backends.difference_update(record["backends"])
         return len(record["items"]), [
@@ -1388,6 +1445,7 @@ def _finish_rejected_takeover(
     host: MigrationHost, record: dict[str, Any],
 ) -> tuple[int, list[dict]]:
     host._save_config(ModelHubConfig.from_payload(record["terminal"]["config"]))
+    host._reconcile_native_auth(tuple(record["backends"]))
     host.migration_journal.complete(record)
     host.migration_blocked_backends.difference_update(record["backends"])
     raise MigrationCredentialsInvalidError
