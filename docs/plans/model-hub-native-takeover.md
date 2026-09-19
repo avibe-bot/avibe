@@ -17,6 +17,9 @@ remaining live-account verification boundaries are described below.
   conversion, not suppressed as duplicates.
 - With no native credentials to migrate, the mode switch proceeds directly.
   Missing credentials use the existing Add subscription / Add API key flows.
+  The service rechecks absence under the shared migration/native-writer guard;
+  a login created after the UI scan rejects the mode-only switch. It never
+  imports or deletes that new login without migration consent.
 - Progress and failures describe only the current state and a necessary action.
   Success means takeover and cleanup completed, not just import accepted.
 - Chinese product name: `模型网关`; English: `Model Hub`. The approved Chinese
@@ -91,6 +94,27 @@ explicitly authorized acceptance check.
 
 - `EngineAdapter.provision_oauth_credential(source_id, vendor, material) -> str`
   stages only, outside the watched auth directory.
+- API-key, transient observation-key, and OAuth provisioning accept the optional
+  keyword `on_reserved: Callable[[str], None] | None = None`. The engine atomically
+  reserves a fresh opaque ref without secrets, refuses an existing ref before
+  invoking the callback, and invokes it synchronously before writing any secret
+  bytes. The callback receives only the ref; failure forbids secret writes.
+  The owned worker is joined even on repeated cancellation. This is an internal
+  write-ahead seam, not a public reservation endpoint or another journal.
+- Migration registers `(final_source_id, credential_ref, revoke_credential)` in
+  the existing revocation journal; rollback uses that same identity. Transient
+  observation keys use their existing `observation` cleanup owner. The callback
+  returns only after both the journal file and its directory are fsynced.
+  Provisioning failure before returning a ref is still covered by that owner.
+  The prepared takeover record must be durable before relinquishing provisional
+  ownership. Startup recovers takeover before replaying pending revocations;
+  a matching current Source/ref is retained, including a rotated OAuth grant.
+- Revocation first confirms the ref is unbound. Even without credential
+  metadata, it deletes only that ref's private OAuth stage/reservation and
+  fsyncs the affected directory; absent paths are idempotent success. Missing
+  metadata never authorizes guessing an auth filename, deleting watched grants,
+  management API calls, or sweeping a directory. Cleanup/fsync failure retains
+  the pending ref. Unlocatable possibly exposed material stays pending.
 - `EngineAdapter.activate_oauth_credential(credential_ref) -> None` publishes
   idempotently after the durable ownership decision; a retry never overwrites
   an existing live (possibly rotated) grant.
@@ -138,6 +162,11 @@ explicitly authorized acceptance check.
   value is exportable. The selected container revision is checked after drain;
   only then are its supported API-key and OAuth components expanded. A denied
   read or unsupported component leaves native ownership intact.
+  A consented, unchanged container containing only unrelated data is verified
+  clean, not an error or an imported Source. Its revision is retained in the
+  existing completed receipt; unrelated bytes are not changed. Any new revision
+  requires consent again. A selector for a verified-empty Codex store remains
+  unchanged so later native logins at that locator remain observable.
 
 ## Durable transaction
 
@@ -153,7 +182,9 @@ and private native file/store edits. The containing directory is mode 0700;
 the record is mode 0600. These snapshots are never response or log payloads.
 
 Prepare, runtime dependency installation, and API-key validation precede
-cleanup. Installation or unsupported-host failures leave native ownership
+cleanup. Reusing an existing API-key Source/ref still requires current upstream
+proof of that exact protocol and target; equality of saved key bytes alone is
+not validation. Installation or unsupported-host failures leave native ownership
 intact; staged OAuth grants remain outside the watched auth directory even
 if dependency installation restarts an existing runtime.
 After cleanup, Source/Routes/
@@ -233,6 +264,13 @@ unusable Hub supply must not fall back to an unrelated native login. Existing
 application/drain, backend enablement, installation and OpenCode permission
 gates remain effective. This is connection readiness, not an inference probe
 or a promise that every selected model is available.
+
+Direct Claude retains its existing bounded `auth status --json` observation
+for Keychain-backed sign-in; opaque Keychain metadata cannot distinguish an
+OAuth grant from an unrelated MCP-only container. The native credential lease
+covers that query and its thread completion, with custody checked before
+launch. This is not a login, refresh or inference request. Hub connection
+observation never launches this query or borrows an unrelated native login.
 
 Only Sources referenced by the backend's effective source order or explicit
 route hops participate. Eligibility reuses the existing backend and
