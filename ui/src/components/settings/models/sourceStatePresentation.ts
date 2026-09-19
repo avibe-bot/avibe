@@ -102,9 +102,13 @@ export const sourceStatePresentation = (
 ): SourceStatePresentation => {
   if (adoption.verificationPending && (state.status === 'active' || state.status === 'standby')) {
     return {
-      key: 'settings.models.sourceDetail.status.unverified',
-      textClass: 'model-hub-ink-gold',
-      dotClass: 'bg-gold',
+      key: 'settings.models.sourceDetail.status.saved',
+      hint: {
+        labelKey: 'settings.models.sourceDetail.status.savedHintLabel',
+        bodyKey: 'settings.models.sourceDetail.status.savedHint',
+      },
+      textClass: 'text-muted',
+      dotClass: 'bg-muted',
     };
   }
   if (state.status === 'active' && !adoption.known) {

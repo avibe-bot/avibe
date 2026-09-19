@@ -188,20 +188,65 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     await waitFor(() => expect(modelsApi.putAgentSources).toHaveBeenCalledWith('claude', { order: ['src_b', 'src_a'] }));
   });
 
-  it('echoes the exact effective-removal guard before saving default membership', async () => {
+  it('MH-ROUTING-003: saves default membership and exact route impact with one click', async () => {
     const user = userEvent.setup();
     const hops = [{ backend: 'claude' as const, menu_model: 'model-a', position: 1, source_id: 'src_a', model_id: 'model-a' }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'model-a', agents: ['Release bot'] }];
+    const committed = { ...agent, sources: { ...agent.sources!, order: ['src_b'] } };
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     const put = vi.spyOn(modelsApi, 'putAgentSources')
-      .mockRejectedValueOnce(new ApiCallError('source_in_route_chain', undefined, true, [], [], hops))
-      .mockResolvedValueOnce({ ...agent, sources: { ...agent.sources!, order: ['src_b'] } });
-    renderDrawer();
+      .mockRejectedValueOnce(new ApiCallError('source_in_route_chain', undefined, true, gaps, [], hops))
+      .mockResolvedValueOnce(committed);
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSaved, onClose });
     await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
     await user.click(screen.getByRole('button', { name: 'Save default routing' }));
-    await screen.findByText('Review affected routes');
-    expect(put).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put).toHaveBeenLastCalledWith('claude', { order: ['src_b'], force: true, would_remove_hops: hops, would_interrupt: gaps });
+    expect(onSaved).toHaveBeenCalledWith(committed);
+    expect(screen.queryByText('Review affected routes')).toBeNull();
+  });
+
+  it('retains the draft when the route impact changes during the save without looping', async () => {
+    const user = userEvent.setup();
+    const gaps = [{ backend: 'claude' as const, model_id: 'model-a', agents: ['Release bot'] }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    const put = vi.spyOn(modelsApi, 'putAgentSources')
+      .mockRejectedValueOnce(new ApiCallError('source_last_supplier', undefined, true, gaps))
+      .mockRejectedValueOnce(new ApiCallError('source_last_supplier', undefined, true, [
+        ...gaps, { backend: 'claude', model_id: 'model-b', agents: ['New agent'] },
+      ]));
+    const onClose = vi.fn();
+    renderDrawer({ onClose });
+    await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
     await user.click(screen.getByRole('button', { name: 'Save default routing' }));
-    await waitFor(() => expect(put).toHaveBeenLastCalledWith('claude', { order: ['src_b'], force: true, would_remove_hops: hops, would_interrupt: [] }));
+    await screen.findByRole('button', { name: 'Retry' });
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put).toHaveBeenLastCalledWith('claude', { order: ['src_b'], force: true, would_remove_hops: [], would_interrupt: gaps });
+    expect(screen.getByRole('button', { name: 'Reorder source' }).closest('li')?.textContent).toContain('Backup');
+    expect(screen.getByRole('button', { name: 'Add to order' })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a lost response to the automatic confirmation without replaying the write', async () => {
+    const user = userEvent.setup();
+    const committed = { ...agent, sources: { ...agent.sources!, order: ['src_b'] } };
+    const gaps = [{ backend: 'claude' as const, model_id: 'model-a', agents: ['Release bot'] }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValueOnce(agent).mockResolvedValueOnce(committed);
+    const put = vi.spyOn(modelsApi, 'putAgentSources')
+      .mockRejectedValueOnce(new ApiCallError('source_last_supplier', undefined, true, gaps))
+      .mockRejectedValueOnce(new TypeError('response lost'));
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    renderDrawer({ onSaved, onClose });
+    await user.click((await screen.findAllByRole('button', { name: 'Remove from order' }))[0]);
+    await user.click(screen.getByRole('button', { name: 'Save default routing' }));
+    await user.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(committed));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledTimes(2);
   });
   it('reconciles an unknown order write without resubmitting the mutation', async () => {
     const user = userEvent.setup();

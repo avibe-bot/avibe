@@ -53,6 +53,14 @@ for (const backend of ['claude', 'codex', 'opencode']) {
           await expect(mapping).toContainText('Primary');
           expect(mappingBox.y).toBeGreaterThanOrEqual(idBox.y + idBox.height);
           expect(Math.abs(mappingBox.x - idBox.x)).toBeLessThanOrEqual(1);
+          for (const row of await card.locator('[data-route-model]').all()) {
+            const [rowBox, badgeBox, chevronBox] = await Promise.all([
+              box(row), box(row.locator('.model-hub-route-origin')), box(row.locator('.model-hub-overview-chevron')),
+            ]);
+            expect(Math.abs(centerY(badgeBox) - centerY(chevronBox))).toBeLessThanOrEqual(1);
+            expect(Math.abs(centerY(badgeBox) - centerY(rowBox))).toBeLessThanOrEqual(1);
+            expect(badgeBox.x + badgeBox.width).toBeLessThan(chevronBox.x);
+          }
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
           if (width === widths[0]) {
             await main.screenshot({ path: testInfo.outputPath('gateway-layout.png'), scale: 'css' });

@@ -1052,6 +1052,18 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(screen.queryByText(/serves a route through it|它就会显示为使用中/i)).toBeNull());
   });
 
+  it.each(['en', 'zh'])('explains the saved connection status through its keyboard-accessible hint in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    render(<ToastProvider><I18nextProvider i18n={locale}>
+      <ReportOwnedPanel source={{ ...source, verification_pending: 'vp_fixture' }} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider></ToastProvider>);
+    expect(screen.getByText(locale.t('settings.models.sourceDetail.status.saved'))).toBeTruthy();
+    const hint = screen.getByRole('button', { name: locale.t('settings.models.sourceDetail.status.savedHintLabel') });
+    hint.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(await screen.findByText(locale.t('settings.models.sourceDetail.status.savedHint'))).toBeTruthy();
+  });
+
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockResolvedValueOnce(source);
     renderPanel();
