@@ -1606,7 +1606,7 @@
         "applyFailed": "Migration failed, please retry",
         "blocked": {
           "config": "Adjust this CLI's configuration, then scan again.",
-          "environment": "Close the CLI or finish its current task, then retry.",
+          "environment": "Remove this CLI’s environment-based credentials, then retry.",
           "credential": "Allow credential access, then retry.",
           "fallback": "Use the existing Add flow for this CLI, then scan again."
         },

@@ -1606,7 +1606,7 @@
         "applyFailed": "迁移失败，请重试",
         "blocked": {
           "config": "请先调整此 CLI 的配置，再重新扫描。",
-          "environment": "请先关闭 CLI 或完成当前任务，再重试。",
+          "environment": "请先清除该 CLI 的环境变量认证配置，再重试。",
           "credential": "请允许访问凭据，再重试。",
           "fallback": "请先用现有的添加流程处理此 CLI，再重新扫描。"
         },

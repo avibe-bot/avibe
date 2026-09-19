@@ -256,6 +256,10 @@ export const MigrationDialog: React.FC<{
           MIGRATION_ERROR_KEYS[code ?? ''] ??
           'settings.models.migration.applyFailed';
         showToast(t(key) as string, 'error');
+        if (code === 'migration_credentials_invalid') {
+          onApplied?.(0);
+          onClose();
+        }
       }
     } finally {
       if (aliveRef.current) setApplying(false);

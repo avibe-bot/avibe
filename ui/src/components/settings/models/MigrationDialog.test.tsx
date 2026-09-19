@@ -270,9 +270,51 @@ describe('MigrationDialog — the settings default', () => {
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(message, 'error'));
   });
 
+  it('refreshes through onApplied and closes after terminal credential settlement', async () => {
+    const onApplied = vi.fn();
+    const onClose = vi.fn();
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_credentials_invalid'));
+    renderDialog({ onApplied, onClose });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'Authentication has expired. Sign in again in Model Hub.',
+      'error',
+    ));
+    expect(onApplied).toHaveBeenCalledWith(0);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(showToast).not.toHaveBeenCalledWith('Migration complete', 'success');
+  });
+
+  it('keeps the dialog open while recovery is still pending', async () => {
+    const onApplied = vi.fn();
+    const onClose = vi.fn();
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_recovery_pending'));
+    renderDialog({ onApplied, onClose });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'Migration is unfinished. Retry to continue.',
+      'error',
+    ));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(onApplied).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['settings.models.migration.blocked.config', "Adjust this CLI's configuration, then scan again."],
-    ['settings.models.migration.blocked.environment', 'Close the CLI or finish its current task, then retry.'],
+    ['settings.models.migration.blocked.environment', 'Remove this CLI’s environment-based credentials, then retry.'],
     ['settings.models.migration.blocked.credential', 'Allow credential access, then retry.'],
     ['settings.models.migration.blocked.unknown', 'Use the existing Add flow for this CLI, then scan again.'],
   ] as const)('maps blocked note %s to actionable copy', async (notes_key, message) => {
