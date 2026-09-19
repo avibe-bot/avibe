@@ -1183,9 +1183,7 @@
         "exactModel": "Exact model ID",
         "moveUp": "Move source up",
         "moveDown": "Move source down",
-        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
-        "guardTitle": "Review affected routes",
-        "confirmDefaults": "Save default routing"
+        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes"
       },
       "order": {
         "title": "{{backend}} · Default routing",
@@ -1681,7 +1679,9 @@
           "error": "Error",
           "standbyHintLabel": "What this status means",
           "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
-          "unverified": "Not yet verified",
+          "saved": "Saved",
+          "savedHintLabel": "About this connection",
+          "savedHint": "Your configuration is saved. This source has not completed a successful model request with its current configuration yet. The status updates after a successful request.",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",

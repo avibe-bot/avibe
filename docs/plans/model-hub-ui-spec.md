@@ -347,11 +347,11 @@ half named in its Missing cell has an owner.
 | # | Surface | Missing | Evidence / disposition (contract baseline `1993f4fd0`) |
 | --- | --- | --- | --- |
 | G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** | a way to retire a *discovered* model from the drawn inventory; ~~a place to remember that it was retired~~ | `DELETE /api/models/sources/<source_id>/models/<model_id>` now persists `models[].retired: true` for a discovered row instead of deleting it. `source.schema.json` keeps that row readable, never supplying, and refresh never revives it; §4.5 applies the same exact-hop and last-supplier guards. §1.6 registers that representation as the ordinary row chrome with muted ink and the existing tag component. Frame 06 still draws removal only for manual entries, so no registered control invokes the discovered-row route; only that producer half remains live instead of treating wire reachability as a UI consumer. |
-| G-9 | Default membership guard, revised 2026-09-06 | Existing exact-plan fields | Sources PUT and compatibility reorder compare effective plans. Pure reorder needs no guard; removal may require confirmation. Closed by the routing contract. |
+| G-9 | Default membership guard | Existing exact-plan fields | Sources PUT and compatibility reorder compare effective plans. Pure reorder needs no guard; membership removal may require an exact-plan wire confirmation. Default routing Save performs that handshake once without a second user confirmation (§1.3). |
 | G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; any mounted surface observing durable `installing` owns the derived 2s status loop, while a held initiating sequence only decides whether settlement lands at Not started or continues through Starting. Unmount stops the loop; reload owns G-10's first read and restores no intent. |
 | G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. |
 | G-12 | 01 upstream card and 06 header, `needs_action` — **registered by frame 12** | ~~the control that replaces a dead credential~~ nothing | §1.11 registers the two repair producers drawn on the source cards: 更换 Key sends the credential-replacement flow to `PUT /api/models/sources/<id>/credential`, and 重新授权 starts `POST /api/models/sources/<id>/reauth`. §1.1 and §1.6 cite that owner instead of pointing at each other. Kept as a registered row so the former absence and its closing frame remain auditable |
-| G-13 | Default routing save | Complete default order and guard plan | Sources PUT preserves manual arrays and returns authoritative AgentSupply. Failed saves retain the draft. |
+| G-13 | Default routing save | Complete default order and guard plan | One Save applies defaults and their inherited-route impact, automatically echoing one exact server plan if needed. Sources PUT preserves manual arrays and returns authoritative AgentSupply. A changed plan or failed save retains the draft; an ambiguous outcome is read back before another write. |
 | G-14 | 08 adopt-gateway confirm, `effects.1` — **registered against the mode transaction** | ~~the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source~~ nothing | A qualifying `direct` → `hub` mode `PATCH` now atomically adopts the recognized CLI login as the first singleton `native_cli` Source and returns the updated `AgentSupply`; an absent or unrecognized login or an existing native Source creates and reorders nothing, and repeats create no duplicate. §1.9's consequence pair states both branches and never treats `cli_present` as recognition evidence; its M5 handoff rereads Sources before the committed result lands because the response cannot carry the possibly created Source. |
 | G-15 | 06 source detail, a source's own name and Base URL — **registered by frame 11** | ~~any affordance that edits them~~ nothing | §1.10 registers the overflow action, edit dialog and guarded `PATCH /api/models/sources/<id>` producer drawn in frame 11. Kept as a registered row so the former absence and its closing frame remain auditable |
 | G-16 | 01 upstream card and 06 source detail — **registered by frame 11** | ~~any affordance that removes a source~~ nothing | §1.10 registers the overflow action and the source-removal guard dialog drawn in frame 11 for `DELETE /api/models/sources/<id>`. The existing 06 model-row 移除 remains a different operation. Kept as a registered row so the former ambiguity and its closing frame remain auditable |
@@ -823,7 +823,8 @@ was writing into before it re-sends — a row already sitting there closes as th
 is, rather than colliding with itself. An unguarded idempotent replacement may owe nothing
 extra only when its computed guard plan is empty. §1.3 default membership saves may
 have effective impact: retain the draft, read canonical defaults after ambiguous results,
-and apply the existing exact-plan confirmation before another write.
+and, on a fresh Save, apply §1.3's bounded automatic exact-plan handshake without
+a second user confirmation.
 §1.2 is deliberately different even though it also replaces an array: the write
 has a guarded plan and response-only impact evidence, so D-36 reads the exact Route before
 any resend and an inferred commit marks that evidence unavailable. Which side a state
@@ -2708,12 +2709,17 @@ server projections without claiming historical human authorship or current healt
 
 Read `AgentSupply.sources.order` and eligibility; save the complete subset with
 `PUT /api/models/agents/<backend>/sources`. Optional `force`, `would_remove_hops`
-and `would_interrupt` follow the existing exact-plan guard. Pure reordering needs no
-guard; membership removal can remove effective hops or supply and must display the
-actual refusal, echoing both arrays unchanged on confirmation. Success returns the
-authoritative `{agent: AgentSupply}`; reconcile chains and adoption through existing
-reads. A failed or ambiguous save keeps the draft and reads canonical defaults before
-another write. Switching backends cannot reuse another backend's draft.
+and `would_interrupt` follow the existing exact-plan guard. One Save authorizes the
+selected defaults and their inherited-route impact; there is no secondary confirmation
+surface. Pure reordering needs no guard. If the initial request receives a named
+`source_in_route_chain` or `source_last_supplier` refusal with a nonempty impact plan,
+automatically retry once with `force: true` and both arrays echoed unchanged. A second
+refusal, including a changed plan, is a save failure, not another automatic retry.
+Success returns the authoritative `{agent: AgentSupply}`; reconcile chains and adoption
+through existing reads. Failed saves retain the draft. An ambiguous result from either
+request requires reading canonical defaults before any later write; an observed matching
+order closes successfully without replay. Switching backends cannot reuse another
+backend's draft. Manual-route and Source-management confirmations are unchanged.
 
 Both include and exclude actions exist. Sources outside defaults remain available for
 manual routes. Empty defaults are valid and leave inherited routes Unconfigured; existing
@@ -2739,7 +2745,7 @@ independent. Helpers must respect existing fallback and streaming boundaries.
 | Dialog footer action | Restore automatic | 恢复自动 |
 | Draft recovery | Undo restore | 撤销恢复 |
 
-Reuse existing localized Save/Cancel/Retry and guard-impact copy. Origin-help behavior
+Reuse existing localized Save/Cancel/Retry and save-failure copy. Origin-help behavior
 follows the routing revision above. Compatibility chains/reorder is not the new UI save
 path; when called it uses the same default guards and preserves manual arrays.
 
@@ -3299,11 +3305,16 @@ held evidence as before. The footer wraps on narrow screens. This supersedes the
 observation prerequisite in the earlier state tables, not cancellation, settlement
 or focus ownership. No upstream observation gates this exit; the bounded inventory
 request it attempts fills the model list and can never admit the Source.
-Source list/detail show `sourceDetail.status.unverified` in existing advisory ink;
-error/cooldown states retain visual precedence. Adoption and model discovery cannot
-replace this label with healthy/in-use copy. Only an actual successful model call
-retires verification as defined by the Source contract. Ambiguity copy must not
-claim authentication success.
+Source list/detail now show `sourceDetail.status.saved` (Saved / 已保存) in neutral
+muted text and dot styling while verification is pending; this replaces the earlier
+advisory unverified presentation. Error, needs-action and cooldown states retain visual
+precedence. The keyboard-accessible connection hint explains that configuration is
+stored and status updates after a successful model request with the current configuration.
+It is shared by API-key, Hub-subscription and native Sources, so it must not promise
+an optional Test entry that some Sources do not have. Adoption and model discovery
+cannot replace this label with healthy/in-use copy. Only an actual successful model
+call retires verification as defined by the Source contract. Saved is not an
+authentication or health claim.
 
 **2026-09-07 owner ruling, later the same day — ①″ is reachable again under a pin or
 a declaration.** The model-independent probe the ruling above introduced cannot
@@ -3318,9 +3329,10 @@ where it landed before, 未验证保存 included. This adds no state, no string 
 footer action: `addKey.protocol.catalogPinned.hint` still says the pin is not
 credential proof, `addKey.pull.result` counts the models that list returned, and the
 unverified exit becomes the fallback rather than the only way out. A Source that left
-through ①″ has nothing pending, so list/detail do not label it
-`sourceDetail.status.unverified`; that label keeps its meaning — nothing upstream has
-accepted this credential yet.
+through ①″ has nothing pending on this legacy observed-create path, so list/detail
+use its ordinary health presentation rather than the pending Saved label. Current
+save-first creation retains the marker until successful invocation; Saved describes
+persisted configuration, not whether an upstream has accepted the credential.
 
 **Element inventory**
 
@@ -3723,7 +3735,9 @@ How that is satisfied is an implementation choice — search, grouping, recent u
 something else. This file deliberately names no control for it: naming one would turn a
 property into a fixture and freeze the weakest implementation that happens to pass.
 
-**The removal confirmation is one surface, and every guarded change uses it** `[frame]`.
+**Source-management and model-route removal confirmations share one surface** `[frame]`.
+Default routing Save is the exception defined in §1.3: it uses the same server guard
+without this second user confirmation.
 `Qp6FI` is 520 wide, `$--surface`, `radius 14`, `$--border-strong`, with the standard
 outer shadow. Head `kCVJB` `padding [16,20]` `gap 4` with a bottom border: title `R4NNdG`
 Inter 15 / 700 naming the exact operation (「从 aihub 移除 ernie-5.0」), subtitle `I8g2k`

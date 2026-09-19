@@ -97,10 +97,7 @@ const ModelRow: React.FC<{
     >
       <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
       <span className="pointer-events-none flex min-w-0 flex-1 flex-col justify-center gap-0.5 pr-1">
-        <span className="flex min-w-0 items-center gap-[7px]">
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
-          <span className="pointer-events-auto relative shrink-0"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
-        </span>
+        <span className="min-w-0 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
         {hasCurrentMapping ? (
           <span
             className={cn('model-hub-model-current min-w-0 truncate text-left text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
@@ -113,6 +110,7 @@ const ModelRow: React.FC<{
           <span className={cn('model-hub-model-current min-w-0 truncate text-left text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>
         )}
       </span>
+      <span className="relative flex shrink-0 items-center"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
       <ChevronRight className="model-hub-overview-chevron pointer-events-none size-[15px] shrink-0" aria-hidden="true" />
     </div>
   );
