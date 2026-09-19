@@ -4346,6 +4346,7 @@
       "retryRequired": "Retry needed · {{count}}",
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
       "sendNow": "Send now",
+      "sendingNow": "Sending…",
       "recall": "Recall to input",
       "remove": "Remove from queue",
       "attachments": {

@@ -880,6 +880,7 @@ export const ChatPage: React.FC = () => {
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
   const [queue, setQueue] = useState<WorkbenchMessage[]>([]);
+  const [sendingQueueNow, setSendingQueueNow] = useState(false);
   const [initialDraft, setInitialDraft] = useState<string | null>(null);
   const draftTimerRef = useRef<number | null>(null);
   // The debounced draft save still owed to the server, tagged with the session
@@ -1599,6 +1600,7 @@ export const ChatPage: React.FC = () => {
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
+    setSendingQueueNow(false);
     setInitialDraft(sessionId ? api.getCachedSessionDraft(sessionId) : null);
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
@@ -2296,13 +2298,18 @@ export const ChatPage: React.FC = () => {
   const sendQueueNow = useCallback(async () => {
     // "立即发送": interrupt the running turn + flush the queue now. The queue
     // flushes as one merged turn, so this runs the whole queue.
-    if (!sessionId || queue.length === 0) return;
+    const sid = sessionId;
+    if (!sid || queue.length === 0 || sendingQueueNow) return;
+    // Give the click an immediate visual response while the request interrupts
+    // the current turn. The queue stays visible until admission succeeds so a
+    // failed or ambiguous request never hides work the user may need to retry.
+    setSendingQueueNow(true);
     // A turn is about to run (the flushed queue) — reflect it immediately so
     // Stop stays available even if the controller's turn.start is missed/delayed
     // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
     markWorking();
     try {
-      const res = await api.sendQueuedNow(sessionId, queue[0].id);
+      const res = await api.sendQueuedNow(sid, queue[0].id);
       // Drop the response if the user switched chats mid-request (Codex P2).
       if (sessionId !== sessionIdRef.current) return;
       if (res && res.ok === false) {
@@ -2316,6 +2323,11 @@ export const ChatPage: React.FC = () => {
         // turn is starting, so drop the optimistic working state + resync.
         setWorking(false);
         void refreshQueue();
+      } else {
+        // The successful admission retires the whole queue as one merged turn.
+        // Clear it locally before queue.updated arrives so the UI confirms the
+        // click immediately instead of waiting for the event round trip.
+        setQueue([]);
       }
     } catch (err) {
       // Same session guard as the success path: a rejection after a chat switch
@@ -2324,8 +2336,10 @@ export const ChatPage: React.FC = () => {
         setWorking(false);
         setError(errorMessage(err) ?? String(err));
       }
+    } finally {
+      if (sid === sessionIdRef.current) setSendingQueueNow(false);
     }
-  }, [api, sessionId, queue, t, refreshQueue, markWorking]);
+  }, [api, sessionId, queue, sendingQueueNow, t, refreshQueue, markWorking]);
 
   useEffect(() => {
     refresh();
@@ -2939,7 +2953,13 @@ export const ChatPage: React.FC = () => {
             holding pre-archive rows, and every button here writes: Send now POSTs
             the flush, Recall appends into the disabled composer. */}
         {writable && (
-          <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
+          <QueueStrip
+            queue={queue}
+            onRemove={removeQueued}
+            onRecall={recallQueued}
+            onSendNow={sendQueueNow}
+            sendingNow={sendingQueueNow}
+          />
         )}
         {sessionId && !readOnly && capabilities.can_use_vault_secrets && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
@@ -3354,7 +3374,8 @@ export const QueueStrip: React.FC<{
   onRemove: (id: string) => void;
   onRecall: (item: WorkbenchMessage) => void;
   onSendNow: () => void;
-}> = ({ queue, onRemove, onRecall, onSendNow }) => {
+  sendingNow?: boolean;
+}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
@@ -3366,8 +3387,23 @@ export const QueueStrip: React.FC<{
             <Clock className="size-3" />
             {t(retryRequired ? 'chat.queue.retryRequired' : 'chat.queue.title', { count: queue.length })}
           </span>
-          <Button type="button" variant="ghost" size="sm" onClick={onSendNow} className="h-6 px-2 text-[11px] text-cyan-ink">
-            {t('chat.queue.sendNow')}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onSendNow}
+            disabled={sendingNow}
+            aria-busy={sendingNow}
+            className="h-6 min-w-[60px] justify-center px-2 text-[11px] text-cyan-ink"
+          >
+            {sendingNow ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                {t('chat.queue.sendingNow')}
+              </>
+            ) : (
+              t('chat.queue.sendNow')
+            )}
           </Button>
         </div>
         {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
