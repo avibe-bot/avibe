@@ -431,6 +431,416 @@ def _claude_payload() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(store, "_KEYCHAIN_STORE", store._DEFAULT_KEYCHAIN_STORE)
+    monkeypatch.setattr(
+        store, "_security_bindings", lambda: pytest.fail("real OS credentials are forbidden")
+    )
+
+
+@pytest.mark.parametrize("root_mode", ["fixture", "default", "config", "secure", "empty_secure"])
+def test_claude_all_paths_share_the_resolved_secure_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_mode: str,
+) -> None:
+    from vibe.claude_config import get_claude_credentials_paths
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+    home = None
+    expected_root = tmp_path / ".claude"
+    if root_mode == "fixture":
+        home = tmp_path
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "ignored-config"))
+        monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(tmp_path / "ignored-secure"))
+    elif root_mode in {"config", "secure", "empty_secure"}:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+        expected_root = tmp_path / "config"
+        if root_mode == "secure":
+            expected_root = tmp_path / "secure"
+            monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(expected_root))
+        elif root_mode == "empty_secure":
+            expected_root = tmp_path / ".claude"
+            monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+
+    paths = store.native_credentials_paths("claude", home)
+    assert paths == (
+        expected_root / ".credentials.json",
+        expected_root / "credentials.json",
+    )
+    # Keep the shipped legacy-layout contract without borrowing its settings root.
+    assert [path.name for path in paths] == [
+        path.name for path in get_claude_credentials_paths(tmp_path)
+    ]
+
+
+@pytest.mark.parametrize("filename", [".credentials.json", "credentials.json"])
+@pytest.mark.parametrize("flat", [False, True])
+@pytest.mark.parametrize("unrelated", [False, True])
+def test_claude_each_supported_file_is_inventoried_and_reversibly_cleaned(
+    tmp_path: Path, no_real_keychain: None, filename: str, flat: bool, unrelated: bool,
+) -> None:
+    root = tmp_path / ".claude"
+    root.mkdir()
+    payload = _claude_payload()
+    if flat:
+        payload = {"access_token": "fixture-access", "refresh_token": "fixture-refresh",
+                   "mcpOAuth": {"保留": "🚀"}}
+    if not unrelated:
+        payload.pop("mcpOAuth")
+    path = root / filename
+    original = json.dumps(payload, ensure_ascii=False) + "\n"
+    path.write_text(original, encoding="utf-8")
+
+    scan = store.read_native_oauth("claude", home=tmp_path)
+    secret = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+    assert scan is not None and secret is not None
+    assert scan.exportable and secret.exportable
+    assert scan.payload == secret.payload == payload
+    assert scan.revision == secret.revision
+    assert scan.keychain_edit is None
+    assert secret.keychain_edit["selection_revision"] == scan.revision
+    assert {op["path"] for op in secret.keychain_edit["operations"]} == {
+        str(root / ".credentials.json"), str(root / "credentials.json"),
+    }
+    store.check_keychain_edit(secret.keychain_edit)
+    store.apply_keychain_edit(secret.keychain_edit)
+    store.apply_keychain_edit(secret.keychain_edit)
+    store.check_keychain_edit(secret.keychain_edit, applied=True)
+    if unrelated:
+        assert json.loads(path.read_text()) == {"mcpOAuth": payload["mcpOAuth"]}
+    else:
+        assert not path.exists()
+    store.apply_keychain_edit(secret.keychain_edit, reverse=True)
+    store.apply_keychain_edit(secret.keychain_edit, reverse=True)
+    assert path.read_text() == original
+    other = root / ("credentials.json" if filename.startswith(".") else ".credentials.json")
+    assert not other.exists()
+
+
+@pytest.mark.parametrize("with_keychain", [False, True])
+@pytest.mark.parametrize("evidence", ["identical", "same_grant", "same_account", "conflict", "no_identity"])
+def test_claude_all_stores_precedence_and_conflicts(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+    with_keychain: bool, evidence: str,
+) -> None:
+    monkeypatch.setenv("USER", "fixture-user")
+    root = tmp_path / ".claude"
+    root.mkdir()
+    primary = _claude_payload()
+    legacy = _claude_payload()
+    if evidence in {"same_grant", "no_identity"}:
+        primary["claudeAiOauth"].pop("accountUuid")
+        legacy["claudeAiOauth"].pop("accountUuid")
+    if evidence != "identical":
+        legacy["claudeAiOauth"]["accessToken"] = "fixture-older-access"
+    if evidence in {"same_account", "no_identity"}:
+        legacy["claudeAiOauth"]["refreshToken"] = "fixture-older-refresh"
+    if evidence == "conflict":
+        legacy["claudeAiOauth"]["accountUuid"] = "other-account"
+    legacy["mcpOAuth"] = {"legacy": "保留🚀"}
+    paths = [root / ".credentials.json", root / "credentials.json"]
+    originals = [json.dumps(payload) + "\n" for payload in (primary, legacy)]
+    for path, raw in zip(paths, originals):
+        path.write_text(raw, encoding="utf-8")
+    keychain_payload = json.loads(json.dumps(primary))
+    keychain_payload["claudeAiOauth"]["accessToken"] = "fixture-keychain-access"
+    locator = ("Claude Code-credentials", "fixture-user")
+    if with_keychain:
+        fake_keychain.items[locator] = (json.dumps(keychain_payload), "fixture-v1")
+
+    scan = store.read_native_oauth("claude", home=tmp_path)
+    assert fake_keychain.read_calls == []
+    secret = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+    assert scan is not None and secret is not None
+    assert scan.revision == secret.revision
+    if evidence in {"conflict", "no_identity"}:
+        assert not scan.exportable and scan.payload["status"] == "conflict"
+        assert not secret.exportable and secret.payload["status"] == "conflict"
+        assert scan.keychain_edit is secret.keychain_edit is None
+    else:
+        assert secret.exportable
+        assert secret.payload == (keychain_payload if with_keychain else primary)
+        if with_keychain:
+            assert not scan.exportable and scan.payload["status"] == "metadata_only"
+        else:
+            assert scan.exportable and scan.payload == primary
+        operations = secret.keychain_edit["operations"]
+        assert [op["kind"] for op in operations] == (
+            (["keychain"] if with_keychain else []) + ["file", "file"]
+        )
+        store.apply_keychain_edit(secret.keychain_edit)
+        assert json.loads(paths[0].read_text()) == {"mcpOAuth": primary["mcpOAuth"]}
+        assert json.loads(paths[1].read_text()) == {"mcpOAuth": legacy["mcpOAuth"]}
+        if with_keychain:
+            assert json.loads(fake_keychain.items[locator][0]) == {"mcpOAuth": primary["mcpOAuth"]}
+        store.apply_keychain_edit(secret.keychain_edit, reverse=True)
+    assert [path.read_text() for path in paths] == originals
+    if with_keychain:
+        assert json.loads(fake_keychain.items[locator][0]) == keychain_payload
+
+
+def test_claude_compares_fallbacks_even_when_keychain_lacks_identity(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "fixture-user")
+    payload = _claude_payload()
+    payload["claudeAiOauth"].pop("accountUuid")
+    fake_keychain.items[("Claude Code-credentials", "fixture-user")] = (
+        json.dumps(payload), "fixture-v1",
+    )
+    root = tmp_path / ".claude"
+    root.mkdir()
+    for name, identity in ((".credentials.json", "account-a"), ("credentials.json", "account-b")):
+        payload["claudeAiOauth"]["accountUuid"] = identity
+        (root / name).write_text(json.dumps(payload), encoding="utf-8")
+    for allow_secret in (False, True):
+        snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=allow_secret)
+        assert snapshot is not None and not snapshot.exportable
+        assert snapshot.payload["status"] == "conflict"
+        assert snapshot.keychain_edit is None
+
+
+@pytest.mark.parametrize("with_keychain", [False, True])
+@pytest.mark.parametrize("filename", [".credentials.json", "credentials.json"])
+@pytest.mark.parametrize("failure", ["invalid", "permission_needed"])
+def test_claude_unreadable_supported_file_blocks_all_cleanup(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+    with_keychain: bool, filename: str, failure: str,
+) -> None:
+    monkeypatch.setenv("USER", "fixture-user")
+    root = tmp_path / ".claude"
+    root.mkdir()
+    for name in (".credentials.json", "credentials.json"):
+        (root / name).write_text(json.dumps(_claude_payload()), encoding="utf-8")
+    if with_keychain:
+        fake_keychain.items[("Claude Code-credentials", "fixture-user")] = (
+            json.dumps(_claude_payload()), "fixture-v1",
+        )
+    if failure == "invalid":
+        (root / filename).write_text("{invalid", encoding="utf-8")
+    else:
+        read_text = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == root / filename:
+                raise PermissionError("fixture denial")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+    for allow_secret in (False, True):
+        snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=allow_secret)
+        assert snapshot is not None and not snapshot.exportable
+        assert snapshot.payload["status"] == failure
+        assert snapshot.keychain_edit is None
+    assert fake_keychain.write_calls == fake_keychain.delete_calls == []
+
+
+@pytest.mark.parametrize("with_keychain", [False, True])
+@pytest.mark.parametrize("change", ["appear", "disappear", "content", "move", "root"])
+def test_claude_selection_revision_binds_every_file_and_locator(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+    with_keychain: bool, change: str,
+) -> None:
+    monkeypatch.setenv("USER", "fixture-user")
+    root = tmp_path / ".claude"
+    root.mkdir()
+    primary, legacy = root / ".credentials.json", root / "credentials.json"
+    raw = json.dumps(_claude_payload())
+    primary.write_text(raw, encoding="utf-8")
+    if change in {"disappear", "content"}:
+        legacy.write_text(raw, encoding="utf-8")
+    if with_keychain:
+        fake_keychain.items[("Claude Code-credentials", "fixture-user")] = (raw, "fixture-v1")
+    before = store.read_native_oauth("claude", home=tmp_path)
+    if change == "appear":
+        legacy.write_text(raw, encoding="utf-8")
+    elif change == "disappear":
+        legacy.unlink()
+    elif change == "content":
+        legacy.write_text(raw + "\n", encoding="utf-8")
+    elif change == "move":
+        primary.rename(legacy)
+    home = tmp_path
+    if change == "root":
+        home = tmp_path / "other"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude/.credentials.json").write_text(raw, encoding="utf-8")
+    after = store.read_native_oauth("claude", home=home)
+    secret = store.read_native_oauth("claude", home=home, allow_secret=True)
+    assert before is not None and after is not None and secret is not None
+    assert before.revision != after.revision
+    assert after.revision == secret.revision
+    assert secret.keychain_edit["selection_revision"] == after.revision
+
+
+@pytest.mark.parametrize("initial", ["absent", "unrelated"])
+@pytest.mark.parametrize("with_keychain", [False, True])
+def test_claude_all_file_states_are_guarded_before_any_cleanup(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+    initial: str, with_keychain: bool,
+) -> None:
+    monkeypatch.setenv("USER", "fixture-user")
+    root = tmp_path / ".claude"
+    root.mkdir()
+    primary, legacy = root / ".credentials.json", root / "credentials.json"
+    raw = json.dumps(_claude_payload())
+    primary.write_text(raw, encoding="utf-8")
+    if initial == "unrelated":
+        legacy.write_text('{"mcpOAuth":{"keep":"unchanged"}}', encoding="utf-8")
+    locator = ("Claude Code-credentials", "fixture-user")
+    if with_keychain:
+        fake_keychain.items[locator] = (raw, "fixture-v1")
+    snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+    assert snapshot is not None and snapshot.exportable
+    operations = snapshot.keychain_edit["operations"]
+    guards = [op for op in operations if op.get("path") == str(legacy)]
+    assert len(guards) == 1 and guards[0]["before"] == guards[0]["after"]
+    legacy.write_text(raw, encoding="utf-8")
+    with pytest.raises(store.NativeOAuthRevisionError):
+        store.check_keychain_edit(snapshot.keychain_edit)
+    with pytest.raises(store.NativeOAuthRevisionError):
+        store.apply_keychain_edit(snapshot.keychain_edit)
+    assert primary.read_text() == legacy.read_text() == raw
+    assert fake_keychain.write_calls == fake_keychain.delete_calls == []
+
+
+@pytest.mark.parametrize(
+    "identity", ["matching_alias", "conflicting_alias", "organization_only", "internal_conflict"],
+)
+def test_claude_legacy_identity_evidence_is_account_specific(
+    tmp_path: Path, identity: str,
+) -> None:
+    root = tmp_path / ".claude"
+    root.mkdir()
+    primary = _claude_payload()
+    legacy = {
+        "access_token": "fixture-legacy-access",
+        "refresh_token": primary["claudeAiOauth"]["refreshToken"],
+        "account_uuid": "account-1" if identity == "matching_alias" else "account-2",
+    }
+    if identity == "matching_alias":
+        legacy["refresh_token"] = "fixture-older-grant"
+    elif identity == "internal_conflict":
+        primary["account_uuid"] = legacy["account_uuid"]
+    if identity == "organization_only":
+        primary["claudeAiOauth"].pop("accountUuid")
+        legacy.pop("account_uuid")
+        primary["claudeAiOauth"]["organizationUuid"] = "shared-organization"
+        legacy["organizationUuid"] = "shared-organization"
+        legacy["refresh_token"] = "fixture-different-grant"
+    (root / ".credentials.json").write_text(json.dumps(primary), encoding="utf-8")
+    (root / "credentials.json").write_text(json.dumps(legacy), encoding="utf-8")
+    for allow_secret in (False, True):
+        snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=allow_secret)
+        assert snapshot is not None
+        if identity == "matching_alias":
+            assert snapshot.exportable and snapshot.payload == primary
+        else:
+            assert not snapshot.exportable and snapshot.payload["status"] == "conflict"
+            assert snapshot.keychain_edit is None
+
+
+def test_claude_legacy_fallback_preserves_unrelated_primary_and_reads_each_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / ".claude"
+    root.mkdir()
+    primary, legacy = root / ".credentials.json", root / "credentials.json"
+    untouched = '{"mcpOAuth": {"保留": "🚀"}}\n'
+    original = json.dumps(_claude_payload()) + "\n"
+    primary.write_text(untouched, encoding="utf-8")
+    legacy.write_text(original, encoding="utf-8")
+    read_text = Path.read_text
+    reads: list[Path] = []
+
+    def once(path, *args, **kwargs):
+        reads.append(path)
+        assert reads.count(path) == 1
+        return read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as reading:
+        reading.setattr(Path, "read_text", once)
+        snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+    assert reads == [primary, legacy]
+    assert snapshot is not None and snapshot.payload == _claude_payload()
+    operations = snapshot.keychain_edit["operations"]
+    assert operations[0]["before"] == operations[0]["after"] == {"exists": True, "raw": untouched}
+    assert operations[1]["before"] == {"exists": True, "raw": original}
+    store.apply_keychain_edit(snapshot.keychain_edit)
+    assert primary.read_text() == untouched
+    assert json.loads(legacy.read_text()) == {"mcpOAuth": {"provider": "keep-me"}}
+
+
+@pytest.mark.parametrize("denied", ["metadata", "read"])
+def test_claude_keychain_denial_never_selects_legacy_fallback(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch, denied: str,
+) -> None:
+    monkeypatch.setenv("USER", "fixture-user")
+    root = tmp_path / ".claude"
+    root.mkdir()
+    raw = json.dumps(_claude_payload())
+    (root / "credentials.json").write_text(raw, encoding="utf-8")
+    fake_keychain.items[("Claude Code-credentials", "fixture-user")] = (raw, "fixture-v1")
+    setattr(fake_keychain, f"{denied}_denied", True)
+    scan = store.read_native_oauth("claude", home=tmp_path)
+    assert fake_keychain.read_calls == []
+    snapshot = store.read_native_oauth("claude", home=tmp_path, allow_secret=True)
+    assert scan is not None and snapshot is not None
+    assert snapshot.revision == scan.revision
+    assert not snapshot.exportable and snapshot.payload["status"] == "permission_needed"
+    assert snapshot.keychain_edit is None
+
+
+@pytest.mark.parametrize("with_keychain", [False, True])
+def test_claude_legacy_snapshots_keep_selection_and_coalesced_file_guards(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+    with_keychain: bool,
+) -> None:
+    from core.handlers.model_hub.migration import _native_store_items
+    from core.handlers.model_hub.migration_files import plan_native_cleanup
+    from core.handlers.model_hub.migration_journal import TakeoverStateError
+
+    monkeypatch.setenv("USER", "fixture-user")
+    root = tmp_path / ".claude"
+    root.mkdir()
+    primary, legacy = root / ".credentials.json", root / "credentials.json"
+    raw = json.dumps(_claude_payload())
+    legacy.write_text(raw, encoding="utf-8")
+    if with_keychain:
+        fake_keychain.items[("Claude Code-credentials", "fixture-user")] = (raw, "fixture-v1")
+
+    def items(allow_secret=False):
+        return _native_store_items(
+            "claude", store.read_native_oauth("claude", home=tmp_path, allow_secret=allow_secret),
+            mask_credential=lambda _: "masked-fixture",
+        )
+
+    scanned, expanded = items(), items(True)
+    assert len(scanned) == len(expanded) == 1
+    assert scanned[0].id == expanded[0].id
+    assert expanded[0].proposed_action == "import"
+    assert expanded[0].oauth_material["refresh_token"] == "refresh-secret"
+    edits = plan_native_cleanup(expanded, home=tmp_path, project_roots=())
+    assert {edit.path for edit in edits} == {primary, legacy}
+    [guard] = [edit for edit in edits if edit.path == primary]
+    assert guard.before is guard.after is None
+    for edit in edits:
+        edit.check()
+        edit.apply()
+        edit.check(applied=True)
+    assert not primary.exists()
+    assert json.loads(legacy.read_text()) == {"mcpOAuth": {"provider": "keep-me"}}
+    for edit in edits:
+        edit.apply(reverse=True)
+    assert legacy.read_text() == raw
+    primary.write_text(raw, encoding="utf-8")
+    assert items()[0].id != scanned[0].id
+    with pytest.raises(TakeoverStateError):
+        guard.check()
+
+
 def test_codex_file_scan_is_exportable_and_cleanup_preserves_unrelated_fields(tmp_path: Path) -> None:
     auth_path = tmp_path / ".codex" / "auth.json"
     auth_path.parent.mkdir()
@@ -531,16 +941,18 @@ def test_fixture_home_never_selects_real_keychain(
 @pytest.mark.parametrize("platform", ["linux", "win32"])
 @pytest.mark.parametrize("allow_secret", [False, True])
 @pytest.mark.parametrize("exists", [False, True])
+@pytest.mark.parametrize("filename", [".credentials.json", "credentials.json"])
 def test_claude_non_macos_production_selection_uses_file_without_keychain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     platform: str,
     allow_secret: bool,
     exists: bool,
+    filename: str,
 ) -> None:
     secure_root = tmp_path / "isolated-claude"
     secure_root.mkdir()
-    path = secure_root / ".credentials.json"
+    path = secure_root / filename
     payload = _claude_payload()
     if exists:
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -562,7 +974,9 @@ def test_claude_non_macos_production_selection_uses_file_without_keychain(
     assert snapshot.payload == payload
     if allow_secret:
         assert snapshot.keychain_edit is not None
-        [operation] = snapshot.keychain_edit["operations"]
+        operations = snapshot.keychain_edit["operations"]
+        assert len(operations) == 2
+        [operation] = [op for op in operations if op["path"] == str(path)]
         assert operation["kind"] == "file"
         assert operation["path"] == str(path)
         assert json.loads(operation["after"]["raw"]) == {"mcpOAuth": payload["mcpOAuth"]}
@@ -1076,7 +1490,10 @@ def test_claude_keychain_and_file_cleanup_preserve_unrelated_fields(
     assert snapshot is not None
     assert snapshot.exportable is True
     assert snapshot.keychain_edit is not None
-    assert len(snapshot.keychain_edit["operations"]) == 2
+    assert len(snapshot.keychain_edit["operations"]) == 3
+    guard = snapshot.keychain_edit["operations"][-1]
+    assert guard["path"] == str(claude_home / "credentials.json")
+    assert guard["before"] == guard["after"] == {"exists": False}
 
     store.apply_keychain_edit(snapshot.keychain_edit)
     store.apply_keychain_edit(snapshot.keychain_edit)
@@ -1173,15 +1590,17 @@ def test_claude_empty_secure_env_suppresses_suffix_even_when_config_is_present(
     assert service == "Claude Code-credentials"
 
 
+@pytest.mark.parametrize("filename", [".credentials.json", "credentials.json"])
 def test_claude_keychain_and_different_fallback_account_are_not_exportable(
     tmp_path: Path,
     fake_keychain: FakeKeychain,
     monkeypatch: pytest.MonkeyPatch,
+    filename: str,
 ) -> None:
     monkeypatch.setenv("USER", "test-user")
     claude_home = tmp_path / ".claude"
     claude_home.mkdir()
-    credentials_path = claude_home / ".credentials.json"
+    credentials_path = claude_home / filename
     fallback = _claude_payload()
     fallback["claudeAiOauth"]["accountUuid"] = "different-account"
     credentials_path.write_text(json.dumps(fallback), encoding="utf-8")
@@ -1204,10 +1623,12 @@ def test_claude_keychain_and_different_fallback_account_are_not_exportable(
     assert json.loads(credentials_path.read_text(encoding="utf-8")) == fallback
 
 
+@pytest.mark.parametrize("filename", [".credentials.json", "credentials.json"])
 def test_claude_keychain_and_fallback_same_refresh_grant_without_identity_are_exportable(
     tmp_path: Path,
     fake_keychain: FakeKeychain,
     monkeypatch: pytest.MonkeyPatch,
+    filename: str,
 ) -> None:
     monkeypatch.setenv("USER", "test-user")
     claude_home = tmp_path / ".claude"
@@ -1216,7 +1637,7 @@ def test_claude_keychain_and_fallback_same_refresh_grant_without_identity_are_ex
     fallback_payload = _claude_payload()
     keychain_payload["claudeAiOauth"].pop("accountUuid")
     fallback_payload["claudeAiOauth"].pop("accountUuid")
-    credentials_path = claude_home / ".credentials.json"
+    credentials_path = claude_home / filename
     credentials_path.write_text(json.dumps(fallback_payload), encoding="utf-8")
     fake_keychain.items[("Claude Code-credentials", "test-user")] = (
         json.dumps(keychain_payload),
@@ -1228,7 +1649,12 @@ def test_claude_keychain_and_fallback_same_refresh_grant_without_identity_are_ex
     assert snapshot is not None
     assert snapshot.exportable is True
     assert snapshot.keychain_edit is not None
-    assert len(snapshot.keychain_edit["operations"]) == 2
+    assert len(snapshot.keychain_edit["operations"]) == 3
+    [guard] = [
+        op for op in snapshot.keychain_edit["operations"]
+        if op["kind"] == "file" and op["path"] != str(credentials_path)
+    ]
+    assert guard["before"] == guard["after"] == {"exists": False}
 
 
 def test_claude_keychain_and_different_refresh_grants_without_identity_conflict(

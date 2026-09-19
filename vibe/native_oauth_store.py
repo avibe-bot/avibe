@@ -11,6 +11,13 @@ before/after credential states needed for a compare-and-swap cleanup or
 reverse, so callers must keep it in the migration journal and never put it on
 the scan response.
 
+Claude selection covers its Keychain and both supported credential filenames
+under the same secure root. Newest-layout files take precedence over legacy
+files, but every credential-bearing copy must have same-account evidence.
+The selection revision binds all file states, including absence. Journal file
+operations include unchanged states as guards; callers must retain them when
+coalescing edits so a newly appeared fallback login cannot escape cleanup.
+
 Metadata scans use ``kSecUseAuthenticationUIFail`` and temporarily disable the
 legacy process-wide Keychain interaction switch. The explicit-consent
 ``allow_secret`` read and subsequent mutations use
@@ -39,7 +46,7 @@ import re
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -80,21 +87,19 @@ _CLAUDE_OAUTH_METADATA_KEYS = frozenset(
         "organization_uuid",
     }
 )
-_CLAUDE_IDENTITY_KEYS = frozenset(
-    {
-        "accountUuid",
-        "account_uuid",
-        "accountId",
-        "account_id",
-        "email",
-        "emailAddress",
-        "accountEmail",
-        "organizationUuid",
-        "organization_uuid",
-        "organizationId",
-        "organization_id",
-    }
-)
+_CLAUDE_IDENTITY_KEYS = {
+    "accountUuid": "account_uuid",
+    "account_uuid": "account_uuid",
+    "accountId": "account_id",
+    "account_id": "account_id",
+    "email": "email",
+    "emailAddress": "email",
+    "accountEmail": "email",
+    "organizationUuid": "organization_uuid",
+    "organization_uuid": "organization_uuid",
+    "organizationId": "organization_id",
+    "organization_id": "organization_id",
+}
 _SAFE_CLAUDE_ACCOUNT = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -306,17 +311,17 @@ def _claude_oauth_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _claude_identity(payload: Mapping[str, Any]) -> dict[str, str]:
+def _claude_identity(payload: Mapping[str, Any]) -> dict[str, set[str]]:
     nested = payload.get("claudeAiOauth")
     sources: list[Mapping[str, Any]] = [payload]
     if isinstance(nested, dict):
         sources.insert(0, nested)
-    identity: dict[str, str] = {}
+    identity: dict[str, set[str]] = {}
     for source in sources:
-        for key in _CLAUDE_IDENTITY_KEYS:
+        for key, canonical in _CLAUDE_IDENTITY_KEYS.items():
             value = source.get(key)
             if isinstance(value, str) and value.strip():
-                identity.setdefault(key, value.strip())
+                identity.setdefault(canonical, set()).add(value.strip())
     return identity
 
 
@@ -326,10 +331,18 @@ def _claude_same_account(
 ) -> bool:
     primary_identity = _claude_identity(primary)
     fallback_identity = _claude_identity(fallback)
+    if any(
+        len(values) != 1
+        for identity in (primary_identity, fallback_identity)
+        for values in identity.values()
+    ):
+        return False
     shared_keys = primary_identity.keys() & fallback_identity.keys()
     if any(primary_identity[key] != fallback_identity[key] for key in shared_keys):
         return False
-    if shared_keys:
+    # An organization can contain multiple accounts. Its identity can disprove
+    # compatibility, but cannot prove that two different grants share an owner.
+    if shared_keys & {"account_uuid", "account_id", "email"}:
         return True
 
     def refresh_grant(payload: Mapping[str, Any]) -> str | None:
@@ -340,7 +353,7 @@ def _claude_same_account(
         for source in sources:
             for key in ("refresh_token", "refreshToken"):
                 value = source.get(key)
-                if isinstance(value, str) and value:
+                if isinstance(value, str) and value.strip():
                     return value
         return None
 
@@ -349,7 +362,7 @@ def _claude_same_account(
     return bool(
         primary_refresh
         and fallback_refresh
-        and hmac.compare_digest(primary_refresh, fallback_refresh)
+        and hmac.compare_digest(primary_refresh.encode("utf-8"), fallback_refresh.encode("utf-8"))
     )
 
 
@@ -438,13 +451,17 @@ def native_credentials_paths(
     backend: str,
     home: Path | None = None,
 ) -> tuple[Path, ...]:
-    """Return the native credential files for the resolved backend root."""
+    """Return all supported native credential files, in precedence order."""
 
     normalized = str(backend or "").strip().lower()
     if normalized == "codex":
         return (_codex_home(home) / "auth.json",)
     if normalized == "claude":
-        return (_claude_locator(home)[0] / ".credentials.json",)
+        secure_root = _claude_locator(home)[0]
+        return (
+            secure_root / ".credentials.json",
+            secure_root / "credentials.json",
+        )
     return ()
 
 
@@ -1479,38 +1496,80 @@ def _read_codex_file(
     )
 
 
-def _read_claude_file(
-    credentials_path: Path,
+def _read_claude_files(
+    credentials_paths: tuple[Path, ...],
     *,
     allow_secret: bool,
+    keychain_snapshot: NativeOAuthSnapshot | None = None,
+    service: str | None = None,
+    account: str | None = None,
 ) -> NativeOAuthSnapshot | None:
-    revision = _path_revision("claude", credentials_path)
-    status, payload, raw = _read_json_file(credentials_path)
-    if status == "missing":
-        return None
-    if status in {"permission_needed", "invalid"} or payload is None:
-        return _placeholder("claude", revision, status, store="file")
-    if _claude_oauth_payload(payload) is None:
-        return None
-    if not allow_secret:
-        file_revision = f"claude:file:{_sha256((raw or '').encode('utf-8'))}"
-        return NativeOAuthSnapshot(
-            backend="claude",
-            revision=file_revision,
-            payload=payload,
-            exportable=True,
+    # One original read supplies the revision, payload and journal before-image.
+    files = [(path, *_read_json_file(path)) for path in credentials_paths]
+    revision = _locator_revision(
+        "claude",
+        "keychain" if keychain_snapshot is not None else "file",
+        json.dumps({
+            "keychain": keychain_snapshot.revision if keychain_snapshot is not None else None,
+            "files": [
+                [str(path), status, _sha256(raw.encode("utf-8")) if raw is not None else None]
+                for path, status, _, raw in files
+            ],
+        }, ensure_ascii=True, separators=(",", ":")),
+    )
+    for _, status, _, _ in files:
+        if status in {"permission_needed", "invalid"}:
+            # A hidden/invalid fallback cannot be certified free of credentials.
+            return _placeholder("claude", revision, status, store="file")
+
+    payloads = [
+        payload for _, _, payload, _ in files
+        if payload is not None and _claude_oauth_payload(payload) is not None
+    ]
+    if keychain_snapshot is not None and keychain_snapshot.exportable:
+        if keychain_snapshot.payload is not None:
+            payloads.insert(0, keychain_snapshot.payload)
+    # Compare every pair: a primary lacking identity must not hide contradictory
+    # identity evidence between two fallback files sharing its refresh grant.
+    if any(
+        not _claude_same_account(primary, fallback)
+        for index, primary in enumerate(payloads)
+        for fallback in payloads[index + 1:]
+    ):
+        return _placeholder(
+            "claude", revision, "conflict",
+            store="keychain+file" if keychain_snapshot is not None else "file",
+            service=service if keychain_snapshot is not None else None,
+            account=account if keychain_snapshot is not None else None,
         )
-    before = _json_file_state_from_raw(raw)
-    after_payload = _remove_claude_oauth(payload)
-    after = _state_for_json_payload(after_payload, raw or "")
-    operation = _file_operation(credentials_path, before, after)
-    file_revision = f"claude:file:{_sha256((raw or '').encode('utf-8'))}"
+    if keychain_snapshot is not None and not keychain_snapshot.exportable:
+        # Preserve metadata-only/permission semantics, never choose a file over
+        # an unread Keychain. File changes invalidate this same consent revision.
+        return replace(keychain_snapshot, revision=revision)
+    if not payloads:
+        return None
+
+    edit = None
+    if allow_secret:
+        operations = (
+            list(keychain_snapshot.keychain_edit["operations"])
+            if keychain_snapshot is not None and keychain_snapshot.keychain_edit else []
+        )
+        for path, _, payload, raw in files:
+            before = _json_file_state_from_raw(raw)
+            after = (
+                _state_for_json_payload(_remove_claude_oauth(payload), raw or "")
+                if payload is not None and _claude_oauth_payload(payload) is not None
+                else before
+            )
+            operations.append(_file_operation(path, before, after))
+        edit = _edit("claude", revision, operations)
     return NativeOAuthSnapshot(
         backend="claude",
-        revision=file_revision,
-        payload=payload,
+        revision=revision,
+        payload=payloads[0],
         exportable=True,
-        keychain_edit=_edit("claude", file_revision, [operation]),
+        keychain_edit=edit,
     )
 
 
@@ -1546,13 +1605,13 @@ def _read_codex(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot
 
 
 def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapshot | None:
-    secure_root, service, account = _claude_locator(home)
-    credentials_path = native_credentials_paths("claude", home)[0]
+    credentials_paths = native_credentials_paths("claude", home)
     # Claude uses the file store off macOS. An unavailable Security framework
     # there is not a Keychain permission request. Explicit fixture homes may
     # still exercise a fake macOS store on any test host.
     if home is None and sys.platform != "darwin":
-        return _read_claude_file(credentials_path, allow_secret=allow_secret)
+        return _read_claude_files(credentials_paths, allow_secret=allow_secret)
+    _, service, account = _claude_locator(home)
     store, isolated = _keychain_for(home)
     keychain_snapshot = _read_keychain_snapshot(
         "claude",
@@ -1562,56 +1621,10 @@ def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapsho
         isolated=isolated,
         allow_secret=allow_secret,
     )
-    if keychain_snapshot is not None:
-        if keychain_snapshot.exportable and allow_secret and keychain_snapshot.keychain_edit:
-            file_status, file_payload, file_raw = _read_json_file(credentials_path)
-            if file_status == "permission_needed":
-                return _placeholder(
-                    "claude",
-                    keychain_snapshot.revision,
-                    "permission_needed",
-                    store="file",
-                )
-            if file_status not in {"missing", "invalid"} and file_payload is not None:
-                if _claude_oauth_payload(file_payload) is not None:
-                    if not _claude_same_account(
-                        keychain_snapshot.payload or {},
-                        file_payload,
-                    ):
-                        return _placeholder(
-                            "claude",
-                            keychain_snapshot.revision,
-                            "conflict",
-                            store="keychain+file",
-                            service=service,
-                            account=account,
-                        )
-                    file_before = _json_file_state_from_raw(file_raw)
-                    file_after_payload = _remove_claude_oauth(file_payload)
-                    operations = list(keychain_snapshot.keychain_edit["operations"])
-                    operations.append(
-                        _file_operation(
-                            credentials_path,
-                            file_before,
-                            _state_for_json_payload(file_after_payload, file_raw or ""),
-                        )
-                    )
-                    return NativeOAuthSnapshot(
-                        backend="claude",
-                        revision=keychain_snapshot.revision,
-                        payload=keychain_snapshot.payload,
-                        exportable=True,
-                        keychain_edit=_edit(
-                            "claude",
-                            keychain_snapshot.revision,
-                            operations,
-                        ),
-                    )
-        if keychain_snapshot.payload and keychain_snapshot.payload.get("status") == "metadata_only":
-            return keychain_snapshot
-        return keychain_snapshot
-
-    return _read_claude_file(credentials_path, allow_secret=allow_secret)
+    return _read_claude_files(
+        credentials_paths, allow_secret=allow_secret, keychain_snapshot=keychain_snapshot,
+        service=service, account=account,
+    )
 
 
 def read_native_oauth(
