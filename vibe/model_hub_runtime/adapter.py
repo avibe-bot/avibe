@@ -22,6 +22,7 @@ from core.handlers.model_hub.adapter import (
     EngineStatus,
     ObservationDiscovery,
     ObservationOutcome,
+    OAuthCredentialRejectedError,
     OAuthFlowState,
     OriginNotAllowedError,
     RawCallOutcome,
@@ -238,6 +239,7 @@ _REFRESH_INVALIDATION_IDENTIFIERS = frozenset(
         "invalid_grant",
         "refresh_token_expired",
         "refresh_token_invalid",
+        "refresh_token_invalidated",
         "refresh_token_revoked",
         "refresh_token_reused",
     }
@@ -792,22 +794,6 @@ def _oauth_auth_record_requires_reauthentication(auth: _AuthRecord) -> bool:
     if not auth.unavailable and auth.status not in {"error", "failed"}:
         return False
     return _normalized_identifier(auth.status_message) in _REFRESH_INVALIDATION_IDENTIFIERS
-
-
-def _raise_oauth_credential_rejected() -> None:
-    """Raise the canonical core rejection type when the integration is present.
-
-    This lane is based on the pre-class contract, so the canonical class is
-    imported lazily. The fallback keeps this branch testable before the main
-    contract commit is integrated; after integration the runtime always raises
-    ``core.handlers.model_hub.adapter.OAuthCredentialRejectedError``.
-    """
-
-    try:
-        from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
-    except ImportError:
-        raise EngineStateError("oauth credential requires reauthentication") from None
-    raise OAuthCredentialRejectedError("oauth credential requires reauthentication")
 
 
 def _response_shape_proves_protocol(
@@ -1812,7 +1798,7 @@ class CLIProxyEngineAdapter:
             if len(matches) != 1:
                 raise EngineStateError("OAuth credential validation is inconclusive")
             if _oauth_auth_record_requires_reauthentication(matches[0]):
-                _raise_oauth_credential_rejected()
+                raise OAuthCredentialRejectedError("oauth credential requires reauthentication")
             try:
                 evidence = await run_owned_in_thread(
                     _probe_oauth_protocol_response,

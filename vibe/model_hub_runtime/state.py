@@ -852,10 +852,6 @@ class EngineStateStore:
         descriptor = os.open(path, flags | os.O_RDONLY)
         try:
             os.fsync(descriptor)
-        except OSError:
-            # Directory fsync is not available on every supported filesystem.
-            # The publication remains atomic; durability is best effort there.
-            pass
         finally:
             os.close(descriptor)
 

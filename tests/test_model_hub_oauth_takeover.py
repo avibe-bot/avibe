@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import errno
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import vibe.model_hub_runtime.adapter as runtime_adapter
+from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 
@@ -638,13 +641,17 @@ async def test_validate_raises_canonical_rejection_only_for_cpa_refresh_state(
         }
     )
 
-    try:
-        from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
-    except ImportError:
-        rejection_type = EngineStateError
-    else:
-        rejection_type = OAuthCredentialRejectedError
-
-    with pytest.raises(rejection_type) as caught:
+    with pytest.raises(OAuthCredentialRejectedError) as caught:
         await adapter.validate_oauth_credential(ref)
     assert "refresh-token-fixture" not in str(caught.value)
+
+
+@pytest.mark.skipif(not getattr(os, "O_DIRECTORY", 0), reason="platform has no directory fsync")
+def test_publication_directory_sync_error_cannot_be_reported_as_success(tmp_path, monkeypatch):
+    def unavailable(_descriptor):
+        raise OSError(errno.EIO, "fixture disk error")
+
+    monkeypatch.setattr(os, "fsync", unavailable)
+    with pytest.raises(OSError) as failure:
+        EngineStateStore._fsync_directory(tmp_path)
+    assert failure.value.errno == errno.EIO
