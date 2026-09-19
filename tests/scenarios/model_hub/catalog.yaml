@@ -730,17 +730,17 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
   - id: MH-MIG-001
-    name: Native import copies without modifying native configuration
+    name: Native migration takes over selected credentials and cleans replaced native auth
     status: covered
     kind: migration
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_001_api_apply_keeps_native_tree_byte_identical
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth
   - id: MH-MIG-002
-    name: Native OAuth subscriptions remain in sanctioned CLI stores
+    name: Native OAuth grants move into Hub custody
     status: covered
     kind: migration
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_grants_move_into_engine_custody
   - id: MH-MIG-003
     name: A scan row names the provider it belongs to without ever carrying a plaintext credential
     status: covered

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/migration-scan.schema.json",
   "title": "MigrationScan",
-  "description": "Result of scanning native backend configs. Rows marked import can be taken over by Model Hub; the native credential is removed only after the engine has accepted and verified the replacement.",
+  "description": "Result of scanning native backend configs. Rows marked import are eligible for the server-owned custody-takeover transaction; native material is withdrawn only after staged replacement validation and durable exposure. Blocked native shapes remain visible as keep_native or reauth rows.",
   "type": "object",
   "required": ["items"],
   "additionalProperties": false,
@@ -20,7 +20,7 @@
           "masked_detail": { "type": "string", "description": "e.g. 'sk-…dd3c + 自定义 Base URL'; never full secrets" },
           "proposed_action": {
             "enum": ["import", "controlled_import", "keep_native", "reauth"],
-            "description": "API keys and file-backed Claude/Codex subscription OAuth use import. Keychain-only OAuth remains keep_native because the CLI does not expose exportable token material. controlled_import remains reserved."
+            "description": "import is a supported API-key or complete refresh-capable OAuth takeover. keep_native is a visible, unselected blocker for access-only, unsupported, malformed, or otherwise non-exportable native material; reauth is the explicit invalid-grant/authentication path. controlled_import remains parseable and reserved."
           },
           "selected": { "type": "boolean" },
           "notes_key": { "type": ["string", "null"], "description": "i18n key for the row's secondary line" },

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/runtime-dependency.schema.json",
   "title": "RuntimeDependency",
-  "description": "v5 managed engine dependency manifest + persisted user intent + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
+  "description": "v5 managed engine dependency manifest + persisted user intent + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin. The additive runtime_default_applied marker records whether the one-time default-on upgrade has been applied.",
   "type": "object",
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
@@ -10,7 +10,11 @@
     "contract_version": { "const": 10 },
     "enabled": {
       "type": "boolean",
-      "description": "Persisted user intent for the managed gateway. Missing on older payloads means clients must fall back to observed health."
+      "description": "Persisted user intent for the managed gateway. Fresh/default configuration is true; explicit stop persists false."
+    },
+    "runtime_default_applied": {
+      "type": "boolean",
+      "description": "Additive persisted model_hub marker. Defaults to true for fresh configuration. A disk shape without this marker is upgraded once to enabled=true and marker=true; later explicit stop remains false and is not defaulted again."
     },
     "host_platform": {
       "type": "string",

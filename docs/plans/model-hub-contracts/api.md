@@ -48,7 +48,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | `{order: string[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{agent: AgentSupply}` | Atomically replaces default membership/order, preserves manual overrides, and guards effective hop removal or protected-supply loss. Pure reordering needs no guard. |
 | POST `/api/models/agents/<backend>/chains/reorder` | `{order?: string[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{agent: AgentSupply}` | Compatibility default-order entry point with the same guards as Sources PUT. Never reorders manual arrays. Without order, returns the current projection. New UI uses Sources PUT. |
-| PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
+| PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. The mode endpoint does not auto-create or adopt a native Source; native custody takeover is the grouped migration transaction. |
 | GET `/api/models/agents/<backend>/models` | → `{agent: {backend, mode, catalog_models}}` | Picker-safe catalog read. It exposes no Source order, Route, or credential-bearing supplier data. Every OpenCode row carries required `native_protocol`; Claude and Codex rows omit it. |
 | GET `/api/models/agents/<backend>/models/candidates` | → `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` | Server-owned picker projection. It returns addable built-ins, deduplicated ordered-provider inventory, and every current menu row with the same exact supplier projection; it is independent of backend mode and contains no credentials. Every OpenCode Candidate carries server-derived `native_protocol`; other backends omit it. Only `in_list` candidates may carry optional `group_if_removed: "builtin" | "providers" | null`, naming the group where that id would be offered after removal. |
 | PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[], expected_suppliers?: {<id>: [{source_id, model_id}]}, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, stale-candidate `409`, `{agent: AgentSupply}`, or `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` | Applies one full-list backend catalog edit with optimistic merge. OpenCode rows require a literal `native_protocol: openai_responses | anthropic`; rows for other backends forbid it. Each caller addition still absent from the latest list starts automatic without a route key. A listed supplier-projection mismatch refuses atomically with the separate exact shape `{ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed}`; a concurrently added row keeps its existing Route. A routeful removal uses the exact echoed-plan guard and then atomically removes its Route; empty-route removal is ordinary success. Supplier inventory remains unchanged. |
@@ -67,17 +67,49 @@ remain readable; ephemeral envelopes use only the terminal version.
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels provider work. A committed flow with `client_nonce` remains the same bounded terminal `OAuthFlow` with `state: "cancelled"` until its existing `expires_at`; a flow without a nonce is forgotten. |
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
-| POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same default placement and effective adoption as Add Source; original files remain byte-identical. |
+| POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It validates selected items before withdrawal, upgrades an existing native Source in place when present, commits Source/Routes/backend mode atomically, and removes only replaced native material. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
 | GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 10 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
-| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
+| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
 
 The removed product-global route `PUT /api/models/priority` has no replacement. Sources
 PUT and compatibility chains/reorder share backend-default semantics and effective guards,
 preserving all manual arrays. Exact manual order is saved through the chain resource;
 DELETE restores automatic and POST preview evaluates the draft without a write.
+
+### Native migration terminal recovery
+
+The migration apply response is successful only after the grouped custody transaction
+has completed. A transient failure after exposure keeps the private takeover journal
+pending and returns `migration_recovery_pending`; retry continues cleanup and projection
+without restoring native custody.
+
+An exposed journal may instead carry the private terminal decision
+`terminal: {invalid_source_ids: string[], config: <canonical target Model Hub config>, reason?: "reauth_requested"}`.
+The terminal `config` and optional `reason` are durable replay inputs and are never
+returned as new public request/response fields. Without `reason`, this decision is
+reserved for an authoritative credential-specific refresh rejection: crash recovery
+trusts it, finalizes each `invalid_source_ids` Source as `status: needs_action` with
+`detail_key: models.source.needs_action.oauth_expired`, and does not revalidate the
+rejected grant. Once that terminalization is durable, the pending journal and
+admission block are cleared and the receipt records `outcome: needs_auth`.
+The original apply and identical retries return `migration_credentials_invalid` and
+never report migration success. An expired access token, generic `401`, or a pinned
+CPA inventory/status string alone cannot create this terminal decision; an
+inconclusive or generic failure remains pending.
+
+When an existing, explicitly acknowledged `reauth_source` requests repair, the
+guarded finish-custody path records `reason: reauth_requested`, verifies native
+withdrawal and the current CPA credential references, marks unresolved OAuth Sources
+as needing sign-in, retains the current Hub grants, and then starts the usual Hub
+login. Its durable receipt records `outcome: reauth_requested`, never migration
+success or proof of expiration. Crash replay finalizes the recorded decision without
+another upstream validation or automatic browser start. If the exact consented native
+material reappears, durable cleanup removes it again while retaining the current Hub
+references; an old receipt never restores a stale OAuth snapshot, and changed or
+additional rows require fresh consent.
 
 ## Unsaved Source observation
 
@@ -297,7 +329,8 @@ every other existing field and enum meaning remains unchanged.
 | `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection for backends currently in Hub mode, sorted by backend then menu model; clients do not derive it from `hops`. Routes retained by Direct-mode backends are excluded because they bypass the gateway. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
 | `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom rather than inferring liveness from configured membership. `chain_length: 0` forces false; a nonzero length may carry either value. |
-| `RuntimeDependency.enabled` | explicit runtime start/stop mutation | Gateway switch and service-start recovery | Persisted user intent, independent of observed process health. Missing in older config defaults to false; an older response without the field falls back to observed health in the UI. |
+| `RuntimeDependency.enabled` | explicit runtime start/stop mutation | Gateway switch and service-start recovery | Persisted user intent, independent of observed process health. Fresh/default configuration is true; explicit Stop persists false. |
+| `model_hub.runtime_default_applied` | config loader/default migration | one-time legacy upgrade and runtime-start recovery | Additive persisted marker. Missing on disk upgrades once to `enabled: true` and `runtime_default_applied: true`; later explicit Stop remains false. |
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
@@ -444,8 +477,9 @@ Both accept optional `force`, `would_remove_hops`, and `would_interrupt` fields.
 The order is the complete desired default subset, including an empty subset. Every id
 is unique, existing and configuration-eligible; invalid input returns
 `invalid_source_order`. Manual routes can name other eligible Sources and are never
-rewritten by either operation. Source creation/native import append eligible defaults;
-refresh, health and turns do not rewrite order.
+rewritten by either operation. Source creation and migration choose or retain eligible
+defaults according to their transaction contract; refresh, health and turns do not
+rewrite order.
 
 `mutation.default_sources` stages the order under the mutation lock and compares
 before/after effective plans. Existing exact-plan guards cover effective hop removal
@@ -457,20 +491,15 @@ Eligibility remains server-authoritative. Ineligible rows carry the closed reaso
 eligible rows carry null. The frontend never matches inventory or infers intent from
 array equality. Default changes affect only the chosen backend.
 
-### Direct-to-Gateway native adoption
+### Direct-to-Gateway mode switch
 
 For `PATCH /api/models/agents/<backend>/mode`, a transition from `direct` to `hub`
-reuses the same sanctioned native-login recognition and response-backed observation
-boundary as native import. If that backend has a recognized CLI login and has no
-`native_cli` Source, the mode change, creation of the backend's singleton native Source,
-default Source-order insertion commit in
-one transaction. The returned `AgentSupply` is assembled after that commit and exposes
-the resulting order, eligibility, sparse manual Routes, and effective supply summaries.
-
-An existing native Source, an unrecognized or absent CLI login, or any transition other
-than `direct` → `hub` creates nothing. The mode switch itself remains legal in those
-cases. Repeating the request never creates a second native Source. `cli_present` alone
-does not satisfy the recognition predicate.
+changes only the persisted backend mode. It does not inspect native login state, create
+or adopt a `native_cli` Source, insert default membership, or invoke the migration
+transaction. Native custody takeover is the grouped migration operation described in
+§6 and requires its own consent and journal. Repeating the request remains idempotent
+and creates no Source; the returned `AgentSupply` reflects the mode with its existing
+Source order, sparse manual Routes, and effective supply summaries.
 
 ### Manual Route configuration and preview
 
@@ -1394,7 +1423,9 @@ Minimum v5 set:
 `candidate_suppliers_changed`, `mode_switch_blocked`, `engine_down`,
 `runtime_platform_unsupported`, `reauth_confirmation_required`,
 `native_source_already_exists`, `native_login_in_progress`,
-`migration_item_conflict`, `source_model_tiers_managed`, `turn_not_found`,
+`migration_item_conflict`, `migration_native_busy`, `migration_permission_needed`,
+`migration_configuration_blocked`, `migration_recovery_pending`,
+`migration_credentials_invalid`, `source_model_tiers_managed`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
 
 `source_model_tiers_managed` is the HTTP 409 refusal for editing an `upstream` or
@@ -1407,6 +1438,23 @@ its structured sibling is `{existing_source_id}` and the adapter is not invoked.
 `native_login_in_progress` is a distinct transient `409` from the shared native-login
 owner. It means another login currently owns the same credential; retry remains on the
 native channel and the response does not assert that a native Source already exists.
+
+Migration action errors are closed, redacted boundary codes:
+
+- `migration_native_busy`: a managed native process could not be drained or an
+  external CLI still owns the credential.
+- `migration_permission_needed`: the selected native store or file operation requires
+  permission that was not granted.
+- `migration_configuration_blocked`: a malformed, unsupported, conflicting, or
+  overriding native configuration blocks the whole backend; no partial import is
+  presented as success.
+- `migration_recovery_pending`: custody was exposed but durable cleanup or projection
+  is incomplete; the affected backend remains blocked and retry continues recovery.
+- `migration_credentials_invalid`: an explicitly selected grant failed
+  credential-specific refresh/validation. Hub custody is retained, the Source is
+  marked `needs_action` with `models.source.needs_action.oauth_expired`, the pending
+  transaction is cleared only after durable terminalization, and a retry receipt never
+  reports success. An expired access token alone is not this error.
 
 Boundary-only action-refusal values cover operations the UI already does not offer but
 a script or regression can call directly. `reauth_confirmation_required` is API/test-
