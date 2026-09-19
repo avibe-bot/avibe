@@ -289,6 +289,7 @@ class BackendRestartCoordinator:
         self._request_locks: dict[str, asyncio.Lock] = {}
         self._outcomes: dict[str, dict[str, str]] = {}
         self._migration_backends: set[str] = set()
+        self._migration_auth_owners: dict[str, tuple[asyncio.Task, NativeCredentialLease]] = {}
         self._process_inventory = process_inventory
 
     def _blocked_backends(self) -> set[str]:
@@ -343,6 +344,42 @@ class BackendRestartCoordinator:
             )
         return result
 
+    def reconcile_migration_auth(self, snapshot: dict[str, dict[str, Any]]) -> None:
+        """Update retired consumers only for the task holding this migration guard."""
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        owned = {
+            backend: lease for backend, (owner, lease) in self._migration_auth_owners.items()
+            if task is not None and owner is task
+        }
+        targets = tuple(sorted(owned))
+        if not owned or any(backend not in owned for backend in snapshot):
+            raise NativeMigrationBlockedError("native_reconciliation_unowned", targets)
+        ready = getattr(self.controller.agent_service, "is_backend_ready", None)
+        draining = getattr(self.controller.session_turns, "_draining_backends", ())
+        for backend, lease in owned.items():
+            lock = self._request_locks.get(backend)
+            if (
+                backend not in self._migration_backends
+                or lock is None or not lock.locked()
+                or not callable(ready) or ready(backend)
+                or backend not in draining
+            ):
+                raise NativeMigrationBlockedError("native_reconciliation_unowned", targets)
+            try:
+                lease.assert_owned(backend)
+            except RuntimeError:
+                raise NativeMigrationBlockedError("native_reconciliation_unowned", targets) from None
+        mirror = getattr(
+            getattr(self.controller, "agent_auth_service", None),
+            "reconcile_native_auth_snapshot", None,
+        )
+        if not callable(mirror):
+            raise NativeMigrationBlockedError("native_reconciliation_unavailable", targets)
+        mirror(snapshot)
+
     @asynccontextmanager
     async def migration_guard(
         self, backends: tuple[str, ...]
@@ -351,7 +388,9 @@ class BackendRestartCoordinator:
 
         Call the recheck immediately before native withdrawal and CPA activation:
         external CLIs do not participate in Avibe's advisory ownership protocol.
-        No external process is ever terminated by the check.
+        No external process is ever terminated by the check. Authentication
+        reconciliation is synchronous and available only to this guard's task
+        after retirement, while its existing lease and both gates remain owned.
         """
         targets = self._migration_targets(backends)
         closed: list[str] = []
@@ -403,8 +442,15 @@ class BackendRestartCoordinator:
                         raise NativeMigrationBlockedError("external_native_processes", targets, pids=pids)
 
                 await verify_idle()
+                task = asyncio.current_task()
+                if task is None:
+                    raise NativeMigrationBlockedError("native_reconciliation_unowned", targets)
+                for backend in targets:
+                    self._migration_auth_owners[backend] = (task, lease)
                 yield verify_idle
             finally:
+                for backend in targets:
+                    self._migration_auth_owners.pop(backend, None)
                 self._migration_backends.difference_update(targets)
                 for backend in closed:
                     if backend not in self._blocked_backends():

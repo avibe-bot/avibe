@@ -847,6 +847,7 @@ class ModelHubService:
         migration_home: Optional[Path] = None,
         migration_project_roots: Callable[[], tuple[Path, ...]] | None = None,
         migration_guard: Any = None,
+        migration_reconcile_auth: Callable[[dict[str, dict[str, Any]]], None] | None = None,
         migration_journal: NativeTakeoverJournal | None = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
@@ -891,6 +892,7 @@ class ModelHubService:
         )
         self.migration_blocked_backends: set[str] = set()
         self.migration_guard = migration_guard or self._unavailable_migration_guard
+        self.migration_reconcile_auth = migration_reconcile_auth
         self._migration_lock = asyncio.Lock()
         self._migration_task: asyncio.Task | None = None
         self._migration_item_ids: tuple[str, ...] | None = None
@@ -1076,6 +1078,13 @@ class ModelHubService:
             source.id == source_id and source.credential_ref == credential_ref
             for source in config.sources
         )
+
+    def _reconcile_native_auth(self, backends: tuple[str, ...]) -> None:
+        """Mirror the actual persisted direction while takeover still owns admission."""
+        reader = getattr(self.store, "native_auth_snapshot", None)
+        snapshot = reader(backends) if callable(reader) else {}
+        if self.migration_reconcile_auth is not None:
+            self.migration_reconcile_auth(snapshot)
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
         canonical = ModelHubConfig.from_payload(config.to_payload())

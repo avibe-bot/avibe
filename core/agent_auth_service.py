@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import errno
+import inspect
 import json
 import logging
 import os
@@ -11,6 +13,7 @@ import re
 import signal
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Coroutine, Optional
@@ -2116,6 +2119,72 @@ class AgentAuthService:
         from config.v2_config import V2Config
 
         return getattr(to_app_config(V2Config.load()), backend, None)
+
+    def reconcile_native_auth_snapshot(self, snapshot: dict[str, dict[str, Any]]) -> None:
+        """Mirror committed auth fields without invoking any runtime or native writer.
+
+        The coordinator owns retirement and admission. Preflight every known
+        consumer before changing any of them; plain mutable config fields are
+        updated in place so detached and shared aliases both lose stale keys.
+        """
+        from core.handlers.model_hub.service import V2ModelHubConfigStore
+
+        updates: dict[int, tuple[dict, dict]] = {}
+        missing = object()
+        try:
+            if not isinstance(snapshot, Mapping):
+                raise ValueError
+            for backend, values in snapshot.items():
+                fields = V2ModelHubConfigStore._NATIVE_AUTH_FIELDS.get(backend)
+                if fields is None or not isinstance(values, Mapping) or set(values) - set(fields):
+                    raise ValueError
+
+            owners = [self.controller]
+            owners.extend(
+                getattr(self.controller, name, None)
+                for name in ("command_handler", "settings_handler", "message_handler", "session_handler")
+            )
+            agents = getattr(getattr(self.controller, "agent_service", None), "agents", {})
+            owners.extend(agents.values())
+            for backend, values in snapshot.items():
+                targets = []
+                for owner in owners:
+                    if owner is None:
+                        continue
+                    config = getattr(owner, "config", None)
+                    targets.extend((
+                        getattr(config, backend, None),
+                        getattr(getattr(config, "agents", None), backend, None),
+                        getattr(owner, f"{backend}_config", None),
+                    ))
+                    if backend == "claude":
+                        targets.append(getattr(getattr(owner, "claude_client", None), "config", None))
+                for target in targets:
+                    if target is None:
+                        continue
+                    for name, value in values.items():
+                        if inspect.getattr_static(target, name, missing) is missing:
+                            # Codex's compat view has auth_mode, not stored keys.
+                            continue
+                        attributes = vars(target)
+                        descriptor = inspect.getattr_static(type(target), name, None)
+                        if (
+                            type(attributes) is not dict or name not in attributes
+                            or inspect.isdatadescriptor(descriptor)
+                            or getattr(getattr(type(target), "__dataclass_params__", None), "frozen", False)
+                        ):
+                            raise ValueError
+                        _, changes = updates.setdefault(id(target), (attributes, {}))
+                        if name in changes and changes[name] != value:
+                            raise ValueError
+                        changes[name] = copy.deepcopy(value)
+        except Exception:
+            # Config descriptors and values must never appear in an error.
+            raise ValueError("Native authentication consumers cannot be reconciled") from None
+        for attributes, changes in updates.values():
+            # Only preflighted plain instance fields reach this non-callback
+            # write. No setter, native I/O or config persistence can run here.
+            attributes.update(changes)
 
     def _load_saved_enabled_backends(self) -> list[str] | None:
         try:

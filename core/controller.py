@@ -370,6 +370,7 @@ class Controller:
         )
         if self.model_hub_service is not None:
             self.model_hub_service.migration_guard = self.backend_restart_coordinator.migration_guard
+            self.model_hub_service.migration_reconcile_auth = self.backend_restart_coordinator.reconcile_migration_auth
         self.backend_restart_coordinator.restore_migration_blocks()
 
         self.vibe_agent_store = VibeAgentStore()
