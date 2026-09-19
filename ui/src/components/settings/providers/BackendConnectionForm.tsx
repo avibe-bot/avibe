@@ -15,8 +15,27 @@ import { OAuthDeviceCodeRow, OAuthLinkRow } from '../oauth/OAuthFlowParts';
 import './connection.css';
 
 type Method = 'oauth' | 'api_key';
+type Credential = 'api_key' | 'auth_token';
 type NativeState = ClaudeAuthState | CodexAuthState;
-export type ConnectionHeading = { method: Method; active: boolean; credential: 'api_key' | 'auth_token' };
+export type ConnectionHeading = { method: Method; active: boolean; credential: Credential };
+
+/**
+ * One unsent secret, per credential type.
+ *
+ * An API key and an auth token are different credentials, not two spellings of
+ * one: they are issued separately, formatted differently and sent under
+ * different keys. A single draft therefore carried a half-typed key into the
+ * Auth Token field the moment someone checked what the other option was — and
+ * the same shared `editing` flag decided, for both, whether the stored mask was
+ * showing. Keeping a draft per credential type means switching only ever
+ * changes which draft is on screen, which is also what makes switching back
+ * safe.
+ */
+type Draft = { value: string; editing: boolean };
+const EMPTY_DRAFTS: Readonly<Record<Credential, Draft>> = {
+  api_key: { value: '', editing: false },
+  auth_token: { value: '', editing: false },
+};
 
 /** Settings and onboarding share persistence, validation, effective readback and cancellation. */
 export function BackendConnectionForm({ backend, provider, initialMethod = 'oauth', compact = false,
@@ -39,9 +58,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [native, setNative] = useState<NativeState | null>(null);
   const [currentProvider, setCurrentProvider] = useState(provider);
   const [method, setMethod] = useState<Method>(backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
-  const [credential, setCredential] = useState<'api_key' | 'auth_token'>('api_key');
-  const [key, setKey] = useState('');
-  const [editing, setEditing] = useState(false);
+  const [credential, setCredential] = useState<Credential>('api_key');
+  const [drafts, setDrafts] = useState<Record<Credential, Draft>>(EMPTY_DRAFTS);
+  const { value: key, editing } = drafts[credential];
   const [reveal, setReveal] = useState(false);
   const [baseUrl, setBaseUrl] = useState('');
   const [loading, setLoading] = useState(true);
@@ -54,6 +73,11 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [authReadable, setAuthReadable] = useState(false);
   const observation = useRef(0);
   const draftTouched = useRef(false);
+  /** Edits only ever reach the credential type currently on screen. */
+  const patchDraft = useCallback((patch: Partial<Draft>) => {
+    draftTouched.current = true;
+    setDrafts((current) => ({ ...current, [credential]: { ...current[credential], ...patch } }));
+  }, [credential]);
   const pendingConfirmation = useRef<Method | null>(null);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
   const lifetime = useRef({ mounted: true, busy: false });
@@ -140,7 +164,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     pendingConfirmation.current = expectedMethod;
     if (!await observe({ expectedMethod, receiptError })) return false;
     pendingConfirmation.current = null;
-    setKey(''); setEditing(false); draftTouched.current = false;
+    setDrafts(EMPTY_DRAFTS); draftTouched.current = false;
     await onConnectedRef.current?.();
     return true;
   };
@@ -166,7 +190,13 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const busy = saving || active;
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   useEffect(() => { onHeading?.({ method, active, credential }); }, [method, active, credential, onHeading]);
-  const hasKey = authReadable && (backend === 'opencode' ? Boolean(currentProvider?.api_key_masked) : Boolean(native?.has_api_key));
+  // What is stored is one credential of one type. A mask only answers for the
+  // type it was saved under, so selecting Auth Token while an API key is stored
+  // shows an empty field to fill rather than a mask that means something else —
+  // and `canSave` then requires a real token instead of accepting "keep".
+  const storedCredential: Credential = native && 'credential_type' in native ? native.credential_type || 'api_key' : 'api_key';
+  const hasKey = authReadable && (backend === 'opencode' ? Boolean(currentProvider?.api_key_masked)
+    : Boolean(native?.has_api_key) && (backend !== 'claude' || storedCredential === credential));
   const mask = native?.api_key_masked || currentProvider?.api_key_masked || '••••••••';
   const uncertain = native && 'auth_mode_uncertain' in native && native.auth_mode_uncertain;
   const signedIn = authReadable && (native?.active_auth_mode === 'oauth' || currentProvider?.active_auth_type === 'oauth');
@@ -274,14 +304,14 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       </div>}
     </>)}
     {method === 'api_key' && <>
-      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><MethodRadio value={credential} onChange={(value) => { draftTouched.current = true; setCredential(value); }} disabled={busy} ariaLabel={credentialLabel}
+      {backend === 'claude' && <div className="connection-field"><Label>{credentialLabel}</Label><MethodRadio value={credential} onChange={(value) => { draftTouched.current = true; setCredential(value); setReveal(false); }} disabled={busy} ariaLabel={credentialLabel}
         options={[{ id: 'api_key', label: apiKeyLabel }, { id: 'auth_token', label: tokenLabel }]} /></div>}
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-key`}>{secretLabel}</Label>
-        {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => { draftTouched.current = true; setEditing(true); setKey(''); }}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
-          : <div className="connection-secret"><KeyRound size={15} /><Input id={`${prefix}-connection-key`} type={reveal ? 'text' : 'password'} value={key} onChange={(event) => { draftTouched.current = true; setKey(event.target.value); }} disabled={busy} autoComplete="off" spellCheck={false} placeholder={credential === 'auth_token' ? t('settings.backends.claudeAuthTokenPlaceholder') : backend === 'claude' ? 'sk-ant-…' : 'sk-…'} />
+        {hasKey && !editing ? <div className="connection-secret"><KeyRound size={15} /><code>{mask}</code><Button variant="ghost" size="xs" disabled={busy} onClick={() => patchDraft({ editing: true, value: '' })}><Pencil size={14} />{t('settings.backends.replaceApiKey')}</Button></div>
+          : <div className="connection-secret"><KeyRound size={15} /><Input id={`${prefix}-connection-key`} type={reveal ? 'text' : 'password'} value={key} onChange={(event) => patchDraft({ value: event.target.value })} disabled={busy} autoComplete="off" spellCheck={false} placeholder={credential === 'auth_token' ? t('settings.backends.claudeAuthTokenPlaceholder') : backend === 'claude' ? 'sk-ant-…' : 'sk-…'} />
             <Button variant="ghost" size="icon" aria-label={t(reveal ? 'onboarding.connection.hideKey' : 'onboarding.connection.showKey')} onClick={() => setReveal(!reveal)}>{reveal ? <EyeOff size={15} /> : <Eye size={15} />}</Button></div>}
         <p>{backend === 'opencode' ? t('onboarding.connection.providerCredentialHint', { name: provider?.name }) : t(backend === 'claude' && credential === 'auth_token' ? 'onboarding.connection.tokenHint' : 'onboarding.connection.keyHint')}</p>
-        {editing && hasKey && <Button variant="link" size="xs" onClick={() => { setEditing(false); setKey(''); }}>{t('common.cancel')}</Button>}
+        {editing && hasKey && <Button variant="link" size="xs" onClick={() => patchDraft({ editing: false, value: '' })}>{t('common.cancel')}</Button>}
       </div>
       <div className="connection-field"><Label htmlFor={`${prefix}-connection-url`}>{t('onboarding.connection.baseUrl')}</Label>
         <Input id={`${prefix}-connection-url`} type="url" value={baseUrl} onChange={(event) => { draftTouched.current = true; setBaseUrl(event.target.value); }} disabled={busy} autoComplete="off" placeholder={backend === 'claude' ? 'https://api.anthropic.com' : backend === 'codex' ? 'https://api.openai.com/v1' : t('onboarding.connection.providerDefault')} />

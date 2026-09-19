@@ -21,21 +21,26 @@ import { useTranslation } from 'react-i18next';
 import { useApi, type OpencodeProvider } from '@/context/ApiContext';
 import { errorMessage } from '@/lib/errorMessage';
 import { getBackendUiMeta } from '@/lib/agentBackends';
+import { useViewportHeightVar } from '@/lib/useViewportHeightVar';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { BackendIcon } from '../visual';
 import { VendorGlyph } from '../settings/models/vendorGlyph';
-import { providerLabel, providerVendorId, setupPrimaryRank } from '../settings/providers/providerIdentity';
+import { providerBrandLabel, providerLabel, providerVendorId, setupPrimaryRank, SETUP_PRIMARY_VENDORS } from '../settings/providers/providerIdentity';
 import { BackendConnectionForm } from '../settings/providers/BackendConnectionForm';
 import type { BackendId } from '../settings/shared/useBackendRuntime';
 
 /** One provider choice: its brand mark, the name a person recognises, and the id
  *  OpenCode files it under — shown because that id is what the rest of OpenCode,
- *  its config file and its model identifiers use. */
-function ProviderRow({ entry, onPick }: { entry: OpencodeProvider; onPick: () => void }) {
+ *  its config file and its model identifiers use. The caller supplies the name,
+ *  because what a row should be called depends on where it stands: a prioritised
+ *  brand slot has to say the brand, and a row under More has to say which of
+ *  that brand's entries it is. */
+type PickerRow = { entry: OpencodeProvider; label: string };
+
+function ProviderRow({ entry, label, onPick }: PickerRow & { onPick: () => void }) {
   const { t } = useTranslation();
-  const label = providerLabel(entry.id, entry.name);
   return (
     <button type="button" className="connection-provider focus-visible:outline-2 focus-visible:outline-ring" onClick={onPick}>
       <span className="connection-provider-mark"><VendorGlyph vendor={providerVendorId(entry.id)} /></span>
@@ -57,6 +62,11 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   onWriteState: (pending: boolean) => void;
 }) {
   const api = useApi(); const { t } = useTranslation();
+  // The frame is sized to the USABLE viewport, which on a phone is what the soft
+  // keyboard leaves. `dvh` cannot see that on iOS — only the visual viewport
+  // shrinks — and this route is the setup wizard, not the app shell that
+  // normally keeps `--app-vvh` current, so the dialog keeps it current itself.
+  useViewportHeightVar();
   const [providers, setProviders] = useState<OpencodeProvider[]>([]);
   const [provider, setProvider] = useState<OpencodeProvider>();
   const [loading, setLoading] = useState(backend === 'opencode');
@@ -94,24 +104,74 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
     // Subscriptions follow OpenCode's real OAuth capability; the eight brands
     // below are an API-key presentation order, not an authentication catalog.
     const eligible = providers.filter((entry) => (method === 'api_key' ? !entry.local : entry.oauth_available));
+    // Both names are searchable, so "qwen" finds the row OpenCode calls
+    // "Alibaba (China)" and "alibaba" still finds it too.
     const matching = eligible.filter((entry) => !term
-      || `${providerLabel(entry.id, entry.name)} ${entry.name} ${entry.id} ${entry.models.join(' ')}`.toLowerCase().includes(term));
+      || `${providerBrandLabel(entry.id, entry.name)} ${providerLabel(entry.id, entry.name)} ${entry.name} ${entry.id} ${entry.models.join(' ')}`.toLowerCase().includes(term));
     const rank = (entry: OpencodeProvider) => method === 'api_key' ? setupPrimaryRank(entry.id) : null;
-    const ordered = [...matching].sort((left, right) => {
-      const [a, b] = [rank(left), rank(right)];
-      if (a !== null && b !== null) return a - b;
-      if (a !== null) return -1;
-      if (b !== null) return 1;
-      // Providers already holding credentials stay reachable without More.
-      if (left.configured !== right.configured) return left.configured ? -1 : 1;
-      return providerLabel(left.id, left.name).localeCompare(providerLabel(right.id, right.name));
-    });
+    const row = (entry: OpencodeProvider, brand = false): PickerRow => ({ entry,
+      label: brand ? providerBrandLabel(entry.id, entry.name) : providerLabel(entry.id, entry.name) });
+    // No two rows on screen may read the same, or there is nothing to act on
+    // the difference with. The first row to use a title keeps it — and a brand
+    // slot is always first — so the eight always read as their brand, and a
+    // second entry of that brand falls back to the id it is filed under, which
+    // is exactly what tells one of them from another.
+    const distinct = (rows: PickerRow[]) => {
+      const used = new Set<string>();
+      return rows.map((entry) => {
+        if (!used.has(entry.label)) { used.add(entry.label); return entry; }
+        return { ...entry, label: entry.entry.id };
+      });
+    };
     // A search has to reach every provider, so it collapses nothing. Neither
     // does the subscription list: it is already only what can sign in, and
-    // there is no shortlist to be the remainder of.
-    if (term || method !== 'api_key') return { shortlist: ordered, more: [] as OpencodeProvider[] };
-    const promoted = (entry: OpencodeProvider) => rank(entry) !== null || entry.configured;
-    return { shortlist: ordered.filter(promoted), more: ordered.filter((entry) => !promoted(entry)) };
+    // there is no shortlist to be the remainder of. Both keep the brand order
+    // in front, then whatever already holds credentials.
+    if (term || method !== 'api_key') return {
+      shortlist: distinct([...matching].sort((left, right) => {
+        const [a, b] = [rank(left), rank(right)];
+        if (a !== null && b !== null) return a - b;
+        if (a !== null) return -1;
+        if (b !== null) return 1;
+        if (left.configured !== right.configured) return left.configured ? -1 : 1;
+        return providerLabel(left.id, left.name).localeCompare(providerLabel(right.id, right.name));
+      }).map((entry) => row(entry))),
+      more: [] as PickerRow[],
+    };
+    const byVendor = new Map<string, OpencodeProvider[]>();
+    for (const entry of matching) {
+      const vendor = providerVendorId(entry.id);
+      const group = byVendor.get(vendor);
+      if (group) group.push(entry); else byVendor.set(vendor, [entry]);
+    }
+    // Exactly one row per prioritised brand, in the approved order, and only
+    // for the brands this runtime actually offers — an absent brand leaves no
+    // slot behind rather than a row that cannot be connected. Which entry
+    // represents a brand is decided rather than incidental: one already holding
+    // credentials, else the id that IS the brand, else the lowest id. So two
+    // aliases of one brand can never both take the shortlist, and two reads of
+    // the same catalog can never trade them.
+    const chosen = SETUP_PRIMARY_VENDORS.flatMap((vendor) => {
+      const group = byVendor.get(vendor);
+      if (!group?.length) return [];
+      const exact = (entry: OpencodeProvider) => entry.id.trim().toLowerCase() === vendor;
+      return [[...group].sort((left, right) => {
+        if (left.configured !== right.configured) return left.configured ? -1 : 1;
+        if (exact(left) !== exact(right)) return exact(left) ? -1 : 1;
+        return left.id.localeCompare(right.id);
+      })[0]];
+    });
+    // Holding credentials is a reason to be easy to find, not a reason to take
+    // a brand's slot — so a configured provider opens More instead of growing
+    // the eight. Everything the shortlist did not take is here, which is what
+    // keeps every native provider reachable without a search.
+    const taken = new Set(chosen.map((entry) => entry.id));
+    const rows = distinct([...chosen.map((entry) => row(entry, true)),
+      ...matching.filter((entry) => !taken.has(entry.id)).map((entry) => row(entry))]);
+    return { shortlist: rows.slice(0, chosen.length), more: rows.slice(chosen.length).sort((left, right) => {
+      if (left.entry.configured !== right.entry.configured) return left.entry.configured ? -1 : 1;
+      return left.label.localeCompare(right.label);
+    }) };
   }, [providers, method, query]);
 
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -139,13 +199,13 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
           {error && <div className="connection-error" role="alert">{error}<Button variant="secondary" onClick={() => void load()}>{t('common.retry')}</Button></div>}
           <p className="connection-intro">{t(method === 'api_key' ? 'onboarding.connection.pickKey' : 'onboarding.connection.pickSubscription')}</p>
           <div className="connection-provider-list">
-            {shortlist.map((entry) => <ProviderRow key={entry.id} entry={entry} onPick={() => setProvider(entry)} />)}
+            {shortlist.map(({ entry, label }) => <ProviderRow key={entry.id} entry={entry} label={label} onPick={() => setProvider(entry)} />)}
             {more.length > 0 && <>
               <Button type="button" variant="secondary" className="connection-more" aria-expanded={showMore} onClick={() => setShowMore((open) => !open)}>
                 {showMore ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                 {t('onboarding.connection.moreProviders')} ({more.length})
               </Button>
-              {showMore && more.map((entry) => <ProviderRow key={entry.id} entry={entry} onPick={() => setProvider(entry)} />)}
+              {showMore && more.map(({ entry, label }) => <ProviderRow key={entry.id} entry={entry} label={label} onPick={() => setProvider(entry)} />)}
             </>}
           </div>
           {!loading && !error && shortlist.length === 0 && more.length === 0 && <p className="connection-intro">{t('onboarding.connection.noProviders')}</p>}

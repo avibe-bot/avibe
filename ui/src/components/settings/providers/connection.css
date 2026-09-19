@@ -25,8 +25,25 @@
   --connection-desc: 40px;
   --connection-controls: 40px;
   --connection-footer: 56px;
-  width: min(568px, calc(100vw - 32px)); max-width: 568px;
-  height: min(var(--connection-h), calc(100dvh - 32px));
+  /* What the window actually leaves this frame, on both axes.
+     `100dvh` is the LAYOUT viewport: on iOS it does not shrink when the soft
+     keyboard opens, so a frame sized to it would put its own footer under the
+     keyboard. `--app-vvh` is the visual viewport the shell already mirrors and
+     falls back to `100dvh`, so this reads the usable height on a phone and the
+     window height everywhere else. The insets are the notch and the home
+     indicator; 32px is the design's margin, which the frame owes on every side
+     it can be pushed against. */
+  --connection-margin: 32px;
+  --connection-room-w: calc(100vw - var(--connection-margin) - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  --connection-room-h: calc(var(--app-vvh, 100dvh) - var(--connection-margin) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  /* The middle of that room, which is not the middle of the window. A soft
+     keyboard takes the bottom of the screen without moving the layout viewport,
+     so a frame centred on the window keeps its lower half under the keyboard
+     even after it has shrunk enough to fit above it. Off a phone this is exactly
+     50% again: the room is the whole window. */
+  --connection-centre: calc((env(safe-area-inset-top, 0px) + var(--app-vvh, 100dvh) - env(safe-area-inset-bottom, 0px)) / 2);
+  width: min(568px, var(--connection-room-w)); max-width: 568px;
+  height: min(var(--connection-h), var(--connection-room-h));
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--connection-head) var(--connection-desc) var(--connection-controls) minmax(0, 1fr) var(--connection-footer);
   /* The frame never scrolls; its middle does. */
@@ -35,6 +52,16 @@
   border-color: var(--border-strong); background: var(--surface-2);
   box-shadow: 0 18px 48px var(--desktop-overlay-shadow, var(--connection-overlay-shadow));
 }
+/* The shared dialog primitive caps every dialog it owns at `100dvh - 2rem`, and
+   below its `md` edge at `90dvh` — its own defaults for dialogs that size to
+   their content, and both of them layout-viewport units that a soft keyboard
+   never moves. It also centres on the window for the same reason. This frame
+   has its own bound and its own centre, so it states both here rather than
+   inheriting them: the doubled class only exists to outweigh a utility class,
+   because the primitive's file belongs to another surface. The primitive's own
+   `-translate-y-1/2` still does the centring; only what it is centred on
+   changes. */
+.connection-dialog.connection-dialog { max-height: var(--connection-room-h); top: var(--connection-centre); bottom: auto; }
 .connection-dialog[data-backend='codex'] { --connection-h: 580px; }
 .connection-dialog[data-backend='opencode'] { --connection-h: 640px; }
 /* `display: contents` keeps the form one component while its three regions sit
@@ -117,9 +144,11 @@
    between the two. The description gets a third line here because the same
    sentence wraps further at phone width. */
 @media (max-width: 767px) {
+  /* `top` is not restored here: the frame's own centre is set with its height
+     bound above, because both answer the same question. */
   .connection-dialog {
-    left: 50%; right: auto; top: 50%; bottom: auto; transform: translate(-50%, -50%);
-    max-width: 568px; width: calc(100vw - 32px); border-radius: 16px;
+    left: 50%; right: auto; transform: translate(-50%, -50%);
+    border-radius: 16px;
     --connection-pad: 20px; --connection-gap: 16px; --connection-desc: 60px;
   }
   .connection-dialog > div[aria-hidden='true']:first-child { display: none; }
@@ -132,6 +161,16 @@
 @media (max-height: 640px) {
   .connection-dialog { --connection-pad: 16px; --connection-gap: 12px; --connection-head: 44px; --connection-desc: 40px; }
   .connection-heading h2 { font-size: 18px; line-height: 22px; }
+}
+/* Shorter than a landscape phone — a soft keyboard on a small screen reaches
+   here too. There is no longer room for both breathing space and the anchors,
+   so the breathing space goes: tighter padding, tighter gaps, a smaller mark
+   and heading. The method row and the footer keep their full height, because
+   they are what has to stay usable, and the middle still gives way first. */
+@media (max-height: 480px) {
+  .connection-dialog { --connection-pad: 12px; --connection-gap: 8px; --connection-head: 40px; }
+  .connection-heading h2 { font-size: 17px; line-height: 20px; }
+  .connection-logo { width: 34px; height: 34px; border-radius: 9px; }
 }
 
 .connection-auth-steps > div > a[data-slot="button"] { height: 38px; border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 600; }

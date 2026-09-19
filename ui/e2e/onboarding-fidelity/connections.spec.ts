@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
-import { expect, test, type Page } from '@playwright/test';
-import { openOnboarding, openSetup, serveProduct, settleEffects } from './support';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import { openOnboarding, openSetup, serveProduct, settleEffects, size } from './support';
 
 async function authFixtures(page: Page) {
   const cancellations: string[] = [];
@@ -89,9 +89,11 @@ const anchorBoxes = (page: Page) => page.evaluate(() => {
     frame: read('.connection-dialog'),
     heading: read('.connection-heading'),
     description: read('.connection-description'),
-    // The method tabs are the dialog's first radio group; a credential group, when a
-    // method has one, lives inside the scrolling middle and is not an anchor.
-    tabs: read('.connection-dialog [role="radiogroup"]'),
+    // Row three, whichever control an assistant puts there: the method tabs, or — for
+    // OpenCode, which has to choose a provider first — the search field and then the
+    // chosen-provider capsule. A credential group, when a method has one, lives inside
+    // the scrolling middle and is not an anchor.
+    controls: read('.connection-dialog .connection-controls, .connection-dialog .backend-connection-form > .connection-radio > [role="radiogroup"]'),
     close: read('.connection-dialog > button:last-of-type'),
     footer: read('.connection-actions'),
   };
@@ -101,17 +103,74 @@ const anchorBoxes = (page: Page) => page.evaluate(() => {
  *  itself — would mean it had been asked to hold more than it has room for. */
 const scrollers = (page: Page) => page.evaluate(() => [...document.querySelectorAll('.connection-dialog, .connection-dialog *')]
   .filter((node) => node.scrollHeight > node.clientHeight + 1 && ['auto', 'scroll'].includes(getComputedStyle(node).overflowY))
-  .map((node) => node.className.toString())
-  .filter((name) => name !== 'connection-body'));
+  // The middle carries a second class while it holds the provider list, and it is still
+  // the middle — so this asks whether a node IS the body, not what its class attribute
+  // happens to spell.
+  .filter((node) => !node.classList.contains('connection-body'))
+  .map((node) => node.className.toString()));
+
+/** The design's margin. The frame is centred, so each edge owes half of it. */
+const CLEARANCE = 16;
 
 /**
- * What the window leaves a frame. The dialog asks for its assistant's own height and the
- * shared primitive caps it — `100dvh - 32` on a desktop, and below 768 the mobile sheet's
- * `90dvh`. Deriving that here keeps the check about the ASSISTANT deciding the height
- * while staying exact at a window too short to grant it.
+ * The room the window actually leaves this frame, read from the browser rather than
+ * recomputed from the stylesheet.
+ *
+ * It is the VISUAL viewport, not `100dvh`: on iOS the layout viewport does not shrink
+ * when the soft keyboard opens, so a frame measured against `100dvh` can be "inside the
+ * window" and still have its footer under the keyboard. The insets are whatever the
+ * device reserves for a notch or a home indicator, which are room the frame does not
+ * have either.
  */
-const room = (viewport: { width: number; height: number }) =>
-  (viewport.width < 768 ? viewport.height * 0.9 : viewport.height - 32);
+const usableViewport = (page: Page) => page.evaluate(() => {
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;top:0;left:0;'
+    + 'width:env(safe-area-inset-left,0px);height:env(safe-area-inset-top,0px);'
+    + 'border-right:env(safe-area-inset-right,0px) solid transparent;'
+    + 'border-bottom:env(safe-area-inset-bottom,0px) solid transparent';
+  document.body.append(probe);
+  const style = getComputedStyle(probe);
+  const inset = {
+    left: parseFloat(style.width) || 0, top: parseFloat(style.height) || 0,
+    right: parseFloat(style.borderRightWidth) || 0, bottom: parseFloat(style.borderBottomWidth) || 0,
+  };
+  probe.remove();
+  const view = window.visualViewport;
+  const x = view?.offsetLeft ?? 0;
+  const y = view?.offsetTop ?? 0;
+  return {
+    left: x + inset.left, top: y + inset.top,
+    right: x + (view?.width ?? window.innerWidth) - inset.right,
+    bottom: y + (view?.height ?? window.innerHeight) - inset.bottom,
+  };
+});
+
+/** The anchors once the dialog's own entrance has finished: Radix animates the frame in
+ *  with a transform, so a box read mid-animation is the animation's, not the layout's. */
+const settled = async (page: Page) => { await settleEffects(page); return anchorBoxes(page); };
+
+/**
+ * The frame's bound, stated as what a person gets rather than as the expression that
+ * produces it. Three things, and together they leave the height no freedom: it never
+ * grows past what its assistant asked for; it is never pushed against an edge of the
+ * room; and when it does have to give height back, it gives back only what the margins
+ * need. A frame that shrank for any other reason fails the third, and one that ignored
+ * the window fails the second — so neither the assistant's number nor the window's has
+ * to be restated here.
+ */
+async function expectFitsItsRoom(page: Page, assistant: number) {
+  await settleEffects(page);
+  const room = await usableViewport(page);
+  const frame = (await anchorBoxes(page)).frame!;
+  const clearance = {
+    left: frame.x - room.left, top: frame.y - room.top,
+    right: room.right - (frame.x + frame.width), bottom: room.bottom - (frame.y + frame.height),
+  };
+  expect(frame.height, 'height its assistant asked for').toBeLessThanOrEqual(assistant + 0.5);
+  for (const [edge, value] of Object.entries(clearance)) expect(value, `${edge} clearance`).toBeGreaterThanOrEqual(CLEARANCE - 0.5);
+  if (frame.height < assistant - 0.5) expect(clearance.top + clearance.bottom, 'height given back').toBeLessThanOrEqual(2 * CLEARANCE + 0.5);
+  return frame;
+}
 
 for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 640 }]) {
   test(`the connection frame holds while its methods change ${viewport.width}x${viewport.height}`, async ({ page }, info) => {
@@ -126,7 +185,7 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 640 
 
     const baseline = await anchorBoxes(page);
     // The height is the assistant's, so it cannot be a function of what is on screen.
-    expect(baseline.frame!.height).toBeCloseTo(Math.min(620, room(viewport)), 0);
+    await expectFitsItsRoom(page, 620);
     for (const anchor of Object.values(baseline)) expect(anchor).not.toBeNull();
     expect(baseline.frame!.y + baseline.frame!.height).toBeLessThanOrEqual(viewport.height);
 
@@ -183,7 +242,7 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 640 
     await expect(dialog.getByLabel('Base URL (optional)')).toBeVisible();
     await settleEffects(page);
     const codex = await anchorBoxes(page);
-    expect(codex.frame!.height).toBeCloseTo(Math.min(580, room(viewport)), 0);
+    await expectFitsItsRoom(page, 580);
     for (const label of ['Sign in with ChatGPT', 'OpenAI API Key', 'Sign in with ChatGPT']) {
       await dialog.getByRole('radiogroup', { name: 'Connection method' }).getByRole('radio', { name: label, exact: true }).click();
       await settleEffects(page);
@@ -193,6 +252,261 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 640 
     expect(denied).toEqual([]);
   });
 }
+
+/** Each assistant's dialog, the height its own frame is sized for, and the two methods
+ *  whose switch the contract names. OpenCode has no method row — it chooses a provider
+ *  first, and that choice is the larger change: it replaces row three AND the middle. */
+const ASSISTANTS = [
+  { slug: 'claude', label: 'Claude Code', height: 620, methods: ['API credentials', 'Claude account'] },
+  { slug: 'codex', label: 'Codex', height: 580, methods: ['OpenAI API Key', 'Sign in with ChatGPT'] },
+  { slug: 'opencode', label: 'OpenCode', height: 640, methods: [] },
+] as const;
+
+/** Non-ASCII, because a failure message is user-facing copy and the row it lands in is
+ *  one of the things the frame has to stay the same size around. */
+const READ_FAILURE = '读取失败 · fixture read failure';
+
+/**
+ * The connection reads, with a switch on them. Registered AFTER `authFixtures`, which is
+ * what makes them win — Playwright matches routes newest-first.
+ *
+ * Nothing is stubbed at the component level: loading is a response still in flight, the
+ * error state is the product's own read rejecting a body it was given, and retry is the
+ * product asking again. The refusal is a 200 carrying `ok: false` rather than a 5xx on
+ * purpose — that is the shape this endpoint really answers with, and it keeps the global
+ * error toast out of a measurement of the dialog.
+ */
+async function switchableReads(page: Page) {
+  let waiting: (() => void)[] = [];
+  let open = true;
+  let failing = false;
+  const answer = async (route: Route, json: object) => {
+    if (!open) await new Promise<void>((resolve) => { waiting.push(resolve); });
+    return route.fulfill({ json: failing ? { ok: false, message: READ_FAILURE } : json });
+  };
+  await page.route('**/api/backend/*/auth', (route) => answer(route, { ok: true, active_auth_mode: 'none', auth_mode: 'oauth', has_api_key: false, base_url: null }));
+  await page.route('**/api/backend/opencode/providers', (route) => answer(route, { ok: true, providers: [
+    { id: 'openai', name: 'OpenAI', description: 'ChatGPT subscription or API Key', oauth_available: true, configured: false, local: false, models: [] },
+    // A prioritised brand under one of its aliases, and one provider that is not
+    // prioritised at all — so the picker has both a shortlist and a More to open.
+    { id: 'alibaba-cn', name: 'Alibaba (China)', description: '', oauth_available: false, configured: true, local: false, models: [] },
+    { id: 'cerebras', name: 'Cerebras', description: '', oauth_available: false, configured: false, local: false, models: [] },
+  ] }));
+  return {
+    hold: () => { open = false; },
+    release: () => { open = true; const pending = waiting; waiting = []; for (const resolve of pending) resolve(); },
+    fail: (value: boolean) => { failing = value; },
+  };
+}
+
+/** Reachable is hit-testable at its own centre, not merely present: the way out and the
+ *  action are what a short window is most likely to have pushed under an edge. */
+async function expectReachable(dialog: Locator) {
+  for (const control of [dialog.getByRole('button', { name: 'Close' }), dialog.locator('.connection-actions button').last()]) {
+    await expect(control).toBeInViewport();
+    expect(await control.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+    }), 'hit-testable at its centre').toBe(true);
+  }
+}
+
+/**
+ * The narrowest phone the matrix names, and a window shorter than a landscape phone —
+ * which is also roughly what a soft keyboard leaves one. Both are windows that cannot
+ * grant an assistant the height it asked for, so they are where the frame has to decide
+ * what to give back, and every state has to survive that decision.
+ */
+for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 300 }]) {
+  test(`every assistant holds its anchors through loading, failure and retry ${size(viewport)}`, async ({ page }, info) => {
+    const denied = await serveProduct(page);
+    await authFixtures(page);
+    const reads = await switchableReads(page);
+    await page.setViewportSize(viewport);
+    await openOnboarding(page);
+    await openSetup(page, 'en');
+    const dialog = page.getByRole('dialog');
+
+    for (const assistant of ASSISTANTS) {
+      reads.hold(); reads.fail(true);
+      await page.getByLabel(assistant.label, { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
+
+      // Loading, with the read still in flight. All five rows are already there: an
+      // anchor that arrived with the data would move everything under it when it did.
+      await expect(dialog.getByRole('status')).toBeVisible();
+      const anchors = await settled(page);
+      for (const [row, box] of Object.entries(anchors)) expect(box, `${assistant.slug} ${row} while loading`).not.toBeNull();
+      await expectFitsItsRoom(page, assistant.height);
+      await expectReachable(dialog);
+
+      // The failure, then the retry the product offers for it.
+      reads.release();
+      await expect(dialog.getByRole('alert')).toContainText(READ_FAILURE);
+      expect(await settled(page), `${assistant.slug} anchors on failure`).toEqual(anchors);
+      await expectFitsItsRoom(page, assistant.height);
+      await expectReachable(dialog);
+      await settleEffects(page);
+      await dialog.screenshot({ path: info.outputPath(`${assistant.slug}-read-failed-${size(viewport)}.png`) });
+
+      reads.fail(false);
+      await dialog.getByRole('button', { name: 'Retry' }).click();
+      await expect(dialog.getByRole('alert')).toHaveCount(0);
+      expect(await settled(page), `${assistant.slug} anchors after retry`).toEqual(anchors);
+      expect(await scrollers(page), `${assistant.slug} scrollers`).toEqual([]);
+      await expectReachable(dialog);
+
+      // Whatever row three can do on this assistant, twice in each direction.
+      for (const label of [...assistant.methods, ...assistant.methods]) {
+        await dialog.getByRole('radiogroup', { name: 'Connection method' }).getByRole('radio', { name: label, exact: true }).click();
+        await expect(dialog.getByRole('radiogroup', { name: 'Connection method' }).getByRole('radio', { name: label, exact: true })).toHaveAttribute('aria-checked', 'true');
+        await settleEffects(page);
+        expect(await settled(page), `${assistant.slug} anchors after ${label}`).toEqual(anchors);
+        expect(await scrollers(page), `${assistant.slug} scrollers after ${label}`).toEqual([]);
+      }
+      if (!assistant.methods.length) {
+        // Opening More is the biggest thing the middle can be asked to hold, and
+        // choosing a provider replaces both row three and the middle at once.
+        await dialog.getByRole('button', { name: 'More providers (1)' }).click();
+        await expect(dialog.getByRole('button', { name: /Cerebras/ })).toBeVisible();
+        expect(await settled(page), 'OpenCode anchors with More open').toEqual(anchors);
+        expect(await scrollers(page), 'OpenCode scrollers with More open').toEqual([]);
+        await dialog.getByRole('button', { name: /Cerebras/ }).click();
+        await expect(dialog.getByLabel('Base URL (optional)')).toBeVisible();
+        expect(await settled(page), 'OpenCode anchors after choosing a provider').toEqual(anchors);
+        await expectReachable(dialog);
+      }
+      await settleEffects(page);
+      await dialog.screenshot({ path: info.outputPath(`${assistant.slug}-settled-${size(viewport)}.png`) });
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+    }
+    expect(denied).toEqual([]);
+  });
+}
+
+/**
+ * The case `100dvh` cannot see. On iOS the layout viewport stays full height while the
+ * soft keyboard is up — only the VISUAL viewport shrinks — so a frame sized in `dvh`
+ * keeps its footer exactly where the keyboard now is. The keyboard is simulated the only
+ * way a headless browser can: the visual viewport really does report a smaller height,
+ * and the product's own listener is what has to notice.
+ *
+ * It needs a touch context, because that is the gate the shared hook uses to decide a
+ * soft keyboard can exist at all — and on a desktop it must NOT move, which is the
+ * second half of this test.
+ */
+for (const touch of [true, false]) {
+  test(`the frame ${touch ? 'gives way to the soft keyboard' : 'ignores a viewport no keyboard shrank'}`, async ({ browser }, info) => {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: touch });
+    const page = await context.newPage();
+    // Installed before the bundle so the resting height the product measures at start-up
+    // is the real one; only the shrink afterwards is simulated.
+    await page.addInitScript(() => {
+      const view = window.visualViewport;
+      if (!view) return;
+      const real = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(view), 'height')!.get!;
+      let keyboard = 0;
+      Object.defineProperty(view, 'height', { configurable: true, get: () => real.call(view) - keyboard });
+      Object.defineProperty(window, '__keyboard', { value: (height: number) => { keyboard = height; view.dispatchEvent(new Event('resize')); } });
+    });
+    const denied = await serveProduct(page);
+    await authFixtures(page);
+    await openOnboarding(page, { realTime: true });
+    await openSetup(page, 'en');
+    await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
+    const dialog = page.getByRole('dialog');
+    const key = dialog.getByLabel('API Key', { exact: true });
+    await expect(key).toBeVisible();
+    const before = await expectFitsItsRoom(page, 620);
+    expect(before.height, 'a window this tall grants the assistant its own height').toBeCloseTo(620, 0);
+
+    // A keyboard opens because a field was focused, which is also what tells the shared
+    // helper that this shrink is a keyboard and not a resized window.
+    const resting = await page.evaluate(() => window.visualViewport!.height);
+    await key.focus();
+    await page.evaluate(() => (window as unknown as { __keyboard: (height: number) => void }).__keyboard(420));
+    if (touch) {
+      await expect.poll(() => page.evaluate(() => document.documentElement.style.getPropertyValue('--app-vvh'))).toBe(`${resting - 420}px`);
+      const anchored = await expectFitsItsRoom(page, 620);
+      // The field being typed into lives in the middle, and a keyboard this large
+      // leaves the middle too short to show all of it at once. Reachable therefore
+      // means it can be brought into view by the one part that is allowed to scroll,
+      // without any of the anchors — or the frame itself — moving to make room.
+      await key.scrollIntoViewIfNeeded();
+      await expect(key).toBeInViewport();
+      expect((await settled(page)).frame).toEqual(anchored);
+      await expectReachable(dialog);
+      expect(await scrollers(page)).toEqual([]);
+    } else {
+      // No soft keyboard exists here, so nothing may move: a shrunken visual viewport on
+      // a desktop is a pinch-zoom or a trackpad gesture, not room the frame lost.
+      await page.waitForTimeout(100);
+      expect(await page.evaluate(() => document.documentElement.style.getPropertyValue('--app-vvh'))).toBe('');
+      expect((await settled(page)).frame!.height).toBeCloseTo(620, 0);
+    }
+    await settleEffects(page);
+    await dialog.screenshot({ path: info.outputPath(`claude-key-${touch ? 'keyboard' : 'desktop'}-390x844.png`) });
+    expect(denied).toEqual([]);
+    await context.close();
+  });
+}
+
+/**
+ * The same form, rendered where there is no dialog.
+ *
+ * `.connection-dialog` has exactly one consumer — the setup dialog — and what Settings
+ * and onboarding actually share is `.backend-connection-form`. The dialog's five-row
+ * grid is what hoists that form's three regions into place, and every rule that does so
+ * is scoped under `.connection-dialog`; this is the browser saying so, because a jsdom
+ * render resolves no stylesheet and therefore cannot tell a hoisted region from an
+ * ordinary one. Settings has to keep the plain column it always had.
+ */
+test('the Settings form keeps its own column and never inherits the dialog grid', async ({ page }, info) => {
+  const denied = await serveProduct(page);
+  await page.route('**/api/codex/models', (route) => route.fulfill({ json: { ok: true, models: [] } }));
+  await page.route('**/api/backend/codex/auth', (route) => route.fulfill({ json: { ok: true, active_auth_mode: 'api_key', auth_mode: 'api_key', has_api_key: true, api_key_masked: 'sk-••••fixture', base_url: 'https://fixture.invalid/v1', file_store_active: true } }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/e2e/onboarding-fidelity/fixture.html?surface=disabled-settings&lang=en&theme=dark');
+  const form = page.locator('.backend-connection-form');
+  await expect(form).toBeVisible();
+
+  const layout = await form.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      dialogs: document.querySelectorAll('.connection-dialog').length,
+      // The dialog's own rows belong to the dialog: Settings has its own page heading.
+      dialogRows: document.querySelectorAll('.connection-heading, .connection-description').length,
+      display: style.display,
+      flow: style.flexDirection,
+      overflowX: node.scrollWidth - node.clientWidth,
+      regions: [...node.children].map((child) => {
+        const own = getComputedStyle(child);
+        const box = child.getBoundingClientRect();
+        return { name: child.className.toString().split(' ')[0], row: own.gridRowStart, overflowY: own.overflowY, top: Math.round(box.top), height: Math.round(box.height) };
+      }),
+    };
+  });
+  expect(layout.dialogs).toBe(0);
+  expect(layout.dialogRows).toBe(0);
+  // `display: contents` is how the dialog hoists these three into its grid. Here the
+  // form is a box of its own, its regions are placed by flow and not by row, and the
+  // middle is not a scroller — it has the whole page to grow into.
+  expect(layout.display).toBe('flex');
+  expect(layout.flow).toBe('column');
+  expect(layout.regions.map((region) => region.name)).toEqual(['connection-radio', 'connection-body', 'connection-actions']);
+  expect(layout.regions.map((region) => region.row)).toEqual(['auto', 'auto', 'auto']);
+  expect(layout.regions.map((region) => region.overflowY)).toEqual(['visible', 'visible', 'visible']);
+  for (const region of layout.regions) expect(region.height, region.name).toBeGreaterThan(0);
+  expect(layout.regions.map((region) => region.top)).toEqual([...layout.regions.map((region) => region.top)].sort((left, right) => left - right));
+  expect(layout.overflowX).toBeLessThanOrEqual(1);
+
+  const save = form.getByRole('button', { name: 'Save', exact: true });
+  await save.scrollIntoViewIfNeeded();
+  await expect(save).toBeInViewport();
+  await settleEffects(page);
+  await page.screenshot({ path: info.outputPath('settings-form-column-390x844.png') });
+  expect(denied).toEqual([]);
+});
 
 for (const lang of ['en', 'zh']) {
   test(`corrected compact labels and Light action ${lang}`, async ({ page }, info) => {

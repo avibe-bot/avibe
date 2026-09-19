@@ -512,6 +512,37 @@ describe('shared Settings and onboarding connection owner', () => {
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
     await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: 'fixture-token', base_url: 'https://old.example' }));
   });
+  // An API key and an auth token are different credentials, not two spellings
+  // of one. So the two sides of the credential switch own their own unsent
+  // value AND their own answer to "is something already stored here" — a mask
+  // saved as an API key says nothing about the token side.
+  it('keeps the Claude API Key and Auth Token drafts independent of each other', async () => {
+    mock.api.getClaudeAuth.mockResolvedValue(native());
+    render(wrap(<BackendConnectionForm backend="claude" compact initialMethod="api_key" />));
+    const credential = async (id: 'API Key' | 'Auth Token') => {
+      const group = await screen.findByRole('radiogroup', { name: en.onboarding.connection.credentialType });
+      fireEvent.click(within(group).getByRole('radio', { name: id }));
+    };
+    // The stored key is an API key, so that side opens on its mask.
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace' }));
+    fireEvent.change(screen.getByLabelText('API Key', { exact: true }), { target: { value: 'sk-ant-半成品' } });
+
+    await credential('Auth Token');
+    // Nothing stored under this type, so no mask to replace and nothing typed.
+    expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
+    expect((screen.getByLabelText('Auth Token', { exact: true }) as HTMLInputElement).value).toBe('');
+    // Saving is not allowed on the strength of the other type's stored key.
+    expect((screen.getByRole('button', { name: en.onboarding.connection.saveConnect }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Auth Token', { exact: true }), { target: { value: '中转令牌' } });
+
+    await credential('API Key');
+    expect((screen.getByLabelText('API Key', { exact: true }) as HTMLInputElement).value).toBe('sk-ant-半成品');
+    await credential('Auth Token');
+    expect((screen.getByLabelText('Auth Token', { exact: true }) as HTMLInputElement).value).toBe('中转令牌');
+
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+    await waitFor(() => expect(mock.api.saveClaudeAuth).toHaveBeenCalledWith({ auth_mode: 'api_key', credential_type: 'auth_token', api_key: '中转令牌', base_url: 'https://old.example' }));
+  });
   it('Codex saves through its native owner and refuses uncertain keychain readback', async () => {
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ auth_mode_uncertain: true }));
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', ok: true, application: 'applied', ready: false, entry_eligible: false, auth: 'unknown' }));
@@ -599,50 +630,86 @@ describe('connection dialog frame', () => {
     expect(subscription.getAttribute('aria-checked')).toBe('true');
   });
 
-  it('offers the eight setup providers first, keeps a configured one out of More, and lets search reach the rest', async () => {
-    const entry = (id: string, name: string, patch: Partial<{ configured: boolean; models: string[] }> = {}) =>
-      ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [], ...patch });
-    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [
-      // `alibaba-cn`, `moonshot` and `google` arrive as bare ids — the case the
-      // brand table exists for. `mistral` arrives with a real name of its own.
-      entry('mistral', 'Mistral AI'), entry('openrouter', 'OpenRouter'), entry('alibaba-cn', 'alibaba-cn', { configured: true }),
-      entry('openai', 'OpenAI'), entry('moonshot', 'moonshot'), entry('google', 'google'),
-      entry('deepseek', 'DeepSeek'), entry('anthropic', 'Anthropic'), entry('xai', 'xAI'),
-      entry('cerebras', 'Cerebras', { configured: true }), entry('groq', 'Groq', { models: ['llama-3.3-70b'] }),
-      entry('ollama', 'Ollama local', { configured: false }),
-    ] });
+  // The picker's whole job in one fixture: every alias the brand table knows,
+  // two brands that arrive under more than one id, a configured provider that
+  // is NOT one of the eight, and the two ids the contract refuses to promote.
+  const PICKER = [
+    ['mistral', 'Mistral AI', { configured: true }], ['openrouter', 'OpenRouter', {}],
+    ['alibaba-cn', 'Alibaba (China)', {}], ['alibaba', 'alibaba', {}], ['dashscope', 'Alibaba DashScope', { configured: true }],
+    ['openai', 'OpenAI', {}], ['moonshot', 'moonshot', {}], ['moonshotai', 'Moonshot AI', {}],
+    ['google', 'google', {}], ['google-vertex', 'google-vertex', {}], ['zhipu', 'zhipu', {}],
+    ['deepseek', 'DeepSeek', {}], ['anthropic', 'Anthropic', {}], ['xai', 'xAI', {}],
+    ['cerebras', 'Cerebras', {}], ['groq', 'Groq', { models: ['llama-3.3-70b'] }],
+    ['zen', 'Zen', {}], ['go', 'Go', {}],
+    ['ollama', 'Ollama local', { local: true }],
+  ] as const;
+  const pickerProvider = ([id, name, patch]: (typeof PICKER)[number]) =>
+    ({ id, name, description: '', configured: false, oauth_available: false, local: false, models: [] as string[], ...patch });
+
+  it('gives each prioritised brand exactly one row, and keeps every other native provider reachable', async () => {
+    mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: PICKER.map(pickerProvider) });
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'opencode', auth: 'none', ready: false, entry_eligible: false }));
     render(wrap(<BackendConnectionDialog backend="opencode" method="api_key" onConnected={vi.fn()} onClose={vi.fn()} onWriteState={vi.fn()} />));
 
-    const names = () => screen.getAllByRole('button').map((node) => node.querySelector('strong')?.textContent).filter(Boolean);
+    // A row is its title and the id it is filed under — the second line, which
+    // is what the rest of OpenCode, its config and its model ids actually use.
+    const rows = () => screen.getAllByRole('button').filter((node) => node.querySelector('strong'))
+      .map((node) => ({ title: node.querySelector('strong')?.textContent ?? '', id: node.querySelector('small')?.textContent ?? '' }));
+    const names = () => rows().map((row) => row.title);
     await waitFor(() => expect(names().length).toBeGreaterThan(0));
-    // The ratified default order, by friendly name rather than by the internal
-    // id: `google`, `moonshot` and `alibaba-cn` are not what anyone calls them.
-    expect(names().slice(0, 8)).toEqual(['OpenAI', 'Anthropic', 'xAI', 'Gemini', 'DeepSeek', 'Qwen', 'Kimi', 'OpenRouter']);
-    // A configured provider outside the eight stays reachable without More.
-    expect(names()).toContain('Cerebras');
+
+    // Eight rows, one per brand, in the approved order and under the approved
+    // names — `google`, `moonshot` and the Alibaba ids are not what anyone
+    // calls them, and none of them may appear twice.
+    expect(names()).toEqual(['OpenAI', 'Anthropic', 'xAI', 'Gemini', 'DeepSeek', 'Qwen', 'Kimi', 'OpenRouter']);
+    // Which entry stands in a slot is decided, not incidental: the configured
+    // one where a brand has one, else the lowest id.
+    expect(rows().map((row) => row.id)).toEqual(['openai', 'anthropic', 'xai', 'google', 'deepseek', 'dashscope', 'moonshot', 'openrouter']);
+    // Being configured is not a promotion: Mistral holds credentials and still
+    // does not take a ninth slot.
     expect(names()).not.toContain('Mistral AI');
-    // The id it is filed under stays on the row, next to the brand name.
-    expect(screen.getByRole('button', { name: /Qwen/ }).textContent).toContain('alibaba-cn');
+    // And the two ids the contract refuses to offer as an official choice
+    // cannot reach the default list, because only the eight brands can.
+    expect(names()).not.toContain('Zen');
+    expect(names()).not.toContain('Go');
 
-    fireEvent.click(screen.getByRole('button', { name: /More providers \(3\)/ }));
-    // A server that already sent a friendly name keeps it; nothing is renamed
-    // to a catalog brand it did not claim.
-    expect(names()).toContain('Mistral AI');
+    const eligible = PICKER.filter(([, , patch]) => !('local' in patch)).map(([id]) => id);
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(`More providers \\(${eligible.length - 8}\\)`) }));
+    // Nothing the runtime offers is unreachable: the two lists together are
+    // exactly the providers an API key can be saved for, each one once.
+    expect(rows().map((row) => row.id).sort()).toEqual([...eligible].sort());
+    const [shortlist, more] = [rows().slice(0, 8), rows().slice(8)];
+    // Credentials already held are a reason to be easy to find, so More opens
+    // on them; the rest follow by name.
+    expect(more[0]).toEqual({ title: 'Mistral AI', id: 'mistral' });
+    const rest = more.slice(1).map((row) => row.title);
+    expect(rest).toEqual([...rest].sort((left, right) => left.localeCompare(right)));
+    expect(more.map((row) => row.title)).toContain('Zen');
+    expect(more.map((row) => row.title)).toContain('Go');
+    // No two rows may read the same. A brand's remaining entries keep their own
+    // name when the server sent one, and fall back to their id when it did not
+    // — `alibaba` would otherwise read "Qwen" twice over.
+    expect(new Set(names()).size).toBe(names().length);
+    expect(more).toContainEqual({ title: 'Alibaba (China)', id: 'alibaba-cn' });
+    expect(more).toContainEqual({ title: 'alibaba', id: 'alibaba' });
+    expect(more).toContainEqual({ title: 'Moonshot AI', id: 'moonshotai' });
+    expect(more).toContainEqual({ title: 'Zhipu AI', id: 'zhipu' });
+    expect(shortlist).toContainEqual({ title: 'Gemini', id: 'google' });
 
-    // Search reaches a provider that More would otherwise hold, by model id too.
+    // Search reaches every variant, under the brand name as well as the id.
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'qwen' } });
+    expect(rows().map((row) => row.id)).toEqual(['alibaba-cn', 'alibaba', 'dashscope']);
+    expect(screen.queryByRole('button', { name: /More providers/ })).toBeNull();
     fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'llama-3.3' } });
     expect(names()).toEqual(['Groq']);
-    expect(screen.queryByRole('button', { name: /More providers/ })).toBeNull();
 
     // Picking one hands the middle to the form and keeps the same frame rows.
-    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'Qwen' } });
-    fireEvent.click(screen.getByRole('button', { name: /Qwen/ }));
+    fireEvent.change(screen.getByLabelText(en.settings.backends.opencodeSearchPlaceholder), { target: { value: 'dashscope' } });
+    fireEvent.click(screen.getByRole('button', { name: /DashScope/ }));
     expect(await screen.findByLabelText(en.onboarding.connection.apiKeyLabel)).toBeTruthy();
     expect(frame().title).toBe('Connect OpenCode');
     expect(frame().rows).toEqual([1, 1, 1]);
-    // The internal id the rest of OpenCode uses stays visible after the choice.
-    expect(screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen')?.textContent).toContain('Qwen');
+    expect(screen.getByRole('button', { name: en.onboarding.connection.changeProvider }).closest('.connection-chosen')?.textContent).toContain('Alibaba DashScope');
   });
 
   it('never offers a local provider for an API Key, and follows OAuth capability for subscriptions', async () => {
