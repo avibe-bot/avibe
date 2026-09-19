@@ -881,6 +881,10 @@ export const ChatPage: React.FC = () => {
   // composer) + the loaded draft to seed the composer with.
   const [queue, setQueue] = useState<WorkbenchMessage[]>([]);
   const [sendingQueueNow, setSendingQueueNow] = useState(false);
+  // Each send-now invocation owns its completion state. A request can survive
+  // navigation away and back to the same session, so the session id alone is
+  // not enough to keep an older request from clearing a newer spinner.
+  const queueSendGenerationRef = useRef(0);
   const [initialDraft, setInitialDraft] = useState<string | null>(null);
   const draftTimerRef = useRef<number | null>(null);
   // The debounced draft save still owed to the server, tagged with the session
@@ -2300,6 +2304,7 @@ export const ChatPage: React.FC = () => {
     // flushes as one merged turn, so this runs the whole queue.
     const sid = sessionId;
     if (!sid || queue.length === 0 || sendingQueueNow) return;
+    const requestGeneration = ++queueSendGenerationRef.current;
     // Give the click an immediate visual response while the request interrupts
     // the current turn. The queue stays visible until admission succeeds so a
     // failed or ambiguous request never hides work the user may need to retry.
@@ -2337,7 +2342,9 @@ export const ChatPage: React.FC = () => {
         setError(errorMessage(err) ?? String(err));
       }
     } finally {
-      if (sid === sessionIdRef.current) setSendingQueueNow(false);
+      if (requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current) {
+        setSendingQueueNow(false);
+      }
     }
   }, [api, sessionId, queue, sendingQueueNow, t, refreshQueue, markWorking]);
 
