@@ -63,6 +63,15 @@ def _config():
     return config
 
 
+@pytest.fixture
+def persisted_config(monkeypatch, tmp_path):
+    _isolate_native_home(monkeypatch, tmp_path / "native")
+    monkeypatch.setattr(paths, "get_config_path", lambda: tmp_path / "config.json")
+    config = _config()
+    config.save()
+    return config
+
+
 def _snapshot(config):
     return {
         backend: {name: copy.deepcopy(getattr(getattr(config.agents, backend), name)) for name in names}
@@ -252,8 +261,8 @@ def test_service_reads_current_store_snapshot_and_allows_standalone_fixture(monk
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rejects_unowned_wrong_backend_and_cross_task_calls():
-    config = _config()
+async def test_coordinator_rejects_unowned_wrong_backend_and_cross_task_calls(persisted_config):
+    config = persisted_config
     runtime = _runtime(config)
     coordinator = runtime.coordinator
     snapshot = {"claude": _cleared(config)["claude"]}
@@ -278,8 +287,8 @@ async def test_coordinator_rejects_unowned_wrong_backend_and_cross_task_calls():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("opened", ["runtime", "turns"])
-async def test_coordinator_refuses_a_guard_with_an_opened_admission(opened):
-    config = _config()
+async def test_coordinator_refuses_a_guard_with_an_opened_admission(opened, persisted_config):
+    config = persisted_config
     runtime = _runtime(config)
     async with runtime.coordinator.migration_guard(("claude",)):
         gate = runtime.admissions if opened == "runtime" else runtime.turns
@@ -299,8 +308,8 @@ def test_coordinator_refuses_calls_without_an_event_loop():
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rechecks_the_existing_native_lease():
-    config = _config()
+async def test_coordinator_rechecks_the_existing_native_lease(persisted_config):
+    config = persisted_config
     runtime = _runtime(config)
     async with runtime.coordinator.migration_guard(("claude",)):
         _, lease = runtime.coordinator._migration_auth_owners["claude"]
@@ -335,8 +344,8 @@ async def test_owned_snapshot_seam_updates_v2_consumers_before_queue_admission(m
 
 
 @pytest.mark.asyncio
-async def test_coordinator_releases_reconciliation_ownership_on_cancellation():
-    runtime = _runtime(_config())
+async def test_coordinator_releases_reconciliation_ownership_on_cancellation(persisted_config):
+    runtime = _runtime(persisted_config)
     reconcile = runtime.coordinator.reconcile_migration_auth
     entered = asyncio.Event()
 
@@ -346,7 +355,7 @@ async def test_coordinator_releases_reconciliation_ownership_on_cancellation():
             entered.set()
             await asyncio.Future()
     task = asyncio.create_task(work())
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

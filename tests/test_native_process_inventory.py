@@ -257,6 +257,29 @@ def test_strict_binary_resolution_keeps_unrelated_recovery_out_of_scope(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("shape", ["raw", "compat"])
+async def test_real_guard_refuses_recovered_live_config_identity(monkeypatch, backend, shape):
+    recovered = V2Config._recover_payload({"mode": "self_host", "agents": "invalid"})
+    assert "agents" in recovered.recovered_sections
+    controller, coordinator, admissions, turns = _configured_owner(
+        recovered if shape == "raw" else to_app_config(recovered),
+    )
+    load = Mock(return_value=recovered)
+    monkeypatch.setattr(V2Config, "load", load)
+    inventory = Mock(return_value=[_row([f"/fixture/custom-{backend}"])])
+    monkeypatch.setattr(psutil, "process_iter", inventory)
+    coordinator._process_inventory = native_cli_processes
+    with pytest.raises(NativeMigrationBlockedError, match="^process_inventory_unavailable$"):
+        async with coordinator.migration_guard((backend,)):
+            pytest.fail("recovered live config must not certify native absence")
+    load.assert_called_once_with(persist_migrations=False)
+    inventory.assert_not_called()
+    assert not admissions and not turns
+    controller.agent_service.force_cancel_backend_turns.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("command", [
     ["node", "--eval=0", "SCRIPT"], ["node", "-", "SCRIPT"],
     ["python3", "-m", "unrelated", "SCRIPT"],

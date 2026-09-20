@@ -678,7 +678,9 @@ class AgentAuthService:
         # flows ignore a non-default cli_path and fall through to
         # ``$PATH``, breaking installs that pin a specific binary.
         backend_cfg = self._resolve_backend_config(backend)
-        if backend_cfg is None:
+        # Compatibility projection can erase recovery provenance, so inventory
+        # validates persisted evidence even when a live backend object exists.
+        if strict or backend_cfg is None:
             try:
                 from config.v2_config import V2Config
 
@@ -689,7 +691,8 @@ class AgentAuthService:
                            for section in config.recovered_sections)
                 ):
                     raise NativeMigrationBlockedError("process_inventory_unavailable", (backend,))
-                backend_cfg = getattr(config.agents, backend, None)
+                if backend_cfg is None:
+                    backend_cfg = getattr(config.agents, backend, None)
             except Exception:  # noqa: BLE001
                 if strict:
                     # A missing/unknown configured identity is not evidence of
