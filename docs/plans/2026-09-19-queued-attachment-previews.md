@@ -59,6 +59,14 @@ existing file/image path context for Claude and OpenCode. Preserve complete
 Delivery snapshots on refusal or ambiguous acknowledgement. Surface deferred
 send feedback without hiding the queued image.
 
+The first review found a read-side gap: retaining the Delivery snapshot was not
+enough when the queue endpoint selected only `queued`. Both queue and bootstrap
+now include unaccepted steering states, preserving order and attachments without
+making them claimable. The UI derives confirming feedback and disabled mutation
+controls from that persisted state, including after reload. Accepted and refused
+receipts notify viewers after commit; tests cover the actual HTTP projection and
+subsequent settlement rather than returning an unchanged queued mock.
+
 The current queue renderer already handles Web and IM image shapes. Inspection
 found an installed host serving an older bundle without those components, while
 the current local master regression contains them; do not infer a new renderer

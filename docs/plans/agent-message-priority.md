@@ -119,6 +119,15 @@ ambiguous acknowledgement retains the existing reconciliation fence. The
 send-now response exposes queued refusal reasons so the UI never implies that
 the attachment was sent when it was not.
 
+The queue and bootstrap read projections retain unaccepted `pending_steer`,
+`steering`, and `reconciling_steer` rows in FIFO order with their original content.
+These rows remain inspectable after reload but cannot be recalled, deleted, or
+sent again; a fenced head blocks Send Now without blocking removal of queued
+followers. The strict queued-only storage default and native ordering fences
+remain unchanged. Receipt settlement publishes a queue refresh after commit:
+acceptance transfers the input to the transcript, while definitive refusal
+restores the editable queued row (or retires it for an inactive Session).
+
 Attachment steering acceptance scenarios:
 
 - `QUEUE-IMAGE-001`: pure image and Chinese text/image queue heads reach the exact
@@ -128,7 +137,9 @@ Attachment steering acceptance scenarios:
 - `QUEUE-IMAGE-003`: foreign/revoked/missing media refuses the whole input before
   writing text; unknown acknowledgements never retry or duplicate the input.
 - `QUEUE-IMAGE-004`: queued thumbnails and send feedback survive refresh and
-  queue-to-transcript transition, with text-only behavior unchanged.
+  reload while steering is unconfirmed; pending rows are read-only, and receipt
+  settlement restores queued actions or moves the input to the transcript.
+  Text-only rows use the same delivery-state projection.
 
 ## Ownership Closure
 

@@ -9355,7 +9355,7 @@ async def sessions_bootstrap(session_id: str):
         queued = (
             [
                 message_deliveries.public_delivery_payload(item)
-                for item in message_deliveries.list_queued(conn, session_id)
+                for item in message_deliveries.list_queued(conn, session_id, include_steering=True)
             ]
             if can_chat
             else []
@@ -11788,7 +11788,7 @@ def sessions_queue_list(session_id: str):
     with engine.connect() as conn:
         queued = [
             message_deliveries.public_delivery_payload(item)
-            for item in message_deliveries.list_queued(conn, session_id)
+            for item in message_deliveries.list_queued(conn, session_id, include_steering=True)
         ]
     return jsonify({"queued": queued})
 

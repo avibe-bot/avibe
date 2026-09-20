@@ -480,11 +480,20 @@ def claimable_fifo_prefix(conn: Connection, session_id: str) -> list[dict[str, A
     return prefix
 
 
-def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
+def list_queued(
+    conn: Connection, session_id: str, *, include_steering: bool = False
+) -> list[dict[str, Any]]:
+    """Read the backlog, optionally including unaccepted UI-visible steers.
+
+    Steering rows remain fenced, not claimable or removable. Operational callers
+    retain the strict queued-only default; queue/bootstrap use the wider read
+    projection so an uncertain native write never hides the original input.
+    """
+    states = ("queued", "pending_steer", "steering", "reconciling_steer") if include_steering else ("queued",)
     rows = conn.execute(
         select(message_deliveries)
         .where(message_deliveries.c.session_id == session_id)
-        .where(message_deliveries.c.state == "queued")
+        .where(message_deliveries.c.state.in_(states))
         .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
     ).mappings()
     return [delivery_payload(dict(row)) for row in rows]

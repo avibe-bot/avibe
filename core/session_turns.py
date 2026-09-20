@@ -2719,6 +2719,9 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         delivery_id = str(deliveries[0]["id"])
+        # The steering claim has committed. Other viewers must see the same
+        # read-only pending row while the native write is in flight.
+        self._publish_queue_update(str(deliveries[0]["session_id"]))
         if not self._compatible_steer_memory_authority(logical_turn_id, deliveries):
             return await self._finish_steer(
                 delivery_id, steer_result(SteerOutcome.REFUSED, reason="memory_authority_changed"), context=context
@@ -3382,14 +3385,12 @@ class SessionTurnManager:
                         receipt=body,
                     )
                     saved = unknown_rows[0] if unknown_rows else None
-                    return DeliveryResult(
-                        delivery_id,
-                        None,
-                        "reconciling_steer",
-                        target_turn_id or None,
-                        None if unknown_rows and all(unknown_rows) else "receipt_cas_lost",
-                    )
-                if not materialized:
+                    if not unknown_rows or not all(unknown_rows):
+                        return DeliveryResult(
+                            delivery_id, None, "reconciling_steer",
+                            target_turn_id or None, "receipt_cas_lost",
+                        )
+                elif not materialized:
                     session_status = conn.execute(
                         select(agent_sessions.c.status).where(
                             agent_sessions.c.id == str(delivery["session_id"])
@@ -3446,6 +3447,8 @@ class SessionTurnManager:
                     "failed to persist steer receipt recovery fence for delivery=%s",
                     delivery_id,
                 )
+            if session_id:
+                self._publish_queue_update(session_id)
             return DeliveryResult(
                 delivery_id,
                 None,
@@ -3473,6 +3476,10 @@ class SessionTurnManager:
                 target_turn_id or None,
                 admission="steered",
             )
+        if saved is not None:
+            # Publish only after the receipt transaction commits, including
+            # recovery refusal: otherwise a viewer stays stuck in confirming.
+            self._publish_queue_update(session_id)
         if should_drain:
             await self.drain_delivery_queue(session_id)
             committed = self._committed_delivery_result(delivery_id)
@@ -3481,7 +3488,7 @@ class SessionTurnManager:
             delivery_id,
             None,
             str((saved or {}).get("state") or "reconciling_steer"),
-            None,
+            str((saved or {}).get("current_target_turn_id") or "") or None,
         )
 
     async def _admit_p0(

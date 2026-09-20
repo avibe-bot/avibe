@@ -1316,6 +1316,9 @@ export type WorkbenchMessage = {
   parent_native_message_id: string | null;
   // Server-owned read projection. Durable Message rows never carry this field.
   projection?: 'claimed_delivery' | null;
+  // Queue/bootstrap include unaccepted steers as well as editable queued rows.
+  // Durable transcript Messages do not carry Delivery state.
+  state?: string;
   // Server-owned queued Delivery recovery projection, not Message metadata.
   requires_explicit_retry?: boolean;
   retry_reason?: string | null;

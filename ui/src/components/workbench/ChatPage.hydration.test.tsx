@@ -263,6 +263,7 @@ describe('ChatPage transcript hydration', () => {
   ])('retains the image and explains $status after send-now', async ({ status, reason, notice }) => {
     const image = {
       ...queuedMessage('queued-image', ''),
+      state: 'queued',
       content: { attachments: [{
         token: 'image-token', name: '队列图片.png', mime: 'image/png', url: '/api/media/image-token',
       }] },
@@ -272,7 +273,7 @@ describe('ChatPage transcript hydration', () => {
       ...bootstrapPayload('session-new'), queued: [image], turn_state: running,
     });
     mocks.api.getTurnState.mockResolvedValue(running);
-    mocks.api.listSessionQueue.mockResolvedValue({ queued: [image] });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [{ ...image, state: status }] });
     const send = deferred<{ ok: boolean; status: string; reason?: string }>();
     mocks.api.sendQueuedNow.mockReturnValue(send.promise);
     render(
@@ -288,8 +289,48 @@ describe('ChatPage transcript hydration', () => {
     await act(async () => send.resolve({ ok: true, status, reason }));
     await screen.findByText(notice);
     expect(document.querySelector('img[src="/api/media/image-token"]')).not.toBeNull();
-    expect(screen.getByRole('button', { name: 'chat.queue.sendNow' }).getAttribute('disabled')).toBeNull();
+    const control = screen.getByRole('button', {
+      name: status === 'reconciling_steer' ? 'chat.queue.confirmingNow' : 'chat.queue.sendNow',
+    }) as HTMLButtonElement;
+    expect(control.disabled).toBe(status === 'reconciling_steer');
     expect(mocks.api.cancelSession).not.toHaveBeenCalled();
+  });
+
+  it.each(['accepted', 'queued'])('restores a confirming image on reload and follows $status settlement', async (settlement) => {
+    const image = {
+      ...queuedMessage('queued-image', ''),
+      state: 'reconciling_steer',
+      content: { attachments: [{
+        token: 'image-token', name: '队列图片.png', mime: 'image/png', url: '/api/media/image-token',
+      }] },
+    };
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'), queued: [image],
+    });
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    const confirming = await screen.findByRole('button', { name: 'chat.queue.confirmingNow' });
+    expect((confirming as HTMLButtonElement).disabled).toBe(true);
+    expect(document.querySelector('img[src="/api/media/image-token"]')).not.toBeNull();
+    fireEvent.click(confirming);
+    expect(mocks.api.sendQueuedNow).not.toHaveBeenCalled();
+    mocks.api.listSessionQueue.mockResolvedValue({
+      queued: settlement === 'accepted' ? [] : [{ ...image, state: 'queued' }],
+    });
+    act(() => mocks.events?.onQueueUpdated({ session_id: 'session-new' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'chat.queue.confirmingNow' })).toBeNull());
+    expect(screen.queryByText('chat.queue.sendReconciling')).toBeNull();
+    if (settlement === 'queued') {
+      expect((screen.getByRole('button', { name: 'chat.queue.sendNow' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(document.querySelector('img[src="/api/media/image-token"]')).not.toBeNull();
+    } else {
+      expect(document.querySelector('[data-queue-row]')).toBeNull();
+      act(() => mocks.events?.onMessageNew({ ...image, type: 'user' }));
+      expect(document.querySelector('img[src="/api/media/image-token"]')).not.toBeNull();
+    }
   });
 
   it('keeps the loading view when SSE Session-row recovery beats transcript bootstrap', async () => {

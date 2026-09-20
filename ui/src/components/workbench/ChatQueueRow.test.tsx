@@ -120,6 +120,43 @@ const chips = () => [...document.querySelectorAll('[data-queue-attachment^="file
 const more = () => [...document.querySelectorAll('[data-queue-attachment-more="true"]')] as HTMLElement[];
 
 describe('QueueStrip — compatible queued messages read as one batch', () => {
+  it.each(['pending_steer', 'steering', 'reconciling_steer'])('keeps a %s head visible and read-only while followers remain editable', (state) => {
+    const onSendNow = vi.fn();
+    const onRemove = vi.fn();
+    const items = [
+      queued({ id: 'head', source: 'user', state, content: {} }),
+      queued({ id: 'follower', source: 'user', state: 'queued', content: {} }),
+    ];
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueueStrip queue={items} onRemove={onRemove} onRecall={vi.fn()} onSendNow={onSendNow} />
+      </I18nextProvider>,
+    );
+    const send = screen.getByRole('button', { name: state === 'reconciling_steer' ? 'Confirming…' : 'Sending…' });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(send);
+    expect(onSendNow).not.toHaveBeenCalled();
+    const rows = [...document.querySelectorAll<HTMLElement>('[data-queue-row]')];
+    const remove = within(rows[0]).getByRole('button', { name: 'Remove from queue' });
+    expect((remove as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(remove);
+    expect(onRemove).not.toHaveBeenCalled();
+    expect(within(rows[0]).queryByRole('button', { name: 'Recall to input' })).toBeNull();
+    expect(within(rows[1]).getByRole('button', { name: 'Recall to input' })).toBeTruthy();
+    fireEvent.click(within(rows[1]).getByRole('button', { name: 'Remove from queue' }));
+    expect(onRemove).toHaveBeenCalledWith('follower');
+  });
+
+  it('leaves a fenced image inspectable', () => {
+    const { openImage } = mountQueued(queued({
+      state: 'reconciling_steer', text: '',
+      content: { attachments: [{ token: 'pending-image', name: '队列图片.png', mime: 'image/png' }] },
+    }));
+    fireEvent.click(thumbs()[0]);
+    expect(openImage).toHaveBeenCalled();
+    expect(screen.getByText('队列图片.png')).toBeTruthy();
+  });
+
   it('MESSAGE-DELIVERY-031: shows the server-owned retry hold and preserves Send now', () => {
     const onSendNow = vi.fn();
     const items = [queued({
