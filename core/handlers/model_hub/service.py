@@ -94,6 +94,7 @@ from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_i
 from .migration import (
     MigrationConflictError,
     MigrationCredentialsInvalidError,
+    MigrationReauthorizationRequiredError,
     apply_native_migration,
     prepare_takeover_reauthentication,
     recover_native_migration,
@@ -6434,6 +6435,8 @@ class ModelHubService:
             applied, added_to = await await_owned_task(task)
         except MigrationCredentialsInvalidError:
             raise ModelHubError("migration_credentials_invalid", status=409) from None
+        except MigrationReauthorizationRequiredError:
+            raise ModelHubError("migration_reauthorization_required", status=409) from None
         except NativeMigrationBlockedError:
             raise ModelHubError("migration_native_busy", status=409) from None
         except (NativeOAuthPermissionError, PermissionError):

@@ -244,6 +244,84 @@ def test_completed_receipt_does_not_authorize_new_unconsented_native_key(monkeyp
     assert len(adapter.provisioned) == 1
 
 
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+@pytest.mark.parametrize("selection", ["mixed", "subset"])
+def test_receipt_retains_known_oauth_with_a_different_fresh_selection(
+    monkeypatch, tmp_path, legacy_receipt, selection,
+):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_codex_oauth(home)
+    native = home / ".codex/auth.json"
+    original = native.read_bytes()
+    other = home / ".config/opencode/opencode.json"
+    other_payload = '{"provider":{"openai":{"options":{"apiKey":"fixture-new-openai"}}}}'
+    if selection == "subset":
+        _write(other, other_payload)
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    asyncio.run(service.migration_apply(ids))
+    receipt = service.migration_journal.completed()
+    if legacy_receipt:
+        for row, identity in zip(receipt["items"], receipt.pop("inventory_ids"), strict=True):
+            row["id"] = identity
+        NativeTakeoverJournal(service.migration_journal.path.with_name("last-completed.json")).save(receipt)
+    old_refs = {source.id: source.credential_ref for source in store.config.sources}
+    native.write_bytes(original)
+    if selection == "mixed":
+        _write(other, other_payload)
+    rows = service.migration_scan()["items"]
+    assert {row["backend"] for row in rows} == (
+        {"codex", "opencode"} if selection == "mixed" else {"codex"}
+    )
+    result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert result["applied"] == len(rows)
+    assert len(adapter.oauth_provisioned) == 1
+    assert len(adapter.provisioned) == 1
+    assert len(store.config.sources) == 2
+    assert old_refs.items() <= {
+        source.id: source.credential_ref for source in store.config.sources
+    }.items()
+    assert service.migration_scan()["items"] == []
+    assert service.migration_journal.load() is None
+    assert adapter.revoked == []
+
+
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+@pytest.mark.parametrize("change", ["metadata", "tokens"])
+def test_receipt_cannot_prove_a_second_native_oauth_authorization(
+    monkeypatch, tmp_path, legacy_receipt, change,
+):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_codex_oauth(home)
+    native = home / ".codex/auth.json"
+    original = json.loads(native.read_text())
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    asyncio.run(service.migration_apply(ids))
+    receipt = service.migration_journal.completed()
+    if legacy_receipt:
+        for row, identity in zip(receipt["items"], receipt.pop("inventory_ids"), strict=True):
+            row["id"] = identity
+        NativeTakeoverJournal(service.migration_journal.path.with_name("last-completed.json")).save(receipt)
+    if change == "metadata":
+        original["fixture_unrelated_metadata"] = True
+    else:
+        original["tokens"]["access_token"] = "fixture-new-native-access"
+        original["tokens"]["refresh_token"] = "fixture-new-native-refresh"
+    _write(native, json.dumps(original))
+    before = native.read_bytes(), store.config.to_payload()
+    rows = service.migration_scan()["items"]
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert failure.value.code == "migration_reauthorization_required"
+    assert (native.read_bytes(), store.config.to_payload()) == before
+    assert len(adapter.oauth_provisioned) == 1
+    assert service.migration_journal.load() is None
+    assert adapter.revoked == []
+
+
 def test_restart_recovers_exposed_handoff_without_native_tokens(monkeypatch, tmp_path):
     home = tmp_path / "native"
     _write_claude_oauth(home)

@@ -1616,6 +1616,7 @@
           "helper": "Credentials supplied by a command cannot be imported. Save them in a supported static configuration or add the source manually in Model Hub.",
           "token": "This login token or authentication format cannot be imported. Add a source in Model Hub or sign in again for that source.",
           "headers": "Custom credential headers cannot be imported. Use a supported authentication method or add the source manually in Model Hub.",
+          "transport": "Model Hub cannot send this endpoint's saved authentication in the same way. The original files are unchanged. Use an authentication method supported by both the provider and Model Hub; changing file permissions will not fix this.",
           "fallback": "This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually."
         },
         "applying": "Migrating…",
@@ -1625,7 +1626,8 @@
           "recoveryPending": "Migration is unfinished. Retry to continue.",
           "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",
           "configurationBlocked": "Adjust the native configuration, then scan again.",
-          "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub."
+          "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub.",
+          "reauthorizationRequired": "This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login."
         },
         "applied_one": "Migration complete",
         "applied_other": "Migration complete",

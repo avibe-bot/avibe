@@ -240,6 +240,7 @@ describe('MigrationDialog — the settings default', () => {
     ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
     ['migration_item_conflict', 'Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.'],
     ['migration_configuration_blocked', 'Adjust the native configuration, then scan again.'],
+    ['migration_reauthorization_required', 'This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login.'],
   ] as const)('maps %s to concise localized copy', async (code, message) => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
     vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError(code));

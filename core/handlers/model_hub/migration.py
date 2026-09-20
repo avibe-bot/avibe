@@ -99,6 +99,10 @@ class MigrationCredentialsInvalidError(RuntimeError):
     """Custody transferred, but one or more grants require Hub reauthentication."""
 
 
+class MigrationReauthorizationRequiredError(RuntimeError):
+    """A changed native snapshot cannot prove a new post-takeover OAuth grant."""
+
+
 class MigrationHost(Protocol):
     store: Any
     adapter: Any
@@ -1399,6 +1403,7 @@ async def _prepare_takeover(
     consented: list[NativeMigrationItem] | None = None,
     project_roots: tuple[Path, ...] = (),
     retained_source_ids: tuple[str, ...] | None = None,
+    retained_item_ids: frozenset[str] = frozenset(),
     clean_native_stores: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Stage all grants and durable before/after images, still native-owned."""
@@ -1419,7 +1424,9 @@ async def _prepare_takeover(
         # A completed receipt can authorize cleanup of the exact old material
         # reintroduced by an external writer. Its current Hub refs are already
         # authoritative; never provision that old OAuth snapshot again.
-        for item in selected if retained_source_ids is None else ():
+        for item in selected:
+            if item.id in retained_item_ids:
+                continue
             protocol = item.protocol
             auth_options = {"auth_scheme": item.auth_scheme} if item.auth_scheme is not None else {}
             observation: SourceObservation | None = None
@@ -1851,18 +1858,23 @@ async def apply_native_migration(
         # original authentication. Selection is therefore grouped by backend.
         if any(item.backend in backends and item.id not in item_ids for item in available):
             raise MigrationConflictError
-        if (
-            completed_record is None
-            and record is not None and record["phase"] == "complete"
-            and sorted(record.get("inventory_ids", [item["id"] for item in record["items"]])) == sorted(
-                item.receipt_identity or item.id for item in selected
-            )
-        ):
+        retained_inventory_ids = (
+            set(record.get("inventory_ids", [item["id"] for item in record["items"]]))
+            & {item.receipt_identity or item.id for item in selected}
+            if record is not None and record["phase"] == "complete" else set()
+        )
+        previous_oauth_backends = {
+            item["backend"] for item in record["items"]
+            if item["kind"] == "oauth_native"
+        } if record is not None and record["phase"] == "complete" and record["source_ids"] else set()
+        if retained_inventory_ids:
             # Fresh file-bound consent may describe the same old grant that
             # an external writer restored after cleanup. Keep the current Hub
             # credential rather than provisioning/refreshing that old grant.
             # Before file-bound IDs existed, receipt item IDs already were
             # these opaque inventory IDs; preserve that exact legacy proof.
+            # Consent can add or omit other backends. Grant ownership is not
+            # conditional on the entire selection being repeated.
             completed_record = record
         async with host.migration_guard(backends) as verify_idle:
             async with host._mutation_lock:
@@ -1882,6 +1894,7 @@ async def apply_native_migration(
                 )
                 consented = selected
                 selected = []
+                retained_item_ids: set[str] = set()
                 clean_native_stores: dict[str, str] = {}
                 for original in consented:
                     resolved = [
@@ -1928,7 +1941,19 @@ async def apply_native_migration(
                         for item in resolved
                     ):
                         raise MigrationConflictError
+                    if (
+                        original.backend in previous_oauth_backends
+                        and (original.receipt_identity or original.id) not in retained_inventory_ids
+                        and any(item.kind == "oauth_native" for item in resolved)
+                    ):
+                        # Snapshot/revision changes cannot distinguish new
+                        # authorization from an old refresh token copied into
+                        # an edited container. Only Hub reauthentication can
+                        # establish a fresh grant; never reprovision by guess.
+                        raise MigrationReauthorizationRequiredError
                     selected.extend(item for item in resolved if item not in selected)
+                    if (original.receipt_identity or original.id) in retained_inventory_ids:
+                        retained_item_ids.update(item.id for item in resolved)
                 if any(item.backend in backends and item not in selected for item in rescanned):
                     raise MigrationConflictError
                 record = await _prepare_takeover(
@@ -1940,6 +1965,7 @@ async def apply_native_migration(
                         tuple(completed_record["source_ids"])
                         if completed_record is not None else None
                     ),
+                    retained_item_ids=frozenset(retained_item_ids),
                     clean_native_stores=clean_native_stores,
                 )
                 return await _resume_takeover(host, record, verify_idle)

@@ -129,6 +129,7 @@ const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
   migration_item_conflict: 'settings.models.migration.errors.itemConflict',
   migration_configuration_blocked: 'settings.models.migration.errors.configurationBlocked',
   migration_credentials_invalid: 'settings.models.migration.errors.credentialsInvalid',
+  migration_reauthorization_required: 'settings.models.migration.errors.reauthorizationRequired',
 };
 const BLOCKED_NOTE_KEYS = new Set<string>([
   'settings.models.migration.blocked.config',
@@ -141,6 +142,7 @@ const BLOCKED_NOTE_KEYS = new Set<string>([
   'settings.models.migration.blocked.helper',
   'settings.models.migration.blocked.token',
   'settings.models.migration.blocked.headers',
+  'settings.models.migration.blocked.transport',
 ] satisfies TranslationKey[]);
 const BLOCKED_FALLBACK_KEY = 'settings.models.migration.blocked.fallback' satisfies TranslationKey;
 

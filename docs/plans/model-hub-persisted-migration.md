@@ -37,6 +37,11 @@ is authorized by this implementation task.
   Absent metadata keeps legacy behavior; unknown schemes fail closed. Official
   Anthropic endpoint Bearer and tokens triggering the pinned engine's
   `sk-ant-oat` OAuth heuristic are not reinterpreted or imported.
+  Conversely, saved Anthropic API-key-header credentials for custom endpoints
+  cannot migrate: the pinned engine sends Bearer there. Migration refuses
+  this mismatch before proof/reuse/custody and preserves the original files;
+  it never treats accepting both headers as permission to change semantics.
+  This migration-only check does not change legacy public Source behavior.
   Public Source/Binding/Record shapes stay unchanged. The shared pure validator
   is `validate_api_key_auth_scheme(vendor, protocol, base_url, secret,
   auth_scheme)` in `api_key_vendors.py`; `protocol=None` is only for transient
@@ -58,7 +63,19 @@ is authorized by this implementation task.
   snapshot-bound consent IDs. Fresh consent for the exact restored old
   credential/target may clean it again only while the receipt's current Hub
   Source/ref ownership still matches; it must never reprovision an old OAuth
-  grant. Legacy receipts remain readable and keep exact-selection behavior.
+  grant. Legacy receipts remain readable: their original leaf IDs supply the
+  same exact inventory proof, after fresh full-file consent and ownership
+  validation. An unrelated or changed grant is not inferred to match.
+  Matching applies per consented item, not to the whole selection, so adding
+  another backend or restoring a subset cannot reprovision an old grant.
+  The existing receipt Source bundle is retained and verified as a whole,
+  without inventing a one-to-one item/Source mapping. A changed OAuth snapshot
+  for a backend already covered by that receipt cannot prove new authorization:
+  refuse cleanup/provisioning and direct the user to existing Hub reauthentication.
+  An entirely Source-free receipt is an empty-only confirmation and does not
+  assert prior OAuth custody. Mixed receipts cannot prove which opaque native
+  container was empty: conservatively require Hub reauthentication there.
+  A cleaned container revision alone does not establish absence of prior OAuth.
 - Public scan adds `source_paths: list[str]` (display-safe file locators, never
   secret content). Existing payload fields remain compatible. Blocked rows
   use specific `settings.models.migration.blocked.*` keys; UI shows every
