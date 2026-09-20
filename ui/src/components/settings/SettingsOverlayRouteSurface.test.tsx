@@ -20,6 +20,7 @@ import {
 
 import {
   closeSettingsOverlay,
+  SettingsFocusHandoffContext,
   useSettingsOverlayOrigin,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
@@ -150,6 +151,16 @@ const ChatProbe = () => {
     }
   }, [location, navigate, routeSurfaceActive]);
 
+  // Stands in for a command route — /apps/show/:id, /apps/library — reaching the
+  // end of its errand while Settings holds the foreground: it opens its window
+  // and replaces itself with the canvas. Retired is exactly when this happens,
+  // because those routes are lazily loaded and the chunk can land after the
+  // user has opened Settings.
+  useEffect(() => {
+    const handoff = (location.state as { handoff?: string } | null)?.handoff;
+    if (!routeSurfaceActive && handoff === 'pending') navigate('/', { replace: true });
+  }, [location, navigate, routeSurfaceActive]);
+
   return (
     <main>
       <div data-testid="chat-location">{`${location.pathname}${location.search}${location.hash}`}</div>
@@ -232,9 +243,37 @@ const SettingsToggle = () => {
   );
 };
 
-const Harness = ({ desktop }: { desktop: boolean }) => (
+// Stands in for the shell's own way out of Settings when a window comes
+// forward: it raises the one-shot handoff flag and then leaves, in that order,
+// exactly as AppShell does. Driven by `fireEvent.click` rather than a user
+// gesture, because the real caller is not a control at all — the window manager
+// announces the foreground change — so there is no pointer, nothing outside the
+// surface is pressed, and nothing here becomes the origin's new focus owner.
+const WindowForegroundExit = ({ handoffRef }: { handoffRef: { current: boolean } }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const origin = useSettingsOverlayOrigin(location);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!origin) return;
+        handoffRef.current = true;
+        closeSettingsOverlay(navigate, origin);
+      }}
+    >
+      leave-for-window
+    </button>
+  );
+};
+
+const Harness = ({ desktop }: { desktop: boolean }) => {
+  const handoffRef = useRef(false);
+  return (
+  <SettingsFocusHandoffContext.Provider value={handoffRef}>
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
+    <WindowForegroundExit handoffRef={handoffRef} />
     {/* Shell chrome that lives OUTSIDE the overlay. Inline, the app sidebar is
         still on screen beside Settings and still live, so what an outside
         interaction means stops being hypothetical. */}
@@ -257,7 +296,9 @@ const Harness = ({ desktop }: { desktop: boolean }) => (
       <Route path="/" element={<div>workbench</div>} />
     </SettingsOverlayRouteSurface>
   </SettingsOverlayNavigationBoundary>
-);
+  </SettingsFocusHandoffContext.Provider>
+  );
+};
 
 const RoutedHarness = ({ desktop = true }: { desktop?: boolean }) => (
   <Routes>
@@ -280,6 +321,9 @@ beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
   window.localStorage.clear();
+  // The exit reads the real history stack to decide between a pop and a
+  // replace, so tests that care about which one it takes set `idx` themselves.
+  window.history.replaceState(null, '');
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     matches: true,
     addEventListener: vi.fn(),
@@ -343,6 +387,57 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('button', { name: 'close-settings' }));
     expect(router.state.location.pathname).toBe('/chat/ses_1');
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
+    expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
+  });
+
+  // With a real history stack behind it the exit prefers a pop back to the
+  // entry the origin was read from — cheaper, and it keeps the stack honest.
+  // That entry is only the origin for as long as nobody has moved the origin.
+  // A command route finishing under Settings moves it, and the pop would undo
+  // that: back to the url the command was already spent on, which mounts it
+  // again and puts its window over whatever the user opened Settings to reach.
+  it('returns to a rewritten origin instead of the entry it was read from', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat/ses_1', state: { handoff: 'pending' } }]}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    // The browser pushed an entry for Settings; the origin still points at 0.
+    window.history.replaceState({ idx: 1 }, '');
+
+    // The command ran while retired and handed the canvas back to the surface,
+    // so the retained route is already gone before the user leaves Settings.
+    await waitFor(() => expect(screen.queryByTestId('chat-location')).toBeNull());
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByText('workbench')).toBeTruthy();
+    expect(screen.queryByTestId('chat-location')).toBeNull();
+  });
+
+  // The same rule with nothing but state rewritten. The pop would land on the
+  // right url carrying the wrong payload, which is the same staleness wearing a
+  // smaller hat — and it is what a browser, unlike a memory router, would
+  // actually have done to the assertion two tests up.
+  it('returns to a state-only rewrite of the origin as well', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat/ses_1', state: { maintenance: 'pending' } }]}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    window.history.replaceState({ idx: 1 }, '');
+    await waitFor(() => expect(screen.getByTestId('chat-maintenance').textContent).toBe('done'));
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
     expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
   });
 
@@ -422,6 +517,29 @@ describe('SettingsOverlayRouteSurface', () => {
       screen.getByRole('link', { name: 'shell-settings' }),
     ));
     expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: inputName }));
+  });
+
+  // The exception to the rule above, and the only one. A retained window that
+  // refocuses itself does not get to outrank the control that opened Settings —
+  // unless that window is why Settings is closing. The window chords read their
+  // target from DOM focus, so taking focus back here would leave the window the
+  // user just asked for on screen and deaf to ⌘W, which would then fall through
+  // to the browser's close-tab.
+  it('leaves focus with the window that closed Settings', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-app-window' }));
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-app-window' }));
+    fireEvent.click(screen.getByRole('button', { name: 'leave-for-window' }));
+
+    const input = await screen.findByRole('textbox', { name: 'retained app-window input' });
+    await settleDeferredFocus();
+    expect(document.activeElement).toBe(input);
   });
 
   it('does not let a stale close callback focus the old origin after Settings reopens', async () => {

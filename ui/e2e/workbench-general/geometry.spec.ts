@@ -676,4 +676,52 @@ test.describe('general settings geometry', () => {
     expect(await widthOf(page, SETTINGS_RAIL)).toBe(standaloneRail);
     expect(denied).toEqual([]);
   });
+
+  // Keeping that column live means keeping its controls. Apps is one of them,
+  // and the one a boundary can quietly take away: it portals its button and Dock
+  // to `document.body`, so nothing in the sidebar's markup shows it missing.
+  test('keeps the Apps launcher usable beside inline Settings', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.setViewportSize(ULTRA);
+    await open(page, '/');
+    const apps = page.getByRole('button', { name: 'Apps', exact: true });
+    await expect(apps).toBeVisible();
+
+    const overlay = page.locator('[data-settings-overlay="true"]');
+    await page.locator(`${SIDEBAR} [data-settings-toggle="true"]`).click();
+    // Standalone stands in for the sidebar, so the sidebar's controls go with it.
+    await expect(overlay).toHaveAttribute('data-settings-menu-placement', 'standalone');
+    await expect(apps).toHaveCount(0);
+
+    await page.getByRole('radio', { name: 'Inline' }).click();
+    await expect(overlay).toHaveAttribute('data-settings-menu-placement', 'inline');
+    await expect(apps).toBeVisible();
+
+    // Reachable, not merely rendered: it floats at z-40 over a surface at z-30,
+    // and which of the two the pointer lands on is a hit test.
+    const box = (await apps.boundingBox())!;
+    expect(await page.evaluate(([x, y]) => Boolean(
+      document.elementFromPoint(x, y)?.closest('button[aria-haspopup="menu"]'),
+    ), [box.x + box.width / 2, box.y + box.height / 2])).toBe(true);
+
+    // And it still opens what it is for. The window layer stays hidden for as
+    // long as Settings is open, so bringing a window forward leaves Settings
+    // first — otherwise the window would arrive behind an opaque surface.
+    await apps.click();
+    const dock = page.getByRole('menu', { name: 'Apps', exact: true });
+    await expect(dock).toBeVisible();
+    await dock.getByRole('button', { name: 'Files', exact: true }).click();
+    await expect(overlay).toHaveCount(0);
+    await expect(page.locator('[data-window-id]').first()).toBeVisible();
+
+    // And the window keeps the focus it just took. The window chords resolve
+    // their target from DOM focus, so Settings restoring focus to the toggle it
+    // was opened from — its ordinary way out — would leave this window on
+    // screen and deaf, with ⌘W falling through to the browser's close-tab.
+    // Polled: the restore Settings would attempt is deferred a frame.
+    await expect
+      .poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('[data-window-id]'))))
+      .toBe(true);
+    expect(denied).toEqual([]);
+  });
 });

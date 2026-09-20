@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -39,6 +39,7 @@ import {
   closeSettingsOverlay,
   isChromelessShellPath,
   isSettingsEntryPath,
+  SettingsFocusHandoffContext,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
@@ -235,7 +236,9 @@ export const AppShell: React.FC = () => {
   // "Beside", not "behind": inline's surface is opaque from the sidebar's
   // trailing edge rightwards, so anything it covers is live-but-invisible,
   // which is worse than retired. The window layer is the one such thing, and
-  // it reads `settingsOpen` instead.
+  // it reads `settingsOpen` instead. Its launcher does NOT go with it — it is
+  // a sidebar control, and a live sidebar keeps its controls; bringing a window
+  // forward is simply a way out of Settings, exactly like the links above it.
   //
   // The rule, not the hook: the shell is what publishes `ShellSidebarContext`,
   // so it cannot read its own broadcast and feeds the same function directly.
@@ -308,6 +311,45 @@ export const AppShell: React.FC = () => {
     url.searchParams.set(APP_TAB_PARAM, '1');
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }, [chromeless, location.pathname, location.search]);
+
+  // One gesture, one exit. Announcements are per window: the Dock's "Show all
+  // windows" restores every minimized window in a single loop and each restore
+  // comes forward, so N of them arrive before React can re-render with Settings
+  // closed. Answering each would run `closeSettingsOverlay`'s history delta N
+  // times over and land well past the origin. Cleared after every commit, so
+  // the latch covers exactly the synchronous batch it is for and cannot outlive
+  // a navigation that never happened.
+  const leavingSettingsRef = useRef(false);
+  useEffect(() => { leavingSettingsRef.current = false; });
+  // Read by the Settings surface below the outlet, on the close this exit
+  // causes. See `SettingsFocusHandoffContext`.
+  //
+  // Cleared on any commit that still shows Settings, which is every commit
+  // except the one this exit produces: a flag raised for a close that then did
+  // not happen — or one the surface never came back to spend — would otherwise
+  // sit here and eat the return focus of the next, ordinary close. Radix defers
+  // its close callback past this effect, so the successful exit still finds it.
+  const settingsFocusHandoffRef = useRef(false);
+  useEffect(() => {
+    if (settingsOpen) settingsFocusHandoffRef.current = false;
+  });
+
+  // A window coming forward is a way out of Settings, and has to be: the window
+  // layer is hidden for as long as Settings is open, so a window opened or
+  // focused from behind it would arrive invisible. The sidebar's links already
+  // work this way -- clicking Inbox leaves Settings by going to Inbox -- and the
+  // Apps launcher is one more sidebar control, so it leaves the same way instead
+  // of being taken away. Same exit the Settings toggle beside it uses.
+  //
+  // Above the access redirects below, because it is a hook and they are returns.
+  const leaveSettingsForWindow = useCallback(() => {
+    if (!settingsOpen || leavingSettingsRef.current) return;
+    leavingSettingsRef.current = true;
+    // The window that caused this exit owns the focus that comes with it.
+    settingsFocusHandoffRef.current = true;
+    if (settingsOverlayOrigin) closeSettingsOverlay(navigate, settingsOverlayOrigin);
+    else navigate('/');
+  }, [navigate, settingsOpen, settingsOverlayOrigin]);
 
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
@@ -388,7 +430,8 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
-    <WindowManagerProvider standalone={standaloneAppTab}>
+    <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
+    <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
@@ -434,14 +477,15 @@ export const AppShell: React.FC = () => {
             floats above app windows. */}
         <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
-            {/* `settingsOpen`, not `settingsCoversSidebar`: this control lives in
-                the sidebar column, but what it produces lives in the window
-                layer, which Settings covers in BOTH placements (see below). A
-                launcher whose every result is invisible is not a live control,
-                so it retires with the windows it opens rather than with the
-                column it sits in. Its Dock goes with it — same component. */}
+            {/* Retires with the column it sits in, like every other control here:
+                a live sidebar keeps its controls. The window layer it opens into
+                IS hidden under inline Settings (see below), but that makes
+                bringing a window forward a way OUT of Settings, not a reason to
+                take the control away — `onWindowForeground` below leaves first so
+                the window arrives visible, exactly as clicking Inbox leaves for
+                Inbox. Its Dock goes with it — same component. */}
             {canUseApps && (
-              <RouteSurfaceActivityBoundary active={!settingsOpen}>
+              <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
                 <AppsLauncher />
               </RouteSurfaceActivityBoundary>
             )}
@@ -613,7 +657,13 @@ export const AppShell: React.FC = () => {
           a strip over the sidebar with its title bar, controls and content all
           hidden behind Settings: visible, unusable, and covering the one column
           inline exists to keep. Inline keeps the sidebar column live, not
-          everything its surface covers. */}
+          everything its surface covers.
+
+          The launcher that opens into this layer does NOT retire with it:
+          `onWindowForeground` leaves Settings first, so by the time a window is
+          on top this layer is back. That holds for every way a window can come
+          forward, not just the launcher — the manager announces it, rather than
+          each caller checking what happens to be covering the layer. */}
       {canUseApps && (
         <div
           hidden={settingsOpen}
@@ -628,6 +678,7 @@ export const AppShell: React.FC = () => {
     </DockProvider>
     </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
+    </SettingsFocusHandoffContext.Provider>
     </SettingsOverlayNavigationBoundary>
     </ShellSidebarContext.Provider>
   );

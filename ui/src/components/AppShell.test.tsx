@@ -3,9 +3,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { closeSettingsOverlay, useSettingsOverlayOrigin } from '../lib/settingsOverlay';
+import {
+  closeSettingsOverlay,
+  settingsOverlayStateForOrigin,
+  useSettingsFocusHandoff,
+  useSettingsOverlayOrigin,
+} from '../lib/settingsOverlay';
 
 import { APP_TAB_PARAM } from '../apps/appLaunch';
 import {
@@ -104,8 +110,18 @@ vi.mock('../context/DockProvider', () => ({
     <div data-testid="dock-provider" data-enabled={String(enabled)}>{children}</div>
   ),
 }));
+// Captures the one prop the shell hands the manager: what to do when a window is
+// about to come forward. The real manager calls it from `focus`/`openApp`; here
+// the test calls it directly, which is the same event from the shell's side.
+const windowManager = vi.hoisted(() => ({ foreground: null as (() => void) | null }));
 vi.mock('../context/WindowManagerProvider', () => ({
-  WindowManagerProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  WindowManagerProvider: ({ children, onWindowForeground }: {
+    children: ReactNode;
+    onWindowForeground?: () => void;
+  }) => {
+    windowManager.foreground = onWindowForeground ?? null;
+    return <>{children}</>;
+  },
 }));
 vi.mock('../context/ShowPageDragProvider', () => ({
   ShowPageDragProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -156,6 +172,21 @@ const SettingsExit = ({ testId }: { testId: string }) => {
   </div>;
 };
 
+// Stands in for a background route the shell can land back on, and for the one
+// thing the real Settings surface reads from the shell on its way out: whether
+// this close is handing focus to a window (`SettingsFocusHandoffContext`).
+const chatProbe = { handoff: null as boolean | null };
+const ChatProbe = () => {
+  const { sessionId } = useParams();
+  const handoffRef = useSettingsFocusHandoff();
+  // Child effects run before the shell's own, so this reads the flag as the
+  // Settings surface's deferred close callback would find it on this commit.
+  useEffect(() => {
+    chatProbe.handoff = handoffRef?.current ?? null;
+  });
+  return <div data-testid="chat">{sessionId}</div>;
+};
+
 // Stands in for the Settings surfaces, which read this and nothing else to
 // decide whether their menu replaces the app sidebar or opens beside it.
 const StandaloneMenuProbe = () => (
@@ -164,6 +195,8 @@ const StandaloneMenuProbe = () => (
 
 beforeEach(() => {
   viewport.isDesktop = false;
+  windowManager.foreground = null;
+  chatProbe.handoff = null;
   window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
@@ -395,10 +428,9 @@ describe('AppShell sidebar width', () => {
   // at z-30. Left live, a window would show as a strip over the very column
   // inline exists to keep, with everything that makes it a window — title bar,
   // controls, content — behind Settings. Live-but-invisible is worse than
-  // retired, so this one retires in both placements. Its launcher goes with it:
-  // a control whose every result is hidden is not a live control.
+  // retired, so this one retires in both placements.
   it.each(['standalone', 'inline'] as const)(
-    'retires the window layer and its launcher under %s Settings',
+    'retires the window layer under %s Settings',
     async (placement) => {
       viewport.isDesktop = true;
       window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
@@ -407,12 +439,11 @@ describe('AppShell sidebar width', () => {
 
       expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
       expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('false');
-      expect(screen.queryByTestId('apps-launcher')).toBeNull();
     },
   );
 
   // ...and comes back, so retiring it is not a way of losing it.
-  it('restores the window layer and its launcher once Settings closes', async () => {
+  it('restores the window layer once Settings closes', async () => {
     viewport.isDesktop = true;
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
     renderShell('/');
@@ -421,6 +452,170 @@ describe('AppShell sidebar width', () => {
     expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
     expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('true');
     expect(screen.getByTestId('apps-launcher')).toBeTruthy();
+  });
+
+  // The launcher does NOT go with the layer. It is a sidebar control, and it
+  // retires with the column it sits in like every other control there: gone
+  // under standalone, which stands in for that column, present under inline,
+  // which keeps it. Taking Apps away under inline is the sidebar losing a button
+  // that is on screen the rest of the time, for no reason the user can see.
+  it.each([
+    ['standalone', false],
+    ['inline', true],
+  ] as const)('keeps the Apps launcher wherever the sidebar stays live (%s)', async (
+    placement,
+    live,
+  ) => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    expect(Boolean(screen.queryByTestId('apps-launcher'))).toBe(live);
+  });
+
+  // What makes keeping it safe: the layer a window arrives in is hidden while
+  // Settings is open, so coming forward has to leave Settings first — the same
+  // exit a sidebar link takes by navigating, and the toggle beside it by closing.
+  // The shell says it once, to the manager, rather than each caller working out
+  // what is covering the layer.
+  it('leaves Settings when a window comes forward', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
+
+    act(() => windowManager.foreground?.());
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
+  });
+
+  // Coming forward is announced per window, and one gesture can raise many: the
+  // Dock's "Show all windows" restores every minimized window in a loop, so the
+  // announcements all land before React can re-render with Settings closed.
+  // Leaving is not per window — it is per gesture. Answering each would run the
+  // exit's history traversal once per window and land that many entries before
+  // the origin, on a route the user never asked to see.
+  it('leaves Settings once however many windows come forward', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    // The exit walks history back to the origin when it can tell where that is,
+    // which is the path a repeat overshoots; the fallback replace is idempotent
+    // and would hide the defect.
+    const origin = {
+      historyIndex: 1,
+      location: {
+        pathname: '/chat/session-2', search: '', hash: '', state: null, key: 'origin',
+      },
+    };
+    window.history.replaceState({ idx: 2 }, '');
+    try {
+      render(
+        <MemoryRouter
+          initialEntries={[
+            '/chat/session-1',
+            '/chat/session-2',
+            { pathname: '/settings/general', state: settingsOverlayStateForOrigin(origin, null) },
+          ]}
+          initialIndex={2}
+        >
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="chat/:sessionId" element={<ChatProbe />} />
+              <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByTestId('settings')).toBeTruthy();
+
+      // One gesture, three windows: the same synchronous batch the Dock produces.
+      act(() => {
+        windowManager.foreground?.();
+        windowManager.foreground?.();
+        windowManager.foreground?.();
+      });
+
+      // The origin, not two entries further back.
+      expect((await screen.findByTestId('chat')).textContent).toBe('session-2');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  // Who holds DOM focus after this exit is not the Settings surface's usual
+  // answer. The window that caused it has already taken focus, and the window
+  // chords read their target from focus, so handing it back to the control that
+  // opened Settings would put a window on screen that ⌘W no longer closes. Only
+  // the shell knows this close had a cause, so the shell is what says so.
+  it('marks the window exit as a focus handoff, and spends it only there', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<ChatProbe />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+
+    act(() => windowManager.foreground?.());
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(chatProbe.handoff).toBe(true);
+
+    // The same flag, one visit later. Nothing about the toggle's own close hands
+    // focus anywhere, so a flag still standing from the previous exit would take
+    // the return focus away from the control that asked for it.
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    await user.click(await screen.findByRole('button', { name: 'settings.close' }));
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(chatProbe.handoff).toBe(false);
+  });
+
+  // The window it opens is the foreground, not a reason to leave one route for
+  // another: with Settings closed there is nothing to clear out of the way.
+  it('stays put when a window comes forward outside Settings', async () => {
+    viewport.isDesktop = true;
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+
+    act(() => windowManager.foreground?.());
+
+    expect(screen.getByTestId('chat')).toBeTruthy();
+    expect(screen.queryByTestId('workbench')).toBeNull();
   });
 
   it('covers the shell below md even when inline is the stored preference', async () => {

@@ -571,6 +571,11 @@ const LibraryRoute = () => {
   // opens on the Show Pages inventory the bookmark asked for, not the Apps tab.
   const initialTab = new URLSearchParams(location.search).get('view') === 'pages' ? ('showpages' as const) : undefined;
 
+  // Runs whether or not this surface is the live one — same handoff, and the same
+  // reason, as ShowPageRoute: a command route runs when it is asked, not when it
+  // is convenient. The manager withholds the foreground announcement from a
+  // retired surface and the boundary diverts the redirect to it, so nothing here
+  // reaches over the top of what the user is looking at.
   useEffect(() => {
     if (!isDesktop || handledRef.current) return;
     handledRef.current = true;

@@ -13,6 +13,7 @@ import {
   locationPath,
   SettingsOverlayOriginContext,
   settingsOverlayStateForOrigin,
+  useSettingsFocusHandoff,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
 import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
@@ -56,6 +57,7 @@ export const SettingsOverlayRouteSurface = ({
   const locationRef = useRef(location);
   const settingsVisitRef = useRef(0);
   const focusFrameRef = useRef<number | null>(null);
+  const focusHandoffRef = useSettingsFocusHandoff();
   useLayoutEffect(() => {
     settingsSurfaceOpenRef.current = settingsSurfaceOpen;
     locationRef.current = location;
@@ -80,11 +82,26 @@ export const SettingsOverlayRouteSurface = ({
   // it in place, so the setup handoff reads it from here rather than guessing
   // from a component's lifecycle.
   useSetupHandoffDeparture(backgroundLocation.pathname);
+  // A retained route replacing itself while Settings is open — a command route
+  // like /apps/show/:id opening its window and handing back to the canvas —
+  // moves the origin this surface returns to. The rewrite has to reach the
+  // recorded history index as well as the recorded location, because that index
+  // names the entry the origin was READ from and that entry still holds what
+  // was there before. Left in place it outranks the rewrite: the exit prefers
+  // its history pop, lands on the old entry, and re-runs the command the user
+  // has already moved on from. Dropped, the exit replaces forward onto where
+  // the origin now is, which is the only thing the rewrite ever claimed.
+  //
+  // Unconditional, including a rewrite that only carries new state. An origin
+  // that has been rewritten is not that entry any more in either case, and one
+  // rule for both is what makes this surface's answer the same one a browser
+  // with a real history stack gives.
   const replaceBackground = useCallback<Navigator['replace']>((to, state) => {
     if (!origin) return;
     const path = resolvePath(to, origin.location.pathname);
     const nextOrigin = {
       ...origin,
+      historyIndex: null,
       location: {
         ...origin.location,
         ...path,
@@ -186,6 +203,15 @@ export const SettingsOverlayRouteSurface = ({
               }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
+                // This close IS a focus handoff: the shell left Settings because
+                // a window came forward, and that window has already claimed DOM
+                // focus. Returning it to the control that opened Settings would
+                // take the window chords away from the window the user just
+                // asked for. One-shot, so it is cleared as it is spent.
+                if (focusHandoffRef?.current) {
+                  focusHandoffRef.current = false;
+                  return;
+                }
                 const visit = settingsVisitRef.current;
                 const expectedOrigin = origin;
                 const target = returnFocusRef.current;
