@@ -175,9 +175,10 @@ def test_unavailable_runtime_preserves_native_oauth_before_custody(monkeypatch, 
     assert not service.migration_blocked_backends
 
 
+@pytest.mark.parametrize("legacy_receipt", [False, True])
 @pytest.mark.parametrize("backend", ["opencode", "codex", "claude"])
 def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
-    monkeypatch, tmp_path, backend,
+    monkeypatch, tmp_path, backend, legacy_receipt,
 ):
     home = tmp_path / "native"
     _isolate_native_home(monkeypatch, home)
@@ -197,6 +198,15 @@ def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
     service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    if legacy_receipt:
+        # Published receipts predate snapshot-bound consent. Their item IDs
+        # encode the same grant/target inventory, without the new display data.
+        receipt = service.migration_journal.completed()
+        for row, identity in zip(receipt["items"], receipt.pop("inventory_ids"), strict=True):
+            row["id"] = identity
+            row.pop("source_paths", None)
+            row.pop("required_backends", None)
+        NativeTakeoverJournal(service.migration_journal.path.with_name("last-completed.json")).save(receipt)
     current = store.config.to_payload()
     provisions = (len(adapter.provisioned), len(adapter.oauth_provisioned))
 

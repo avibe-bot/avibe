@@ -1793,14 +1793,15 @@ async def apply_native_migration(
         if (
             completed_record is None
             and record is not None and record["phase"] == "complete"
-            and record.get("inventory_ids")
-            and sorted(record["inventory_ids"]) == sorted(
+            and sorted(record.get("inventory_ids", [item["id"] for item in record["items"]])) == sorted(
                 item.receipt_identity or item.id for item in selected
             )
         ):
             # Fresh file-bound consent may describe the same old grant that
             # an external writer restored after cleanup. Keep the current Hub
             # credential rather than provisioning/refreshing that old grant.
+            # Before file-bound IDs existed, receipt item IDs already were
+            # these opaque inventory IDs; preserve that exact legacy proof.
             completed_record = record
         async with host.migration_guard(backends) as verify_idle:
             async with host._mutation_lock:
