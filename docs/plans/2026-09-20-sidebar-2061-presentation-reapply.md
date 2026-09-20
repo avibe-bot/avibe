@@ -1,5 +1,17 @@
 # Reapply the approved sidebar and home presentation after PR #2058
 
+> Owner amendment (2026-09-20 15:46 Asia/Shanghai): restore the earlier compact
+> sidebar edge spacing and blue Apps launcher without reverting navigation or
+> home behavior. The pre-shared-shell brand sat 10 CSS px from the top; nesting
+> its replacement inside 20px shell padding plus 8px brand padding produced a
+> 28px inset. AppShell now owns the 10px top and 16px bottom insets, with no
+> extra top padding in WorkbenchSidebar. Restore the historical 22px space
+> between the logo and Inbox, keep the 39px Apps/Settings row, and reuse the cyan fill/border/glow/icon
+> tokens. This supersedes only the earlier frame/footer non-change boundary.
+> Browser acceptance measures the brand top and footer bottom at different
+> desktop heights and sidebar widths, checks both themes, and retains existing
+> Dock/Settings/collapse interaction tests. Mobile behavior is unchanged.
+
 The owner approved this work in two steps. The sidebar contract below was given
 first; the Workbench home was added to the same change at 13:03:52 and is
 specified in "Owner amendment: restore the Workbench home". Both surfaces ship

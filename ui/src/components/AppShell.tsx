@@ -369,7 +369,8 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar Y1TiVV — 248 wide by default, 16px padding, top group and bottom
+      {/* Sidebar Y1TiVV — 248 wide by default, 16px horizontal/bottom padding and
+          the original 10px brand top inset. The top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
           The width is SidebarResizer's --app-sidebar-w, shared with Workbench
@@ -379,7 +380,7 @@ export const AppShell: React.FC = () => {
         aria-hidden={settingsOpen || undefined}
         inert={settingsOpen || undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pt-2.5 pb-4 md:flex',
           settingsOpen && 'invisible pointer-events-none',
         )}
       >
