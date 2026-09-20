@@ -1,8 +1,8 @@
 ---
 name: use-avibe
 slug: use-avibe
-description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state.
-version: 0.6.2
+description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state. Also use it to report an Avibe bug, send product feedback, or file a feature request from the current conversation.
+version: 0.7.0
 ---
 
 # Use Avibe
@@ -25,6 +25,7 @@ Typical requests include:
 - check or apply Avibe updates (`vibe check-update`, `vibe upgrade`)
 - inspect logs, run doctor, check service status, or explain where Avibe stores state
 - decide whether a requested change belongs in Avibe config or in the host backend's own config
+- report an Avibe bug, send product feedback, or file a feature request from the current conversation ("report this to Avibe", "submit a bug", "request a feature")
 
 Follow this skill as an operations playbook for agents, not as end-user marketing copy.
 
@@ -81,6 +82,7 @@ Paths below are relative to this Skill directory; scripts remain under
 | Run or delegate Agent work, schedule tasks, manage watches or Session queues | [Agent Harness](references/harness.md) |
 | Choose backend/subagent settings or change native OpenCode, Claude, or Codex config | [Backends](references/backends.md) |
 | Inspect runtime paths, logs, or health; restart or upgrade the service | [Operations and troubleshooting](references/operations.md) |
+| Turn a problem or a wish in this conversation into a bug report, feedback, or feature request | [Feedback and feature requests](references/feedback.md) |
 
 For multi-step API work, use the bundled `scripts/vibe_api.py` helper.
 The API client reference contains its exact invocations and fetch/merge examples.
@@ -96,20 +98,21 @@ Always follow these constraints:
 - never expose bind codes, pairing keys, tunnel tokens, instance secrets, or session secrets unless the user explicitly asks
 - never paste a credentialed `proxy_url` (`user:pass@host`) back into chat — mask the credentials portion when echoing the value
 - always say when a requested change actually belongs in OpenCode, Claude Code, or Codex config instead of Avibe
+- never publish anything derived from this conversation until that exact content, destination, and posting identity are authorized — a destination is a host, a repository, and an acting account, never whatever the environment happens to supply; sanitize first, and keep the authorization to one concrete yes rather than a prompt per step; ordinary reads and generic public searches are already covered by the task
+- never splice a generated or user-supplied value into a shell command string; pass it as its own argument
 
 ## Escalation
 
-If the user still cannot solve a problem after API read-back checks, doctor, and log inspection, point them to the Avibe repository:
-
-- repo: `https://github.com/avibe-bot/avibe`
-
-Use that link when:
+Some requests are not local maintenance at all. Switch to the feedback workflow in [Feedback and feature requests](references/feedback.md) when:
 
 - the behavior looks like a real bug rather than a local misconfiguration
 - the user is asking for a feature Avibe does not support yet
 - backend integration behavior appears inconsistent with the documented configuration surface
+- the user simply asks to report something or request a change, with or without prior diagnosis
 
-If the user wants to contribute back, suggest opening an issue or a pull request in that repository.
+That reference owns the whole path: gathering facts from this conversation, drafting a short English report, sanitizing it, getting approval, and submitting it to `https://github.com/avibe-bot/avibe` through an already authorized channel. Do not stop at "open an issue yourself", and do not treat diagnosis, a restart, or a repair as a precondition for filing.
+
+If the user wants to contribute back with code, suggest a pull request in that repository.
 
 ## Response Pattern
 
@@ -120,3 +123,5 @@ When you complete an Avibe maintenance task, report back with:
 3. which keys changed
 4. the read-back or doctor evidence
 5. whether a restart was avoided, deferred, or still required and why
+
+A feedback or feature-request task reports something different: the verified issue URL, or the finished draft plus an explicit statement that it was not submitted.

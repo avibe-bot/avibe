@@ -8,6 +8,7 @@ import { Dock } from './apps/Dock';
 import { ContextMenu, ContextMenuItem } from './ui/context-menu';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { useShowPageDrag } from '../context/showPageDrag';
+import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 
 // The sidebar bottom-left "Apps" button that reveals the Dock.
 //   - hover        → the Dock floats up ABOVE the button (transient preview; the
@@ -19,10 +20,20 @@ import { useShowPageDrag } from '../context/showPageDrag';
 //                    and the empty-Dock hint), complementing §7.1c point 7. It
 //                    does NOT touch the hover/pin behavior.
 export const AppsLauncher: React.FC = () => {
+  const active = useRouteSurfaceActive();
+  const [pinned, setPinned] = useState(false);
+  // Pinning belongs to the launcher owner. Hover/menu/drag and Dock demand
+  // belong to the visible presentation and retire together on suspension.
+  return active ? <LauncherPresentation pinned={pinned} setPinned={setPinned} /> : null;
+};
+
+const LauncherPresentation = ({ pinned, setPinned }: {
+  pinned: boolean;
+  setPinned: (value: boolean) => void;
+}) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const showPageDrag = useShowPageDrag();
-  const [pinned, setPinned] = useState(false);
   const [hovering, setHovering] = useState(false);
   const [dragHovering, setDragHovering] = useState(false);
   // Cursor-positioned right-click menu, on the shared ContextMenu primitive.
@@ -91,12 +102,9 @@ export const AppsLauncher: React.FC = () => {
       closeTimer.current = null;
     }, 180);
   };
-  useEffect(
-    () => () => {
-      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-    },
-    [],
-  );
+  useEffect(() => () => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+  }, []);
 
   const onClick = () => {
     if (pinned) {
@@ -164,16 +172,19 @@ export const AppsLauncher: React.FC = () => {
         aria-expanded={visible}
         aria-pressed={pinned}
         className={clsx(
-          'group flex h-[39px] w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-0 text-[13px] font-bold text-foreground transition-colors',
+          // Keep the Apps control soft and mint scoped to this shell affordance.
+          // Its label stays ordinary foreground text; the fill and icon carry
+          // the brand without changing shared mint-soft tokens or adding glow.
+          'group flex w-full items-center gap-2.5 rounded-full border bg-mint/[0.16] px-4 py-2.5 text-[13px] font-bold text-foreground transition-colors',
           visible
-            ? 'border-cyan shadow-glow-md-cyan'
-            : 'border-cyan/45 shadow-glow-sm-cyan hover:border-cyan/70',
+            ? 'border-mint'
+            : 'border-mint/45 hover:border-mint/70',
         )}
       >
-        <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
+        <LayoutGrid className="size-4 shrink-0 text-mint-ink" />
         <span className="flex-1 whitespace-nowrap text-left">{t('apps.title')}</span>
         {pinned ? (
-          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan text-cyan-ink" />
+          <Pin className="size-3.5 shrink-0 rotate-45 fill-mint text-mint-ink" />
         ) : (
           <ChevronUp className={clsx('size-3.5 shrink-0 text-muted transition-transform', !visible && 'rotate-180')} />
         )}
@@ -194,7 +205,7 @@ export const AppsLauncher: React.FC = () => {
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={184} itemCount={1}>
           <ContextMenuItem
-            icon={<LayoutGrid className="size-[15px] text-cyan-ink" />}
+            icon={<LayoutGrid className="size-[15px] text-mint-ink" />}
             label={t('apps.launcher.openLibrary')}
             onClick={openLibrary}
           />

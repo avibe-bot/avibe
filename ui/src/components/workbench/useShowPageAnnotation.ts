@@ -235,7 +235,8 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
 
   const handleShortcutKeyDown = useCallback<React.KeyboardEventHandler<HTMLElement>>((event) => {
     if (
-      event.defaultPrevented
+      !routeSurfaceActive
+      || event.defaultPrevented
       || event.repeat
       || stateRef.current?.available !== true
       || stateRef.current.enabled
@@ -246,7 +247,7 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     }
     event.preventDefault();
     enableFromShortcut();
-  }, [enableFromShortcut, shortcutRef, stateRef]);
+  }, [routeSurfaceActive, enableFromShortcut, shortcutRef, stateRef]);
 
   const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
     (iframe) => {

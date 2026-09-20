@@ -1,12 +1,81 @@
-import { expect, test, type Locator } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 
-import { open, serveProduct } from './support';
+import { expect, test, type Locator, type Page } from '@playwright/test';
+
+import { open, ORIGIN, serveProduct as serveWorkbench, type Lang } from './support';
 
 const VIEWPORT = { width: 1665, height: 1329 };
 const SETTINGS = 'aside [data-settings-toggle="true"]';
 const LAUNCHER = '[data-show-page-dock-drop-target] > button';
 const DOCK = '[data-show-page-dock-drop-target] [role="menu"]';
 const OVERLAY = '[data-settings-overlay="true"]';
+
+// Keep failure evidence as well as passing guards: these cases must never
+// accept the support harness's generic unknown-API fallback as an empty result.
+const audits = new WeakMap<Page, { denied: string[]; unknown: string[]; pageErrors: string[]; reads: string[] }>();
+async function serveProduct(page: Page, lang: Lang = 'en') {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const denied = await serveWorkbench(page, lang);
+  const audit = { denied, unknown: [] as string[], pageErrors, reads: [] as string[] };
+  audits.set(page, audit);
+  const inheritedReads = new Set([
+    '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
+    '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
+    '/api/inbox', '/api/version', '/api/memory/settings', '/api/events',
+  ]);
+  await page.route('**/api/**', (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() !== 'GET' || new URL(request.url()).origin !== ORIGIN) {
+      denied.push(`${request.method()} ${request.url()}`);
+      return route.abort();
+    }
+    audit.reads.push(path);
+    if (path === '/api/asr/status') return route.fulfill({ json: { available: false } });
+    if (path === '/api/show-pages') return route.fulfill({ json: { pages: [] } });
+    if (path === '/api/dock') return route.fulfill({ json: {
+      dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
+    } });
+    if (inheritedReads.has(path)) return route.fallback();
+    audit.unknown.push(`${request.method()} ${request.url()}`);
+    return route.abort();
+  });
+  return denied;
+}
+
+test.afterEach(async ({ page }, info) => {
+  const audit = audits.get(page);
+  expect(audit).toBeDefined();
+  const evidence = info.outputPath('traffic-and-page-errors.json');
+  await writeFile(evidence, JSON.stringify(audit, null, 2));
+  await info.attach('traffic-and-page-errors', { path: evidence, contentType: 'application/json' });
+  expect(audit!.denied).toEqual([]);
+  expect(audit!.unknown).toEqual([]);
+  expect(audit!.pageErrors).toEqual([]);
+});
+
+async function expectStandaloneSettings(page: Page) {
+  const overlay = page.locator(OVERLAY);
+  await expect(overlay).toBeVisible();
+  await expect.poll(async () => {
+    const box = (await overlay.boundingBox())!;
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
+  }).toEqual({ x: 0, y: 0, ...page.viewportSize()! });
+  const sidebar = page.locator('aside.fixed');
+  await expect(sidebar).toBeHidden();
+  await expect(sidebar).toHaveAttribute('inert');
+  await expect(sidebar).toHaveAttribute('aria-hidden', 'true');
+  await expect(page.locator(LAUNCHER)).toHaveCount(0);
+  await expect(page.locator(DOCK)).toHaveCount(0);
+}
+
+async function returnToWorkbench(page: Page) {
+  await page.locator(OVERLAY).getByRole('button', { name: 'Close Settings', exact: true }).click();
+  await expect(page.locator(OVERLAY)).toHaveCount(0);
+  await expect(page.locator('aside.fixed')).toBeVisible();
+  await expect(page.locator('aside.fixed')).not.toHaveAttribute('inert');
+}
 
 // Visibility alone passes for covered controls. Ask which surface receives an
 // actual hit at the element's center, across independent portal roots.
@@ -25,45 +94,51 @@ for (const lang of ['en', 'zh'] as const) {
     const settings = page.locator(SETTINGS);
     const apps = page.locator(LAUNCHER);
     const label = lang === 'en' ? 'Settings' : '设置';
-    await expect(settings).toHaveAccessibleName(label);
-    await expect(settings).toHaveText('');
-    await expect(settings).toHaveAttribute('title', label);
-
-    const widths = async () => ({
-      settings: (await settings.boundingBox())!.width,
-      apps: (await apps.boundingBox())!.width,
-    });
-    await expect.poll(widths).toEqual({ settings: 44, apps: 163 });
-    await settings.click();
-    await expect(page.locator(OVERLAY)).toBeVisible();
-    await expect(settings).toHaveAccessibleName(label);
-    await expect(settings).toHaveText('');
-    await expect.poll(widths).toEqual({ settings: 44, apps: 163 });
-
-    await page.locator('aside [role="separator"]').focus();
-    await page.keyboard.press('End');
-    await expect.poll(widths).toEqual({ settings: 44, apps: 411 });
-    await settings.click();
-    await expect(page.locator(OVERLAY)).toHaveCount(0);
+    const expectControls = async (appsWidth: number) => {
+      await expect(settings).toHaveAccessibleName(label);
+      await expect(settings).toHaveText('');
+      await expect(settings).toHaveAttribute('title', label);
+      await expect.poll(async () => ({
+        settings: (await settings.boundingBox())!.width,
+        apps: (await apps.boundingBox())!.width,
+      })).toEqual({ settings: 44, apps: appsWidth });
+    };
+    for (const width of [163, 411]) {
+      if (width === 411) {
+        await page.locator('aside [role="separator"]').focus();
+        await page.keyboard.press('End');
+      }
+      await expectControls(width);
+      await settings.click();
+      await expectStandaloneSettings(page);
+      // Actual history return works in both languages without operating the
+      // retained, hidden sidebar controls.
+      await page.goBack();
+      await expect(page.locator(OVERLAY)).toHaveCount(0);
+      await expectControls(width);
+      await expect.poll(() => receivesPointer(settings)).toBe(true);
+    }
     expect(denied).toEqual([]);
   });
 }
 
 for (const order of ['dock-first', 'settings-first'] as const) {
-  test(`Dock remains usable above Settings (${order})`, async ({ page }) => {
+  test(`Dock returns to the foreground after standalone Settings (${order})`, async ({ page }) => {
     const denied = await serveProduct(page);
     await page.setViewportSize(VIEWPORT);
     await open(page, '/');
     if (order === 'dock-first') await page.locator(LAUNCHER).click();
     await page.locator(SETTINGS).click();
-    await expect(page.locator(OVERLAY)).toBeVisible();
-    if (order === 'settings-first') await page.locator(LAUNCHER).hover();
+    await expectStandaloneSettings(page);
+    await returnToWorkbench(page);
+    await expect(page.locator(LAUNCHER)).toHaveAttribute('aria-pressed', String(order === 'dock-first'));
+    if (order === 'settings-first') {
+      await expect(page.locator(DOCK)).toHaveCount(0);
+      await page.locator(LAUNCHER).hover();
+    }
 
     const library = page.locator(DOCK).getByRole('button', { name: 'App Library', exact: true });
     await expect(library).toBeVisible();
-    const libraryBox = (await library.boundingBox())!;
-    const overlayBox = (await page.locator(OVERLAY).boundingBox())!;
-    expect(libraryBox.x + libraryBox.width / 2).toBeGreaterThan(overlayBox.x);
     await expect.poll(() => receivesPointer(library)).toBe(true);
     await page.screenshot({
       path: `e2e/.artifacts/workbench-general/shots/${order}.png`, scale: 'css', animations: 'disabled',
@@ -79,7 +154,7 @@ for (const order of ['dock-first', 'settings-first'] as const) {
 }
 
 for (const state of ['running', 'minimized'] as const) {
-  test(`Dock activation dismisses Settings and reaches an existing ${state} window`, async ({ page }) => {
+  test(`Dock activation after Settings return reaches the same ${state} window`, async ({ page }) => {
     const denied = await serveProduct(page);
     await page.setViewportSize(VIEWPORT);
     await open(page, '/');
@@ -89,19 +164,23 @@ for (const state of ['running', 'minimized'] as const) {
     const appWindow = page.locator('[data-window-id][aria-label="App Library"]');
     await expect(appWindow).toBeVisible();
     const windowId = await appWindow.getAttribute('data-window-id');
+    const originalWindow = await appWindow.elementHandle();
     if (state === 'minimized') {
       await appWindow.getByRole('button', { name: 'Minimize', exact: true }).click();
       await expect(appWindow).toHaveAttribute('inert');
     }
     await page.locator(SETTINGS).click();
     await expect(page.locator(OVERLAY)).toBeVisible();
-    // The existing Settings outside-interaction dismissal must handle focus
-    // and restore just as it handles opening a fresh window.
+    await expectStandaloneSettings(page);
+    await returnToWorkbench(page);
+    await expect(page.locator(LAUNCHER)).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => receivesPointer(library)).toBe(true);
     await library.click();
     await expect(page.locator(OVERLAY)).toHaveCount(0);
     await expect(appWindow).toHaveCount(1);
     await expect(appWindow).toHaveAttribute('data-window-id', windowId!);
     await expect(appWindow).not.toHaveAttribute('inert');
+    expect(await appWindow.evaluate((node, original) => node === original, originalWindow)).toBe(true);
     await expect.poll(() => receivesPointer(appWindow)).toBe(true);
     await appWindow.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(appWindow).toHaveCount(0);

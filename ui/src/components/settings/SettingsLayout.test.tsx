@@ -184,22 +184,21 @@ describe('SettingsLayout', () => {
       const modelHubFrame = screen.getByText('models-body').parentElement;
       expect(modelHubFrame?.className).toContain('min-h-full');
       expect(modelHubFrame?.className).not.toContain('mx-auto');
-      expect(modelHubFrame?.className).not.toContain('max-w-[1180px]');
+      expect(modelHubFrame?.className).not.toMatch(/(?:^|\s)(?:[\w-]+:)*max-w-/);
     },
   );
 
-  // The source draws General as content that simply fills whatever the rail
-  // leaves, so the shared reading column would re-introduce a fixed width the
-  // design does not have. It opts out the way Model Hub already does — without
-  // Model Hub's `min-h-full`, which is a full-height pane, not a width.
+  // General and the other ordinary Settings sections share the standalone
+  // 944px outer frame (880px content after desktop padding). Model Hub keeps
+  // the full route pane for its own full-height surface.
   it.each(['/settings/general', '/settings/general/'])(
-    'lets General fill the route pane at %s',
+    'keeps General in the common standalone content column at %s',
     (path) => {
       renderLayout(path);
 
       const generalFrame = screen.getByText('general-body').parentElement;
-      expect(generalFrame?.className).not.toContain('mx-auto');
-      expect(generalFrame?.className).not.toContain('max-w-[1180px]');
+      expect(generalFrame?.className).toContain('mx-auto');
+      expect(generalFrame?.className).toContain('max-w-[944px]');
       expect(generalFrame?.className).not.toContain('min-h-full');
     },
   );
@@ -209,7 +208,7 @@ describe('SettingsLayout', () => {
 
     const standardFrame = screen.getByText('replies-body').parentElement;
     expect(standardFrame?.className).toContain('mx-auto');
-    expect(standardFrame?.className).toContain('max-w-[1180px]');
+    expect(standardFrame?.className).toContain('max-w-[944px]');
     expect(standardFrame?.className).not.toContain('min-h-full');
   });
 
@@ -328,6 +327,28 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.general' }).getAttribute('href'))
       .toBe('/settings/general');
     expect(screen.getByTestId('account-menu').getAttribute('data-open-upward')).toBe('true');
+  });
+
+  it('updates the retained rail when instance-management permission changes', async () => {
+    const surface = () => (
+      <MemoryRouter initialEntries={['/settings/general']}>
+        <Routes>
+          <Route path="/settings" element={<SettingsLayoutHarness />}>
+            <Route path="general" element={<div>general-body</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+    const view = render(surface());
+    expect(await screen.findByRole('link', { name: 'settings.sections.backends' })).toBeTruthy();
+    authorization.capabilities.can_manage_instance = false;
+    view.rerender(surface());
+    expect(screen.queryByRole('link', { name: 'settings.sections.backends' })).toBeNull();
+    expect(screen.getByText('general-body')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
+    authorization.capabilities.can_manage_instance = true;
+    view.rerender(surface());
+    expect(await screen.findByRole('link', { name: 'settings.sections.backends' })).toBeTruthy();
   });
 
   it('keeps member preferences, Replies, and Access while preserving the phase-2 permission gate', () => {

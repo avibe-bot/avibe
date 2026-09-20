@@ -414,8 +414,11 @@ of health and routing eligibility. It marks a credential nothing upstream has
 accepted yet, so an API-key create whose add-time observation authenticated the
 credential stores none — superseding, for that path only, the earlier rule that every
 observed create is marked. Native-config imports, Hub OAuth admission and every
-credential or endpoint replacement still get one. Source list/detail use the
-existing advisory treatment instead of healthy/in-use copy. Inventory never clears it.
+credential or endpoint replacement still get one. Source list/detail use neutral
+Saved / 已保存 instead of advisory unverified or healthy/in-use copy; real
+error, needs-action and cooldown states retain precedence. The shared accessible
+connection hint explains saved configuration and successful-call status updates,
+without promising a Test entry for every Source kind. Inventory never clears it.
 A call captures the marker before invocation; any successful same-credential call
 with that marker, including the existing backend probe, clears it in a fresh shared
 config transaction. Later same-credential attempts do not invalidate success.

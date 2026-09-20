@@ -70,8 +70,8 @@ const THEME_CHOICES: { mode: ThemeMode; icon: LucideIcon; labelKey: TranslationK
 ];
 
 // design r6G6P — ordinary Settings: interface language and appearance, both
-// saved the moment they are picked. Content is fluid; the 924 column in the
-// source is what 1200 minus the 196 rail happens to leave, not a max width.
+// saved the moment they are picked. The standalone frame owns an 880px content
+// column inside a 944px outer frame at the desktop reference width.
 export const SettingsGeneralPage: React.FC = () => {
   const { t } = useTranslation();
   const { languages, current, select } = useLanguageSelection();

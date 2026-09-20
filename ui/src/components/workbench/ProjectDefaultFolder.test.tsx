@@ -19,7 +19,7 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
 vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => null }));
 vi.mock('../../context/StandaloneAppTabContext', () => ({ useStandaloneAppTab: () => false }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => true, isDesktopViewport: () => true }));
-vi.mock('../../lib/routeSurfaceActivity', () => ({ useRouteSurfaceWindowEvent: () => {} }));
+vi.mock('../../lib/routeSurfaceActivity', () => ({ useRouteSurfaceWindowEvent: () => {}, useRouteSurfaceActive: () => true }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../../lib/filesApi', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/filesApi')>(),

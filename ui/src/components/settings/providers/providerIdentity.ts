@@ -56,6 +56,27 @@ export function providerLabel(providerId: string, serverName?: string | null): s
 }
 
 /**
+ * What to call a provider that is standing in a *named brand slot*.
+ *
+ * The setup shortlist offers eight brands in an approved order, so those rows
+ * carry the brand's own name and mark: an OpenCode catalog row that calls Qwen
+ * "Alibaba (China)" is the right label for a variant listed under More and the
+ * wrong one for the Qwen slot. Where there is no slot, `providerLabel` stays
+ * correct, because there the job is to tell two rows of the same brand apart
+ * rather than to name the brand. A provider the catalog does not know has no
+ * brand slot to fill, so it falls back to the same label it would show anywhere
+ * else.
+ *
+ * Both of these say what a row may ASK to be called. What it is actually called
+ * also depends on what every other row is called, so the picker settles that in
+ * one place and every surface — the list, More, search and the chosen-provider
+ * capsule — reads the answer rather than recomputing one.
+ */
+export function providerBrandLabel(providerId: string, serverName?: string | null): string {
+  return apiKeyVendorPreset(providerVendorId(providerId))?.label ?? providerLabel(providerId, serverName);
+}
+
+/**
  * The API-key providers the setup picker offers before More.
  *
  * Declared here rather than taken as "the catalog's first eight": the catalog is

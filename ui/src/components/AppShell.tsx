@@ -22,6 +22,7 @@ import { WindowLayer } from './apps/WindowLayer';
 import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
+import { RouteSurfaceActivityBoundary } from './RouteSurfaceActivityBoundary';
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
@@ -36,7 +37,6 @@ import {
 import {
   closeSettingsOverlay,
   isSettingsEntryPath,
-  isSettingsRoutePath,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
@@ -178,7 +178,10 @@ export const AppShell: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const settingsOverlayOrigin = useSettingsOverlayOrigin(location);
-  const settingsOpen = isSettingsRoutePath(location.pathname);
+  // Settings owns the foreground surface, even while a retained Workbench
+  // origin stays mounted behind it. Keep this distinction at the shell boundary
+  // so the origin cannot bring back Workbench chrome or its desktop offset.
+  const settingsOpen = isSettingsEntryPath(location.pathname);
   // An origin can now exist on a phone too (the Workbench home retains its
   // composer behind Settings), but only the desktop overlay is a layer *over*
   // this shell. Below md the Settings surface covers the shell outright, so the
@@ -226,7 +229,7 @@ export const AppShell: React.FC = () => {
   // consume the same user-configured chord first; otherwise search owns it.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
+      if (e.defaultPrevented || settingsOpen) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         setSearchOpen((prev) => !prev);
@@ -234,7 +237,7 @@ export const AppShell: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [settingsOpen]);
 
   // Close the mobile Dock drawer on navigation.
   useEffect(() => {
@@ -323,7 +326,7 @@ export const AppShell: React.FC = () => {
   // brand header AND the bottom tab bar are hidden on them.
   const isChat = surfaceLocation.pathname.startsWith('/chat/');
   const isSearch = surfaceLocation.pathname === '/search';
-  const isSettings = isSettingsRoutePath(surfaceLocation.pathname);
+  const isSettings = settingsOpen;
   const isShowPageApp = surfaceLocation.pathname.startsWith('/apps/show/');
   const isBuiltinApp = isStandaloneAppRoutePath(surfaceLocation.pathname);
   const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
@@ -362,12 +365,23 @@ export const AppShell: React.FC = () => {
       {/* Sidebar Y1TiVV — 248 wide by default, 16px padding, top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
-          The width is SidebarResizer's --app-sidebar-w, which <main> below and the
-          Settings overlay read too, so a drag moves the whole layout at once. */}
+          The width is SidebarResizer's --app-sidebar-w, shared with Workbench
+          content. Settings owns the viewport and never reads this offset. */}
       {!chromeless && (
-      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-4 md:flex">
+      <aside
+        aria-hidden={settingsOpen || undefined}
+        inert={settingsOpen || undefined}
+        className={clsx(
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex',
+          settingsOpen && 'invisible pointer-events-none',
+        )}
+      >
         <div className="flex min-h-0 flex-1 flex-col">
-          {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
+          {isDesktop && (
+            <RouteSurfaceActivityBoundary active={!settingsOpen}>
+              <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />
+            </RouteSurfaceActivityBoundary>
+          )}
         </div>
 
         {/* Bottom cluster: Apps fills the row beside the compact Settings icon,
@@ -376,7 +390,11 @@ export const AppShell: React.FC = () => {
             floats above app windows. */}
         <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
-            {canUseApps && <AppsLauncher />}
+            {canUseApps && (
+              <RouteSurfaceActivityBoundary active={!settingsOpen}>
+                <AppsLauncher />
+              </RouteSurfaceActivityBoundary>
+            )}
             {settingsOpen ? (
               <button
                 type="button"
@@ -463,6 +481,8 @@ export const AppShell: React.FC = () => {
             // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
+            : settingsOpen
+              ? 'min-h-0 flex-1 overflow-hidden md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : isFullScreenMobile
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
@@ -511,25 +531,33 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {canUseApps && (
+      {!settingsOpen && canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
       {capabilities.can_chat && (
-        <NewSessionSheet
-          open={newSessionOpen}
-          onClose={() => setNewSessionOpen(false)}
-          onOpen={() => setNewSessionOpen(true)}
-        />
+        <RouteSurfaceActivityBoundary active={!settingsOpen}>
+          <NewSessionSheet
+            open={newSessionOpen}
+            onClose={() => setNewSessionOpen(false)}
+            onOpen={() => setNewSessionOpen(true)}
+          />
+        </RouteSurfaceActivityBoundary>
       )}
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}
-      <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+      <RouteSurfaceActivityBoundary active={!settingsOpen}>
+        <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+      </RouteSurfaceActivityBoundary>
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
-      {canUseApps && <WindowLayer />}
+      {canUseApps && (
+        <div hidden={settingsOpen} inert={settingsOpen || undefined} aria-hidden={settingsOpen || undefined}>
+          <WindowLayer active={!settingsOpen} />
+        </div>
+      )}
     </div>
     </ShowPageDragProvider>
     </DockProvider>
