@@ -824,7 +824,8 @@ def test_claude_legacy_snapshots_keep_selection_and_coalesced_file_guards(
     assert expanded[0].proposed_action == "import"
     assert expanded[0].oauth_material["refresh_token"] == "refresh-secret"
     edits = plan_native_cleanup(expanded, home=tmp_path, project_roots=())
-    assert {edit.path for edit in edits} == {primary, legacy}
+    assert {primary, legacy} <= {edit.path for edit in edits}
+    assert all(edit.before == edit.after for edit in edits if edit.path not in {primary, legacy})
     [guard] = [edit for edit in edits if edit.path == primary]
     assert guard.before is guard.after is None
     for edit in edits:
@@ -986,6 +987,50 @@ def test_claude_noncredential_keychain_without_file_oauth_is_not_exportable(
     assert scanned is not None and scanned.payload["status"] == "metadata_only"
     assert store.read_native_oauth("claude", home=tmp_path, allow_secret=True) is None
     assert fake_keychain.write_calls == fake_keychain.delete_calls == []
+
+
+@pytest.mark.parametrize("first_grant,other_source", [(True, False), (False, False), (False, True)])
+def test_completed_metadata_revision_does_not_prove_no_prior_oauth(
+    tmp_path: Path, fake_keychain: FakeKeychain, monkeypatch: pytest.MonkeyPatch,
+    first_grant: bool, other_source: bool,
+) -> None:
+    from core.handlers.model_hub.service import ModelHubError
+    from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
+        _isolate_native_home, _service, _write,
+    )
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    monkeypatch.setenv("USER", "fixture-user")
+    locator = ("Claude Code-credentials", "fixture-user")
+    oauth = json.dumps(_claude_payload())
+    empty = json.dumps({"mcpOAuth": _claude_payload()["mcpOAuth"]})
+    fake_keychain.items[locator] = (oauth if first_grant else empty, "fixture-initial")
+    if other_source:
+        _write(home / ".config/opencode/opencode.json",
+               '{"provider":{"openai":{"options":{"apiKey":"fixture-other"}}}}')
+    service, config_store, adapter = _service(tmp_path, migration_home=home)
+    rows = service.migration_scan()["items"]
+    asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert "claude" in service.migration_journal.completed()["clean_native_stores"]
+    provisions = len(adapter.oauth_provisioned)
+    fake_keychain.items[locator] = (oauth, "fixture-restored")
+    fake_keychain.mdates[locator] += 1
+    before = config_store.config.to_payload()
+    rows = service.migration_scan()["items"]
+    if first_grant or other_source:
+        # A mixed bundle cannot prove that this opaque container was empty.
+        with pytest.raises(ModelHubError) as failure:
+            asyncio.run(service.migration_apply([row["id"] for row in rows]))
+        assert failure.value.code == "migration_reauthorization_required"
+        assert len(adapter.oauth_provisioned) == provisions
+        assert fake_keychain.items[locator] == (oauth, "fixture-restored")
+        assert config_store.config.to_payload() == before
+    else:
+        # An entirely source-free confirmation transferred no old OAuth.
+        asyncio.run(service.migration_apply([row["id"] for row in rows]))
+        assert len(adapter.oauth_provisioned) == 1
+    assert service.migration_journal.load() is None
 
 
 def test_codex_file_scan_is_exportable_and_cleanup_preserves_unrelated_fields(tmp_path: Path) -> None:

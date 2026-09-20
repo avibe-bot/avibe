@@ -1,6 +1,7 @@
-// One-click native credential takeover. Each backend is one custody boundary:
-// unsupported native rows stay visible and block that backend as a group.
+// One-click native credential takeover. Each backend is one custody boundary;
+// shared persisted assignments link those boundaries into one consent group.
 import * as React from 'react';
+import type { TFunction } from 'i18next';
 import { ArrowDownToLine, Bot, KeyRound, Loader2, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -25,15 +26,15 @@ import type { AgentBackend, MigrationItem } from './types';
 
 const BACKEND_ORDER: AgentBackend[] = ['claude', 'codex', 'opencode'];
 
-// Where a row's credential was read from, named only as far as the payload can
-// honestly support. An OpenCode key may come from the config file or from
-// auth.json and `backend` + `kind` cannot tell the two apart, so all three say
-// "<assistant> configuration" rather than claiming a specific store.
-const SOURCE_KEY: Record<AgentBackend, TranslationKey> = {
+// Older payloads cannot identify the exact file or store. Name only the
+// backend's configuration when the server supplies no file locators.
+const SOURCE_KEY = {
   claude: 'settings.models.migration.source.claude',
   codex: 'settings.models.migration.source.codex',
   opencode: 'settings.models.migration.source.opencode',
-};
+} as const satisfies Record<AgentBackend, TranslationKey>;
+
+const sourcePaths = (item: MigrationItem): string[] => [...new Set(item.source_paths ?? [])];
 
 /** The provider a row belongs to, or `null` when the server sent no metadata —
  *  in which case the row falls back to `masked_detail` rather than guessing an
@@ -69,8 +70,10 @@ const ItemRow: React.FC<{
   // to put above them, so the composed detail stays the title as before.
   const title = provider ?? item.masked_detail;
   const maskedKey = provider ? (item.masked_credential?.trim() || item.masked_detail) : '';
-  const origin = t(SOURCE_KEY[item.backend]);
+  const paths = sourcePaths(item);
+  const origin = paths.length === 0 ? t(SOURCE_KEY[item.backend]) : '';
   const detail = [maskedKey, origin].filter(Boolean).join(' · ');
+  const label = [title, detail, ...paths].filter(Boolean).join(' · ');
   return (
     <div
       className={cn(
@@ -79,7 +82,7 @@ const ItemRow: React.FC<{
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <Checkbox checked={checked} onCheckedChange={onToggle} disabled={!selectable} label={detail ? `${title} · ${detail}` : title} />
+        <Checkbox checked={checked} onCheckedChange={onToggle} disabled={!selectable} label={label} />
         <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
           {vendor
             ? <VendorGlyph vendor={providerVendorId(vendor)} className={cn('h-[14px] w-auto shrink-0 aspect-[10/7]', ACCENT_ICON[accent])} />
@@ -88,6 +91,9 @@ const ItemRow: React.FC<{
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[14px] font-semibold text-foreground">{title}</span>
           {detail && <span className="truncate text-[12px] text-muted">{detail}</span>}
+          {paths.map((path) => (
+            <span key={path} className="break-all font-mono text-[12px] text-muted">{path}</span>
+          ))}
         </div>
       </div>
     </div>
@@ -96,6 +102,26 @@ const ItemRow: React.FC<{
 
 const DEFAULT_SCOPE = () => true;
 const isImportable = (item: MigrationItem) => item.proposed_action === 'import';
+
+function requiredBackends(items: MigrationItem[], backends: Iterable<AgentBackend>): Set<AgentBackend> {
+  const required = new Set(backends);
+  // Resolve from every row of an included backend, not just the eligible
+  // entry-point rows. Scope filters cannot conceal a shared-file consumer.
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const item of items) {
+      if (!required.has(item.backend)) continue;
+      for (const backend of item.required_backends ?? []) {
+        if (required.has(backend)) continue;
+        required.add(backend);
+        expanded = true;
+      }
+    }
+  }
+  return required;
+}
+
 const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
   migration_native_busy: 'settings.models.migration.errors.nativeBusy',
   migration_permission_needed: 'settings.models.migration.errors.permissionNeeded',
@@ -103,22 +129,41 @@ const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
   migration_item_conflict: 'settings.models.migration.errors.itemConflict',
   migration_configuration_blocked: 'settings.models.migration.errors.configurationBlocked',
   migration_credentials_invalid: 'settings.models.migration.errors.credentialsInvalid',
+  migration_reauthorization_required: 'settings.models.migration.errors.reauthorizationRequired',
 };
-const BLOCKED_NOTE_KEYS = new Set([
+const BLOCKED_NOTE_KEYS = new Set<string>([
   'settings.models.migration.blocked.config',
   'settings.models.migration.blocked.environment',
   'settings.models.migration.blocked.credential',
-]);
+  'settings.models.migration.blocked.dynamic_shell',
+  'settings.models.migration.blocked.ambiguous_shell',
+  'settings.models.migration.blocked.unreadable',
+  'settings.models.migration.blocked.reference',
+  'settings.models.migration.blocked.helper',
+  'settings.models.migration.blocked.token',
+  'settings.models.migration.blocked.headers',
+  'settings.models.migration.blocked.transport',
+] satisfies TranslationKey[]);
 const BLOCKED_FALLBACK_KEY = 'settings.models.migration.blocked.fallback' satisfies TranslationKey;
 
-function blockedMessage(
-  t: ReturnType<typeof useTranslation>['t'],
+function blockedMessages(
+  t: TFunction,
   rows: MigrationItem[],
-): string {
-  const noteKey = rows
-    .map((item) => item.notes_key)
-    .find((key): key is string => Boolean(key && BLOCKED_NOTE_KEYS.has(key)));
-  return serverText(t, noteKey, BLOCKED_FALLBACK_KEY) ?? '';
+): { key: string; source: string; message: string }[] {
+  const messages = new Map<string, { key: string; source: string; message: string }>();
+  for (const item of rows) {
+    const noteKey = item.notes_key && BLOCKED_NOTE_KEYS.has(item.notes_key) ? item.notes_key : undefined;
+    const message = serverText(t, noteKey, BLOCKED_FALLBACK_KEY) ?? '';
+    const paths = sourcePaths(item);
+    // Older scans cannot identify a file. Keep their backend-level locator,
+    // with each distinct reason, without duplicating an account or key title.
+    const sources = paths.length > 0 ? paths : [t(SOURCE_KEY[item.backend])];
+    for (const source of sources) {
+      const key = JSON.stringify([source, item.notes_key ?? BLOCKED_FALLBACK_KEY]);
+      messages.set(key, { key, source, message });
+    }
+  }
+  return [...messages.values()];
 }
 
 export const MigrationDialog: React.FC<{
@@ -126,9 +171,8 @@ export const MigrationDialog: React.FC<{
   onClose: () => void;
   /** Fired after a successful apply so callers can refresh sources/agents. */
   onApplied?: (applied: number) => void;
-  /** Scopes the dialog to backends represented by an entry point. It never
-   *  hides other native rows from those backends: a blocked row must remain
-   *  visible so the whole CLI cannot be partially migrated. */
+  /** Scopes the entry point, then includes every native row and required
+   *  backend so shared-file custody and blockers remain explicit. */
   eligible?: (item: MigrationItem) => boolean;
 }> = ({ open, onClose, onApplied, eligible }) => {
   const { t } = useTranslation();
@@ -137,8 +181,6 @@ export const MigrationDialog: React.FC<{
   const [items, setItems] = React.useState<MigrationItem[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
-  const eligibleRef = React.useRef(eligible);
-  eligibleRef.current = eligible;
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
     aliveRef.current = true;
@@ -158,33 +200,7 @@ export const MigrationDialog: React.FC<{
       .scanMigration()
       .then((scan) => {
         if (cancelled) return;
-        const scopePredicate = eligibleRef.current ?? DEFAULT_SCOPE;
-        const scopedBackends = new Set(
-          scan.items.filter(scopePredicate).map((item) => item.backend),
-        );
-        const importable = scan.items.filter(
-          (item) => scopedBackends.has(item.backend) && isImportable(item),
-        );
-        const blockedBackends = new Set(
-          scan.items
-            .filter((item) => scopedBackends.has(item.backend) && !isImportable(item))
-            .map((item) => item.backend),
-        );
-        const backendSelection = new Map<AgentBackend, boolean>();
-        for (const backend of BACKEND_ORDER) {
-          const rows = importable.filter((item) => item.backend === backend);
-          if (rows.length > 0) {
-            backendSelection.set(
-              backend,
-              !blockedBackends.has(backend) && rows.every((item) => item.selected),
-            );
-          }
-        }
-        setItems(scan.items.map((item) => (
-          scopedBackends.has(item.backend) && isImportable(item)
-            ? { ...item, selected: backendSelection.get(item.backend) ?? false }
-            : item
-        )));
+        setItems(scan.items);
         setLoading(false);
       })
       .catch(() => {
@@ -198,18 +214,24 @@ export const MigrationDialog: React.FC<{
   }, [open, showToast, t]);
 
   const scopePredicate = eligible ?? DEFAULT_SCOPE;
-  const scopedBackends = new Set(
+  const scopedBackends = requiredBackends(
+    items,
     items.filter(scopePredicate).map((item) => item.backend),
   );
   const candidates = items.filter((item) => scopedBackends.has(item.backend));
   const grouped = BACKEND_ORDER.map((backend) => {
     const rows = candidates.filter((item) => item.backend === backend);
     const importRows = rows.filter(isImportable);
-    const blockedRows = rows.filter((item) => !isImportable(item));
+    const required = requiredBackends(items, [backend]);
+    const linkedRows = candidates.filter((item) => required.has(item.backend));
+    const linkedImportRows = linkedRows.filter(isImportable);
+    const blockedRows = linkedRows.filter((item) => !isImportable(item));
     return {
       backend,
       rows,
       importRows,
+      required,
+      linkedImportRows,
       blockedRows,
       blocked: blockedRows.length > 0,
     };
@@ -219,7 +241,7 @@ export const MigrationDialog: React.FC<{
       .filter((group) => (
         !group.blocked
         && group.importRows.length > 0
-        && group.importRows.every((item) => item.selected)
+        && group.linkedImportRows.every((item) => item.selected)
       ))
       .map((group) => group.backend)
   );
@@ -227,9 +249,9 @@ export const MigrationDialog: React.FC<{
     setItems((prev) => {
       const group = grouped.find((item) => item.backend === backend);
       if (!group || group.blocked || group.importRows.length === 0) return prev;
-      const selected = group.importRows.every((item) => item.selected);
+      const selected = group.linkedImportRows.every((item) => item.selected);
       return prev.map((item) => (
-        item.backend === backend && isImportable(item)
+        group.required.has(item.backend) && isImportable(item)
           ? { ...item, selected: !selected }
           : item
       ));
@@ -290,12 +312,29 @@ export const MigrationDialog: React.FC<{
                 <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-normal text-muted">
                   {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
                 </span>
+                {group.required.size > 1 && (
+                  <p className="px-1 text-[12px] leading-relaxed text-muted">
+                    {t('settings.models.migration.sharedFiles', {
+                      backends: BACKEND_ORDER
+                        .filter((backend) => group.required.has(backend))
+                        .map((backend) => t(`settings.models.backends.${backend}`))
+                        .join(', '),
+                    })}
+                  </p>
+                )}
                 {group.blocked && (
                   <div
                     role="status"
                     className="rounded-lg border border-gold/40 bg-gold/[0.08] px-3 py-2 text-[12px] leading-relaxed text-foreground"
                   >
-                    {blockedMessage(t, group.blockedRows)}
+                    <ul className="flex flex-col gap-2">
+                      {blockedMessages(t, group.blockedRows).map(({ key, source, message }) => (
+                        <li key={key} className="flex flex-col gap-0.5">
+                          <span className="break-all font-mono">{source}</span>
+                          <span>{message}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
                 {group.rows.map((item) => (

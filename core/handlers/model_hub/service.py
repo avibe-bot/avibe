@@ -94,6 +94,7 @@ from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_i
 from .migration import (
     MigrationConflictError,
     MigrationCredentialsInvalidError,
+    MigrationReauthorizationRequiredError,
     apply_native_migration,
     prepare_takeover_reauthentication,
     recover_native_migration,
@@ -405,7 +406,7 @@ class UnavailableEngineAdapter:
 
     async def provision_credential(
         self, vendor: str, protocol: str, secret: str, base_url: str | None,
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
@@ -427,16 +428,23 @@ class UnavailableEngineAdapter:
     async def matches_api_key_credential(
         self, credential_ref: str, vendor: str, protocol: str,
         secret: str, base_url: str | None,
+        *, auth_scheme: str | None = None,
     ) -> bool:
+        raise EngineUnavailableError
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         raise EngineUnavailableError
 
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
     async def revoke_credential(self, credential_ref: str) -> None:
+        raise EngineUnavailableError
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
         raise EngineUnavailableError
 
     async def sync_sources(self, bindings) -> None:
@@ -640,9 +648,11 @@ async def _provision_transient_credential_with_cancellation_ownership(
     vendor: str,
     key: str,
     base_url: str | None,
-    *, on_reserved: Callable[[str], None] | None = None,
+    *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
 ) -> str:
-    options = {"on_reserved": on_reserved} if on_reserved is not None else {}
+    options: dict[str, Any] = {"on_reserved": on_reserved} if on_reserved is not None else {}
+    if auth_scheme is not None:
+        options["auth_scheme"] = auth_scheme
     return await _acquire_credential_ref_with_cancellation_ownership(
         service,
         service.adapter.provision_transient_credential(vendor, key, base_url, **options),
@@ -1285,6 +1295,13 @@ class ModelHubService:
                         continue
                     if not cleaned:
                         continue
+                elif pending.operation == "revoke_api_key_credential":
+                    try:
+                        await self.adapter.revoke_api_key_credential(pending.credential_ref)
+                    except Exception:
+                        # Only successful exact-namespace cleanup establishes
+                        # absence. Metadata errors are not retirement proof.
+                        continue
                 else:
                     try:
                         await self.adapter.revoke_credential(
@@ -1671,6 +1688,7 @@ class ModelHubService:
         payload: Mapping[str, Any],
         *,
         require_proven: bool = False,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         if set(payload) - {"vendor", "base_url", "key", "protocol"}:
@@ -1690,6 +1708,7 @@ class ModelHubService:
             vendor,
             key.strip(),
             base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
         try:
@@ -1716,10 +1735,11 @@ class ModelHubService:
     async def _require_proven_source_payload(
         self,
         payload: Mapping[str, Any],
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         return await self._observe_source_payload(
             payload, require_proven=True, on_reserved=on_reserved,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
         )
 
     async def _provision_oauth_credential(
@@ -3222,12 +3242,16 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
 
             old_credential_ref = source.credential_ref
+            auth_scheme = await self._engine_call(
+                self.adapter.credential_auth_scheme(old_credential_ref)
+            )
             replacement_ref = await self._engine_call(
                 self.adapter.provision_credential(
                     source.vendor,
                     source.protocol,
                     key,
                     source.base_url,
+                    **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
                 )
             )
             committed = False
@@ -3238,7 +3262,20 @@ class ModelHubService:
                 source.masked_credential = _mask_credential(key)
                 discovered = await self._discover(source)
                 if old_credential_ref != replacement_ref:
-                    self.revocations.add(source.id, old_credential_ref)
+                    if any(
+                        pending.source_id == source.id
+                        and pending.credential_ref == old_credential_ref
+                        and pending.operation == "revoke_credential"
+                        for pending in self.revocations.list()
+                    ):
+                        # Replay also discards intents for the current active
+                        # ref. Do that here for a pre-upgrade generic intent:
+                        # syncing the damaged old credential is not required
+                        # to establish that it is still the committed ref.
+                        self.revocations.remove(source.id, old_credential_ref)
+                    self.revocations.add(
+                        source.id, old_credential_ref, operation="revoke_api_key_credential",
+                    )
                     old_revocation_recorded = True
                 removed_hops, interrupted = await self._finalize_successful_discovery(
                     previous,
@@ -3277,7 +3314,7 @@ class ModelHubService:
 
             if old_credential_ref != replacement_ref:
                 try:
-                    await self.adapter.revoke_credential(old_credential_ref)
+                    await self.adapter.revoke_api_key_credential(old_credential_ref)
                 except Exception:
                     pass
                 else:
@@ -6421,6 +6458,8 @@ class ModelHubService:
             applied, added_to = await await_owned_task(task)
         except MigrationCredentialsInvalidError:
             raise ModelHubError("migration_credentials_invalid", status=409) from None
+        except MigrationReauthorizationRequiredError:
+            raise ModelHubError("migration_reauthorization_required", status=409) from None
         except NativeMigrationBlockedError:
             raise ModelHubError("migration_native_busy", status=409) from None
         except (NativeOAuthPermissionError, PermissionError):

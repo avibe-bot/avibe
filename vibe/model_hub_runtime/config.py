@@ -8,7 +8,7 @@ import yaml
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
-from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url, validate_api_key_auth_scheme
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
 
@@ -73,6 +73,12 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
         # OAuth credentials are engine auth files, not YAML credential values.
         return
     api_key = store.read_api_key(source.credential_ref)
+    try:
+        validate_api_key_auth_scheme(
+            source.vendor, source.protocol, source.base_url, api_key, credential.get("auth_scheme"),
+        )
+    except ValueError:
+        raise EngineStateError("unsupported API key authentication scheme") from None
     reasoning_by_model = dict(source.model_reasoning_efforts)
     models = []
     for model in dict.fromkeys((*source.model_ids, *source.route_model_ids)):

@@ -152,7 +152,9 @@ def test_real_guard_blocks_wrapped_cli_before_takeover(monkeypatch, tmp_path, ba
     if backend != "opencode":
         native.auth_mode = "api_key"
         native.api_key = "fixture-native-key"
-        native.base_url = "https://fixture.example"
+        # Reach the process guard with a supported native transport. Custom
+        # Anthropic API-key headers are refused before takeover begins.
+        native.base_url = "https://api.anthropic.com" if backend == "claude" else "https://fixture.example"
     else:
         auth = Path.home() / ".config/opencode/opencode.json"
         auth.parent.mkdir(parents=True)
@@ -177,8 +179,9 @@ def test_real_guard_blocks_wrapped_cli_before_takeover(monkeypatch, tmp_path, ba
 
     monkeypatch.setattr(psutil, "process_iter", inventory)
     before = paths.get_config_path().read_bytes()
-    ids = [row["id"] for row in service.migration_scan()["items"] if row["backend"] == backend]
-    assert ids
+    rows = [row for row in service.migration_scan()["items"] if row["backend"] == backend]
+    assert rows and all(row["proposed_action"] == "import" for row in rows)
+    ids = [row["id"] for row in rows]
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply(ids))
     assert error.value.code == "migration_native_busy"

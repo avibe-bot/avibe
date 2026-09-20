@@ -14,6 +14,7 @@ from .state_file import write_state_document
 
 RevocationOperation = Literal[
     "revoke_credential",
+    "revoke_api_key_credential",
     "cleanup_orphaned_oauth_material",
 ]
 _REVOCATION_OPERATIONS = frozenset(get_args(RevocationOperation))

@@ -197,6 +197,7 @@ class MockUpstreamState:
         self._config: dict[str, Any] = {
             "auth": "ok",
             "required_api_key": None,
+            "required_auth_scheme": "protocol",
             "stream": "healthy",
             "models": [copy.deepcopy(model) for model in DEFAULT_MODELS],
             "protocol": "openai_chat",
@@ -215,6 +216,7 @@ class MockUpstreamState:
         unknown = set(update) - {
             "auth",
             "required_api_key",
+            "required_auth_scheme",
             "stream",
             "models",
             "protocol",
@@ -234,6 +236,8 @@ class MockUpstreamState:
             not isinstance(required_key, str) or not required_key.strip()
         ):
             raise ConfigurationError("required_api_key must be a non-empty string or null")
+        if candidate["required_auth_scheme"] not in ("protocol", "bearer"):
+            raise ConfigurationError("unsupported required_auth_scheme")
         if candidate["stream"] not in STREAM_BEHAVIORS:
             raise ConfigurationError("unsupported stream behavior")
         if candidate["protocol"] not in PROTOCOLS:
@@ -386,14 +390,18 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
         """Optional value check for synthetic credentials on data endpoints."""
         required_key = config["required_api_key"]
         if required_key is not None:
+            use_api_key_header = (
+                config["protocol"] == "anthropic"
+                and config["required_auth_scheme"] == "protocol"
+            )
             supplied = (
                 self.headers.get("x-api-key")
-                if config["protocol"] == "anthropic"
+                if use_api_key_header
                 else self.headers.get("authorization")
             )
             expected = (
                 required_key
-                if config["protocol"] == "anthropic"
+                if use_api_key_header
                 else f"Bearer {required_key}"
             )
             if supplied != expected:

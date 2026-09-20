@@ -16,12 +16,16 @@ from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
-from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
+from vibe.model_hub_runtime.api_key_vendors import (
+    official_api_key_base_url,
+    validate_api_key_auth_scheme,
+)
 
 
 logger = logging.getLogger(__name__)
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
+_BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
 _PROTOCOLS = {"anthropic", "openai_responses", "openai_chat"}
 
@@ -164,6 +168,7 @@ class EngineStateStore:
         vendor: str = "custom",
         protocol: str = "openai_chat",
         base_url: str | None = None,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         if not isinstance(value, str) or not value:
@@ -173,9 +178,16 @@ class EngineStateStore:
             raise EngineStateError("credential vendor is empty")
         if protocol not in _PROTOCOLS:
             raise EngineStateError("unsupported source protocol")
+        try:
+            validate_api_key_auth_scheme(
+                normalized_vendor, protocol, base_url, value, auth_scheme,
+            )
+        except ValueError:
+            raise EngineStateError("unsupported API key authentication scheme") from None
         normalized_base_url = _validated_base_url(base_url)
         with self._lock:
-            credential_ref = f"cred_{secrets.token_hex(16)}"
+            prefix = "cred_auth_bearer_" if auth_scheme == "bearer" else "cred_"
+            credential_ref = f"{prefix}{secrets.token_hex(16)}"
             credential_path, credential_tmp, stage_path, stage_tmp = (
                 self._reserve_credential_namespace(credential_ref)
             )
@@ -190,6 +202,7 @@ class EngineStateStore:
                         "protocol": protocol,
                         "base_url": normalized_base_url,
                         "value": value,
+                        **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
                     },
                     temporary_path=credential_tmp,
                     credential_ref=credential_ref,
@@ -443,17 +456,24 @@ class EngineStateStore:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         """Compare transient native material with an engine-owned API key."""
 
         metadata = self.credential_metadata(credential_ref)
         if metadata.get("kind") != "api_key":
             return False
+        try:
+            validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
+        except ValueError:
+            raise EngineStateError("unsupported API key authentication scheme") from None
         normalized_base_url = _validated_base_url(base_url)
         if (
             metadata.get("vendor") != vendor.strip().lower()
             or metadata.get("protocol") != protocol
             or metadata.get("base_url") != normalized_base_url
+            or metadata.get("auth_scheme") != auth_scheme
         ):
             return False
         if not isinstance(secret, str):
@@ -604,12 +624,79 @@ class EngineStateStore:
             if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
                 raise EngineStateError("credential permissions are unsafe")
             payload = self._read_json(path)
-            kind = payload.get("kind") if payload else None
-            if kind == "reservation" and payload.get("credential_ref") == credential_ref:
+            if payload is None:
                 return None
-            if kind not in {"api_key", "oauth"}:
-                raise EngineStateError("credential is unavailable")
+            if payload.get("kind") == "reservation" and payload.get("credential_ref") == credential_ref:
+                return None
+            _validate_credential_auth_scheme(credential_ref, payload)
             return payload
+
+    def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        """Recover replacement transport without requiring the previous secret.
+
+        Only a safe missing or content-corrupt document permits ref fallback.
+        Readable identity conflicts, unsafe paths and I/O failures stay errors.
+        Plain refs predate explicit transport; intact unpublished Bearer
+        metadata is supported, but its complete loss cannot be reconstructed.
+        """
+        with self._lock:
+            ref_scheme = _credential_ref_auth_scheme(credential_ref)
+            payload = self._read_replacement_credential_document(credential_ref)
+            if payload is None:
+                return ref_scheme
+            _validate_credential_auth_scheme(credential_ref, payload, require_secret=False)
+            if payload.get("kind") != "api_key":
+                raise EngineStateError("API key credential is unavailable")
+            return payload.get("auth_scheme")
+
+    def _private_credential_directory_present(self, directory: Path) -> bool:
+        """Observe owned directories without creating or repairing them."""
+        for path in (self.root, directory):
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise EngineStateError("unable to inspect credential directory") from exc
+            if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
+                raise EngineStateError("credential directory permissions are unsafe")
+        return True
+
+    def _read_replacement_credential_document(
+        self, credential_ref: str,
+    ) -> dict[str, Any] | None:
+        """Read safe identity evidence; only missing/corrupt contents are absent."""
+        _credential_ref_auth_scheme(credential_ref)
+        directory = self.root / "credentials"
+        if not self._private_credential_directory_present(directory):
+            return None
+        path = directory / f"{credential_ref}.json"
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise EngineStateError("unable to inspect credential file") from exc
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            raise EngineStateError("credential permissions are unsafe")
+        try:
+            # Do not turn an open/read failure into content corruption. Ref
+            # recovery is safe only after a private regular file was read.
+            descriptor = os.open(
+                path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+            with os.fdopen(descriptor, "rb") as handle:
+                mode = os.fstat(handle.fileno()).st_mode
+                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                    raise EngineStateError("credential permissions are unsafe")
+                raw = handle.read()
+        except OSError as exc:
+            raise EngineStateError("unable to read credential file") from exc
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def has_current_source_credential(
         self,
@@ -629,8 +716,7 @@ class EngineStateStore:
         remain entirely engine-owned and are not opened by this observation.
         """
         try:
-            if not isinstance(credential_ref, str) or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-                return False
+            _credential_ref_auth_scheme(credential_ref)
             _validated_source_id(source_id)
             credential_kind = {"api_key": "api_key", "subscription": "oauth"}.get(kind)
             if credential_kind is None or not isinstance(vendor, str) or protocol not in _PROTOCOLS:
@@ -653,7 +739,12 @@ class EngineStateStore:
                 payload.get("kind") != credential_kind or payload.get("vendor") != normalized_vendor
             ):
                 return False
+            _validate_credential_auth_scheme(credential_ref, payload)
             if credential_kind == "api_key":
+                validate_api_key_auth_scheme(
+                    normalized_vendor, protocol, normalized_base_url,
+                    payload.get("value"), payload.get("auth_scheme"),
+                )
                 return (
                     payload.get("protocol") == protocol
                     and payload.get("base_url") == normalized_base_url
@@ -705,6 +796,30 @@ class EngineStateStore:
             self._remove_private_file_if_present(stage_temporary_path)
             self._remove_private_file_if_present(temporary_path)
             self._remove_private_file_if_present(path)
+
+    def revoke_api_key_credential(self, credential_ref: str) -> None:
+        """Retire a known API-key ref, never a watched OAuth auth file.
+
+        The caller's durable API-key-only intent permits cleanup when the old
+        document is missing/content-corrupt. Readable identity conflicts still
+        reject. Exact private namespace ownership does not depend on a secret.
+        """
+        with self._lock:
+            self.assert_credential_unbound(credential_ref)
+            self.credential_auth_scheme(credential_ref)
+            paths = self._credential_namespace_paths(credential_ref, create=False)
+            present_directories = {
+                directory
+                for directory in {path.parent for path in paths}
+                if self._private_credential_directory_present(directory)
+            }
+            # Validate every owned path before deleting any, including temp and
+            # staging remnants. Never follow an auth_name in document contents.
+            for path in paths:
+                self._assert_private_file(path, "engine state path is unsafe")
+            for path in reversed(paths):
+                if path.parent in present_directories:
+                    self._remove_private_file_if_present(path)
 
     def clear_runtime_configs(self) -> None:
         """Remove persisted engine configs after any credential is revoked."""
@@ -778,8 +893,7 @@ class EngineStateStore:
             entry.chmod(0o600)
 
     def _credential_path(self, credential_ref: str) -> Path:
-        if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-            raise EngineStateError("invalid credential reference")
+        _credential_ref_auth_scheme(credential_ref)
         self._ensure_private_dir(self.root)
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
@@ -788,9 +902,18 @@ class EngineStateStore:
     def _credential_namespace_paths(
         self,
         credential_ref: str,
+        *,
+        create: bool = True,
     ) -> tuple[Path, Path, Path, Path]:
-        credential_path = self._credential_path(credential_ref)
-        stage_path = self._oauth_stage_path(credential_ref)
+        _credential_ref_auth_scheme(credential_ref)
+        credential_path = (
+            self._credential_path(credential_ref)
+            if create else self.root / "credentials" / f"{credential_ref}.json"
+        )
+        stage_path = (
+            self._oauth_stage_path(credential_ref)
+            if create else self.oauth_staging_dir / f"{credential_ref}.json"
+        )
         return (
             credential_path,
             credential_path.with_name(f".{credential_path.name}.tmp"),
@@ -821,8 +944,7 @@ class EngineStateStore:
         return paths
 
     def _oauth_stage_path(self, credential_ref: str) -> Path:
-        if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-            raise EngineStateError("invalid credential reference")
+        _credential_ref_auth_scheme(credential_ref)
         self._ensure_private_dir(self.oauth_staging_dir)
         return self.oauth_staging_dir / f"{credential_ref}.json"
 
@@ -838,8 +960,10 @@ class EngineStateStore:
             credential_ref = path.stem
             if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
                 raise EngineStateError("credential state contains an unsafe entry")
+            _credential_ref_auth_scheme(credential_ref)
             payload = self._read_json(path)
             if payload and payload.get("kind") == "oauth":
+                _validate_credential_auth_scheme(credential_ref, payload)
                 result.append((credential_ref, payload))
         return result
 
@@ -1111,6 +1235,52 @@ class EngineStateStore:
             return
         if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
             raise EngineStateError(message)
+
+
+def _credential_ref_auth_scheme(credential_ref: str) -> str | None:
+    """Decode private immutable transport identity; callers keep refs opaque."""
+    if not isinstance(credential_ref, str) or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+        raise EngineStateError("invalid credential reference")
+    if credential_ref.startswith("cred_auth_"):
+        if _BEARER_CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+            raise EngineStateError("unsupported credential reference authentication scheme")
+        return "bearer"
+    return None
+
+
+def _validate_credential_auth_scheme(
+    credential_ref: str,
+    payload: dict[str, Any],
+    *,
+    require_secret: bool = True,
+) -> None:
+    ref_scheme = _credential_ref_auth_scheme(credential_ref)
+    kind = payload.get("kind")
+    if not isinstance(kind, str) or kind not in {"api_key", "oauth"}:
+        raise EngineStateError("credential is unavailable")
+    scheme = payload.get("auth_scheme")
+    if ref_scheme is not None and (kind != "api_key" or scheme != ref_scheme):
+        raise EngineStateError("unsupported API key authentication scheme")
+    if kind == "oauth":
+        if scheme is not None:
+            raise EngineStateError("unsupported API key authentication scheme")
+        return
+    try:
+        # Metadata-only replacement validates transport independently of the
+        # old value. The new value must pass ordinary provisioning/discovery.
+        validate_api_key_auth_scheme(
+            payload.get("vendor"), payload.get("protocol"), payload.get("base_url"),
+            payload.get("value") if require_secret else None, scheme,
+        )
+        if scheme is not None and (
+            payload.get("protocol") != "anthropic"
+            or (require_secret and (
+                not isinstance(payload.get("value"), str) or not payload["value"]
+            ))
+        ):
+            raise ValueError
+    except ValueError:
+        raise EngineStateError("unsupported API key authentication scheme") from None
 
 
 def _validated_oauth_auth_name(value: str) -> str:
