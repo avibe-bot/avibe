@@ -22,9 +22,9 @@ const APPEARANCE_CARD = 'section.bg-surface-2:has([role="radiogroup"])';
 const WORKSPACE_CHIP = 'Workspace: /Users/max/工作区/中文项目';
 const MOBILE_NAV = 'nav.fixed.bottom-0';
 const ULTRA = { width: 1920, height: 1000 };
-// A phone one iPhone-generation shorter. The composer has to clear the tab bar
-// because of where it is anchored, not because 844 happens to leave room.
-const NARROW_SHORT = { width: 390, height: 667 };
+// A short phone that still requires scrolling after the composer spacing was
+// tightened. The composer must clear the tab bar even when the home cannot fit.
+const NARROW_SHORT = { width: 390, height: 568 };
 
 const MODEL_HUB_AGENT = {
   backend: 'codex',
@@ -251,7 +251,7 @@ test.describe('workbench home geometry', () => {
         // Continue the typed draft on the existing short phone. Here overflow
         // must be real: the controls clear the bar even in a crowded layout.
         await page.setViewportSize(NARROW_SHORT);
-        await page.waitForFunction(() => window.innerHeight === 667);
+        await page.waitForFunction((height) => window.innerHeight === height, NARROW_SHORT.height);
         const overflow = await page.locator(SHELL_SCROLL).evaluate((node) => ({
           top: node.scrollTop,
           hidden: node.scrollHeight - node.clientHeight,

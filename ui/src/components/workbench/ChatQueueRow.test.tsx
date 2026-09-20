@@ -148,6 +148,25 @@ describe('QueueStrip — compatible queued messages read as one batch', () => {
     expect(screen.getByText('Queued · 1')).toBeTruthy();
   });
 
+  it('gives immediate feedback and blocks duplicate sends while flushing', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueueStrip
+          queue={[queued()]}
+          onRemove={vi.fn()}
+          onRecall={vi.fn()}
+          onSendNow={vi.fn()}
+          sendingNow
+        />
+      </I18nextProvider>,
+    );
+
+    const button = screen.getByRole('button', { name: 'Sending…' });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.getAttribute('aria-busy')).toBe('true');
+    expect(button.querySelector('svg')).toBeTruthy();
+  });
+
   it('uses one shared bubble and reveals each original row boundary on hover or focus', () => {
     const html = wrap(
       <QueueStrip

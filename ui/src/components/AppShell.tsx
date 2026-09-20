@@ -369,7 +369,7 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar Y1TiVV — 248 wide by default, 20/16 padding, top group and bottom
+      {/* Sidebar Y1TiVV — 248 wide by default, 16px padding, top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
           The width is SidebarResizer's --app-sidebar-w, shared with Workbench
@@ -395,7 +395,7 @@ export const AppShell: React.FC = () => {
             then version on the left and the live service status on the right.
             AppsLauncher keeps its layout slot here while its interactive surface
             floats above app windows. */}
-        <div className="relative flex shrink-0 flex-col gap-2.5">
+        <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
             {canUseApps && (
               <RouteSurfaceActivityBoundary active={!settingsOpen}>
