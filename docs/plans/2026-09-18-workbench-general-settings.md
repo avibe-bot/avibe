@@ -16,11 +16,13 @@ the sidebar owner remains mounted, including across Settings, without storing
 that preference in localStorage. Keep #2058's Composer spacing and queue send
 feedback, current authorization filters, and Settings activity boundaries.
 
-All production and test content must remain byte-identical to the original
-#2058 head. Re-run the affected consumers, hermetic browser geometry/capability
-cases, typechecks, lint, and UI build, then obtain fresh exact-head Codex review
-and CI. Historical green results do not qualify for the refreshed head. This
-authorizes updating the existing PR, not merging or deploying it.
+The initial conflict-resolution refresh kept all production and test content
+byte-identical to the original #2058 head. Re-run the affected consumers,
+hermetic browser geometry/capability cases, typechecks, lint, and UI build, then
+obtain fresh exact-head Codex review and CI. Historical green results do not
+qualify for the refreshed head. This authorizes updating the existing PR, not
+merging or deploying it. Any later review repair must be recorded with its
+scope and validation below.
 
 PM review inventory before this refresh: nine reviews, eleven inline comments,
 two issue comments, and seven resolved whole-PR threads, including exhausted
@@ -33,9 +35,10 @@ heads and requires PM diagnosis under the circuit breaker. Independent inspectio
 confirms the current invocation predicate gates the settled response, error,
 queue-refresh result, and spinner cleanup; the sidebar toggle and eyebrow have
 live consumers. The current focused consumers pass. This round preserves those
-repairs byte-for-byte and resolves only the owner-selected presentation conflict;
-it is not another queue architecture rewrite. Any new finding requires complete
-inventory and a fresh PM causal/scope ruling before further edits or pushes.
+repairs and resolves the owner-selected presentation conflict. A later exact-head
+review also identified a queue-read ordering race; that repair and its validation
+are recorded below. Any new finding requires complete inventory and a fresh PM
+causal/scope ruling before further edits or pushes.
 
 
 Owner authorized parallel implementation on 2026-09-18 02:36 Asia/Shanghai. PM session: sestqz5wvu5ty. Branch feat/workbench-general-settings starts at GitHub-verified master 4019b704c99afe16223d475fccd9e1cb94a109d7 in its own worktree. #2011 is a separate active lane; #2013 remains deferred. Historical #2010-only or sequential-dispatch language is superseded by this explicit instruction.
@@ -308,6 +311,23 @@ Settings. Against the unrepaired product that assertion reads 6 where it must re
 by label so it fails on the history, not on the element type. Unit scope adds the close behaviour at the phone
 root and holds internal back destinations to links. Re-validated: the six browser cases on the built app, the five
 affected unit files (91), the browser suite's `typecheck`, `lint` on the changed files, and `build`.
+
+## Review round 3 repair — queue refresh commit ordering
+
+One finding exposed a race between overlapping authoritative queue reads. A
+post-send refresh could start before a newly queued row was inserted, while a
+later `queue.updated` refresh started after it; if the later snapshot resolved
+first, the older response could still pass the send-now predicate and overwrite
+the visible queue, hiding the new row and its Recall/Remove controls.
+
+The existing session and send-now ownership guards remain unchanged. The shared
+`refreshQueue` path now assigns every read a monotonic generation and commits a
+successful response only when it is not older than the latest committed read.
+This is a read-ordering repair, not a queue ownership or server-claim change.
+`ChatPage.hydration.test.tsx` covers the class by resolving the newer snapshot
+first and proving that the late older response cannot replace it. Re-validated
+locally: the focused Vitest scope (94 tests), UI lint, test typechecks, and
+production build.
 
 ## Producer integration — what the end-to-end run found
 
