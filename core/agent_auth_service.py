@@ -668,7 +668,7 @@ class AgentAuthService:
     def _make_flow_key(self, context: MessageContext, backend: str) -> str:
         return f"{self._get_settings_key(context)}:{backend}"
 
-    def _get_cli_binary(self, backend: str) -> str:
+    def _get_cli_binary(self, backend: str, *, strict: bool = False) -> str:
         # Same dual-shape issue as ``_resolve_backend_config``: V2Config
         # carries the binary under ``config.agents.<backend>.cli_path``,
         # but ``AppCompatConfig`` (the shape live IM controllers run on)
@@ -682,8 +682,19 @@ class AgentAuthService:
             try:
                 from config.v2_config import V2Config
 
-                backend_cfg = getattr(V2Config.load().agents, backend, None)
+                config = V2Config.load(persist_migrations=False) if strict else V2Config.load()
+                if strict and (
+                    config.whole_config_recovery
+                    or any(section in {"agents", f"agents.{backend}", f"agents.{backend}.cli_path"}
+                           for section in config.recovered_sections)
+                ):
+                    raise NativeMigrationBlockedError("process_inventory_unavailable", (backend,))
+                backend_cfg = getattr(config.agents, backend, None)
             except Exception:  # noqa: BLE001
+                if strict:
+                    # A missing/unknown configured identity is not evidence of
+                    # native idleness. Do not expose config error payloads.
+                    raise NativeMigrationBlockedError("process_inventory_unavailable", (backend,)) from None
                 logger.debug(
                     "Failed to load persisted %s config for Settings probe",
                     backend,

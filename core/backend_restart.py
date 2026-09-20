@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import stat
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -184,20 +185,8 @@ async def finish_native_operation(awaitable: Awaitable[Any]) -> Any:
     return result
 
 
-def _native_process_backend(command: list[str], binaries: Mapping[str, str]) -> str | None:
-    """Match an executable or its interpreter's script, never prompt arguments."""
-    if not command:
-        return None
-    executable = command[0]
-    name = Path(executable).name.lower()
-    if name in {"node", "nodejs", "node.exe", "bun", "bun.exe"}:
-        # Interpreter options are not scripts. Do not scan past a script into
-        # its prompt/config arguments looking for another executable.
-        script = next((arg for arg in command[1:] if not arg.startswith("-")), None)
-        if script is None:
-            return None
-        executable = script
-        name = Path(script).name.lower()
+def _native_executable_backend(executable: str, binaries: Mapping[str, str]) -> str | None:
+    name = executable.replace("\\", "/").rsplit("/", 1)[-1].lower()
     for backend, binary in binaries.items():
         if executable == binary or name in {backend, f"{backend}.exe"}:
             return backend
@@ -208,6 +197,94 @@ def _native_process_backend(command: list[str], binaries: Mapping[str, str]) -> 
             return backend
         if backend == "opencode" and normalized.endswith("/opencode-ai/bin/opencode"):
             return backend
+    return None
+
+
+def _native_process_backend(command: list[str], binaries: Mapping[str, str]) -> str | None:
+    """Match a direct executable or interpreter entrypoint, never script arguments."""
+    if not command:
+        return None
+    direct = _native_executable_backend(command[0], binaries)
+    if direct:
+        return direct
+    name = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?", name):
+        family = "python"
+        values = {"--check-hash-based-pycs"}
+        flags = set()
+    elif name.lstrip("-") in {"sh", "bash", "dash", "zsh", "ksh", "ash"}:
+        family = "shell"
+        values = {"--rcfile", "--init-file"}
+        flags = {"--noprofile", "--norc", "--login", "--posix", "--restricted", "--verbose", "--debugger"}
+    elif name in {"node", "nodejs", "bun"}:
+        family = "javascript"
+        values = {
+            "--require", "--import", "--loader", "--experimental-loader", "--conditions",
+            "--env-file", "--env-file-if-exists", "--title", "--icu-data-dir",
+            "--openssl-config", "--diagnostic-dir", "--input-type", "--preload",
+            "--cwd", "--config", "--watch-path",
+        }
+        flags = {
+            "--inspect", "--inspect-brk", "--inspect-wait", "--trace-warnings",
+            "--no-warnings", "--enable-source-maps", "--experimental-strip-types",
+            "--watch", "--check", "--no-addons",
+        }
+    else:
+        return None
+
+    def unknown(index: int) -> None:
+        # Unknown startup syntax cannot establish that a possible native script
+        # is only data. Refuse this inventory rather than guess an idle backend.
+        # This is reached only BEFORE an entrypoint or non-script mode is found.
+        if any(_native_executable_backend(value, binaries) for value in command[index:]):
+            raise NativeMigrationBlockedError("process_inventory_unavailable", tuple(sorted(binaries)))
+
+    index = 1
+    bun_run = False
+    while index < len(command):
+        value = command[index]
+        if value == "--" or family == "shell" and value == "-":
+            return _native_executable_backend(command[index + 1], binaries) if index + 1 < len(command) else None
+        if value == "-" or value in {"--help", "--version"}:
+            return None
+        if name == "bun" and value == "run" and not bun_run:
+            bun_run = True
+            index += 1
+            continue
+        if not value.startswith("-") and not (family == "shell" and value.startswith("+")):
+            return _native_executable_backend(value, binaries)
+        option, separator, _ = value.partition("=")
+        if family == "javascript" and (
+            option in {"--eval", "--print"} or value.startswith(("-e", "-p")) or value in {"-h", "-v"}
+        ):
+            return None
+        if option in values:
+            index += 1 if separator else 2
+            continue
+        if option in flags:
+            index += 1
+            continue
+        if value.startswith("--"):
+            return unknown(index)
+        short = value[1:]
+        if family == "javascript":
+            if short[:1] in {"r", "C"}:
+                index += 2 if len(short) == 1 else 1
+                continue
+            return unknown(index)
+        for position, flag in enumerate(short):
+            if (
+                family == "python" and flag in "cmhV?"
+                or family == "shell" and value.startswith("-") and flag in "cs"
+            ):
+                return None  # Code/module/stdin is not a script path or prompt.
+            if flag in ("WX" if family == "python" else "oO"):
+                if position == len(short) - 1:
+                    index += 1  # The next token is this option's operand.
+                break
+            if flag not in ("bBdEiIOPqRsStuUvVx" if family == "python" else "abefhiklmnprtuvxBCEHPT"):
+                return unknown(index)
+        index += 1
     return None
 
 
@@ -335,8 +412,14 @@ class BackendRestartCoordinator:
     def _native_binaries(self, targets: tuple[str, ...]) -> dict[str, str]:
         result: dict[str, str] = {}
         config = getattr(self.controller, "config", None)
+        resolve = getattr(getattr(self.controller, "agent_auth_service", None), "_get_cli_binary", None)
         for backend in targets:
-            backend_config = getattr(config, backend, None)
+            if callable(resolve):
+                # This existing owner handles raw/compat config and reloads a
+                # configured path omitted by a disabled compatibility backend.
+                result[backend] = str(resolve(backend, strict=True))
+                continue
+            backend_config = getattr(config, backend, None) or getattr(getattr(config, "agents", None), backend, None)
             result[backend] = str(
                 getattr(backend_config, "binary", None)
                 or getattr(backend_config, "cli_path", None)

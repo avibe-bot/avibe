@@ -136,6 +136,21 @@ explicitly authorized acceptance check.
   a forced cancellation), strictly retires credential-bearing idle processes,
   and checks for external CLI users. It is acquired before `_mutation_lock`.
   Production installs wire it from the Controller; no production no-op.
+  Configured CLI identity is independent of backend enablement: the existing
+  auth-service binary resolver supplies raw/compatibility paths and persisted
+  paths omitted by disabled compatibility backends. Inventory uses its strict
+  mode: unreadable or recovered binary configuration cannot fall back to a default
+  identity and certify idleness; ordinary Settings probes remain best-effort.
+  Process matching recognizes
+  direct executables and script entrypoints behind Node/Bun, Python-family and
+  POSIX-shell interpreters. Startup options consume their operands; matching stops
+  at the script or an eval/module/stdin mode, never a later prompt argument.
+  A lone `-` ends shell options but selects stdin for Python/Node.
+  Ambiguous startup syntax containing a possible native executable refuses the
+  inventory. No script contents, process environments or arbitrary shell/eval
+  code are inspected or executed. Initial admission and idle rechecks use the
+  same matcher; this does not promise exclusion of arbitrary uncooperative
+  writers or new external launches after the check.
 - `ModelHubService.migration_blocked_backends` is a set of backend names that
   must remain blocked after the guard exits if durable takeover recovery is
   incomplete. Completed or fully reverted transactions remove their names.
