@@ -58,7 +58,10 @@ from vibe.native_oauth_store import (
     apply_keychain_edit,
     read_native_oauth,
 )
-from vibe.model_hub_runtime.api_key_vendors import validate_api_key_auth_scheme
+from vibe.model_hub_runtime.api_key_vendors import (
+    validate_api_key_auth_scheme,
+    validate_migration_api_key_transport,
+)
 from vibe.opencode_config import (
     get_opencode_custom_provider_adapter,
 )
@@ -1199,6 +1202,24 @@ def _deduplicate_opencode_items(
     return [replacements.get(item.id, item) for item in items if item.id not in duplicates]
 
 
+def _require_native_api_key_transport(
+    item: NativeMigrationItem, *, observed_protocol: str | None = None,
+) -> None:
+    if item.kind == "oauth_native":
+        return
+    protocol = observed_protocol if observed_protocol is not None else item.protocol
+    try:
+        validate_migration_api_key_transport(
+            item.vendor, protocol, item.base_url, item.secret, item.auth_scheme,
+        )
+        if (protocol == "anthropic") != (item.protocol == "anthropic"):
+            # None is legacy protocol-auth, not permission to replace a native
+            # x-api-key with Bearer (or vice versa) after observation.
+            raise ValueError
+    except ValueError:
+        raise MigrationConflictError from None
+
+
 def scan_native_configs(
     config: ModelHubConfig,
     *,
@@ -1270,6 +1291,18 @@ def scan_native_configs(
                 continue
             valid_items.append(item)
         items = valid_items
+    admitted: list[NativeMigrationItem] = []
+    for item in items:
+        if item.proposed_action == "import":
+            try:
+                _require_native_api_key_transport(item)
+            except MigrationConflictError:
+                item = replace(
+                    item, proposed_action="reauth", selected=False,
+                    notes_key="settings.models.migration.blocked.transport",
+                )
+        admitted.append(item)
+    items = admitted
     items = _deduplicate_opencode_items(items, validate_base_url)
     existing_native_sources = {
         source.vendor: source
@@ -1407,6 +1440,9 @@ async def _prepare_takeover(
     clean_native_stores: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Stage all grants and durable before/after images, still native-owned."""
+    for item in selected:
+        # Recheck before cleanup planning, reuse, proof or credential custody.
+        _require_native_api_key_transport(item)
     clean_native_stores = dict(clean_native_stores or {})
     cleanup_items = [
         *selected,
@@ -1452,10 +1488,11 @@ async def _prepare_takeover(
                         # Identity reuse is not current authentication proof.
                         # Observe the exact existing target/ref without changing
                         # its inventory, state, or user-owned routes.
-                        await host._require_proven_observation(
+                        reuse_observation = await host._require_proven_observation(
                             candidate.vendor, candidate.base_url,
                             candidate.credential_ref, (candidate.protocol,),
                         )
+                        _require_native_api_key_transport(item, observed_protocol=reuse_observation.protocol)
                         _ensure_takeover_placement(updated, candidate, item.backend)
                         source_ids.append(candidate.id)
                         break
@@ -1466,6 +1503,7 @@ async def _prepare_takeover(
                         "key": item.secret,
                     }, on_reserved=lambda ref: host.revocations.add("observation", ref), **auth_options)
                     protocol = cast(Any, observation.protocol)
+                    _require_native_api_key_transport(item, observed_protocol=protocol)
                 if observation is None:
                     continue
             if existing is not None and not (

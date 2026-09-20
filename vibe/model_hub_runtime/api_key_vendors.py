@@ -20,6 +20,30 @@ _LEGACY_OFFICIAL_BASE_URLS = {
 }
 
 
+def _validated_cpa_anthropic_origin(base_url: str | None) -> bool:
+    """Share CPA's authority gate, rejecting ambiguous HTTP URL spellings."""
+    if not isinstance(base_url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in base_url):
+        raise ValueError
+    normalized = normalize_model_hub_base_url(base_url)
+    if normalized is None:
+        raise ValueError
+    parsed = urlsplit(normalized)
+    hostname = parsed.hostname
+    if not hostname or "%" in parsed.netloc or "\\" in parsed.netloc or parsed.port == 0:
+        raise ValueError
+    ascii_hostname = hostname.encode("idna").decode("ascii").lower()
+    if ascii_hostname == "api.anthropic.com" and hostname.lower() != ascii_hostname:
+        # Python's HTTP client can normalize these to the official host while
+        # Go's URL authority gate sees the original spelling. Admit neither.
+        raise ValueError
+    return (
+        parsed.scheme == "https"
+        and hostname.lower() == "api.anthropic.com"
+        # CPA compares URL.Port() as text: :0443 is not its official origin.
+        and (parsed.port is None or parsed.netloc.rsplit(":", 1)[-1] == "443")
+    )
+
+
 def validate_api_key_auth_scheme(
     vendor: str,
     protocol: str | None,
@@ -42,30 +66,9 @@ def validate_api_key_auth_scheme(
             or not isinstance(vendor, str)
             or vendor.strip().lower() != "anthropic"
             or protocol not in (None, "anthropic")
-            or not isinstance(base_url, str)
-            or any(ord(char) <= 32 or ord(char) == 127 for char in base_url)
         ):
             raise ValueError
-        normalized = normalize_model_hub_base_url(base_url)
-        if normalized is None:
-            raise ValueError
-        parsed = urlsplit(normalized)
-        hostname = parsed.hostname
-        # Inspect the parsed authority, never a substring of the whole URL.
-        # Reject encoded/ambiguous authorities before a HTTP library normalizes
-        # them differently. Match CPA's HTTPS/default-port first-party gate.
-        if (
-            not hostname
-            or "%" in parsed.netloc
-            or "\\" in parsed.netloc
-            or parsed.port == 0
-        ):
-            raise ValueError
-        if (
-            parsed.scheme == "https"
-            and hostname.encode("idna").decode("ascii").lower() == "api.anthropic.com"
-            and parsed.port in (None, 443)
-        ):
+        if _validated_cpa_anthropic_origin(base_url):
             raise ValueError
         if secret is not None and (
             not isinstance(secret, str)
@@ -77,6 +80,34 @@ def validate_api_key_auth_scheme(
     except (TypeError, ValueError):
         raise ValueError("unsupported API key authentication scheme") from None
     return "bearer"
+
+
+def validate_migration_api_key_transport(
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    secret: str | None,
+    auth_scheme: str | None,
+) -> None:
+    """Admit native static auth only when proof and pinned CPA preserve it.
+
+    This is a migration gate, not a new default for public Sources or legacy
+    credential metadata. Anthropic SDK/API_KEY inputs mean x-api-key; CPA uses
+    that header only at its official origin. Static keys matching its OAuth
+    heuristic are unsafe at either origin, regardless of successful proof.
+    """
+    try:
+        validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
+        if protocol != "anthropic":
+            return
+        if not isinstance(secret, str) or not secret.strip() or "sk-ant-oat" in secret:
+            raise ValueError
+        if auth_scheme is None and not _validated_cpa_anthropic_origin(
+            base_url if base_url is not None else official_api_key_base_url(vendor)
+        ):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("unsupported native API key transport") from None
 
 
 @dataclass(frozen=True)
