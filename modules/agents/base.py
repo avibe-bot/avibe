@@ -653,7 +653,12 @@ class BaseAgent(ABC):
                     parse_mode=parse_mode,
                     is_error=is_error,
                     output=output,
-                    citations=citations,
+                    # Forwarded ONLY when there is a sidecar to carry, for the
+                    # reason ``controller.emit_agent_message`` gives when it
+                    # forwards the same value: the controller is a substitutable
+                    # collaborator, and an always-present keyword would change the
+                    # required signature of every stand-in that has none.
+                    **({"citations": citations} if citations else {}),
                 )
             else:
                 # No visible text (show_duration off + empty result/suffix) is still
@@ -708,7 +713,7 @@ class BaseAgent(ABC):
                 is_error=is_error,
                 result_footer=result_footer,
                 output=output,
-                citations=citations,
+                **({"citations": citations} if citations else {}),
             )
 
         # Remove ack reaction after result is sent

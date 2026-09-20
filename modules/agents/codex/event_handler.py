@@ -12,13 +12,18 @@ import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
 from core.citations import CitationSource, has_citation_markers, resolve_citations
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
+from modules.agents.codex.search_history import (
+    SAFE_THREAD_ID_RE,
+    harvest_search_results,
+    read_thread_search_sources,
+)
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
@@ -26,7 +31,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _GENERATED_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".webp"}
-_SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ATTACHMENT_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(attachment://[^)\s]+\)")
 _ImageSnapshot = dict[Path, tuple[int, int]]
 # Bounds for the citation source cache. Generous enough that an ordinary
@@ -51,7 +55,10 @@ class CodexEventHandler:
         # Citable web-search results, keyed by Codex thread then ref_id. A ref_id
         # is only unique inside its own native thread, and a later Avibe turn can
         # cite a search run in an earlier one, so the scope is the thread - never
-        # the turn, and never one map shared across threads.
+        # the turn, and never one map shared across threads. This is a memo over
+        # Codex's recorded history rather than the record itself: a thread absent
+        # here is read back from that history on first use, so neither a restart
+        # nor an eviction loses attribution.
         self._search_sources_by_thread: OrderedDict[str, OrderedDict[str, CitationSource]] = (
             OrderedDict()
         )
@@ -232,7 +239,9 @@ class CodexEventHandler:
         await asyncio.to_thread(self._persist_turn_generated_images, params)
         pending = turn_state.pending_assistant if turn_state else None
         pending_text = pending[0] if pending else None
-        pending_text, citations = self._resolve_citations(pending_text, params, tracked_request)
+        pending_text, citations = await self._resolve_citations(
+            pending_text, params, tracked_request
+        )
         result_text = self._append_generated_images(pending_text, params, tracked_request)
         self._agent._turn_registry.pop_turn(turn_id)
         if pending and (pending[0] or "").strip():
@@ -281,7 +290,9 @@ class CodexEventHandler:
                 prev_is_visible = bool(prev and strip_silent_blocks(prev[0]).strip())
                 if text_is_visible and prev_is_visible:
                     prev_text, prev_pm = prev
-                    prev_text, prev_citations = self._resolve_citations(prev_text, params, request)
+                    prev_text, prev_citations = await self._resolve_citations(
+                        prev_text, params, request
+                    )
                     await self._agent.controller.emit_agent_message(
                         request.context,
                         "assistant",
@@ -365,35 +376,27 @@ class CodexEventHandler:
     def _record_search_sources(self, params: dict[str, Any], item: dict[str, Any]) -> None:
         """Harvest a completed web search's results so later markers can cite them.
 
-        This is a bounded cache, not durable truth: a ref whose search predates an
-        eviction (or a restart) resolves to the unresolved label rather than to a
-        guess. Codex re-sends the results when a thread is re-read, so an ordinary
-        resumed conversation re-populates itself.
+        The live stream is the fast path only. Codex records the same results in
+        the thread's rollout file, and ``_sources_for_thread`` reads them back
+        when this handler never saw them, so an eviction here costs a re-read
+        rather than the attribution.
         """
         thread_id = self._extract_thread_id(params)
-        results = item.get("results")
-        if not thread_id or not isinstance(results, list):
+        if not thread_id:
             return
-        harvested: list[CitationSource] = []
-        for result in results:
-            if not isinstance(result, dict):
-                continue
-            ref_id = result.get("ref_id") or result.get("refId")
-            url = result.get("url")
-            if not isinstance(ref_id, str) or not ref_id or not isinstance(url, str) or not url:
-                continue
-            title = result.get("title")
-            harvested.append(
-                CitationSource(
-                    ref_id=ref_id,
-                    title=title if isinstance(title, str) else "",
-                    url=url,
-                )
-            )
-        # A search with nothing citable must not claim a cache slot of its own -
-        # that slot would evict a thread whose refs an answer can still cite.
+        harvested = harvest_search_results(item)
+        # A search with nothing citable adds nothing; leave the thread's entry
+        # (and its hydration state) exactly as it was.
         if not harvested:
             return
+        self._merge_search_sources(thread_id, harvested)
+
+    def _merge_search_sources(
+        self,
+        thread_id: str,
+        harvested: list[CitationSource],
+    ) -> OrderedDict[str, CitationSource]:
+        """Fold sources into a thread's entry, newest definition of a ref winning."""
         sources = self._search_sources_by_thread.get(thread_id)
         if sources is None:
             sources = OrderedDict()
@@ -406,8 +409,33 @@ class CodexEventHandler:
                 sources.popitem(last=False)
         while len(self._search_sources_by_thread) > _MAX_CITATION_THREADS:
             self._search_sources_by_thread.popitem(last=False)
+        return sources
 
-    def _resolve_citations(
+    async def _sources_for_thread(self, thread_id: str) -> Mapping[str, CitationSource]:
+        """This thread's citable sources, read back from history when unseen.
+
+        A thread reaches this handler with no live searches recorded whenever the
+        process restarted, the conversation resumed (``excludeTurns``), it was
+        re-read (``includeTurns: False``), or it was forked - ``thread/fork``
+        hands back an id and nothing else. The entry is created even when the
+        read finds nothing, so one miss is not re-read on every later message,
+        and it is dropped by the same eviction as any other entry, so a thread
+        that falls out is re-read rather than permanently unresolvable.
+        """
+        if not thread_id:
+            return {}
+        sources = self._search_sources_by_thread.get(thread_id)
+        if sources is not None:
+            self._search_sources_by_thread.move_to_end(thread_id)
+            return sources
+        recovered = await asyncio.to_thread(
+            read_thread_search_sources,
+            thread_id,
+            limit=_MAX_CITATION_SOURCES_PER_THREAD,
+        )
+        return self._merge_search_sources(thread_id, recovered)
+
+    async def _resolve_citations(
         self,
         text: str | None,
         params: dict[str, Any],
@@ -421,7 +449,7 @@ class CodexEventHandler:
         """
         if not has_citation_markers(text):
             return text, None
-        sources = self._search_sources_by_thread.get(self._extract_thread_id(params)) or {}
+        sources = await self._sources_for_thread(self._extract_thread_id(params))
         resolved, citations = resolve_citations(
             text,
             sources,
@@ -635,7 +663,7 @@ class CodexEventHandler:
         return images
 
     def _generated_images_dir(self, thread_id: str) -> Path | None:
-        if not _SAFE_THREAD_ID_RE.fullmatch(thread_id):
+        if not SAFE_THREAD_ID_RE.fullmatch(thread_id):
             logger.warning("Ignoring unsafe Codex thread id for generated images: %s", thread_id)
             return None
         codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")

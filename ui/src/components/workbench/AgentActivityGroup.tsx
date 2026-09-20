@@ -333,7 +333,10 @@ const ActivityAssistantRow: React.FC<{ row: ActivityRow }> = ({ row }) => (
     <Sparkles className="mt-0.5 size-3.5 shrink-0 text-mint-ink" aria-hidden="true" />
     <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground/90 [&_p]:my-0.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto">
       {row.text ? (
-        <Markdown content={row.text} className="vr-markdown--inherit-size" />
+        // Narration rows are the agent's own words, so the same authorship gate the
+        // transcript applies is satisfied here by construction: an assistant row may
+        // draw a source badge; without a sidecar the link stays the plain domain.
+        <Markdown content={row.text} className="vr-markdown--inherit-size" citations={row.citations} />
       ) : (
         <span className="text-muted">—</span>
       )}

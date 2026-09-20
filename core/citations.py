@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlsplit
 
+from core.reply_enhancer import mask_markdown_code
+
 # The private-use delimiters the marker is wrapped in.
 _START = "\ue200"
 _SEP = "\ue202"
@@ -43,12 +45,6 @@ CITATION_MARKER_RE = re.compile(f"{_START}cite{_SEP}([^{_START}{_END}]*){_END}")
 # Real ref_ids look like ``turn0view1``. Keep the shape permissive but bounded so
 # a malformed payload falls through to the unresolved fallback.
 _REF_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
-
-# Inline code spans, fenced blocks, and indented code lines. A marker shown
-# inside a code example must stay literal - an agent explaining this very
-# grammar is a case seen in real transcripts.
-_CODE_SEGMENT_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
-_INDENTED_CODE_LINE_RE = re.compile(r"^(?: {4}|\t)")
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 # C0/C1 controls, zero-width and line/paragraph separators, and the whole
@@ -210,26 +206,34 @@ def resolve_citations(
             return match.group(0)
         # Markers usually sit flush against the preceding word or full stop;
         # a separating space keeps the link from reading as part of the sentence.
-        lead = "" if match.start() == 0 or match.string[match.start() - 1].isspace() else " "
+        lead = "" if match.start() == 0 or text[match.start() - 1].isspace() else " "
         return lead + " ".join(links)
 
     return _rewrite_outside_code(text, replace), [c.to_payload() for c in citations]
 
 
 def _rewrite_outside_code(text: str, replace: Callable[[re.Match[str]], str]) -> str:
-    """Apply ``replace`` to every marker that is not inside a code example."""
+    """Apply ``replace`` to every marker CommonMark does not read as code.
 
-    def rewrite(segment: str) -> str:
-        return "\n".join(
-            line if _INDENTED_CODE_LINE_RE.match(line) else CITATION_MARKER_RE.sub(replace, line)
-            for line in segment.split("\n")
-        )
-
+    A marker shown inside a code example must stay literal - an agent
+    explaining this very grammar is a case seen in real transcripts - and
+    "inside code" is a question only a CommonMark lexer can answer. Fence
+    lengths nest (a four-backtick block quoting a three-backtick one), an
+    unclosed fence swallows the rest of the document, a code span may run
+    across lines, and container indentation shifts all of it. So the decision
+    is delegated to the reply parser's offset-preserving mask: markers are
+    matched against the mask and spliced back into the original source, which
+    leaves every byte this function does not replace exactly as it arrived.
+    """
+    mask = mask_markdown_code(text)
     out: list[str] = []
-    last = 0
-    for match in _CODE_SEGMENT_RE.finditer(text):
-        out.append(rewrite(text[last : match.start()]))
-        out.append(match.group(0))
-        last = match.end()
-    out.append(rewrite(text[last:]))
+    cursor = 0
+    # A match in the mask cannot overlap a blanked region, so the marker text
+    # under it is the original text - only its surroundings may have been
+    # blanked, and those are copied from ``text``, never from the mask.
+    for match in CITATION_MARKER_RE.finditer(mask):
+        out.append(text[cursor : match.start()])
+        out.append(replace(match))
+        cursor = match.end()
+    out.append(text[cursor:])
     return "".join(out)

@@ -95,6 +95,42 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         # Promoted to body, so no separate subtext footer is passed.
         self.assertEqual(controller.result_footers, [None])
 
+    async def test_an_uncited_result_does_not_require_the_citation_keyword(self):
+        """The controller is substitutable, so an empty sidecar stays unsent.
+
+        ``_StubController`` above deliberately keeps the pre-citation signature:
+        an ordinary uncited turn must reach any stand-in that never heard of
+        citations, on both the duration-on and duration-off paths.
+        """
+        controller = _StubController()
+        agent = _StubAgent(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        for show_duration in (True, False):
+            controller.config.show_duration = show_duration
+            message_id = await agent.emit_result_message(context, "Plain answer.")
+
+            self.assertEqual(message_id, "message-id")
+        self.assertEqual([m[0] for m in controller.messages], ["result", "result"])
+
+    async def test_a_cited_result_forwards_its_sidecar(self):
+        """The keyword is withheld only when there is nothing to carry."""
+        seen: list[object] = []
+
+        class _CitationAwareController(_StubController):
+            async def emit_agent_message(self, *args, citations=None, **kwargs):
+                seen.append(citations)
+                return await super().emit_agent_message(*args, **kwargs)
+
+        controller = _CitationAwareController()
+        agent = _StubAgent(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+        sidecar = [{"index": 1, "ref_id": "turn0view0", "url": "https://example.com/x"}]
+
+        await agent.emit_result_message(context, "Cited answer.", citations=sidecar)
+
+        self.assertEqual(seen, [sidecar])
+
 
 class AgentSessionIdContextTests(unittest.TestCase):
     def test_bind_agent_session_id_attaches_returned_public_session_id(self):

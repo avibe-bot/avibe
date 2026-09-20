@@ -2,7 +2,7 @@ import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ExternalLink } from 'lucide-react';
 
-import { badgeVariants, interactiveBadgeTriggerClassName } from './badge-variants';
+import { badgeVariants, inlineBadgeTriggerClassName } from './badge-variants';
 import { Popover, PopoverAnchor, PopoverContent } from './popover';
 import type { CitationSource } from '@/lib/citations';
 import { cn } from '@/lib/utils';
@@ -83,7 +83,7 @@ export const CitationBadge: React.FC<{ citation: CitationSource; className?: str
           }}
           className={cn(
             badgeVariants({ variant: 'secondary' }),
-            interactiveBadgeTriggerClassName,
+            inlineBadgeTriggerClassName,
             // Pin the chip's own leading. It is baseline-aligned inline content, so
             // its box has to fit inside the prose line box or every line carrying a
             // citation grows taller than the uncited lines around it; inheriting

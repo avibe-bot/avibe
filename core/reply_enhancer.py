@@ -481,7 +481,7 @@ def _strip_silent_blocks_with_mask(text: str) -> Tuple[str, str]:
     if not text:
         return text, text
     if "<silent" not in text.lower():
-        return text, _mask_markdown_code(text)
+        return text, mask_markdown_code(text)
 
     candidates = _silent_control_candidates(text)
     ranges, markdown_mask = _silent_control_ranges_and_mask(text, candidates)
@@ -723,7 +723,7 @@ def _inline_file_link_captures(
 
 def _strip_file_links(text: str) -> str:
     """Replace file links outside Markdown code with their labels."""
-    return _strip_file_links_with_mask(text, _mask_markdown_code(text))[0]
+    return _strip_file_links_with_mask(text, mask_markdown_code(text))[0]
 
 
 def _strip_file_links_with_mask(text: str, markdown_mask: str) -> Tuple[str, str]:
@@ -917,7 +917,7 @@ def _extract_secret_requests(
     """Return ordered, de-duplicated ``$<NAME>`` markers found outside code spans."""
     if not text or "$<" not in text:
         return []
-    masked = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
+    masked = markdown_mask if markdown_mask is not None else mask_markdown_code(text)
     out: List[SecretRequest] = []
     seen: set[str] = set()
     for match in _SECRET_REQUEST_RE.finditer(masked):
@@ -928,8 +928,17 @@ def _extract_secret_requests(
     return out
 
 
-def _mask_markdown_code(text: str) -> str:
-    """Blank Markdown code regions without changing string offsets."""
+def mask_markdown_code(text: str) -> str:
+    """Blank Markdown code regions without changing string offsets.
+
+    The result is the same length as *text*, so a consumer that must act on a
+    literal marker only where CommonMark reads it as prose can run its own
+    pattern over the mask and apply the offsets to the original source. Two
+    features need exactly that: this module's ``$<NAME>`` secret requests and
+    ``core.citations``' citation markers. Both have to leave a marker shown
+    inside a code example alone, and neither can afford to re-derive fence,
+    indented-code, and code-span lexing from patterns of its own.
+    """
     if not any(marker in text for marker in ("`", "~~~", "    ", "\t")):
         return text
     ranges, _ = _markdown_code_ranges(text)
@@ -1464,7 +1473,7 @@ def _extract_buttons(
     allow_unseparated: bool = True,
 ) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
-    mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
+    mask = markdown_mask if markdown_mask is not None else mask_markdown_code(text)
     pattern = _BUTTON_BLOCK_RE
     masked_match = pattern.search(mask)
     if masked_match is None and allow_unseparated:

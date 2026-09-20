@@ -272,6 +272,16 @@ class TestUntrustedMetadata:
 
 
 class TestCodeAndIncompleteMarkers:
+    """Where a marker counts as code is a CommonMark question, not a regex one.
+
+    The cases below are the ones local patterns get wrong: fence lengths nest,
+    a closing fence may be longer than its opener, an unclosed fence runs to
+    the end of the document, a code span may cross lines, and container
+    indentation shifts all of it. Both directions are asserted - a literal
+    marker keeps every byte, and a marker in prose still resolves even when
+    code sits nearby - because over-masking silently drops attribution.
+    """
+
     @pytest.mark.parametrize(
         "template",
         [
@@ -280,8 +290,36 @@ class TestCodeAndIncompleteMarkers:
             "~~~text\n{m}\n~~~",
             "    {m}",
             "\t{m}",
+            "``{m}``",
+            "`` ` {m} ``",
+            "`line one\n{m}`",
+            "````markdown\n```\n{m}\n```\n````",
+            "`````\n````\n{m}\n````\n`````",
+            "```text\n{m}",
+            "~~~\n{m}",
+            "- item\n\n  ```\n  {m}\n  ```\n",
+            "> ```\n> {m}\n> ```\n",
+            "> - a\n>\n>   ```\n>   {m}\n>   ```\n",
+            "- item\n\n      {m}\n",
         ],
-        ids=["inline", "fenced", "tilde-fenced", "indented", "tab-indented"],
+        ids=[
+            "inline",
+            "fenced",
+            "tilde-fenced",
+            "indented",
+            "tab-indented",
+            "double-backtick-span",
+            "double-backtick-span-holding-a-backtick",
+            "code-span-across-lines",
+            "four-backtick-fence-quoting-three",
+            "five-backtick-fence-quoting-four",
+            "unclosed-fence-runs-to-end",
+            "unclosed-tilde-fence-runs-to-end",
+            "fence-inside-a-list-item",
+            "fence-inside-a-blockquote",
+            "fence-inside-a-blockquoted-list",
+            "indented-code-inside-a-list-item",
+        ],
     )
     def test_a_marker_inside_a_code_example_is_untouched(self, template):
         raw = template.format(m=marker("turn0view0"))
@@ -290,6 +328,31 @@ class TestCodeAndIncompleteMarkers:
 
         assert text == raw
         assert citations == []
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "- item {m}\n",
+            "> quoted {m}\n",
+            "```\ncode\n`````\nanswer{m}",
+            "````\n```\n````\nanswer{m}",
+        ],
+        ids=[
+            "inside-a-list-item",
+            "inside-a-blockquote",
+            "after-a-longer-closing-fence",
+            "after-a-fence-that-quoted-a-fence",
+        ],
+    )
+    def test_a_marker_in_prose_resolves_even_next_to_code(self, template):
+        """Code lexing decides what to skip; it must not swallow real prose."""
+        raw = template.format(m=marker("turn0view0"))
+
+        text, citations = resolve(raw)
+
+        assert marker("turn0view0") not in text
+        assert "[developers.openai.com]" in text
+        assert [c["ref_id"] for c in citations] == ["turn0view0"]
 
     def test_prose_around_a_code_example_still_resolves(self):
         raw = f"See{marker('turn0view0')}\n\n```\n{marker('turn0view0')}\n```\n\nAnd{marker('turn0view1')}"

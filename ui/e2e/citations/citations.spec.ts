@@ -100,6 +100,42 @@ for (const locale of ['en', 'zh'] as const) {
       await source.close();
     });
 
+    test(`a tap on a badge never reaches its neighbour (${locale})`, async ({ page, isMobile }) => {
+      test.skip(!isMobile, 'the touch hit area only exists below the md breakpoint');
+      // Three chips separated by one space each. The mobile hit area has to be
+      // big enough to tap and small enough that it stays inside the space the
+      // chip owns - a box that reaches its neighbour opens the WRONG source,
+      // which is worse than a small target.
+      const row = page.locator('p', { hasText: 'Three in a row.' }).last();
+      const chips = row.getByRole('link');
+      await expect(chips).toHaveCount(3);
+
+      const owners = await row.evaluate((node) => {
+        const badges = Array.from(node.querySelectorAll('a[data-citation-index]')) as HTMLElement[];
+        return badges.flatMap((badge) => {
+          const box = badge.getBoundingClientRect();
+          const points: Array<[number, number]> = [
+            [box.left + 1, box.top + box.height / 2],
+            [box.right - 1, box.top + box.height / 2],
+            [box.left + box.width / 2, box.top + 1],
+            [box.left + box.width / 2, box.bottom - 1],
+          ];
+          return points.map(([x, y]) => {
+            const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+            const owner = hit?.closest('a[data-citation-index]') as HTMLElement | null;
+            return `${badge.dataset.citationIndex}->${owner?.dataset.citationIndex ?? 'none'}`;
+          });
+        });
+      });
+      expect(owners.filter((pair) => pair !== `${pair.split('->')[0]}->${pair.split('->')[0]}`)).toEqual([]);
+
+      // …and the edge a neighbour used to cover still opens its own source.
+      const box = (await chips.first().boundingBox())!;
+      await chips.first().tap({ position: { x: box.width - 1, y: box.height / 2 } });
+      await expect(page.getByText(SOURCES[0].title, { exact: true })).toBeVisible();
+      await expect(page.getByText(SOURCES[1].title, { exact: true })).toHaveCount(0);
+    });
+
     test(`a badge opens its source from the keyboard (${locale})`, async ({ page, context }) => {
       const first = badge(page, SOURCES[0]);
       await first.focus();
