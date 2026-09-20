@@ -239,4 +239,64 @@ checked once in the final visual batch.
 
 ## Implementation and evidence
 
-Pending implementation and independent PM verification.
+Delivered on `fix/sidebar-2061-presentation-20260920`, local only, awaiting
+independent PM verification.
+
+### What changed
+
+`WorkbenchSidebar.tsx` carries the reference's capability row classes, the
+`foreground/[0.04]` Inbox hover and the mint brand well. `Workbench.tsx` is the
+restored home: a bounded welcome card with the mint Sparkles tile, the heading
+and body copy, and the three outline pills, over a 640px input column holding
+the existing `ProjectPicker`, a labelled standalone `AgentRoutePicker` and the
+`Composer` in single-row mode. The pills keep their current owners — the
+directory/new-project path, the capability-gated agents route and
+`CreateViaChatDialog`. The old copy comes back through the existing
+`workbench.home` keys, with the Chinese recovered from the v3.1.0 locale;
+`chooseWorkspace` and `workspaceAria` had no consumer left and were dropped.
+`Composer.tsx`, `AgentRoutePicker.tsx`, `ProjectPicker.tsx`, `useNewSession.ts`
+and `ChatPage.tsx` are untouched.
+
+### Consumer migrations
+
+Each moved locator keeps its scenario's claim. The home surfaces no folder path
+now, so `Workspace: <path>` accessible-name assertions became display-name chip
+locators plus the picker's own `bg-mint-soft` selection fill; `ProjectPicker`
+exposes no `aria-current`, and adding one would edit a shared component that is
+out of scope. `home-media`'s attach-target assertion moved from 28x28 to 28x36,
+which is what the shared `Composer` renders in single-row mode — the mode the
+contract mandates — so the claim (a fixed target that does not stretch with the
+viewport, language or theme) is unchanged. `mobile-continuation`'s `pickClaude`
+now dismisses the Agent popover, because in the restored layout it is anchored
+over the project row.
+
+### Pre-existing failures repaired in passing
+
+The build-config suite was already red before this branch: a probe of the
+unmodified base head ran 6 failed / 2 passed. `NewProjectDialog` began passing
+`initialPath` in #2047, after the browse fixture landed in #2033, and
+`directory-browser` has no fallback when the opening listing misses — so the
+four mobile-continuation cases could never reach a folder. One fixture entry for
+the recent workspace's own path fixes it with no assertion changed. Two
+setup-handoff locators were also stale: a heading string that no longer exists,
+and a "New chat" link whose i18n key has no consumer anywhere in `src`; the
+latter now leaves and returns through the sidebar brand row.
+
+### Validation
+
+Vitest 4765 passed across 332 files; lint, `tsc -b`, test typecheck, both e2e
+project typechecks and the production build all pass. Browser suites:
+workbench-general 67 passed, workbench-general-build 8 passed (base head: 6
+failed / 2 passed), home-media 55 passed (before: 20 failed / 35 passed),
+project-order 16 passed. No Playwright suite runs in CI; only lint does.
+
+The visual batch used the suites' own captures — `home-{en,zh}-{light,dark}-
+{desktop,narrow}` under `ui/e2e/.artifacts/workbench-general/shots/` and the 20
+`home-media` layout renders. Both surfaces match their references in both
+themes: the brand chip sits in a mint well, the Inbox pill and capability rows
+carry the reference's fills, and the home reproduces the card, tile, copy, pill
+order and icons, the mint-filled selected project chip, the bordered Agent
+picker and the single-row composer. The remaining differences are fixture data
+(one project instead of five, an Agent with no model or effort to show) and the
+capability group rendering expanded, which the owner already ruled is a render
+state rather than a new default. No targeted confirmation batch was needed.
