@@ -5990,6 +5990,39 @@ async def test_send_now_written_or_ambiguous_attempt_does_not_restore_prewrite_h
     assert len(starts) == 2
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("reason", ["claude_background_activity_timeout", "claude_runtime_changed_before_write"])
+async def test_claude_admission_failure_retains_input_until_explicit_retry(managers, reason):
+    """MESSAGE-DELIVERY-035: an unwritten input survives recovery without replay."""
+    from core.native_dispatch_phase import mark_prewrite_recovery_required, prewrite_failure_evidence
+
+    manager, restarted, engine, _other, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="保留原文，不重复发送"),
+        context=_context(),
+    )
+    snapshot = _row(engine, admitted.delivery_id)["snapshot_json"]
+    context = _context()
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    mark_prewrite_recovery_required(context, reason)
+    manager._settle_durable_prewrite_failure(
+        admitted.turn_id, outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+        failure_evidence=prewrite_failure_evidence(context),
+    )
+    for _ in range(2):
+        await restarted.recover_durable_delivery_state("ses_fsm")
+        assert not await restarted.drain_delivery_queue("ses_fsm")
+    assert len(starts) == 1
+    held = _row(engine, admitted.delivery_id)
+    assert held["snapshot_json"] == snapshot
+    assert delivery_store.requires_explicit_start_retry(held)
+    result = await manager.send_now("ses_fsm", expected_delivery_id=admitted.delivery_id)
+    assert result["status"] == "claimed"
+    assert len(starts) == 2
+    assert starts[-1][1] == starts[0][1]
+    assert _row(engine, admitted.delivery_id)["snapshot_json"] == snapshot
+
+
 def test_definite_handler_prewrite_exception_requeues_through_terminal_boundary(
     managers,
     monkeypatch,

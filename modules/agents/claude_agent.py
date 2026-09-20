@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
-from core.handlers.session_handler import ClaudeSessionNotFoundError
+from core.handlers.session_handler import ClaudeInputNotSentError, ClaudeSessionNotFoundError
 from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -70,6 +70,9 @@ class ClaudeAgent(BaseAgent):
     # Preserve the usual task-notification -> assistant/result association while
     # bounding terminal-only notifications on the otherwise long-lived stream.
     ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 30.0
+    # Bound only admission of a NEW input, never the running background task.
+    ACTIVITY_OUTPUT_WAIT_SECONDS = 300.0
+    ACTIVITY_OUTPUT_POLL_SECONDS = 1.0
 
     # AskUserQuestion support is disabled - SDK cannot respond programmatically
     # Set to True when SDK adds support (see issue #10168)
@@ -143,6 +146,8 @@ class ClaudeAgent(BaseAgent):
 
     def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
         """Return the durable notify text for Claude terminal errors."""
+        if isinstance(error, ClaudeInputNotSentError):
+            return f"❌ {self._translate_error(error.message_key)}"
         if isinstance(error, ClaudeSessionNotFoundError):
             detail = self._translate_error(
                 "error.claudeSessionNotFound",
@@ -194,7 +199,7 @@ class ClaudeAgent(BaseAgent):
             # Inbox item until that output is delivered. The Session remains full
             # duplex while this backend avoids attributing a background Result to
             # the new user Turn.
-            await self._wait_for_activity_output(runtime_session_key)
+            await self._wait_for_activity_output(runtime_session_key, client=client)
 
             # Queue reaction BEFORE sending query to avoid race condition where
             # a fast result arrives before the reaction is queued
@@ -264,8 +269,11 @@ class ClaudeAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
             missing_session = isinstance(e, ClaudeSessionNotFoundError)
+            input_not_sent = isinstance(e, ClaudeInputNotSentError)
             if missing_session:
                 mark_prewrite_recovery_required(context, "native_session_not_found")
+            elif input_not_sent:
+                mark_prewrite_recovery_required(context, e.reason)
             diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
             # Classify BEFORE recording: ``record_model_hub_native_failure``
             # turns the pending native/hub attempt into a failed one, so a
@@ -274,7 +282,7 @@ class ClaudeAgent(BaseAgent):
             intentional_teardown = self._teardown_is_intentional(
                 runtime_session_key, e, client=client
             )
-            if not intentional_teardown:
+            if not intentional_teardown and not input_not_sent:
                 await self.record_model_hub_native_failure(context, diagnostic)
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
@@ -286,7 +294,7 @@ class ClaudeAgent(BaseAgent):
                 # A typed local resume failure takes precedence over incidental
                 # auth words in the working path or captured process diagnostic.
                 handled = False
-                if not missing_session:
+                if not missing_session and not input_not_sent:
                     handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                         context,
                         "claude",
@@ -2842,15 +2850,44 @@ class ClaudeAgent(BaseAgent):
             )
         )
 
-    async def _wait_for_activity_output(self, composite_key: str) -> None:
-        """Serialize Claude inference until native background output is consumed."""
+    async def _wait_for_activity_output(self, composite_key: str, *, client=None) -> None:
+        """Wait for background output without stranding an unwritten input."""
 
-        while self._activity_output_pending(composite_key):
-            event = self._activity_settle_events.setdefault(composite_key, asyncio.Event())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.ACTIVITY_OUTPUT_WAIT_SECONDS
+        # Real SessionHandler clients are registered. Lightweight adapter callers
+        # can provide an unregistered client; still respect closing/retired state.
+        registered = client is not None and self.claude_sessions.get(composite_key) is client
+        identity = self._client_activation_identity(client) if client is not None else None
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activation_registry", None)
+        while True:
+            # Recheck BEFORE the empty-output return too: Stop may retire this
+            # generation in the same tick that its receiver settles Activities.
+            if client is not None and (
+                (registered and self.claude_sessions.get(composite_key) is not client)
+                or getattr(client, "_vibe_runtime_activation_retired", False) is True
+                or composite_key in self._steering_closing_keys()
+                or (identity is not None and registry is not None and not registry.is_current(identity))
+            ):
+                raise ClaudeInputNotSentError(
+                    "claude_runtime_changed_before_write", "error.claudeInputRuntimeChanged"
+                )
             if not self._activity_output_pending(composite_key):
                 self._signal_activity_output_settled(composite_key)
                 return
-            await event.wait()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise ClaudeInputNotSentError(
+                    "claude_background_activity_timeout", "error.claudeBackgroundInputWaitTimedOut"
+                )
+            event = self._activity_settle_events.setdefault(composite_key, asyncio.Event())
+            try:
+                await asyncio.wait_for(event.wait(), timeout=min(remaining, self.ACTIVITY_OUTPUT_POLL_SECONDS))
+            except asyncio.TimeoutError:
+                # Poll ownership as well as output: teardown may retain an
+                # undelivered Activity and therefore never signal its event.
+                pass
 
     def _signal_activity_output_settled(self, composite_key: str) -> None:
         if self._activity_output_pending(composite_key):

@@ -14,6 +14,13 @@ status_legend:
   manual: currently validated only by human regression
   gap: not covered yet
 scenarios:
+  - id: MESSAGE-DELIVERY-035
+    name: Claude background admission waits preserve input and fence retired clients
+    status: partial
+    kind: recovery
+    layer: contract
+    test: tests/test_claude_input_wait.py::test_background_wait_timeout_preserves_work_and_releases_gate
+    notes: Adapter and durable retry coverage exists; live Claude and IM recovery still need end-to-end verification.
   - id: MESSAGE-DELIVERY-031
     name: Bounded prewrite retry retains FIFO input across restart until explicit recovery
     status: covered
