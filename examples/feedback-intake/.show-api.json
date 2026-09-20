@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "server_to_server": [
+    {
+      "path": "api/feedback",
+      "method": "POST",
+      "auth": "handler",
+      "max_body_bytes": 32768,
+      "forward_headers": []
+    }
+  ]
+}

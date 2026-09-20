@@ -7,8 +7,9 @@ and receives the actual Issue link after official submission succeeds.
 
 ## Scope and reuse
 
-Use the existing dedicated avibe-feedback VM on ad and its already paired origin
-https://avibe-feedback-app.avibe.bot. Reuse public Show server API admission
+Use the existing dedicated avibe-feedback VM on ad, Session `ses9u23mgw6dr`,
+Share ID `132vCvND49U`, and its paired origin
+https://avibe-feedback-app.avibe.bot/p/132vCvND49U/. Reuse public Show server API admission
 from merged PR2039 and the use-avibe feedback guidance from merged PR2037.
 This is an installed Show application, not a new Cloud service or general
 cross-instance Agent execution API. No GitHub webhook is required. No model
@@ -23,10 +24,13 @@ or resolution events unsupported by that waiter.
 
 ## Fixed protocol (v1)
 
-The operator allocates one public Show Session and gives its actual share base
-URL to PM before client discovery is finalized. No client accepts a destination
-from report text, issues or redirects. POST endpoint is <share-base>/api/feedback;
-GET receipt endpoint is <share-base>/api/feedback-status?request_id=<UUIDv4>.
+PM accepted the allocated public Show Session `ses9u23mgw6dr`, share ID
+`132vCvND49U`, on 2026-09-20. It is public at access revision 1; the intake
+remains unavailable until commissioning verifies the reviewed app. No client accepts a destination
+from report text, issues or redirects. POST endpoint is
+https://avibe-feedback-app.avibe.bot/p/132vCvND49U/api/feedback; GET receipt
+endpoint is
+https://avibe-feedback-app.avibe.bot/p/132vCvND49U/api/feedback-status?request_id=<UUIDv4>.
 
 POST JSON has exactly these fields:
 
@@ -89,9 +93,16 @@ Requests definitely rejected before any GitHub write can fail explicitly.
   Use the installed supported Vault API/CLI with opaque named injection, never
   copy the Mac/e2e developer credential or print secrets. Missing PAT disables
   writes without blocking isolated implementation/tests.
+- The operator binding is actor `cs-agent-bot` (user ID `272811739`) and
+  repository `avibe-bot/avibe` (repository ID `1035030370`); neither is
+  accepted from report data or ambient configuration.
 - Fixed HTTPS api.github.com endpoints; no redirects or ambient proxies selecting
   another destination. Verify effective GitHub actor using the same credential;
   operator binds it to the official service, client discloses official submission.
+- The deployed compatibility fixture must support packaged Show Runtime
+  `5e31eda3536db3ea4de018fb253d0ed7d5c69a09`, Linux archive SHA256
+  `ea1079eca7bf532192c72950e1c9cd6f183192fb3c30af6a87f7fa0a63305b6e`, and
+  manifest SHA256 `98725b13df13c206ba689609f5df198bd5cd9b83d3484b58142944a2775e7698`.
 - Native manifest32KiB bound before Runtime. Handler/service also bound bytes,
   strings, execution time, subprocess output and upstream response. Use argv/stdin
   JSON, no shell evaluation of report text. No URL fetches from report content.
@@ -143,3 +154,35 @@ smoke submission and repeat return one actual Issue with rendered readback and
 link. Do not publish a synthetic public Issue until PM has reconciled concrete
 content and publication authority. Do not call deployment complete if PAT or
 public end-to-end submission is missing. Return a precise remaining prerequisite.
+
+## Implementation and artifact acceptance
+
+The app supervisor validates/reserves the report before calling named Vault run.
+Only request ID and an internal reservation token cross argv; report content is
+read from the app ledger because the supported Vault CLI uses stdin for sealed
+envelopes. The same injected credential binds actor/repository/create/readback.
+The 201 immutable Issue ID, number and canonical URL are committed before GET.
+Public GET projects only state and verified public URL, without upstream egress.
+An operator-only `worker.py reconcile <request_id>` permits at most three bounded
+read-only reconciliations of a retained Issue identity after the prior deadline.
+
+Kernel-owned file locks bound active upstream workers to two and release only
+on actual worker exit. Workers enforce an absolute 20-second reservation
+cutoff with SIGALRM; delayed Vault delivery cannot start a stale write. The
+supervisor tracks and kills actual descendants, including avault's separate
+process session, on timeout or excess output. Interrupted pending or unknown
+reservations never become new writes. The remote GitHub operation may still
+complete after disconnection: no exactly-once or remote cancellation claim.
+
+The app requires an explicit private ledger directory outside AVIBE_HOME and
+all Show workspaces, plus an explicit app root for bundled TS handlers. Existing
+Python/Node tooling and avibe-os's psutil dependency suffice. No core changes.
+See examples/feedback-intake/README.md for deployment and recovery instructions.
+
+The client helper ships under the existing use-avibe identity in the normal
+wheel and built-in content-addressed publication. A deployed receiver does not
+update installed clients. PM reconciles the exact reviewed wheel/hash and
+normal install authority separately; no release/merge is granted by this plan.
+The app integration verifies the frozen manifest hash and platform archive hash
+before using packaged Runtime 5e31. Local macOS compatibility is not proof of
+Linux live commissioning, write permission or universal client distribution.

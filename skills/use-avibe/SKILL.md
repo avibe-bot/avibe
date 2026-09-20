@@ -2,7 +2,7 @@
 name: use-avibe
 slug: use-avibe
 description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state. Also use it to report an Avibe bug, send product feedback, or file a feature request from the current conversation.
-version: 0.7.0
+version: 0.8.0
 ---
 
 # Use Avibe
@@ -111,6 +111,17 @@ Some requests are not local maintenance at all. Switch to the feedback workflow 
 - the user simply asks to report something or request a change, with or without prior diagnosis
 
 That reference owns the whole path: gathering facts from this conversation, drafting a short English report, sanitizing it, getting approval, and submitting it to `https://github.com/avibe-bot/avibe` through an already authorized channel. Do not stop at "open an issue yourself", and do not treat diagnosis, a restart, or a repair as a precondition for filing.
+
+When the user has approved the sanitized content and public consent, use the
+official route in the feedback reference when commissioning has marked it
+available. Its packaged `scripts/feedback_intake.py` helper is distributed
+inside this existing Skill by the normal wheel `skills/` inclusion and
+built-in snapshot publication path. A development checkout or a deployed
+receiver alone does not update a client's installed Skill. The helper is bound
+to the operator's HTTPS Show share and `cs-agent-bot` posting identity; it
+creates one UUIDv4, persists the exact payload in its local outbox, and reads
+the separate public receipt before claiming an Issue URL. `resume <request_id>`
+only reads that receipt and never retries an uncertain write.
 
 If the user wants to contribute back with code, suggest a pull request in that repository.
 
