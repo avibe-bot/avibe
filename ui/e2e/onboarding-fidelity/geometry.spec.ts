@@ -603,7 +603,7 @@ test.describe('import capsule', () => {
       await openSetup(page, 'zh');
 
       const help = page.getByRole('button', { name: '什么是模型网关？' });
-      const body = page.getByText(/模型网关集中管理 API Key 和模型连接/);
+      const body = page.getByText(/模型网关管理你选择的认证信息/);
 
       // Pointer: the panel is portalled, so it must survive the trip from trigger to panel.
       await help.hover();
