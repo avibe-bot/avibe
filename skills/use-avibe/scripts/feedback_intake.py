@@ -45,7 +45,8 @@ def _share_base():
 
 def _request(path, *, body=None, on_status=None):
     req = urllib.request.Request(_share_base() + path, data=body,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": "avibe-feedback-intake/1"})
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
     try:
         response = opener.open(req, timeout=10)
