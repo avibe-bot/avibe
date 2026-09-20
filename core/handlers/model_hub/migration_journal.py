@@ -178,8 +178,39 @@ def _fsync_directory(path: Path) -> None:
 class NativeTakeoverJournal:
     """One controller-owned transaction, plus the last idempotency receipt."""
 
+    _OAUTH_BACKENDS = frozenset({"claude", "codex"})
+
     def __init__(self, path: Path):
         self.path = path
+
+    @classmethod
+    def oauth_custody_backends(cls, record: dict[str, Any] | None) -> frozenset[str]:
+        """Require proof or reauthorization without retaining older grants."""
+        if record is None:
+            return frozenset()
+        if "oauth_custody_backends" in record:
+            marker = record["oauth_custody_backends"]
+            if (
+                not isinstance(marker, list)
+                or any(not isinstance(value, str) or value not in cls._OAUTH_BACKENDS for value in marker)
+                or len(set(marker)) != len(marker)
+            ):
+                raise TakeoverStateError("invalid takeover custody evidence")
+            backends = set(marker)
+        elif record["phase"] == "complete":
+            # An old last receipt cannot exclude overwritten batches, even
+            # when its own batch was empty. Absence is not explicit [].
+            backends = set(cls._OAUTH_BACKENDS)
+        else:
+            backends = set()
+        if record["source_ids"]:
+            # A mixed opaque container/Source bundle cannot prove which
+            # container was empty. Keep the existing conservative policy.
+            backends.update(
+                item["backend"] for item in record["items"]
+                if item.get("kind") == "oauth_native" and item["backend"] in cls._OAUTH_BACKENDS
+            )
+        return frozenset(backends)
 
     def _prepare(self) -> None:
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -318,9 +349,12 @@ class NativeTakeoverJournal:
                     raise TakeoverStateError("invalid takeover terminal configuration")
         elif payload.get("outcome", "success") not in {"success", "needs_auth", "reauth_requested"}:
             raise TakeoverStateError("invalid takeover receipt")
+        self.oauth_custody_backends(payload)
         return payload
 
     def save(self, payload: dict[str, Any]) -> None:
+        if "oauth_custody_backends" in payload:
+            self.oauth_custody_backends(payload)
         self._prepare()
         if self.path.exists():
             self.load()  # Refuse unsafe/corrupt state, never silently overwrite.
@@ -339,9 +373,11 @@ class NativeTakeoverJournal:
 
     def complete(self, record: dict[str, Any]) -> None:
         receipt = NativeTakeoverJournal(self.path.with_name("last-completed.json"))
+        previous = receipt.load()
+        custody_backends = self.oauth_custody_backends(previous) | self.oauth_custody_backends(record)
         clean_stores = {
             backend: revision
-            for backend, revision in (receipt.load() or {}).get("clean_native_stores", {}).items()
+            for backend, revision in (previous or {}).get("clean_native_stores", {}).items()
             if backend not in record["backends"]
         }
         clean_stores.update(record.get("clean_native_stores", {}))
@@ -363,6 +399,7 @@ class NativeTakeoverJournal:
                 if source["id"] in record["source_ids"]
             },
             "clean_native_stores": clean_stores,
+            "oauth_custody_backends": sorted(custody_backends),
         })
         self.forget()
 

@@ -1905,10 +1905,10 @@ async def apply_native_migration(
             & {item.receipt_identity or item.id for item in selected}
             if record is not None and record["phase"] == "complete" else set()
         )
-        previous_oauth_backends = {
-            item["backend"] for item in record["items"]
-            if item["kind"] == "oauth_native"
-        } if record is not None and record["phase"] == "complete" and record["source_ids"] else set()
+        previous_oauth_backends = (
+            host.migration_journal.oauth_custody_backends(record)
+            if record is not None and record["phase"] == "complete" else frozenset()
+        )
         if retained_inventory_ids:
             # Fresh file-bound consent may describe the same old grant that
             # an external writer restored after cleanup. Keep the current Hub
