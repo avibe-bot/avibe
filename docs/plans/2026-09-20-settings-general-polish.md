@@ -567,3 +567,25 @@ removing the spent command from history — would send Back out of the app
 instead. The two halves are one rule: an exit the user did not aim at the Show
 Page must not raise it, and a Back they did aim there must. `C-SETTINGS-10`
 now carries both, which is the coverage gap the finding named.
+
+## Review round 6: the gate already reaches window bodies
+
+Codex read the announcement gate as covering retained routes only, on the
+premise that `WindowLayer` sits outside any `RouteSurfaceActivityBoundary`. It
+does not: the layer renders one around its windows, fed by the same `active`
+prop the shell hides it with, and `useWindowManager` reads it from there. So a
+window body is retired exactly when the layer is, and the awaited
+`AppsPreviewPage.openInEditor` and `AppsFileBrowserPage` content-hit paths it
+named are already covered — the suspended-closure case is the one the gate was
+written for.
+
+The premise was reachable, though, because nothing pinned the wiring end to
+end. The gate's tests drive `RouteSurfaceActiveContext` directly, and the
+layer's boundary has no test at all, so both halves read as plausible while
+neither states that window bodies inherit the answer.
+
+`windowLayerForeground.test.tsx` now renders the real layer under the real
+provider, captures the manager from a window body the way an await holds it,
+retires the layer, and requires the late `openApp` to open its window without
+announcing — then to announce again once the layer is live. Both fail if the
+layer stops passing `active` into its boundary.
