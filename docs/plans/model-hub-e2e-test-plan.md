@@ -231,10 +231,15 @@ lane-to-lane.
   `required_auth_scheme: "protocol"|"bearer"` defaults to `"protocol"` and
   leaves that behavior unchanged. Opting into `"bearer"` models a custom
   Anthropic relay accepting only the exact Authorization bearer value, not
-  the same value sent as `x-api-key`. The persisted-migration suite uses this
+  the same value sent as `x-api-key`. F2 uses a saved `ANTHROPIC_AUTH_TOKEN`
+  and this gate, keeping its positive and six-file-preserving negative
+  controls consistent with the pinned engine's custom-endpoint transport.
+  The persisted-migration suite uses this
   to check that a saved `ANTHROPIC_AUTH_TOKEN` keeps its authentication
   semantics through proof and actual CPA requests; missing/wrong credentials
   still return 401, and authenticated schema probes still return 400.
+  Custom API-key-header settings/shell controls must instead show the explicit
+  transport blocker before any upstream request, preserving files and Sources.
 - The Playwright lane consumes this ONLY over HTTP via env
   `VIBE_E2E_MOCK_UPSTREAM_URL`; it never imports the Python module. Mock-
   dependent specs skip with a clear message when the env is absent.

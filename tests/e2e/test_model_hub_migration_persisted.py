@@ -46,7 +46,7 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
     _configure_protocol(mock_llm_upstream, protocol, models=[{"id": "mock-model"}])
     mock_llm_upstream.configure(
         required_api_key=KEY,
-        required_auth_scheme="bearer" if shape == "claude-bearer" else "protocol",
+        required_auth_scheme="bearer" if backend == "claude" else "protocol",
     )
     source_paths = []
     retained = "# 保留终端偏好\nexport EDITOR='vim'\n"
@@ -55,9 +55,10 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
         _seed_hub(app)
         if shape.endswith("-shell"):
             prefix = "ANTHROPIC" if backend == "claude" else "OPENAI"
+            credential_name = "ANTHROPIC_AUTH_TOKEN" if backend == "claude" else "OPENAI_API_KEY"
             path = app.home / ".bashrc"
             _write(path, retained + (
-                f"export {prefix}_API_KEY='{KEY}'\n"
+                f"export {credential_name}='{KEY}'\n"
                 f"export {prefix}_BASE_URL='{mock_llm_upstream.url}'\n"
             ))
         elif shape == "claude-bearer":
@@ -99,7 +100,7 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
             assert json.loads(source_paths[0].read_text())["theme"] == "system"
         assert app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"] == []
 
-        if shape == "claude-bearer":
+        if backend == "claude":
             # Test the pinned engine consumer, not just direct discovery proof.
             status = app.client.get("/api/models/runtime/status").json()["runtime"]["status"]
             listening = status["listening"]
@@ -130,14 +131,14 @@ def test_f4_unproven_shell_key_is_not_removed(
 ):
     """F4: a readable static file is not proof of credential authentication."""
     _configure_protocol(mock_llm_upstream, "anthropic")
-    mock_llm_upstream.configure(required_api_key=required)
+    mock_llm_upstream.configure(required_api_key=required, required_auth_scheme="bearer")
     paths = []
 
     def seed(app):
         _seed_hub(app)
         path = app.home / ".zshrc"
         _write(path, (
-            f"export ANTHROPIC_API_KEY='{KEY}'\n"
+            f"export ANTHROPIC_AUTH_TOKEN='{KEY}'\n"
             f"export ANTHROPIC_BASE_URL='{mock_llm_upstream.url}'\n"
         ))
         paths.append(path)
@@ -150,3 +151,41 @@ def test_f4_unproven_shell_key_is_not_removed(
         assert result.status == 409, result.json()
         assert paths[0].read_bytes() == before
         assert app.client.get("/api/models/sources").json()["sources"] == []
+
+
+@pytest.mark.parametrize("shape", ["settings", "shell"])
+def test_f4_custom_api_key_transport_is_refused_without_cleanup(
+    model_hub_app_factory, mock_llm_upstream, shape,
+):
+    """F4: discovery cannot prove a header the pinned engine will not send."""
+    _configure_protocol(mock_llm_upstream, "anthropic")
+    mock_llm_upstream.configure(required_api_key=KEY, required_auth_scheme="protocol")
+    paths = []
+
+    def seed(app):
+        _seed_hub(app)
+        if shape == "shell":
+            path = app.home / ".zshrc"
+            _write(path, (
+                f"export ANTHROPIC_API_KEY='{KEY}'\n"
+                f"export ANTHROPIC_BASE_URL='{mock_llm_upstream.url}'\n"
+            ))
+        else:
+            path = app.home / ".claude/settings.json"
+            _write(path, json.dumps({
+                "env": {"ANTHROPIC_API_KEY": KEY, "ANTHROPIC_BASE_URL": mock_llm_upstream.url},
+            }))
+        paths.append(path)
+
+    with model_hub_app_factory(extra_env=RUNTIME_ENV, before_start=seed) as app:
+        before = paths[0].read_bytes()
+        response = app.client.post("/api/models/migration/scan", {})
+        assert response.status == 200, response.json()
+        [row] = response.json()["scan"]["items"]
+        assert row["selected"] is False
+        assert row["notes_key"] == "settings.models.migration.blocked.transport"
+        refused = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
+        assert refused.status == 409, refused.json()
+        assert paths[0].read_bytes() == before
+        assert app.client.get("/api/models/sources").json()["sources"] == []
+        assert mock_llm_upstream.requests() == []
