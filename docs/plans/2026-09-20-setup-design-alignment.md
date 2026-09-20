@@ -70,9 +70,14 @@ the switcher's own dropdown menu. The settings-shell `LanguageSwitcher` and
   settled connection can still be reopened.
 - The card's active/hover shadow is the design's own `0 2px 12px #5BFFA038` (dark) /
   `0 2px 16px -4px #10B98124` (light). Because those carry a y offset they are not
-  members of the centred accent glow scale: `--shadow-glow-onboarding-mint` and its
-  per-theme numbers are deleted from `index.css`, and `glowScale.test.mjs` loses the
-  role with them.
+  members of the centred accent glow scale, so the managed token
+  `--shadow-glow-onboarding-mint` is retained but re-declared in that offset shape,
+  with its per-theme blur, spread and alpha named beside each palette the way
+  `--brand-glow-blur` is. `glowScale.test.mjs` keeps the role as an excused member:
+  its blur is asserted from the role map, its offset geometry and alpha are pinned
+  per theme, and the scale's blur assertion reads the shadow's third length so an
+  offset is not mistaken for an absence of blur. `onboarding.css` consumes the
+  token rather than holding literals.
 - The wire box is sized `card * 350/300` from the card, which keeps the handoffs on
   the cards' midline at every tier; the return-loop caption rides y=338 of that box.
 
@@ -86,7 +91,8 @@ arrow. The import capsule's review button takes the design's 6-radius 28px shape
 ## Validation
 
 - `npm run build`, `validate:theme`, `typecheck:tests`, `lint` green.
-- Onboarding unit suites and `glowScale.test.mjs` green (404 tests).
+- Onboarding unit suites and `glowScale.test.mjs` green, including the retained
+  offset-shadow role asserted per theme.
 - `ui/e2e/onboarding-fidelity` updated to assert the tiers it now ships — card
   height per window, heading reserve and gap per tier, wire-box ratio, access
   block/grid spans, and the offset halo geometry — and run across the viewport,
