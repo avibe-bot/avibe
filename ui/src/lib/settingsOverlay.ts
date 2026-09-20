@@ -26,6 +26,15 @@ export const isSettingsRoutePath = (pathname: string): boolean =>
 export const isSettingsEntryPath = (pathname: string): boolean =>
   isSettingsRoutePath(pathname) || isLegacySettingsEntryPath(pathname);
 
+/**
+ * The setup wizard owns the whole window: AppShell renders its outlet alone,
+ * with no sidebar, header or bottom nav around it. Stated once here because
+ * three separate decisions turn on it — whether the shell draws its chrome at
+ * all, and, for a Settings surface opened from there, whether the Settings menu
+ * has an app sidebar to sit beside.
+ */
+export const isChromelessShellPath = (pathname: string): boolean => pathname === '/setup';
+
 export const settingsOverlayOriginFromState = (state: unknown): SettingsOverlayOrigin | null => {
   if (!state || typeof state !== 'object') return null;
   const candidate = (state as SettingsOverlayState)[SETTINGS_BACKGROUND_KEY];

@@ -229,10 +229,15 @@ const Harness = ({ desktop }: { desktop: boolean }) => (
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
     {/* Shell chrome that lives OUTSIDE the overlay. Inline, the app sidebar is
-        still on screen beside Settings, so what an outside interaction means
-        stops being hypothetical: the resize edge lays this surface out and the
-        rest of the sidebar is a way out of it. */}
-    <button type="button" data-sidebar-resizer="true">shell-resizer</button>
+        still on screen beside Settings and still live, so what an outside
+        interaction means stops being hypothetical — and the answer depends on
+        whether it landed in that sidebar, which is why these are nested the way
+        the shell nests them. */}
+    <aside data-app-sidebar="true">
+      <button type="button" data-sidebar-resizer="true">shell-resizer</button>
+      <button type="button">sidebar-idle</button>
+      <Link to="/chat/ses_2">sidebar-chat-link</Link>
+    </aside>
     <button type="button">shell-elsewhere</button>
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/setup" element={<SetupProbe />} />
@@ -571,7 +576,7 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(surface.classList.contains('md:border-l')).toBe(dividedFromSidebar);
   });
 
-  it('treats the sidebar resize edge as layout, and the rest of the shell as a way out', async () => {
+  it('leaves a live sidebar to its own affordances, and treats the rest of the shell as a way out', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
     render(
@@ -588,11 +593,48 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('button', { name: 'shell-resizer' }));
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
 
-    // Everything else in a live sidebar is the user leaving Settings, which is
-    // the whole point of keeping that sidebar reachable.
+    // Nor is the sidebar's own quiet space a dismissal: inline puts these two
+    // surfaces side by side, so the sidebar is a neighbour, not "outside".
+    await user.click(screen.getByRole('button', { name: 'sidebar-idle' }));
+    expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
+
+    // A sidebar link is the one thing that does take the user out — by its own
+    // navigation, which is exactly one navigation. Dismissal must not also fire
+    // here: `closeSettingsOverlay` traverses history asynchronously and would
+    // race this synchronous push back to the retained origin.
+    await user.click(screen.getByRole('link', { name: 'sidebar-chat-link' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
+
+    // Everything outside that sidebar is still a way out, landing back on the
+    // retained origin rather than anywhere the shell happened to be.
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'shell-elsewhere' }));
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
-    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
+  });
+
+  // The setup wizard's shell renders its outlet alone — no app sidebar at all.
+  // Inline there would offset Settings past an empty strip and narrow its rail
+  // for a neighbour that does not exist, so the stored preference is simply not
+  // in force on that origin.
+  it('opens standalone from a setup origin even when inline is stored', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/setup']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'open-model-hub' }));
+    const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
+
+    expect(surface.getAttribute('data-settings-menu-placement')).toBe('standalone');
+    expect(surface.classList.contains('md:left-0')).toBe(true);
+    expect(surface.classList.contains('md:left-[var(--app-sidebar-w)]')).toBe(false);
+    expect(surface.classList.contains('md:border-l')).toBe(false);
   });
 
   it('keeps legacy redirects out of origins while preserving real ingress origins', async () => {

@@ -35,8 +35,8 @@ const resizeTo = (isDesktop: boolean) => act(() => {
 });
 
 const Placement = () => <span data-testid="placement">{useSettingsMenuPlacement()}</span>;
-const Standalone = () => (
-  <span data-testid="standalone">{String(useStandaloneSettingsMenu())}</span>
+const Standalone = ({ shellHasSidebar }: { shellHasSidebar?: boolean } = {}) => (
+  <span data-testid="standalone">{String(useStandaloneSettingsMenu({ shellHasSidebar }))}</span>
 );
 
 const shown = (testId: string) => screen.getByTestId(testId).textContent;
@@ -124,5 +124,16 @@ describe('useStandaloneSettingsMenu', () => {
 
     resizeTo(true);
     expect(shown('standalone')).toBe('false');
+  });
+
+  it('is true where the shell draws no sidebar, whatever the preference says', () => {
+    writeSettingsMenuPlacement('inline');
+
+    // `inline` is a claim about something else being on screen. A shell that
+    // renders no app sidebar — the setup wizard — leaves it nothing to sit
+    // beside, so the answer is standalone on a full desktop window too.
+    render(<Standalone shellHasSidebar={false} />);
+    expect(shown('standalone')).toBe('true');
+    expect(readSettingsMenuPlacement()).toBe('inline');
   });
 });

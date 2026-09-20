@@ -52,11 +52,27 @@ identical to theme, and reversible later if a real preference store ever exists.
 
 ### One derived question, answered once
 
-Three trees need the same answer and would otherwise each re-derive it:
-`placement === 'inline' && isDesktop`. `ui/src/lib/settingsMenuPlacement.ts`
-exports the store *and* `useStandaloneSettingsMenu()`, which folds in the
-viewport: below `md` there is no room for two rails, so Settings covers the
-shell whatever the stored preference says — without forgetting it.
+Three trees need the same answer and would otherwise each re-derive it.
+`ui/src/lib/settingsMenuPlacement.ts` exports the store *and*
+`useStandaloneSettingsMenu()`, which owns the whole derivation.
+
+`inline` is a claim about something *else* being on screen, so the stored
+preference only means anything where an app sidebar is actually there to sit
+beside. Two things take that away, and the hook folds in both:
+
+- **The viewport.** Below `md` there is no room for two rails, so Settings
+  covers the shell.
+- **The shell.** The setup wizard owns the whole window and draws no sidebar at
+  all, so a caller passes `shellHasSidebar: false` and gets standalone on a full
+  desktop window too. Without it, inline would offset Settings past an empty
+  strip and narrow its rail for a neighbour that does not exist.
+
+Either way the answer is standalone, and neither one forgets what the owner
+picked for the windows that do have a sidebar. That `/setup` is the chromeless
+shell is stated once, as `isChromelessShellPath` in `settingsOverlay.ts`, because
+three separate decisions turn on it: whether `AppShell` draws its chrome, and —
+for a Settings surface opened from there — the overlay's own offset and its
+rail's width.
 
 ### What each consumer does with it
 
@@ -73,6 +89,18 @@ shell whatever the stored preference says — without forgetting it.
   the screen edge with no left border; inline takes the primitive's
   `--app-sidebar-w` offset and a border, so the two edges stay together while the
   sidebar is dragged. It publishes `data-settings-menu-placement` for tests.
+
+  It also decides what an interaction *outside* the surface means — and once
+  inline leaves the sidebar live, the sidebar is not "outside" at all. It is the
+  surface this one sits beside, and its affordances already own what they do, so
+  the whole column (marked `data-app-sidebar`) is exempt from dismissal rather
+  than the one resize handle that was exempt before. The resize edge moves this
+  surface's own left edge, so grabbing it must not close what the drag is laying
+  out; a sidebar link already navigates, and that navigation *is* the way out of
+  Settings. Letting dismissal fire too would race two navigations —
+  `closeSettingsOverlay` traverses history asynchronously while the link pushes
+  synchronously — and could land on the retained origin instead of the route
+  that was clicked. One navigation, chosen by the sidebar.
 - **`SettingsLayout`**'s rail is `var(--app-sidebar-w)` when standalone (so it
   tracks even a dragged sidebar) and stays 196px inline, where spending a second
   full-width column on a secondary nav would cost 496px of left chrome.
@@ -105,15 +133,19 @@ edited into `design.pen`.
 ## Validation
 
 - `settingsMenuPlacement.test.tsx` — default, persistence, refused storage,
-  same-tab propagation across React trees, cross-tab `storage` events, and the
-  viewport fold-in.
+  same-tab propagation across React trees, cross-tab `storage` events, and both
+  fold-ins: the viewport, and a shell that draws no sidebar.
 - `SettingsGeneralPage.test.tsx` — the placement radiogroup is its own group,
   arrowed and drawn like the theme one beside it, and does not touch the theme key.
 - `AppShell.test.tsx` — the shell retires only where Settings replaces it, and
   covers the shell below `md` even when inline is stored.
-- `SettingsLayout.test.tsx` — rail width per placement.
+- `SettingsLayout.test.tsx` — rail width per placement, including standalone from
+  a setup origin while `inline` is stored.
 - `SettingsOverlayRouteSurface.test.tsx` — the surface's left edge and border per
-  placement; the sidebar resize edge is layout, the rest of the shell is a way out.
+  placement, standalone from a setup origin, and what an outside interaction
+  means: a live sidebar keeps its own affordances (the resize edge lays this
+  surface out, a sidebar link navigates and lands on the route it names), while
+  the rest of the shell is still a way out.
 - `e2e/workbench-general/geometry.spec.ts` — measured in a browser: the 248 rail,
   the card's background matching a neighbouring page's card, and inline actually
   putting a live sidebar beside Settings at the sidebar's own width.

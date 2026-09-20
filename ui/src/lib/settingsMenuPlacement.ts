@@ -85,17 +85,32 @@ export function useSettingsMenuPlacement(): SettingsMenuPlacement {
   );
 }
 
+type StandaloneSettingsMenuOptions = {
+  /**
+   * Whether the shell BEHIND this Settings surface actually draws the app
+   * sidebar. Defaults to true, which is what every ordinary shell route does;
+   * pass false from a context that renders none.
+   */
+  shellHasSidebar?: boolean;
+};
+
 /**
  * Whether the Settings menu stands IN FOR the app sidebar rather than opening
  * beside it — the one question the shell, the overlay frame and the Settings
  * rail each have to answer, so it is answered once here.
  *
- * The preference only describes a desktop window. Below md there is no room for
- * two rails, so Settings covers the shell at every viewport that narrow and the
- * preference is simply not in force.
+ * `inline` is a claim about something else being on screen: it only means
+ * anything where an app sidebar is there to sit beside. Two things can take
+ * that away. The viewport: below md there is no room for two rails, so Settings
+ * covers the shell and the preference is simply not in force. The shell itself:
+ * the setup wizard owns the whole window and draws no sidebar, so inline there
+ * would offset Settings past an empty strip and narrow its rail for a neighbour
+ * that does not exist. Either way the answer is standalone, and neither one
+ * forgets what the owner picked for the windows that do have a sidebar.
  */
-export function useStandaloneSettingsMenu(): boolean {
+export function useStandaloneSettingsMenu(options?: StandaloneSettingsMenuOptions): boolean {
   const placement = useSettingsMenuPlacement();
   const isDesktop = useIsDesktop();
+  if (options?.shellHasSidebar === false) return true;
   return placement === 'standalone' || !isDesktop;
 }

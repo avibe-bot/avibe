@@ -36,6 +36,7 @@ import {
 } from '../lib/adminNavigation';
 import {
   closeSettingsOverlay,
+  isChromelessShellPath,
   isSettingsEntryPath,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
@@ -305,7 +306,10 @@ export const AppShell: React.FC = () => {
     return <Navigate to="/" replace />;
   }
 
-  if (location.pathname === '/setup' || settingsOverlayOrigin?.location.pathname === '/setup') {
+  if (
+    isChromelessShellPath(location.pathname)
+    || (settingsOverlayOrigin !== null && isChromelessShellPath(settingsOverlayOrigin.location.pathname))
+  ) {
     return (
       <>
         <ConfigRecoveryNotice config={config} />
@@ -389,6 +393,9 @@ export const AppShell: React.FC = () => {
           Settings retires this whole aside; inline Settings leaves it live. */}
       {!chromeless && (
       <aside
+        // Inline Settings opens beside this column and leaves it live, so the
+        // overlay has to be able to tell "the sidebar" from "outside".
+        data-app-sidebar="true"
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
         className={clsx(

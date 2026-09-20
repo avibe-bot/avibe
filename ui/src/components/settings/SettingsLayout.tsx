@@ -33,6 +33,7 @@ import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import {
   closeSettingsOverlay,
+  isChromelessShellPath,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
@@ -236,8 +237,11 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
-  const standaloneMenu = useStandaloneSettingsMenu();
-  const setupOrigin = useSettingsOverlayContext()?.location.pathname === '/setup';
+  const setupOriginPath = useSettingsOverlayContext()?.location.pathname;
+  const setupOrigin = setupOriginPath !== undefined && isChromelessShellPath(setupOriginPath);
+  // The setup wizard draws no app sidebar, so there is nothing for an inline
+  // rail to sit beside and nothing for it to be narrower than.
+  const standaloneMenu = useStandaloneSettingsMenu({ shellHasSidebar: !setupOrigin });
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);

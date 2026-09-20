@@ -195,6 +195,30 @@ describe('SettingsLayout', () => {
     expect(navigation.className).not.toContain(rejected);
   });
 
+  // The setup wizard draws no app sidebar, so the inline rail would be narrower
+  // than a neighbour that is not there. The stored preference is not in force on
+  // that origin — and is not forgotten for the windows that do have one.
+  it('sizes the rail standalone from a setup origin even when inline is stored', () => {
+    media.matches = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const setupOrigin: Location = {
+      pathname: '/setup',
+      search: '',
+      hash: '',
+      state: null,
+      key: 'setup-origin',
+    };
+
+    renderLayout({
+      pathname: '/settings/models',
+      state: settingsOverlayOpenState(setupOrigin),
+    });
+
+    const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(navigation.className).toContain('md:w-[var(--app-sidebar-w)]');
+    expect(navigation.className).not.toContain('md:w-[196px]');
+  });
+
   it.each(['/settings/models', '/settings/models/'])(
     'lets Model Hub fill the route pane at %s',
     (path) => {

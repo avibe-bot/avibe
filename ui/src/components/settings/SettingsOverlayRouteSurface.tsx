@@ -9,6 +9,7 @@ import { Dialog, DialogSurfaceContent, DialogTitle } from '@/components/ui/dialo
 import { useSetupHandoffDeparture } from '@/components/workbench/backendReadiness';
 import {
   closeSettingsOverlay,
+  isChromelessShellPath,
   isSettingsEntryPath,
   locationPath,
   SettingsOverlayOriginContext,
@@ -48,7 +49,9 @@ export const SettingsOverlayRouteSurface = ({
   const location = useLocation();
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
-  const standaloneMenu = useStandaloneSettingsMenu();
+  const standaloneMenu = useStandaloneSettingsMenu({
+    shellHasSidebar: !(origin && isChromelessShellPath(origin.location.pathname)),
+  });
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -146,11 +149,19 @@ export const SettingsOverlayRouteSurface = ({
                 const target = event.target;
                 if (
                   target instanceof Element
-                  // The toggle closes the overlay itself. The sidebar's resize
-                  // edge is not a dismissal at all: inline, it moves this
-                  // surface's own left edge, so grabbing it must not close what
-                  // the drag is laying out.
-                  && target.closest('[data-settings-toggle="true"], [data-sidebar-resizer="true"]')
+                  // The toggle closes the overlay itself, wherever it is drawn.
+                  //
+                  // The app sidebar is not "outside" at all once inline leaves
+                  // it live: it is the surface this one sits beside, and its
+                  // affordances already own what they do. The resize edge moves
+                  // this surface's own left edge, so grabbing it must not close
+                  // what the drag is laying out. A sidebar link navigates, and
+                  // that navigation is what takes the user out of Settings — if
+                  // dismissal also fired, `closeSettingsOverlay`'s asynchronous
+                  // history traversal would race the link's synchronous push and
+                  // could land on the retained origin instead of the route that
+                  // was clicked. One navigation, chosen by the sidebar.
+                  && target.closest('[data-settings-toggle="true"], [data-app-sidebar="true"]')
                 ) {
                   event.preventDefault();
                 }
