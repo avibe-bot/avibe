@@ -27,6 +27,12 @@ is authorized by this implementation task.
   emulation of shell execution or a recursive scan of arbitrary scripts.
   Known dynamic writers include `mapfile`/`readarray` destinations and explicit
   callback assignments; option operands and quoted command data are not writers.
+  Classify the existing builtin writer family by its argument grammar, including
+  attached/combined destination options, array destinations, implicit destinations
+  and explicit arithmetic writes. Output/query-only options do not write.
+  Bash/POSIX startup paths and Zsh startup paths use their respective option
+  semantics. This remains bounded syntax recognition, not execution, alias
+  resolution, effective precedence, or arbitrary expansion.
 - File references to environment variables resolve only from unambiguous
   persisted literal assignments, never `os.environ`. Unresolved references
   describe a missing persistent value, not a permission failure.
@@ -53,6 +59,27 @@ is authorized by this implementation task.
   credentials. Adapter provision/transient/matching gain an optional keyword;
   private `_require_proven_source_payload` forwards it separately from public
   source payloads. Existing calls omit that keyword when it is absent.
+  The first released explicit Bearer implementation also binds the scheme to
+  an opaque immutable `cred_auth_bearer_<32 random hex characters>` ref. Only
+  runtime state decodes this reserved namespace; unknown/malformed tags refuse.
+  Legacy API-key and OAuth ref generation is unchanged. Every full credential
+  consumer verifies tagged-ref/metadata agreement; deleting metadata's scheme
+  cannot downgrade a tagged credential. Valid pre-release plain-ref Bearer
+  metadata remains readable; replacement/retarget creates a fresh tagged ref.
+  Complete loss of such an unpublished untagged Bearer record is unrecoverable
+  from its ref alone and is not a supported upgrade guarantee.
+  Replacement's scheme accessor does not require the old secret. For safe
+  missing or content-corrupt documents it may use the ref: published plain
+  API-key refs mean legacy, tagged refs mean Bearer. Readable documents still
+  require API-key kind and known consistent scheme; unsafe paths, permissions,
+  symlinks and genuine I/O errors never fall back. The replacement key passes
+  ordinary target/scheme validation and authenticated discovery before commit.
+  Existing revocation journal operation `revoke_api_key_credential` and the
+  same-named adapter method carry explicit API-key-only retirement intent.
+  They remove only the unbound ref's safe private namespace, durably, without
+  requiring its old secret or deleting any OAuth auth-name file. The generic
+  OAuth cleanup sequence is unchanged; unreadable/invalid is not proof of
+  absence and cannot discard a pending retirement.
 - Existing backend custody, authenticated proof, source reuse, cooperative
   lease/drain, durable journal, no-op guards, and recovery remain authoritative.
   Shared shell assignments must not be removed for unconsented consumers.
@@ -72,6 +99,11 @@ is authorized by this implementation task.
   evidence, not a legacy default. This is compare-before-write, not a claim of
   cross-process atomic CAS. Compare-only guards never claim permissions;
   Avibe-owned journal/state files remain owner-private.
+  Atomic publication mechanics remain owned by `config.atomic_io.write_atomic`.
+  Optional `mode` defaults to `0600`; optional `before_replace` runs after the
+  temporary bytes/mode are durable, immediately before publication. The caller
+  owns source validation and strict directory durability. Guard failure cleans
+  only the unpublished temporary file. No-op/replay paths do not call this writer.
   Shared-reference guards cover configuration/profile consumers, not unrelated
   backend credential-store bytes. Credential snapshots stay backend-scoped.
   Completed receipts retain optional opaque `inventory_ids`, distinct from
@@ -88,9 +120,25 @@ is authorized by this implementation task.
   for a backend already covered by that receipt cannot prove new authorization:
   refuse cleanup/provisioning and direct the user to existing Hub reauthentication.
   An entirely Source-free receipt is an empty-only confirmation and does not
-  assert prior OAuth custody. Mixed receipts cannot prove which opaque native
+  assert OAuth custody for that batch. Mixed receipts cannot prove which opaque native
   container was empty: conservatively require Hub reauthentication there.
   A cleaned container revision alone does not establish absence of prior OAuth.
+  Optional private `oauth_custody_backends: list[str]` preserves a monotonic
+  reauthorization requirement across subsequent completed batches, including
+  API-only and empty batches. It is bounded by the supported native OAuth
+  backends (Claude and Codex), not
+  a secret/grant history or another custody owner. The journal produces/merges
+  and validates it; fresh-consent apply consumes it before proof/provision or
+  cleanup. Exact last-bundle matches retain the existing cleanup-only path.
+  Earlier-batch unmatched OAuth requires Hub reauthorization even if its old
+  Source was removed or changed. An existing legacy receipt without the field
+  has unknown overwritten history: conservatively mark all supported backends,
+  including when that last receipt is Source-free. A genuinely new history
+  writes an explicit empty list when no OAuth custody was transferred. Thus
+  legacy upgrade can require an extra OAuth authorization, never speculative
+  reprovisioning of a restored native refresh grant. Completion/recovery must
+  carry this evidence monotonically across receipt-save/active-journal-forget
+  interruptions and terminal needs-auth outcomes.
 - Public scan adds `source_paths: list[str]` (display-safe file locators, never
   secret content). Existing payload fields remain compatible. Blocked rows
   use specific `settings.models.migration.blocked.*` keys; UI shows every
