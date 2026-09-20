@@ -368,6 +368,10 @@ class Controller:
             self,
             self.agent_auth_service._apply_backend_runtime_refresh,
         )
+        if self.model_hub_service is not None:
+            self.model_hub_service.migration_guard = self.backend_restart_coordinator.migration_guard
+            self.model_hub_service.migration_reconcile_auth = self.backend_restart_coordinator.reconcile_migration_auth
+        self.backend_restart_coordinator.restore_migration_blocks()
 
         self.vibe_agent_store = VibeAgentStore()
         self.vibe_agent_store.ensure_builtin_default_agents(
@@ -2818,6 +2822,10 @@ class Controller:
                     logger.debug("IM runtime could not signal the event loop to stop", exc_info=True)
 
     async def _restore_active_polls(self, platforms: set[str]) -> None:
+        coordinator = getattr(self, "backend_restart_coordinator", None)
+        if coordinator is not None and "opencode" in coordinator._blocked_backends():
+            coordinator.restore_migration_blocks()
+            return
         opencode_agent = self.agent_service.agents.get("opencode")
         if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
             try:
@@ -2968,8 +2976,12 @@ class Controller:
                 await recover_model_hub()
             except Exception:
                 logger.exception(
-                    "Model Hub runtime recovery failed; continuing without it"
+                    "Model Hub runtime recovery failed; retaining blocked backend admission"
                 )
+            finally:
+                coordinator = getattr(self, "backend_restart_coordinator", None)
+                if coordinator is not None:
+                    coordinator.restore_migration_blocks()
 
         recover_deliveries = getattr(
             self.session_turns,

@@ -360,6 +360,7 @@ def test_opencode_options_rereads_hub_mode_at_launch_boundary(monkeypatch):
         agents=AgentsConfig(),
         runtime=RuntimeConfig(default_cwd="."),
     )
+    direct_config.model_hub.agents["opencode"].mode = "direct"
     hub_config.model_hub.agents["opencode"].mode = "hub"
     configs = iter((direct_config, hub_config))
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")

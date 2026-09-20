@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -821,6 +822,12 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
         )
     )
     service = service_for(tmp_path, store, adapter)
+    service.migration_home = native_home
+
+    async def verify_fixture_idle():
+        return None
+
+    service.migration_guard = lambda backends: nullcontext(verify_fixture_idle)
     scan = service.migration_scan()["items"]
     result = asyncio.run(service.migration_apply([item["id"] for item in scan]))
 

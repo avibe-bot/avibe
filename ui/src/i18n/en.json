@@ -637,6 +637,8 @@
       "oauthRemoved": "Credentials removed.",
       "oauthRemoveFailed": "Could not remove credentials: {{detail}}",
       "oauthRemovePartial": "Credentials cleared from Avibe, but the backend CLI logout reported a problem: {{detail}}. The CLI's own files may still be present.",
+      "nativeAuthHubOwned": "Authentication is managed by Model Hub.",
+      "openModelHub": "Open Model Hub",
       "oauthFlowLockedToast": "OAuth login is in progress — finish or cancel it before switching auth mode.",
       "testConnectionTitle": "Test connection",
       "testConnectionSubtitle": "Send a one-token \"Hi\" prompt to verify the session, the model, and any custom Base URL.",
@@ -940,66 +942,6 @@
           "body": "Install Claude Code, Codex or OpenCode, come back to this page, and they will appear here.",
           "install": "Install a backend CLI, then reload this page."
         }
-      },
-      "adopt": {
-        "title": "Switch {{backend}} to the gateway",
-        "subtitle": "Affects {{backend}} only; the other backends are unchanged.",
-        "vendor": {
-          "claude": "Claude",
-          "chatgpt": "ChatGPT"
-        },
-        "section": {
-          "effects": "What will happen",
-          "undo": "You can undo this"
-        },
-        "effects": {
-          "1": "Your current {{vendor}} login becomes the first source and keeps priority",
-          "2": "Once you add other sources, it moves to them when this login is exhausted",
-          "1.opencode": "OpenCode's own model configuration is kept as it is; this switch does not change it",
-          "2.opencode": "Its models are supplied from the sources on this page; if there are none yet, add one first",
-          "3": "The model menu does not change",
-          "4": "Conversations in progress are unaffected; the change applies from the next request",
-          "install": "The gateway component ({{component}}, about {{duration}}) is installed first, then the switch happens"
-        },
-        "undo": {
-          "1": "You can switch back to direct at any time",
-          "2": "Where to undo: the {{backend}} card on this page → Switch to direct",
-          "3": "If you switch back, the sources you added stay; they just stop supplying {{backend}}"
-        },
-        "cancel": "Cancel",
-        "confirm": "Switch to gateway",
-        "confirm.install": "Install and switch",
-        "fail": {
-          "title": "The switch to the gateway did not go through",
-          "detail": "{{request}} · {{status}} · {{reason}}",
-          "reason": {
-            "transport": "The gateway could not be reached",
-            "refused": "The gateway did not accept the switch",
-            "notReady": "The gateway started but did not become ready",
-            "unknown": "No reason was given"
-          }
-        }
-      },
-      "install": {
-        "duration": "1 minute",
-        "title": "Install the gateway component",
-        "subtitle": "Installs the component only; the backends keep working the way they do now",
-        "section": {
-          "effects": "What will happen"
-        },
-        "effects": {
-          "1": "{{component}} is downloaded and installed, about {{duration}}",
-          "2": "The gateway starts automatically once it is installed",
-          "3": "No backend is switched and the model menu does not change"
-        },
-        "confirm": "Install and start",
-        "cancel": "Cancel",
-        "progress": "Installing…",
-        "fail": {
-          "title": "The install did not finish",
-          "detail": "The install did not finish, and the component may be left incomplete. Retrying installs it again from scratch."
-        },
-        "retry": "Try again"
       },
       "gateway": {
         "heading": "Gateway routes",
@@ -1724,34 +1666,42 @@
           "title": "Gateway mode",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
-          "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models. {{backend}}'s native config is left untouched, and you can switch away anytime."
+          "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models."
         },
         "direct": {
           "title": "Direct mode",
-          "description": "{{backend}} uses its own native config (settings.json / CLI sign-in); Avibe only launches the process and doesn't manage models. Good for troubleshooting or fully self-managed setups.",
+          "description": "{{backend}} uses its own configuration. Avibe does not manage its credentials or model routes.",
           "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
           "import": "Import to gateway…"
         },
         "fixHint": "Add or enable a source on the Models page to bring it back."
       },
       "migration": {
-        "title": "Connect to the model gateway",
-        "subtitle": "Move your existing sign-ins and API keys into the gateway in one pass — each Agent then keeps its own sources and order.",
-        "empty": "No native configuration detected to migrate.",
+        "open": "Migrate configuration",
+        "title": "Migrate to the Model Hub",
+        "subtitle": "After migration, CLI authentication will be fully managed by Model Hub.",
+        "empty": "No configuration found to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
-        "applyFailed": "Import failed, please retry",
-        "applied_one": "Imported {{count}} item",
-        "applied_other": "Imported {{count}} items",
-        "later": "Maybe later",
-        "apply_one": "Import {{count}} item and enable the gateway",
-        "apply_other": "Import {{count}} items and enable the gateway",
-        "nonDestructive": "Non-destructive: native configs are never changed or deleted — importing only copies them; you can switch back to Direct on the Backends page anytime.",
-        "action": {
-          "import": "Import as source",
-          "controlledImport": "Controlled import · reserved",
-          "keepNative": "Keep native",
-          "reauth": "Re-authorize · one-click in browser"
+        "applyFailed": "Migration failed, please retry",
+        "blocked": {
+          "config": "Adjust this CLI's configuration, then scan again.",
+          "environment": "Remove this CLI’s environment-based credentials, then retry.",
+          "credential": "Allow credential access, then retry.",
+          "fallback": "Use the existing Add flow for this CLI, then scan again."
         },
+        "applying": "Migrating…",
+        "errors": {
+          "nativeBusy": "Close the CLI or finish its tasks, then retry.",
+          "permissionNeeded": "Allow credential access, then retry.",
+          "recoveryPending": "Migration is unfinished. Retry to continue.",
+          "itemConflict": "The native configuration changed. Scan again.",
+          "configurationBlocked": "Adjust the native configuration, then scan again.",
+          "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub."
+        },
+        "applied_one": "Migration complete",
+        "applied_other": "Migration complete",
+        "later": "Later",
+        "apply": "Start migration",
         "notes": {
           "customBaseUrl": "Includes a custom Base URL",
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
@@ -1994,16 +1944,16 @@
         "failed": "Couldn't do that, please retry"
       },
       "importNotice": {
-        "found_one": "Found {{count}} API key to import into Model Gateway",
-        "found_other": "Found {{count}} API keys to import into Model Gateway",
-        "review": "Review and import",
-        "help": "What is Model Gateway?",
-        "helpBody": "Model Gateway keeps your API keys and model connections in one place, so every AI assistant has a single way in. Importing only copies the keys you select; your existing configuration is left as it is.",
+        "found_one": "Found {{count}} API key to import into Model Hub",
+        "found_other": "Found {{count}} API keys to import into Model Hub",
+        "review": "Review and migrate",
+        "help": "What is Model Hub?",
+        "helpBody": "Model Hub manages the credentials you select and supplies them to your AI assistants.",
         "dismiss": "Dismiss import notice",
-        "imported_one": "Imported {{count}} API key into Model Gateway",
-        "imported_other": "Imported {{count}} API keys into Model Gateway",
-        "importedRemaining_one": "Imported {{imported}} · {{count}} API key still available",
-        "importedRemaining_other": "Imported {{imported}} · {{count}} API keys still available"
+        "imported_one": "Migrated {{count}} API key into Model Hub",
+        "imported_other": "Migrated {{count}} API keys into Model Hub",
+        "importedRemaining_one": "Migrated {{imported}} · {{count}} API key still available",
+        "importedRemaining_other": "Migrated {{imported}} · {{count}} API keys still available"
       }
     }
   },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,17 @@ class CredentialRevocationJournal:
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.RLock()
+
+    def _sync_directory(self) -> None:
+        # write_atomic flushes the file. Provisional ownership also requires a
+        # durable directory entry before the engine can write any secret.
+        if os.name == "nt":
+            return
+        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _read(self) -> list[PendingCredentialRevocation]:
         if not self.path.exists():
@@ -129,6 +141,8 @@ class CredentialRevocationJournal:
             if entry not in entries:
                 entries.append(entry)
                 self._write(entries)
+            # Retry the fence if a previous add wrote the row but failed flush.
+            self._sync_directory()
 
     def remove(self, source_id: str, credential_ref: str) -> None:
         with self._lock:

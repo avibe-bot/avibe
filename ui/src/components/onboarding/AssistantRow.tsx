@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Check, Download, RefreshCw, Sliders } from 'lucide-react';
+import { Check, Download, ExternalLink, RefreshCw, Sliders } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
 import { Button } from '../ui/button';
@@ -25,7 +25,7 @@ export interface AssistantRowProps {
   connectionError?: string;
   configuringDisabled?: boolean;
   /** Presentation only. The connection owner must supply confirmed state. */
-  connection?: 'subscription' | 'api_key';
+  connection?: 'subscription' | 'api_key' | 'hub';
 }
 
 /**
@@ -67,7 +67,8 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
       </div>
       <div className="onboarding-assistant-body">
         <p className="onboarding-assistant-note" title={t(`onboarding.setup.${backend}Description`)}>
-          {t(connection ? `onboarding.setup.${connection}` : `onboarding.setup.${backend}Description`)}
+          {connection === 'hub' ? t('settings.backends.nativeAuthHubOwned')
+            : t(connection ? `onboarding.setup.${connection}` : `onboarding.setup.${backend}Description`)}
         </p>
         <div className="onboarding-assistant-actions">
           {status === 'missing' && <Button variant="secondary" size="sm" className="h-[34px]" onClick={onInstall} disabled={installing || detecting}>
@@ -76,8 +77,9 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
           </Button>}
           {status === 'unknown' && !detecting && <Button variant="secondary" size="sm" onClick={onDetect}><RefreshCw size={14} />{t('common.retry')}</Button>}
           <Button variant="secondary" size="sm" className="h-[34px]" onClick={onConfigure} disabled={configuringDisabled || installing || detecting}>
-            {connection ? <Check size={14} className="text-mint-ink" /> : <Sliders size={14} />}
-            {t(connection ? `onboarding.setup.${connection}Connected` : 'onboarding.connection.addSubscription')}
+            {connection === 'hub' ? <ExternalLink size={14} /> : connection ? <Check size={14} className="text-mint-ink" /> : <Sliders size={14} />}
+            {connection === 'hub' ? t('settings.backends.openModelHub')
+              : t(connection ? `onboarding.setup.${connection}Connected` : 'onboarding.connection.addSubscription')}
           </Button>
           {!connection && onAddKey && <Button variant="secondary" size="sm" className="h-[34px]" onClick={onAddKey} disabled={configuringDisabled || installing || detecting}>{t('onboarding.connection.addKey')}</Button>}
         </div>

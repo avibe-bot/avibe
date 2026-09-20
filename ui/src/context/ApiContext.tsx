@@ -2270,6 +2270,8 @@ export type BackendConnectionState = {
   application: 'applied' | 'draining' | 'failed' | 'stopped' | 'unknown';
   ready: boolean;
   entry_eligible: boolean;
+  /** Which credential owner supplies this backend; omitted responses remain direct-compatible. */
+  supply_mode?: 'direct' | 'hub';
   permission_required?: boolean;
   message?: string;
 };
@@ -2369,6 +2371,8 @@ export type BackendNotice = {
 export type CodexAuthSaveResult = CodexAuthState & {
   restart?: BackendRestartResult;
   notices?: BackendNotice[];
+  error?: string;
+  reauth_channel?: 'hub';
 };
 
 export type ClaudeAuthMode = 'oauth' | 'api_key';
@@ -2419,6 +2423,8 @@ export type ClaudeAuthSaveResult = ClaudeAuthState & {
   partial?: boolean;
   warning?: string;
   detail?: string;
+  error?: string;
+  reauth_channel?: 'hub';
 };
 
 // One entry in the OpenCode provider grid. The full catalog is built
@@ -2445,6 +2451,7 @@ export type OAuthWebStartResult = {
   callback_kind?: 'code' | 'device' | 'redirect' | null;
   error?: string;
   detail?: string;
+  reauth_channel?: 'hub';
 };
 
 export type OAuthWebStatus = {
@@ -2457,12 +2464,14 @@ export type OAuthWebStatus = {
   awaiting_code?: boolean;
   callback_kind?: 'code' | 'device' | 'redirect' | null;
   error?: string | null;
+  reauth_channel?: 'hub';
 };
 
 export type OAuthWebMutationResult = {
   ok: boolean;
   error?: string;
   detail?: string;
+  reauth_channel?: 'hub';
   notices?: BackendNotice[];
   restart?: BackendRestartResult;
   // ``partial: true`` rides on ``ok: true`` when the V2Config side of
@@ -2482,6 +2491,7 @@ export type BackendAuthTestResult = {
   exit_code?: number;
   error?: string;
   detail?: string;
+  reauth_channel?: 'hub';
 };
 
 export type OpencodeProvider = {
@@ -2555,6 +2565,9 @@ export type OpencodeMutationResult = {
   ok: boolean;
   restart?: BackendRestartResult;
   message?: string;
+  error?: string;
+  detail?: string;
+  reauth_channel?: 'hub';
   default_provider?: string;
   provider_id?: string;
   model_id?: string;

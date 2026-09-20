@@ -622,6 +622,19 @@ async fn a_launcher_failure_observed_after_timeout_is_rechecked_on_retry() {
         1,
         "observing the failed launch must not start a replacement in the same retry"
     );
+    assert!(matches!(
+        host.remove_private_runtime(None).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown],
+        "a failed helper does not prove that a previously launched Runtime is absent"
+    );
 
     let third = host.bootstrap(&Recorder::default()).await;
     assert_eq!(third.phase, BootstrapPhase::Failed);

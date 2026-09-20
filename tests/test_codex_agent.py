@@ -5849,6 +5849,10 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                     "desktop_backend_subprocess_environment",
                     return_value=managed_env,
                 ),
+                patch(
+                    "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+                    return_value=_catalog_reference(Path(cwd) / "codex-hub-catalog.json"),
+                ) as prepare_catalog,
             ):
                 await agent._get_or_create_transport(cwd, launch)
 
@@ -5856,6 +5860,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_env["PATH"], managed_env["PATH"])
         self.assertEqual(runtime_env["AVIBE_MODEL_HUB_TOKEN"], "gateway-token")
         self.assertNotIn("OPENAI_API_KEY", runtime_env)
+        prepare_catalog.assert_called_once_with(agent.codex_config.binary, None, None)
 
     async def test_cached_transport_evicted_when_cwd_inode_changes(self):
         import tempfile

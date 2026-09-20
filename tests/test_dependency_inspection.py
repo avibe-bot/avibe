@@ -77,7 +77,11 @@ def test_selective_checks_preserve_complete_rows_and_only_probe_their_owners(pro
 
     result = api.dependencies_status(dependency_ids=requested)
 
-    assert result == {"ok": True, "deps": [row for row in complete["deps"] if row["id"] in requested]}
+    assert result["ok"] is True
+    assert result["deps"] == [row for row in complete["deps"] if row["id"] in requested]
+    assert result["reconciling"] is False
+    assert result["reconciling_dependencies"] == []
+    assert set(result) == {"ok", "deps", "reconciling", "reconciling_dependencies"}
     assert [group for group, _ in probes] == [group for group in GROUPS if set(group).intersection(requested)]
 
 
@@ -87,6 +91,8 @@ def test_coupled_rows_share_one_offline_inspection_and_duplicate_ids_do_not_repe
         dependency_ids=["memory-runtime", "show-runtime", "memory-package", "node", "memory-runtime"],
     )
     assert [row["id"] for row in result["deps"]] == ["show-runtime", "memory-package", "memory-runtime", "node"]
+    assert result["reconciling"] is False
+    assert result["reconciling_dependencies"] == []
     assert probes == [(GROUPS[2], {"offline": True}), (GROUPS[4], {"offline": True})]
 
 

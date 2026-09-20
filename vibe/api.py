@@ -54,6 +54,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
 from core.memory_loader import probe_memory_runtime_entrypoint
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.install_integrity import verify_python_environment
@@ -157,6 +158,71 @@ _PLATFORM_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "wechat": ("bot_token",),
 }
 _GATEWAY_SECRET_FIELDS = ("workspace_token", "client_secret")
+
+
+def _native_write_blocked(error: NativeMigrationBlockedError) -> dict:
+    result = {"ok": False, "error": error.reason}
+    if error.backends:
+        result["backends"] = list(error.backends)
+    if error.reason == "native_auth_hub_owned":
+        result["reauth_channel"] = "hub"
+    return result
+
+
+def _native_auth_write(
+    backend: str | None = None, *, pass_lease: bool = False, authentication: bool = True
+):
+    """Own the whole native RMW and its cancellation tail across instances.
+
+    Model/permission-only edits need the same lease: rewriting a stale document
+    can resurrect credentials after takeover. Only auth writers require native
+    custody; non-auth edits remain usable with Hub routing.
+    """
+    from functools import wraps
+
+    def decorate(function):
+        def acquire(args, kwargs):
+            target = str(backend or kwargs.get("backend") or (args[0] if args else "")).strip().lower()
+            if target not in {"claude", "codex", "opencode"}:
+                raise NativeMigrationBlockedError("unsupported_backend", ())
+            lease = NativeCredentialLease((target,)).acquire()
+            try:
+                if authentication:
+                    lease.assert_auth_custody(target)
+                return lease
+            except BaseException:
+                lease.release()
+                raise
+
+        if asyncio.iscoroutinefunction(function):
+            @wraps(function)
+            async def asynchronous(*args, **kwargs):
+                try:
+                    lease = acquire(args, kwargs)
+                except NativeMigrationBlockedError as error:
+                    return _native_write_blocked(error)
+                try:
+                    if pass_lease:
+                        kwargs["_native_lease"] = lease
+                    return await finish_native_operation(function(*args, **kwargs))
+                finally:
+                    lease.release()
+            return asynchronous
+
+        @wraps(function)
+        def synchronous(*args, **kwargs):
+            try:
+                lease = acquire(args, kwargs)
+            except NativeMigrationBlockedError as error:
+                return _native_write_blocked(error)
+            try:
+                if pass_lease:
+                    kwargs["_native_lease"] = lease
+                return function(*args, **kwargs)
+            finally:
+                lease.release()
+        return synchronous
+    return decorate
 
 
 def _parse_agent_import_file(path: Path, *, backend: str):
@@ -6421,6 +6487,7 @@ def opencode_permission_status() -> dict:
     }
 
 
+@_native_auth_write("opencode", authentication=False)
 def setup_opencode_permission() -> dict:
     """Set OpenCode permission to 'allow' in config file.
 
@@ -10615,8 +10682,65 @@ def _codex_process_status(resolved_binary: str | None) -> str:
     return "running" if _codex_processes(resolved_binary) else "stopped"
 
 
+def _hub_backend_connection_auth(config: V2Config, backend: str) -> str:
+    """Observe only configured supply owners; never resolve or invoke a model."""
+    from core.handlers.model_hub.resolver import (
+        source_after_cooldown_recovery,
+        source_eligible_for_backend,
+        source_runnable,
+    )
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    hub = config.model_hub
+    if not hub.enabled:
+        return "none"
+    source_ids = list(dict.fromkeys([
+        *hub.effective_source_order(backend),
+        *(hop.source_id for route in hub.agents[backend].routes.values() for hop in route.hops),
+    ]))
+    by_id = {source.id: source for source in hub.sources}
+    now = datetime.now(timezone.utc)
+    credentials = EngineStateStore(paths.get_runtime_dir() / "model-hub" / "state")
+    for source_id in source_ids:
+        source = by_id.get(source_id)
+        if source is None or not source_eligible_for_backend(source, backend) or not source_runnable(source, now=now):
+            continue
+        if source.supply_channel == "hub":
+            if credentials.has_current_source_credential(
+                source.credential_ref,
+                source_id=source.id,
+                kind=source.kind,
+                vendor=source.vendor,
+                protocol=source.protocol,
+                base_url=source.base_url,
+            ):
+                return "api_key" if source.kind == "api_key" else "subscription"
+        elif source.supply_channel == "native_cli" and source.kind == "subscription":
+            from modules.agents.model_hub import ModelHubRuntimeRouter
+
+            # The retained Source is the explicit subscription owner. Reuse
+            # its launch checks, including native key/endpoint conflicts;
+            # an arbitrary dormant native login cannot supply another Source.
+            recovered = source_after_cooldown_recovery(source, now)
+            if ModelHubRuntimeRouter._default_native_cli_ready(
+                backend, verified_oauth=backend == "codex" and recovered.state.status == "active",
+            ):
+                return "subscription"
+    return "none"
+
+
+def _direct_claude_connection_auth() -> dict:
+    """Keep the bounded native status reader inside the takeover exclusion."""
+    with NativeCredentialLease(("claude",)) as lease:
+        # The caller's config may predate an await or a completed takeover.
+        # acquire() checks pending recovery; custody must be reread under lease.
+        lease.assert_auth_custody("claude")
+        return get_claude_auth(connection_observation=True)
+
+
 async def get_backend_connection(name: str) -> dict:
-    """Observe native launch auth and controller application, without a model call."""
+    """Observe persisted credential custody and application, without a model call."""
+    from core.backend_restart import pending_native_backends
     from vibe import internal_client, runtime
 
     if not is_agent_backend(name):
@@ -10624,9 +10748,11 @@ async def get_backend_connection(name: str) -> dict:
     config = await asyncio.to_thread(load_config)
     backend_config = getattr(config.agents, name)
     enabled = bool(backend_config.enabled)
+    supply_mode = config.model_hub.agents[name].mode
     installed = await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
     result = {
         "ok": True, "backend": name, "installed": installed, "enabled": enabled,
+        "supply_mode": supply_mode,
         "auth": "unknown", "application": "unknown", "ready": False,
         "entry_eligible": False,
     }
@@ -10656,10 +10782,14 @@ async def get_backend_connection(name: str) -> dict:
     if receipt and not receipt.get("ok") and result["application"] != "stopped":
         result["application"] = "failed"
         result["message"] = receipt.get("message") or receipt.get("error")
-    if not installed:
+    if not installed or config.load_warnings:
+        return result
+    if name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
     try:
-        if name == "opencode":
+        if supply_mode == "hub":
+            result["auth"] = await asyncio.to_thread(_hub_backend_connection_auth, config, name)
+        elif name == "opencode":
             if not enabled:
                 return result
             # Read the same persisted launch sources as the provider catalog.
@@ -10672,15 +10802,27 @@ async def get_backend_connection(name: str) -> dict:
             modes.update({pid: "api" for pid in key_ids})
             effective = next((mode for mode in modes.values() if mode in {"api", "oauth"}), None)
             result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
-            permission = await asyncio.to_thread(opencode_permission_status)
-            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
         else:
-            auth = await asyncio.to_thread(get_claude_auth if name == "claude" else get_codex_auth)
+            if name == "claude":
+                # Cancelling to_thread does not stop its native status process.
+                # Join the worker and retain its lease through the entire tail.
+                auth = await finish_native_operation(asyncio.to_thread(_direct_claude_connection_auth))
+            else:
+                auth = await asyncio.to_thread(get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):
                 return result
             result["auth"] = {"oauth": "subscription", "api_key": "api_key", "none": "none"}.get(auth.get("active_auth_mode"), "unknown")
+        if name == "opencode" and enabled:
+            permission = await asyncio.to_thread(opencode_permission_status)
+            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
+    except NativeMigrationBlockedError:
+        return result
     except Exception as exc:
         result["message"] = str(exc)
+        return result
+    # An ownership transition may have started while the observation awaited
+    # IPC or native read-only checks. Do not admit against a pending journal.
+    if name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
     credential_ready = enabled and result["auth"] in {"subscription", "api_key"} and not result.get("permission_required")
     result["ready"] = credential_ready and result["application"] == "applied"
@@ -11193,6 +11335,8 @@ async def start_oauth_web_async(
                 backend=backend,
             ),
         }
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web OAuth start failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "start_failed", "detail": str(exc)}
@@ -11258,6 +11402,8 @@ async def remove_backend_auth_async(backend: str) -> dict:
     service = _get_oauth_service()
     try:
         return await service.remove_web_auth(backend)
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web auth remove failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "remove_failed", "detail": str(exc)}
@@ -11271,6 +11417,8 @@ async def remove_claude_oauth_credentials_async() -> dict:
     service = _get_oauth_service()
     try:
         return await service.clear_claude_oauth_credentials_only()
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Claude OAuth credentials cleanup failed: %s", exc, exc_info=True)
         return {"ok": False, "error": "remove_failed", "detail": str(exc)}
@@ -11280,14 +11428,17 @@ def remove_claude_oauth_credentials() -> dict:
     return _submit_oauth_coro(remove_claude_oauth_credentials_async(), timeout=30.0)
 
 
-def _clear_claude_oauth_credentials_after_api_key_save(service=None) -> dict:
+def _clear_claude_oauth_credentials_after_api_key_save(service=None, *, lease=None) -> dict:
     service = service or _get_oauth_service()
     return _submit_oauth_coro(
-        service.clear_claude_oauth_credentials_only(),
-        timeout=30.0,
+        service.clear_claude_oauth_credentials_only(**({"lease": lease} if lease is not None else {})),
+        # The outer writer owns this explicit lease until cleanup truly exits;
+        # a Future.result timeout would leave that writer running unprotected.
+        timeout=None if lease is not None else 30.0,
     )
 
 
+@_native_auth_write()
 def remove_backend_api_key(backend: str) -> dict:
     """Clear the stored API key for Claude / Codex without touching OAuth.
 
@@ -11420,6 +11571,8 @@ async def test_backend_auth_async(backend: str, model: Optional[str] = None) -> 
     service = _get_oauth_service()
     try:
         return await service.test_web_auth(backend, model=model)
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web auth test failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "test_failed", "detail": str(exc)}
@@ -11444,6 +11597,8 @@ async def test_opencode_provider_async(provider_id: str, model: Optional[str] = 
     service = _get_oauth_service()
     try:
         return await service.test_opencode_provider(provider_id, model=model)
+    except NativeMigrationBlockedError as exc:
+        return _native_write_blocked(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "OpenCode provider test failed for %s: %s",
@@ -11582,6 +11737,7 @@ def get_codex_auth() -> dict:
     }
 
 
+@_native_auth_write("codex")
 def save_codex_auth(payload: dict) -> dict:
     """Persist Codex auth: V2Config + ``~/.codex/{config.toml,auth.json}``.
 
@@ -11836,7 +11992,7 @@ def save_codex_auth(payload: dict) -> dict:
     return state
 
 
-def get_claude_auth() -> dict:
+def get_claude_auth(*, connection_observation: bool = False) -> dict:
     """Return the user-facing Claude auth state for the Settings UI.
 
     Claude differs from Codex in two structural ways:
@@ -11851,6 +12007,10 @@ def get_claude_auth() -> dict:
     Legacy V2Config keys are read only as a migration fallback so old
     installs still render their current state before the next save moves
     the key into Claude's own settings file.
+
+    ``connection_observation`` is the leased Direct connection projection:
+    use actual launch-key precedence and explicit uncertainty if neither the
+    bounded status query nor the selected native store proves OAuth.
     """
     from vibe.claude_config import (
         read_claude_auth_state,
@@ -11860,7 +12020,7 @@ def get_claude_auth() -> dict:
     )
 
     disk_state = read_claude_auth_state()
-    disk_oauth_signed_in = read_claude_oauth_signed_in()
+    disk_oauth_signed_in = False if connection_observation else read_claude_oauth_signed_in()
     settings_env = read_claude_settings_env()
     settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
@@ -11882,6 +12042,14 @@ def get_claude_auth() -> dict:
 
     configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
+    if connection_observation:
+        # Settings are applied by Claude after Avibe's launch environment.
+        # Reuse its composition so explicit OAuth masks inherited keys while
+        # legacy environment keys and persisted settings still take precedence.
+        launch_env = build_claude_subprocess_env(cfg if "cfg" in locals() else None)
+        launch_env.update(settings_env)
+        if launch_env.get("ANTHROPIC_API_KEY") or launch_env.get("ANTHROPIC_AUTH_TOKEN"):
+            return {"ok": True, "active_auth_mode": "api_key"}
     try:
         claude_status_env = _build_claude_status_probe_env(
             build_claude_subprocess_env(
@@ -11891,11 +12059,31 @@ def get_claude_auth() -> dict:
         )
     except Exception:
         claude_status_env = None
+    # Direct connection observation owns the native lease through this bounded
+    # status query. Hub observations never call this native reader.
     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
         configured_cli_path if isinstance(configured_cli_path, str) else None,
         env=claude_status_env,
         cwd=status_probe_cwd,
     )
+    if connection_observation:
+        if cli_oauth_signed_in is not None:
+            return {"ok": True, "active_auth_mode": "oauth" if cli_oauth_signed_in else "none"}
+        from vibe.native_oauth_store import read_native_oauth
+
+        try:
+            snapshot = read_native_oauth("claude", allow_secret=False)
+        except Exception:
+            # An unavailable observer is not proof of logout. Do not expose
+            # native errors or metadata in the public connection response.
+            return {"ok": True, "auth_mode_uncertain": True}
+        if snapshot is None:
+            return {"ok": True, "active_auth_mode": "none"}
+        if snapshot.exportable:
+            return {"ok": True, "active_auth_mode": "oauth"}
+        # Keychain attributes describe a container, which may hold only MCP
+        # credentials. Neither that presence nor denied access proves OAuth.
+        return {"ok": True, "auth_mode_uncertain": True}
     oauth_signed_in = (
         cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in
     )
@@ -11963,7 +12151,8 @@ def get_claude_auth() -> dict:
     }
 
 
-def save_claude_auth(payload: dict) -> dict:
+@_native_auth_write("claude", pass_lease=True)
+def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
     """Persist Claude auth into Claude Code's own ``settings.json``.
 
     V2Config records only non-secret intent/legacy cleanup state. It must
@@ -12022,6 +12211,12 @@ def save_claude_auth(payload: dict) -> dict:
     if recovery_message:
         return {"ok": False, "error": "config_recovery", "message": recovery_message}
 
+    oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
+    if oauth_cleanup_service is not None:
+        # Construction may defer recovery because this outer operation already
+        # owns the lease. Adopt it explicitly before reading/writing new settings.
+        oauth_cleanup_service._recover_interrupted_claude_oauth_settings_backup(lease=_native_lease)
+
     settings_env: dict[str, str] = {}
     existing_credential_type: str | None = None
     existing_credential: str | None = None
@@ -12071,8 +12266,6 @@ def save_claude_auth(payload: dict) -> dict:
                 except Exception:
                     effective_base_url = None
 
-    oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
-
     from vibe.claude_config import apply_claude_auth
 
     try:
@@ -12117,7 +12310,7 @@ def save_claude_auth(payload: dict) -> dict:
     if auth_mode == "api_key":
         try:
             oauth_cleanup_result = _clear_claude_oauth_credentials_after_api_key_save(
-                oauth_cleanup_service
+                oauth_cleanup_service, lease=_native_lease,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to clear Claude OAuth credentials after API-key save: %s", exc)
@@ -12886,6 +13079,7 @@ def _normalize_custom_provider_payload(payload: dict) -> tuple[str, str, str, st
     return provider_id.strip(), name.strip(), adapter.strip(), base_url.strip(), api_key_value
 
 
+@_native_auth_write("opencode")
 async def save_opencode_custom_provider_async(payload: dict) -> dict:
     try:
         provider_id, name, adapter, base_url, api_key = _normalize_custom_provider_payload(payload)
@@ -12989,6 +13183,7 @@ def save_opencode_custom_provider(payload: dict) -> dict:
     return run_coroutine_blocking(save_opencode_custom_provider_async(payload))
 
 
+@_native_auth_write("opencode")
 async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
@@ -13060,6 +13255,7 @@ def delete_opencode_custom_provider(provider_id: str) -> dict:
     return run_coroutine_blocking(delete_opencode_custom_provider_async(provider_id))
 
 
+@_native_auth_write("opencode", authentication=False)
 async def save_opencode_provider_model_async(provider_id: str, payload: dict) -> dict:
     """Add or update a user-managed OpenCode model under one provider."""
 
@@ -13154,6 +13350,7 @@ def delete_opencode_provider_model(provider_id: str, model_id: str) -> dict:
     return run_coroutine_blocking(delete_opencode_provider_model_async(provider_id, model_id))
 
 
+@_native_auth_write("opencode", authentication=False)
 async def delete_opencode_provider_model_async(provider_id: str, model_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
@@ -13313,6 +13510,7 @@ def save_opencode_provider_auth(provider_id: str, payload: dict) -> dict:
     return run_coroutine_blocking(save_opencode_provider_auth_async(provider_id, payload))
 
 
+@_native_auth_write("opencode")
 async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> dict:
     """Persist a single OpenCode provider's API key (and optional base URL).
 
@@ -13473,6 +13671,7 @@ def delete_opencode_provider_auth(provider_id: str) -> dict:
     return run_coroutine_blocking(delete_opencode_provider_auth_async(provider_id))
 
 
+@_native_auth_write("opencode")
 async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     """Drop a single provider's stored credentials.
 

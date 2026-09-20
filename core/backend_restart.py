@@ -4,15 +4,337 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+import re
+import stat
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 300.0
 _POLL_INTERVAL_SECONDS = 0.1
+_NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
+
+
+class NativeMigrationBlockedError(RuntimeError):
+    """Credential-free refusal before native credential ownership can change."""
+
+    def __init__(self, reason: str, backends: tuple[str, ...], *, pids: tuple[int, ...] = ()) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.backends = backends
+        self.pids = pids
+
+
+def pending_native_backends(directory: Path) -> set[str]:
+    """Read only the pending transaction envelope; corrupt state blocks all."""
+    try:
+        data = json.loads((directory / "current.json").read_text())
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError):
+        return set(_NATIVE_BACKENDS)
+    if (
+        not isinstance(data, dict)
+        or type(data.get("version")) is not int
+        or data.get("version") != 1
+        or not isinstance(data.get("phase"), str)
+        or data.get("phase") not in {
+        "prepared", "withdrawn", "exposed", "reverting",
+        }
+    ):
+        return set(_NATIVE_BACKENDS)
+    blocked = data.get("backends")
+    if not isinstance(blocked, list) or not blocked or any(
+        not isinstance(name, str) or name not in _NATIVE_BACKENDS for name in blocked
+    ):
+        return set(_NATIVE_BACKENDS)
+    return set(blocked)
+
+
+class NativeCredentialLease:
+    """Non-reentrant, cross-process ownership of backend-native credentials.
+
+    Every acquire opens a separate file description (not a thread-reentrant
+    MigrationFileLock). Never unlink these files: waiters must share one inode.
+    An explicit lease may be passed to nested owned operations across threads.
+    """
+
+    def __init__(self, backends: tuple[str, ...], *, state_dir: Path | None = None) -> None:
+        from config.paths import get_state_dir
+
+        if not backends or any(name not in _NATIVE_BACKENDS for name in backends):
+            raise ValueError("Unsupported native credential backend")
+        self.backends = tuple(sorted(set(backends)))
+        self.directory = (state_dir if state_dir is not None else get_state_dir()) / "native-takeover"
+        self._handles: list[Any] = []
+
+    def acquire(self, *, recovery: bool = False) -> NativeCredentialLease:
+        from storage.lock import _try_lock
+
+        if self._handles:
+            raise RuntimeError("Native credential lease is not reentrant")
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory_stat = self.directory.lstat()
+            if not stat.S_ISDIR(directory_stat.st_mode) or (
+                hasattr(os, "getuid") and directory_stat.st_uid != os.getuid()
+            ):
+                raise OSError("Unsafe native lease directory")
+            for backend in self.backends:
+                fd = os.open(
+                    self.directory / f"{backend}.lock",
+                    os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                handle = os.fdopen(fd, "a+b")
+                self._handles.append(handle)
+                info = os.fstat(handle.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+                    or info.st_mode & 0o077
+                ):
+                    raise OSError("Unsafe native lease file")
+                if not _try_lock(handle):
+                    raise NativeMigrationBlockedError("native_auth_in_progress", (backend,))
+            if not recovery:
+                if pending_native_backends(self.directory).intersection(self.backends):
+                    raise NativeMigrationBlockedError("migration_recovery_pending", self.backends)
+            return self
+        except BaseException:
+            self.release()
+            raise
+
+    def assert_owned(self, backend: str) -> None:
+        if backend not in self.backends or len(self._handles) != len(self.backends):
+            raise RuntimeError("Native credential operation has no ownership")
+
+    def assert_auth_custody(self, backend: str, *, source_id: str | None = None) -> None:
+        """Authorize a native writer from durable routing, while holding its lease.
+
+        Runtime enablement is not credential ownership. A Hub backend may
+        maintain only the explicitly bound, retained native subscription;
+        generic Settings/IM login and API-key writes must use Hub instead.
+        Read without load-time migration writes: this is an admission check.
+        """
+        from config.v2_config import V2Config
+
+        self.assert_owned(backend)
+        try:
+            config = V2Config.load(persist_migrations=False)
+        except FileNotFoundError:
+            config = V2Config.default()
+        except (OSError, TypeError, ValueError):
+            raise NativeMigrationBlockedError("config_recovery", (backend,)) from None
+        if config.load_warnings:
+            raise NativeMigrationBlockedError("config_recovery", (backend,))
+        hub = config.model_hub
+        if hub.agents[backend].mode == "direct":
+            return
+        vendor = {"claude": "anthropic", "codex": "openai"}.get(backend)
+        if source_id is not None and vendor is not None and any(
+            source.id == source_id
+            and source.vendor == vendor
+            and source.kind == "subscription"
+            and source.supply_channel == "native_cli"
+            for source in hub.sources
+        ):
+            return
+        raise NativeMigrationBlockedError("native_auth_hub_owned", (backend,))
+
+    def release(self) -> None:
+        # Closing the descriptor releases the OS lock, including on Windows.
+        while self._handles:
+            self._handles.pop().close()
+
+    def __enter__(self) -> NativeCredentialLease:
+        return self.acquire()
+
+    def __exit__(self, *_: Any) -> None:
+        self.release()
+
+
+async def finish_native_operation(awaitable: Awaitable[Any]) -> Any:
+    """Keep ownership until a started operation settles, even on cancellation.
+
+    In particular, cancelling asyncio.to_thread does not stop its writer.
+    """
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+            continue
+        except BaseException:
+            # shield retrieved the worker exception; do not leave a writer.
+            raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+def _native_executable_backend(executable: str, binaries: Mapping[str, str]) -> str | None:
+    name = executable.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for backend, binary in binaries.items():
+        if executable == binary or name in {backend, f"{backend}.exe"}:
+            return backend
+        normalized = executable.replace("\\", "/").lower()
+        if backend == "claude" and normalized.endswith("/@anthropic-ai/claude-code/cli.js"):
+            return backend
+        if backend == "codex" and normalized.endswith("/@openai/codex/bin/codex.js"):
+            return backend
+        if backend == "opencode" and normalized.endswith("/opencode-ai/bin/opencode"):
+            return backend
+    return None
+
+
+def _native_process_backend(command: list[str], binaries: Mapping[str, str]) -> str | None:
+    """Match a direct executable or interpreter entrypoint, never script arguments."""
+    if not command:
+        return None
+    direct = _native_executable_backend(command[0], binaries)
+    if direct:
+        return direct
+    name = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?", name):
+        family = "python"
+        values = {"--check-hash-based-pycs"}
+        flags = set()
+    elif name.lstrip("-") in {"sh", "bash", "dash", "zsh", "ksh", "ash"}:
+        family = "shell"
+        values = {"--rcfile", "--init-file"}
+        flags = {"--noprofile", "--norc", "--login", "--posix", "--restricted", "--verbose", "--debugger"}
+    elif name in {"node", "nodejs", "bun"}:
+        family = "javascript"
+        values = {
+            "--require", "--import", "--loader", "--experimental-loader", "--conditions",
+            "--env-file", "--env-file-if-exists", "--title", "--icu-data-dir",
+            "--openssl-config", "--diagnostic-dir", "--input-type", "--preload",
+            "--cwd", "--config", "--watch-path",
+        }
+        flags = {
+            "--inspect", "--inspect-brk", "--inspect-wait", "--trace-warnings",
+            "--no-warnings", "--enable-source-maps", "--experimental-strip-types",
+            "--watch", "--check", "--no-addons",
+        }
+    else:
+        return None
+
+    def unknown(index: int) -> None:
+        # Unknown startup syntax cannot establish that a possible native script
+        # is only data. Refuse this inventory rather than guess an idle backend.
+        # This is reached only BEFORE an entrypoint or non-script mode is found.
+        if any(_native_executable_backend(value, binaries) for value in command[index:]):
+            raise NativeMigrationBlockedError("process_inventory_unavailable", tuple(sorted(binaries)))
+
+    index = 1
+    bun_run = False
+    while index < len(command):
+        value = command[index]
+        if value == "--" or family == "shell" and value == "-":
+            return _native_executable_backend(command[index + 1], binaries) if index + 1 < len(command) else None
+        if value == "-" or value in {"--help", "--version"}:
+            return None
+        if name == "bun" and value == "run" and not bun_run:
+            bun_run = True
+            index += 1
+            continue
+        if not value.startswith("-") and not (family == "shell" and value.startswith("+")):
+            return _native_executable_backend(value, binaries)
+        option, separator, _ = value.partition("=")
+        if family == "javascript" and (
+            option in {"--eval", "--print"} or value.startswith(("-e", "-p")) or value in {"-h", "-v"}
+        ):
+            return None
+        if option in values:
+            index += 1 if separator else 2
+            continue
+        if option in flags:
+            index += 1
+            continue
+        if value.startswith("--"):
+            return unknown(index)
+        short = value[1:]
+        if family == "javascript":
+            if short[:1] in {"r", "C"}:
+                index += 2 if len(short) == 1 else 1
+                continue
+            return unknown(index)
+        for position, flag in enumerate(short):
+            if (
+                family == "python" and flag in "cmhV?"
+                or family == "shell" and value.startswith("-") and flag in "cs"
+            ):
+                return None  # Code/module/stdin is not a script path or prompt.
+            if flag in ("WX" if family == "python" else "oO"):
+                if position == len(short) - 1:
+                    index += 1  # The next token is this option's operand.
+                break
+            if flag not in ("bBdEiIOPqRsStuUvVx" if family == "python" else "abefhiklmnprtuvxBCEHPT"):
+                return unknown(index)
+        index += 1
+    return None
+
+
+def native_cli_processes(binaries: Mapping[str, str]) -> tuple[int, ...]:
+    """Read same-user process identities without reading environments or killing.
+
+    After managed retirement any matching process is a blocker, including login,
+    interactive CLIs and untracked descendants. An incomplete inventory is not
+    evidence that the native credential has no remaining reader.
+    """
+    import psutil
+
+    backends = tuple(sorted(binaries))
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    owner_field = "uids" if uid is not None else "username"
+    try:
+        username = psutil.Process().username() if uid is None else None
+        processes = psutil.process_iter(["pid", owner_field, "name", "cmdline", "status"])
+        blockers: list[int] = []
+        for process in processes:
+            try:
+                info = process.info
+                if info.get("status") in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                    continue
+                owner = info.get(owner_field)
+                owner = getattr(owner, "real", None) if uid is not None else owner
+                if owner is not None and owner != (uid if uid is not None else username):
+                    continue
+                command = info.get("cmdline")
+                if not command:
+                    # A known other executable with inaccessible owner metadata
+                    # is not a CLI match; same-user unreadable command lines are
+                    # conservatively refused rather than silently skipped.
+                    name = str(info.get("name") or "")
+                    if owner is None and _native_process_backend([name], binaries) is None:
+                        continue
+                    raise NativeMigrationBlockedError("process_inventory_unavailable", backends)
+                if _native_process_backend(command, binaries) is not None:
+                    if owner is None:
+                        raise NativeMigrationBlockedError("process_inventory_unavailable", backends)
+                    blockers.append(int(info["pid"]))
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.AccessDenied, KeyError, TypeError, ValueError):
+                raise NativeMigrationBlockedError("process_inventory_unavailable", backends) from None
+        return tuple(sorted(set(blockers)))
+    except psutil.NoSuchProcess:
+        raise NativeMigrationBlockedError("process_inventory_unavailable", backends) from None
+    except (psutil.Error, OSError, ValueError):
+        raise NativeMigrationBlockedError("process_inventory_unavailable", backends) from None
 
 
 def _configured_drain_timeout() -> float:
@@ -34,6 +356,7 @@ class BackendRestartCoordinator:
         *,
         drain_timeout: float | None = None,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
+        process_inventory: Callable[[Mapping[str, str]], tuple[int, ...]] = native_cli_processes,
     ) -> None:
         self.controller = controller
         self._refresh = refresh
@@ -42,11 +365,187 @@ class BackendRestartCoordinator:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._request_locks: dict[str, asyncio.Lock] = {}
         self._outcomes: dict[str, dict[str, str]] = {}
+        self._migration_backends: set[str] = set()
+        self._migration_auth_owners: dict[str, tuple[asyncio.Task, NativeCredentialLease]] = {}
+        self._process_inventory = process_inventory
+
+    def _blocked_backends(self) -> set[str]:
+        service = getattr(self.controller, "model_hub_service", None)
+        return set(getattr(service, "migration_blocked_backends", set())) | pending_native_backends(
+            self._native_state_dir() / "native-takeover"
+        )
+
+    def _native_state_dir(self) -> Path:
+        from config.paths import get_state_dir
+
+        service = getattr(self.controller, "model_hub_service", None)
+        event_path = getattr(getattr(service, "events", None), "path", None)
+        return Path(event_path).parent if isinstance(event_path, (str, Path)) else get_state_dir()
+
+    def restore_migration_blocks(self) -> None:
+        """Apply recovered durable exclusions before any producer is admitted."""
+        for backend in self._blocked_backends():
+            self.controller.agent_service.begin_backend_drain(backend)
+            self.controller.session_turns.begin_backend_drain(backend)
+
+    @staticmethod
+    def _migration_targets(backends: tuple[str, ...]) -> tuple[str, ...]:
+        if not isinstance(backends, tuple) or any(backend not in _NATIVE_BACKENDS for backend in backends):
+            raise ValueError("Unsupported native migration backend")
+        return tuple(sorted(set(backends)))
+
+    def assert_native_auth_available(self, backend: str) -> None:
+        if backend in self._migration_backends or backend in self._blocked_backends():
+            raise NativeMigrationBlockedError("migration_in_progress", (backend,))
+
+    def _assert_no_native_login(self, targets: tuple[str, ...]) -> None:
+        auth_service = getattr(self.controller, "agent_auth_service", None)
+        flows = getattr(auth_service, "_flows_by_id", {})
+        for backend in targets:
+            if any(
+                getattr(flow, "backend", None) == backend
+                and getattr(flow, "state", "starting") not in {"success", "failed", "cancelled"}
+                for flow in flows.values()
+            ):
+                raise NativeMigrationBlockedError("native_auth_in_progress", (backend,))
+
+    def _native_binaries(self, targets: tuple[str, ...]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        config = getattr(self.controller, "config", None)
+        resolve = getattr(getattr(self.controller, "agent_auth_service", None), "_get_cli_binary", None)
+        for backend in targets:
+            if callable(resolve):
+                # This existing owner handles raw/compat config and reloads a
+                # configured path omitted by a disabled compatibility backend.
+                result[backend] = str(resolve(backend, strict=True))
+                continue
+            backend_config = getattr(config, backend, None) or getattr(getattr(config, "agents", None), backend, None)
+            result[backend] = str(
+                getattr(backend_config, "binary", None)
+                or getattr(backend_config, "cli_path", None)
+                or backend
+            )
+        return result
+
+    def reconcile_migration_auth(self, snapshot: dict[str, dict[str, Any]]) -> None:
+        """Update retired consumers only for the task holding this migration guard."""
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        owned = {
+            backend: lease for backend, (owner, lease) in self._migration_auth_owners.items()
+            if task is not None and owner is task
+        }
+        targets = tuple(sorted(owned))
+        if not owned or any(backend not in owned for backend in snapshot):
+            raise NativeMigrationBlockedError("native_reconciliation_unowned", targets)
+        ready = getattr(self.controller.agent_service, "is_backend_ready", None)
+        draining = getattr(self.controller.session_turns, "_draining_backends", ())
+        for backend, lease in owned.items():
+            lock = self._request_locks.get(backend)
+            if (
+                backend not in self._migration_backends
+                or lock is None or not lock.locked()
+                or not callable(ready) or ready(backend)
+                or backend not in draining
+            ):
+                raise NativeMigrationBlockedError("native_reconciliation_unowned", targets)
+            try:
+                lease.assert_owned(backend)
+            except RuntimeError:
+                raise NativeMigrationBlockedError("native_reconciliation_unowned", targets) from None
+        mirror = getattr(
+            getattr(self.controller, "agent_auth_service", None),
+            "reconcile_native_auth_snapshot", None,
+        )
+        if not callable(mirror):
+            raise NativeMigrationBlockedError("native_reconciliation_unavailable", targets)
+        mirror(snapshot)
+
+    @asynccontextmanager
+    async def migration_guard(
+        self, backends: tuple[str, ...]
+    ) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+        """Yield an idle recheck under the same lease and closed admissions.
+
+        Call the recheck immediately before native withdrawal and CPA activation:
+        external CLIs do not participate in Avibe's advisory ownership protocol.
+        No external process is ever terminated by the check. Authentication
+        reconciliation is synchronous and available only to this guard's task
+        after retirement, while its existing lease and both gates remain owned.
+        """
+        targets = self._migration_targets(backends)
+        closed: list[str] = []
+        async with AsyncExitStack() as locks:
+            for backend in targets:
+                await locks.enter_async_context(self._request_locks.setdefault(backend, asyncio.Lock()))
+                restart = self._tasks.get(backend)
+                if restart is not None and not restart.done():
+                    raise NativeMigrationBlockedError("backend_restart_in_progress", (backend,))
+            self._assert_no_native_login(targets)
+            lease = NativeCredentialLease(targets, state_dir=self._native_state_dir()).acquire(recovery=True)
+            locks.callback(lease.release)
+            self._migration_backends.update(targets)
+            try:
+                for backend in targets:
+                    self.controller.agent_service.begin_backend_drain(backend)
+                    self.controller.session_turns.begin_backend_drain(backend)
+                    closed.append(backend)
+                for backend in targets:
+                    await self.controller.agent_service.prepare_backend_restart(backend)
+                deadline = asyncio.get_running_loop().time() + self._drain_timeout
+                for backend in targets:
+                    while await self._has_active_turns(backend):
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise NativeMigrationBlockedError("native_runtime_busy", (backend,))
+                        await asyncio.sleep(self._poll_interval)
+                self._assert_no_native_login(targets)
+                for backend in targets:
+                    agent = self.controller.agent_service.agents.get(backend)
+                    if agent is None:
+                        # A disabled backend has no controller-owned runtime.
+                        # The mandatory process inventory still checks its CLI.
+                        continue
+                    retire = getattr(agent, "retire_for_native_migration", None)
+                    if not callable(retire):
+                        raise NativeMigrationBlockedError("native_retirement_unavailable", (backend,))
+                    try:
+                        await finish_native_operation(retire())
+                    except Exception:
+                        raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
+                async def verify_idle() -> None:
+                    for backend in targets:
+                        lease.assert_owned(backend)
+                        if await self._has_active_turns(backend):
+                            raise NativeMigrationBlockedError("native_runtime_busy", (backend,))
+                    self._assert_no_native_login(targets)
+                    pids = await asyncio.to_thread(self._process_inventory, self._native_binaries(targets))
+                    if pids:
+                        raise NativeMigrationBlockedError("external_native_processes", targets, pids=pids)
+
+                await verify_idle()
+                task = asyncio.current_task()
+                if task is None:
+                    raise NativeMigrationBlockedError("native_reconciliation_unowned", targets)
+                for backend in targets:
+                    self._migration_auth_owners[backend] = (task, lease)
+                yield verify_idle
+            finally:
+                for backend in targets:
+                    self._migration_auth_owners.pop(backend, None)
+                self._migration_backends.difference_update(targets)
+                for backend in closed:
+                    if backend not in self._blocked_backends():
+                        self.controller.agent_service.end_backend_drain(backend)
+                        await self.controller.session_turns.end_backend_drain(backend)
 
     async def request_restart(self, backend: str) -> str:
         """Begin or join a restart and return without waiting for a long drain."""
+        self.assert_native_auth_available(backend)
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
+            self.assert_native_auth_available(backend)
             existing = self._tasks.get(backend)
             if existing is not None:
                 if not existing.done():
@@ -62,8 +561,9 @@ class BackendRestartCoordinator:
                 had_active_work = await self._has_active_turns(backend)
             except BaseException as exc:
                 self._outcomes[backend] = {"state": "failed", "error": str(exc) or type(exc).__name__}
-                agent_service.end_backend_drain(backend)
-                await session_turns.end_backend_drain(backend, resume_deferred=False)
+                if backend not in self._blocked_backends():
+                    agent_service.end_backend_drain(backend)
+                    await session_turns.end_backend_drain(backend, resume_deferred=False)
                 raise
             task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
             self._tasks[backend] = task
@@ -96,6 +596,8 @@ class BackendRestartCoordinator:
 
     def snapshot(self, backend: str) -> dict[str, str | bool]:
         """Read application without starting another cutover or credential probe."""
+        if backend in self._blocked_backends() or backend in self._migration_backends:
+            return {"state": "draining"}
         lock = self._request_locks.get(backend)
         if lock is not None and lock.locked():
             return {"state": "draining"}
@@ -164,8 +666,9 @@ class BackendRestartCoordinator:
         finally:
             # Runtime admission opens before durable queues are flushed. A flush
             # therefore always enters the refreshed generation.
-            self.controller.agent_service.end_backend_drain(backend)
-            await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+            if backend not in self._blocked_backends():
+                self.controller.agent_service.end_backend_drain(backend)
+                await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
 
     async def wait(self, backend: str) -> None:
         """Testing/diagnostic hook: wait for the current restart, if any."""

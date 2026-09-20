@@ -40,6 +40,15 @@ from vibe.claude_config import (
 )
 
 
+def _direct_config():
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
+    for supply in config.model_hub.agents.values():
+        supply.mode = "direct"
+    return config
+
+
 class _Backend:
     cli_path = "/usr/bin/echo"  # any binary that exists is fine
 
@@ -74,6 +83,7 @@ def isolated_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     # resolves config.json from AVIBE_HOME — isolate it so no test
     # touches the developer's real ~/.avibe.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    _direct_config().save()
 
 
 @pytest.fixture
@@ -775,7 +785,7 @@ class _FakeOpencodeServer:
     def __init__(self) -> None:
         self.next_authorize: dict = {}
         self.auth_map: dict = {}
-        self.wait_future: asyncio.Future = asyncio.get_event_loop_policy().new_event_loop().create_future()
+        self.wait_future: asyncio.Future | None = None
         self.start_calls: list[tuple[str, int, dict]] = []
         self.wait_calls: list[tuple[str, int, dict]] = []
         self.catalog: dict = {}
@@ -835,6 +845,8 @@ class _FakeOpencodeServer:
 
     async def wait_provider_oauth(self, provider_id, *, method, prompt_answers, timeout):
         self.wait_calls.append((provider_id, method, prompt_answers))
+        if self.wait_future is None:
+            self.wait_future = asyncio.get_running_loop().create_future()
         return await self.wait_future
 
 
@@ -1928,7 +1940,7 @@ def test_nonreset_claude_cancel_and_failed_start_restore_real_credential_files(s
     credentials = home / ".credentials.json"
     credentials.write_text('{"claudeAiOauth":{"accessToken":"test-old-oauth"}}')
     original = credentials.read_bytes()
-    V2Config.default().save()
+    _direct_config().save()
     logout = AsyncMock(side_effect=AssertionError("non-reset login must not log out"))
     monkeypatch.setattr(service, "_run_utility_command", logout)
     monkeypatch.setattr(service, "_create_claude_control_client", AsyncMock(return_value=SimpleNamespace()))
@@ -1964,7 +1976,7 @@ def test_nonreset_claude_cancel_and_failed_start_restore_real_credential_files(s
 def test_claude_committed_credentials_survive_apply_failure_and_cancel(service, monkeypatch):
     from config.v2_config import V2Config
 
-    V2Config.default().save()
+    _direct_config().save()
     old = {"ANTHROPIC_API_KEY": "old-test-key"}
     restore_claude_settings_env(old)
     monkeypatch.setattr(service, "_post_web_success_hook", lambda _backend: (_ for _ in ()).throw(RuntimeError("apply failed")))
@@ -1990,7 +2002,7 @@ def test_claude_committed_credentials_survive_apply_failure_and_cancel(service, 
 def test_cancel_waits_for_irreversible_commit_before_new_flow_can_start(service, monkeypatch):
     from config.v2_config import V2Config
 
-    V2Config.default().save()
+    _direct_config().save()
     restore_claude_settings_env({"ANTHROPIC_API_KEY": "test-old"})
 
     async def run():

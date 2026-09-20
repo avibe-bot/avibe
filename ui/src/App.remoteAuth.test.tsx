@@ -203,6 +203,27 @@ describe('AuthGuard setup-bypass authorization', () => {
     expect(await screen.findByText('diagnostics-page')).toBeTruthy();
     expect(screen.queryByText('workbench-home')).toBeNull();
   });
+
+  it('lets an authenticated owner open Model Hub before setup without completing setup', async () => {
+    api.getAuthSession.mockResolvedValue(localOwnerSession);
+    api.getConfig.mockResolvedValue({
+      mode: 'v2',
+      setup_state: { needs_setup: true },
+      capabilities: { model_hub: { enabled: true } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/settings/models']}>
+        <AuthGuard>
+          <div>model-hub-page</div>
+        </AuthGuard>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('model-hub-page')).toBeTruthy();
+    expect(api.getConfig).toHaveBeenCalledOnce();
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
 });
 
 describe('AuthGuard setup access parity (AUTH-SETUP-405)', () => {

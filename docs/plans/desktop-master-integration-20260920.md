@@ -176,10 +176,10 @@ Read back every PR-body/comment change. Hand back PR/head, source parent SHAs, s
   | failed helper | release failed attempt; do not infer prior Runtime absence | none | `Unknown` when prior liveness evidence remains; fresh never-launched state may be `Inactive` |
 
   Readiness timeout alone releases retry eligibility, not liveness evidence.
-  Receipt refusal removes scoped stop authority but preserves uncertainty until
-  confirmed Runtime loss. `reset_after_confirmed_runtime_loss` is allowed to
-  clear the evidence only when its caller has established that the Runtime is
-  no longer serving. Tests cover timeout -> retry eligibility -> uninstall,
+  Receipt refusal removes scoped stop authority but preserves uncertainty.
+  `reset_after_confirmed_runtime_loss` releases retry and stop ownership after
+  the readiness monitor's recovery threshold, but does not itself prove process
+  absence or clear the removal fence. Tests cover timeout -> retry eligibility -> uninstall,
   late-ready scoped stop, refusal, no-overlap, valid handover, fresh inactive
   removal, and safe successful cleanup.
 - The Windows notification review finding `4056057501` is a verified false
@@ -190,6 +190,36 @@ Read back every PR-body/comment change. Hand back PR/head, source parent SHAs, s
   failure-preservation test on the reviewed head. No notification code or
   dependency change is warranted. This evidence will be linked in the thread
   reply before the thread is resolved.
+
+### Latest-master candidate evidence
+
+- 2026-09-20: Explicit refspec refresh confirmed `origin/master` at
+  `162fda5942461941942536355130477372739c36` and `origin/desktop` at
+  `007f631613be43b3d00918c9e1e3cde58235099d`. The local candidate is a real
+  merge commit with parents `a323abc0fb300baca829a3df0d986cabc49445cf` and
+  `162fda5942461941942536355130477372739c36`; the first parent preserves the
+  desktop integration candidate and the second is the native credential
+  takeover mainline. The restricted fetch configuration was not changed.
+- The three exact CI compatibility classes from the synthetic latest-master
+  merge ref were fixed at their current contracts: the Codex Hub transport
+  test supplies a hermetic catalog-preparation result; dependency selective
+  checks assert `reconciling` and `reconciling_dependencies` metadata while
+  retaining row/probe ownership assertions; internal-server observability
+  tests use the current cross-platform `ControlIpcHost` bind/publish/cleanup
+  owner and retain all five recorder-close paths.
+- Focused evidence on the candidate: the three CI classes plus local dependency
+  coverage passed (`483 passed`); the native auth/Model Hub/backend consumer
+  set passed (`1303 passed, 33 warnings, 125 subtests`); Runtime-host passed
+  `94` library tests, `25` bootstrap integration tests, and `5` notification
+  HTTP tests, with `cargo fmt --check`; changed-Python Ruff passed; desktop
+  localization and bootstrap build passed; UI test typechecks and production
+  build passed.
+- The first native consumer run reported 17 Claude direct-observation failures
+  only because this agent process exports `ANTHROPIC_*` and `OPENAI_*` launch
+  credentials. The new-master direct projection intentionally honors those
+  launch sources. The connection-test safety fixture now removes those five
+  variables before each test, and the same consumer set passes with hermetic
+  source selection. Production credential precedence is unchanged.
 
 ### Original-head review inventory and scope decision
 

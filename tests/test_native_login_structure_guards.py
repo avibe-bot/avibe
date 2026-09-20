@@ -257,7 +257,11 @@ def test_every_discovered_spawn_site_is_reachable_from_shared_start_path() -> No
     for function_name in (reaches_spawn & guarded_region) - {"_start_auth_flow"}:
         assert reverse_graph[function_name] <= guarded_region
 
-    start = functions["_start_auth_flow"]
+    # Native ownership moved into the owned task so cancellation can wait for
+    # startup and cleanup without dropping the lease early. Keep the guard
+    # anchored to that real call chain: the claim must still precede every
+    # provider start reached from the shared entry point.
+    start = functions["_start_auth_flow_owned"]
     claim_lines = [
         call.lineno
         for call in ast.walk(start)
@@ -268,7 +272,7 @@ def test_every_discovered_spawn_site_is_reachable_from_shared_start_path() -> No
         call.lineno
         for call in ast.walk(start)
         if isinstance(call, ast.Call)
-        and _call_name(call) in reaches_spawn - {"_start_auth_flow"}
+        and _call_name(call) in reaches_spawn - {"_start_auth_flow_owned"}
     ]
     assert guarded_entry_lines
     assert claim_lines[0] < min(guarded_entry_lines)

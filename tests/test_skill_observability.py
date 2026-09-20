@@ -486,15 +486,23 @@ async def test_internal_server_owns_recorder_cleanup(engine, monkeypatch, tmp_pa
         if exit_mode == "cancel":
             await asyncio.Event().wait()
 
-    def bind_socket(_path):
-        if exit_mode == "bind_error":
-            raise OSError("socket unavailable")
-        return listener, tmp_path / "dispatch.sock"
+    host = SimpleNamespace(
+        instance_id=None,
+        bearer_token=None,
+        bind=Mock(
+            side_effect=(
+                OSError("socket unavailable")
+                if exit_mode == "bind_error"
+                else lambda: SimpleNamespace(listener=listener)
+            )
+        ),
+        publish=Mock(),
+        cleanup=Mock(side_effect=lambda bound: bound.listener.close()),
+    )
 
     monkeypatch.setattr(internal_server, "_create_controller_loop_server", lambda _config: SimpleNamespace(serve=serve))
-    monkeypatch.setattr(internal_server, "_bind_socket", bind_socket)
+    monkeypatch.setattr(internal_server.control_ipc, "select_control_ipc_host", lambda **_: host)
     monkeypatch.setattr(internal_server, "_write_internal_server_status", Mock())
-    monkeypatch.setattr(internal_server, "_remove_owned_socket", Mock())
     if exit_mode != "recovery_cancel":
         controller._delivery_recovery_complete.set()
     task = asyncio.create_task(internal_server.serve(controller))
@@ -520,6 +528,7 @@ async def test_internal_server_owns_recorder_cleanup(engine, monkeypatch, tmp_pa
     if exit_mode not in {"recovery_cancel", "bind_error"}:
         assert counts(engine) == (1, 1)
         listener.close.assert_called_once()
+        host.cleanup.assert_called_once()
 
 
 def test_config_flag_is_strict_and_serialized():

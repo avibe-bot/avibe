@@ -120,6 +120,9 @@ struct LaunchAttempt {
 struct LaunchState {
     attempt: Option<LaunchAttempt>,
     ownership: Option<(Arc<dyn ResolvedRuntimeLauncher>, StartupReceipt)>,
+    /// The shell has evidence that a Runtime may still be alive, without
+    /// necessarily having scoped stop authority for it.
+    runtime_may_be_running: bool,
     stopping: bool,
 }
 
@@ -128,7 +131,21 @@ impl LaunchState {
         if let Some(attempt) = &self.attempt {
             if let Some(receipt) = attempt.runtime.watch.owned_receipt() {
                 self.ownership = Some((attempt.launcher.clone(), receipt.clone()));
+                self.runtime_may_be_running = true;
             }
+        }
+    }
+
+    fn retain_completed_attempt_liveness(&mut self) {
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.runtime.watch.succeeded())
+        {
+            // A successful helper may have started a Runtime even when the
+            // receipt is reused or absent. Completion is not proof of process
+            // absence, so releasing the retry slot must retain this fence.
+            self.runtime_may_be_running = true;
         }
     }
 }
@@ -182,8 +199,14 @@ impl RuntimeHost {
             .as_ref()
             .is_some_and(|(owner, _)| Arc::ptr_eq(owner, &launcher))
         {
-            if result.is_ok() || matches!(result, Err(LaunchError::OwnershipLost)) {
+            if result.is_ok() {
                 *state = LaunchState::default();
+            } else if matches!(result, Err(LaunchError::OwnershipLost)) {
+                // Refusal revokes the receipt, but does not prove that the
+                // replacement Runtime is gone. Retain the uninstall fence.
+                state.attempt = None;
+                state.ownership = None;
+                state.stopping = false;
             } else {
                 state.stopping = false;
             }
@@ -196,20 +219,30 @@ impl RuntimeHost {
         self.probe.is_healthy(origin).await
     }
 
-    /// Releases retained launch ownership after the shell has confirmed that
-    /// the previously ready Runtime is no longer serving.
+    /// Releases retry and stop ownership after readiness loss.
     ///
-    /// This does not stop a process. It only allows the next bootstrap run to
-    /// launch again if the Runtime cannot be adopted.
+    /// This does not stop a process or prove that it has exited. It only allows
+    /// the next bootstrap run to launch again while retaining the uninstall
+    /// fence for uncertain liveness. A successful scoped stop or completed
+    /// removal clears that fence.
     pub fn reset_after_confirmed_runtime_loss(&self) {
-        *self.launched_runtime() = LaunchState::default();
+        let mut state = self.launched_runtime();
+        state.attempt = None;
+        state.ownership = None;
+        state.stopping = false;
     }
 
     /// Gracefully stops and removes an app-private Runtime owned by this host.
     ///
     /// Installed/user-managed launchers return `false` and are never modified.
     pub async fn remove_private_runtime(&self, active_origin: Option<&LoopbackOrigin>) -> Result<bool, LaunchError> {
-        let launched_by_host = self.has_owned_runtime();
+        let (launched_by_host, liveness_uncertain) = {
+            let state = self.launched_runtime();
+            (
+                state.ownership.is_some(),
+                state.runtime_may_be_running || state.attempt.is_some(),
+            )
+        };
         let state = match active_origin {
             Some(origin) => match self.probe.readiness(origin).await {
                 Some(readiness) if readiness.desktop_runtime_id.is_some() => RuntimeRemovalState::Managed,
@@ -218,7 +251,7 @@ impl RuntimeHost {
                 None => RuntimeRemovalState::Unknown,
             },
             None if launched_by_host => RuntimeRemovalState::Managed,
-            None if self.has_launched() => RuntimeRemovalState::Unknown,
+            None if liveness_uncertain => RuntimeRemovalState::Unknown,
             None => RuntimeRemovalState::Inactive,
         };
         let launcher = self.launcher.clone();
@@ -485,6 +518,7 @@ impl RuntimeHost {
             .as_ref()
             .is_some_and(|attempt| attempt.runtime.watch.succeeded())
         {
+            state.retain_completed_attempt_liveness();
             state.attempt = None;
         }
         if state.attempt.is_none() {
@@ -492,10 +526,12 @@ impl RuntimeHost {
                 Some(resolved) => resolved,
                 None => self.launcher.resolve()?,
             };
-            state.attempt = Some(LaunchAttempt {
-                runtime: launcher.launch()?,
-                launcher,
-            });
+            let runtime = launcher.launch()?;
+            // Spawning the helper is evidence that a Runtime may exist even
+            // when the helper later reports failure or no receipt. Keep that
+            // fact separate from retry deduplication and stop authority.
+            state.attempt = Some(LaunchAttempt { runtime, launcher });
+            state.runtime_may_be_running = true;
         }
         Ok(())
     }
@@ -523,6 +559,7 @@ impl RuntimeHost {
             .as_ref()
             .is_some_and(|attempt| attempt.runtime.watch.succeeded())
         {
+            state.retain_completed_attempt_liveness();
             state.attempt = None;
             return true;
         }
@@ -699,6 +736,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn timeout_then_retry_then_uninstall_retains_unknown_liveness_fence() {
+        let launcher = Arc::new(RecordingLauncher {
+            watch: receipt_watch("reused"),
+            ..RecordingLauncher::default()
+        });
+        let host = RuntimeHost::new(
+            Arc::new(TransientProbe(AtomicBool::new(false))),
+            launcher.clone(),
+            RuntimeHostSettings {
+                ready_timeout: Duration::ZERO,
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        assert_eq!(
+            host.bootstrap(&DiscardStatus).await.notice.code,
+            BootstrapNoticeCode::ReadyTimeout
+        );
+        assert!(
+            !host.has_launched(),
+            "a completed helper must release retry deduplication"
+        );
+        assert!(
+            !host.has_owned_runtime(),
+            "a reused receipt never grants stop authority"
+        );
+
+        assert_eq!(host.bootstrap(&DiscardStatus).await.phase, crate::BootstrapPhase::Ready);
+        assert!(matches!(
+            host.remove_private_runtime(None).await,
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert_eq!(
+            *launcher.removals.lock().expect("recorded removal"),
+            [RuntimeRemovalState::Unknown]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn timeout_then_late_ready_retry_preserves_scoped_stop_authority() {
         let launcher = Arc::new(RecordingLauncher::default());
         let host = RuntimeHost::new(
@@ -732,6 +808,7 @@ mod tests {
             LaunchWatch::exited(false),
             receipt_watch("reused"),
         ] {
+            let completed = watch.succeeded();
             let launcher = Arc::new(RecordingLauncher {
                 watch,
                 ..RecordingLauncher::default()
@@ -740,6 +817,13 @@ mod tests {
             host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
             assert!(host.has_launched());
             assert!(!host.has_owned_runtime());
+            if completed {
+                assert!(host.clear_successful_launch());
+                assert!(
+                    !host.has_launched(),
+                    "completed non-owning helpers release retry deduplication"
+                );
+            }
             assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
             assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
             assert!(matches!(
@@ -777,6 +861,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_refusal_retains_unknown_liveness_for_uninstall() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
+        host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
+        launcher.ownership_lost.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            host.stop_owned_runtime().await,
+            Err(LaunchError::OwnershipLost)
+        ));
+        assert!(matches!(
+            host.remove_private_runtime(None).await,
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert_eq!(
+            *launcher.removals.lock().expect("recorded removal"),
+            [RuntimeRemovalState::Unknown]
+        );
+    }
+
+    #[tokio::test]
     async fn stop_uses_the_retained_launcher_and_releases_only_successful_ownership() {
         let resolver = Arc::new(RecordingLauncher::default());
         let launched = Arc::new(RecordingLauncher::default());
@@ -804,6 +909,14 @@ mod tests {
         host.reset_after_confirmed_runtime_loss();
         assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
         assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            host.remove_private_runtime(None).await,
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert_eq!(
+            *launcher.removals.lock().expect("recorded removal"),
+            [RuntimeRemovalState::Unknown]
+        );
     }
 
     #[test]
