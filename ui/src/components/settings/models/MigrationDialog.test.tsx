@@ -238,7 +238,7 @@ describe('MigrationDialog — the settings default', () => {
     ['migration_native_busy', 'Close the CLI or finish its tasks, then retry.'],
     ['migration_permission_needed', 'Allow credential access, then retry.'],
     ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
-    ['migration_item_conflict', 'The native configuration changed. Scan again.'],
+    ['migration_item_conflict', 'Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.'],
     ['migration_configuration_blocked', 'Adjust the native configuration, then scan again.'],
   ] as const)('maps %s to concise localized copy', async (code, message) => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
@@ -251,6 +251,27 @@ describe('MigrationDialog — the settings default', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(message, 'error'));
+  });
+
+  it('keeps selection and explains configuration or credential verification failure in Chinese', async () => {
+    await i18n.changeLanguage('zh');
+    const onClose = vi.fn();
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_item_conflict'));
+    renderDialog({ onClose });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+    await user.click(within(dialog).getByRole('button', { name: '开始迁移' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      '无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。',
+      'error',
+    ));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole('checkbox').getAttribute('aria-checked')).toBe('true');
+    expect((within(dialog).getByRole('button', { name: '开始迁移' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it.each([
@@ -375,8 +396,8 @@ describe('MigrationDialog — persisted authentication', () => {
     {
       reason: 'token',
       path: '/home/用户/.zshenv',
-      en: /token's authentication form is not supported.*supported authentication method/,
-      zh: /令牌的认证形式暂不支持迁移.*受支持的认证方式/,
+      en: /login token or authentication format cannot be imported.*Add a source.*sign in again/,
+      zh: /登录令牌或认证格式暂不支持导入.*添加供应商.*重新登录/,
     },
     {
       reason: 'headers',

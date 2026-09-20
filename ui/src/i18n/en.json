@@ -1614,7 +1614,7 @@
           "unreadable": "This source file could not be read. Check that it exists and that Avibe has read access, then scan again.",
           "reference": "A referenced variable has no unambiguous saved literal value. Configure and save the corresponding key in the listed configuration or shell startup file, then scan again.",
           "helper": "Credentials supplied by a command cannot be imported. Save them in a supported static configuration or add the source manually in Model Hub.",
-          "token": "This token's authentication form is not supported for migration. Use a supported authentication method or add the source manually in Model Hub.",
+          "token": "This login token or authentication format cannot be imported. Add a source in Model Hub or sign in again for that source.",
           "headers": "Custom credential headers cannot be imported. Use a supported authentication method or add the source manually in Model Hub.",
           "fallback": "This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually."
         },
@@ -1623,7 +1623,7 @@
           "nativeBusy": "Close the CLI or finish its tasks, then retry.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
-          "itemConflict": "The native configuration changed. Scan again.",
+          "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",
           "configurationBlocked": "Adjust the native configuration, then scan again.",
           "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub."
         },
