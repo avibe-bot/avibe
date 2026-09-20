@@ -29,7 +29,6 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
-import { tabModifierLabel } from '../../apps/appLaunch';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -70,9 +69,10 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
   { to: '/vaults', i18nKey: 'workbench.nav.vaults', icon: KeyRound },
 ];
 
-// One navigation row (design m8K59, 216 x 40). Selected / hover / default are the
-// three states the approved source draws, each on its own token so Light and Dark
-// follow the table instead of a hard-coded neon.
+// One capability row, in the approved compact treatment: a 13px medium label
+// behind a 16px icon on a rounded-lg row, with mint reserved for the selected
+// state. Selected / hover / default each keep their own nav token so Light and
+// Dark follow the table instead of a hard-coded neon.
 const SidebarNavRow: React.FC<{
   to: string;
   end?: boolean;
@@ -84,10 +84,10 @@ const SidebarNavRow: React.FC<{
     end={end}
     className={({ isActive }) =>
       clsx(
-        'group flex h-10 items-center gap-2.5 rounded-xl border px-3 text-[13px] transition-colors',
+        'group flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
         isActive
-          ? 'border-[var(--nav-selected-border)] bg-[var(--nav-selected-bg)] font-semibold text-foreground shadow-[var(--shadow-glow-nav-mint)]'
-          : 'border-transparent font-medium text-muted hover:bg-[var(--nav-hover-bg)] hover:text-foreground',
+          ? 'border-[var(--nav-selected-border)] bg-[var(--nav-selected-bg)] text-foreground shadow-[var(--shadow-glow-nav-mint)]'
+          : 'border-transparent text-muted hover:bg-[var(--nav-hover-bg)] hover:text-foreground',
       )
     }
   >
@@ -95,7 +95,7 @@ const SidebarNavRow: React.FC<{
       <>
         <Icon
           className={clsx(
-            'size-[17px] shrink-0',
+            'size-4 shrink-0',
             isActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground',
           )}
         />
@@ -804,13 +804,15 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   }, [totalUnread]);
 
   // Fill the sidebar column and cap its height so the project list (and only the
-  // project list) scrolls; the brand row and navigation stay pinned. The Inbox
-  // hover popover stays OUT of any overflow box below, so it is never clipped.
+  // project list) scrolls; the brand row, Inbox and Capabilities stay pinned. The
+  // Inbox hover popover stays OUT of any overflow box below, so it is never clipped.
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {/* Brand row tLDP1 — the whole brand opens the new-conversation home.
-          Search and Inbox live in full-width rows below it so the shell keeps one
-          clear reading order at every supported sidebar width. */}
+    <div className="flex min-h-0 flex-1 flex-col gap-2.5">
+      {/* Brand row tLDP1 — the whole brand opens the new-conversation home. The
+          mark keeps the approved chip treatment (32px, mint hairline over the
+          brand well, resting glow that strengthens on hover) inside this
+          sidebar's own padding, so the adjustable width still governs the
+          column. Search is a compact icon in the Projects header below. */}
       <div className="flex shrink-0 items-center py-2">
         <Link
           to="/"
@@ -822,52 +824,49 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             src={logoImg}
             alt=""
             aria-hidden="true"
-            className="h-9 w-[38px] shrink-0 rounded-[7px] border border-mint/35 bg-[var(--logo-well-background)] object-cover transition-shadow group-hover:shadow-glow-sm-mint"
+            className="size-8 shrink-0 rounded-lg border border-mint/35 bg-[var(--logo-well-background)] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
           />
           <div className="min-w-0 leading-tight">
             <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
-            <div className="truncate text-[11px] text-muted">{t('workbench.eyebrow')}</div>
+            <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
           </div>
         </Link>
       </div>
 
-      <Button
-        type="button"
-        variant="ghost"
-        className="h-9 w-full justify-start rounded-lg px-2.5 text-[13px] text-muted hover:text-foreground"
-        aria-label={t('workbench.search.entry')}
-        onClick={onOpenSearch}
-      >
-        <Search className="size-[17px]" />
-        <span>{t('workbench.search.entry')}</span>
-        <kbd className="ml-auto rounded border border-border-strong px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted">{tabModifierLabel()}K</kbd>
-      </Button>
-
       {/* Inbox entry — hover opens the floating popover (portaled above the chat).
-          At zero unread there is no badge node at all and the icon stays muted;
-          both reads come from the same real counter. */}
+          Search is a compact icon in the Projects header below, so this row keeps
+          the full width the approved design gives it. At zero unread there is no
+          badge node at all and the icon stays uncoloured; both reads come from
+          the same real counter. */}
       <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
         <PopoverAnchor asChild>
           <div className="w-full" onMouseEnter={openPopover} onMouseLeave={queueClose}>
             <NavLink
               to="/inbox"
               aria-label={t('workbench.nav.inbox')}
-              className="relative flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-[13px] transition-colors hover:bg-[var(--nav-hover-bg)]"
+              className={({ isActive }) =>
+                clsx(
+                  'group flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] font-semibold transition-colors',
+                  // Cyan active state per design.pen ze15A — mint is reserved
+                  // for sessions / projects so the two reads stay distinct.
+                  isActive
+                    ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-glow-sm-cyan'
+                    : 'border-border-strong text-foreground hover:bg-[var(--nav-hover-bg)]',
+                )
+              }
             >
               {({ isActive }) => (
                 <>
-                  <Inbox
-                    className={clsx(
-                      'size-[17px]',
-                      badge ? 'text-cyan-ink' : isActive ? 'text-foreground' : 'text-muted',
-                    )}
-                  />
-                  <span className={clsx(isActive ? 'font-semibold text-foreground' : 'font-medium text-muted')}>{t('workbench.nav.inbox')}</span>
+                  {/* Cyan is what unread means here, so the counter colours the
+                      icon on any route — not only while Inbox is the open one. */}
+                  <Inbox className={clsx('size-4', badge || isActive ? 'text-cyan-ink' : 'text-foreground')} />
+                  <span className="flex-1">{t('workbench.nav.inbox')}</span>
                   {badge && (
-                    <span className="ml-auto inline-flex min-w-[18px] items-center justify-center rounded-full border border-surface bg-cyan px-[4px] font-mono text-[9px] font-bold leading-[14px] text-primary-foreground">
+                    <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                       {badge}
                     </span>
                   )}
+                  <ChevronRight className="size-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
                 </>
               )}
             </NavLink>
@@ -886,19 +885,22 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      {/* Navigation m8K59 — the home brand is the new-conversation entry, so
-          capability destinations are the only rows in this group. */}
+      {/* Capabilities m8K59 — a collapsible group, so a long project list can
+          reclaim the rows. The label leads and the chevron closes the row on the
+          right, matching the Projects header below. Only the destinations the
+          current authorization admits are rendered, and the header disappears
+          with them. */}
       {capabilityNav.length > 0 && (
-        <div className="flex shrink-0 flex-col gap-1">
+        <div className="flex shrink-0 flex-col gap-1.5">
           <button
             type="button"
-            className="group flex h-7 items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
+            className="group flex items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
             aria-expanded={capabilitiesOpen}
             aria-controls="workbench-capability-nav"
             onClick={() => setCapabilitiesOpen((open) => !open)}
           >
-            {capabilitiesOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            <span>{t('nav.capabilities')}</span>
+            <span className="flex-1 text-left">{t('nav.capabilities')}</span>
+            <ChevronDown className={clsx('size-3.5 shrink-0 transition-transform', !capabilitiesOpen && '-rotate-90')} />
           </button>
           {capabilitiesOpen && (
             <nav id="workbench-capability-nav" className="flex flex-col gap-0.5">
@@ -910,23 +912,39 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
       )}
 
-      {/* Projects section t7o96 — the label on the left and the create
-          affordance on the right; Search has its own row below the brand. */}
+      {/* Projects section t7o96 — the label on the left (matching the
+          Capabilities label style) and the borderless search + add icons grouped
+          on the right. Search sits immediately before add and stays reachable
+          for everyone who could reach it before, including the people this
+          instance does not let create a project; ⌘K still opens the same
+          palette from anywhere. */}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5">
         <div className="flex items-center justify-between px-1">
-          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-muted">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
             {t('workbench.projectsLabel')}
           </span>
-          {canCreateProject && <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="size-[22px] shrink-0 text-muted hover:text-foreground"
-            aria-label={t('workbench.addProject')}
-            onClick={() => setShowNewProject(true)}
-          >
-            <FolderPlus className="size-[15px]" />
-          </Button>}
+          <div className="flex items-center gap-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0 text-muted hover:text-foreground"
+              aria-label={t('workbench.search.entry')}
+              onClick={onOpenSearch}
+            >
+              <Search className="size-4" />
+            </Button>
+            {canCreateProject && <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0 text-muted hover:text-foreground"
+              aria-label={t('workbench.addProject')}
+              onClick={() => setShowNewProject(true)}
+            >
+              <FolderPlus className="size-4" />
+            </Button>}
+          </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5">

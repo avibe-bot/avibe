@@ -1,13 +1,12 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
-import { tabModifierLabel } from '../../apps/appLaunch';
 
 const inbox = vi.hoisted(() => ({
   totalUnread: 0,
@@ -23,6 +22,9 @@ const hookCalls = vi.hoisted(() => ({
 const capabilities = vi.hoisted(() => ({
   can_chat: true,
   can_manage_projects: true,
+  // Project creation is `can_manage_projects && can_use_files`; both are named so
+  // a case can withhold creation alone and still watch Search stay reachable.
+  can_use_files: true,
   can_use_agents: true,
   can_use_skills: true,
   can_use_vault_secrets: true,
@@ -96,6 +98,7 @@ beforeEach(() => {
   Object.assign(capabilities, {
     can_chat: true,
     can_manage_projects: true,
+    can_use_files: true,
     can_use_agents: true,
     can_use_skills: true,
     can_use_vault_secrets: true,
@@ -114,7 +117,8 @@ describe('Workbench sidebar inbox counter', () => {
     const link = screen.getByRole('link', { name: en.workbench.nav.inbox });
     // A zero badge is still a badge — an empty inbox draws no attention at all.
     expect(link.textContent).toBe(en.workbench.nav.inbox);
-    expect(inboxIcon().getAttribute('class')).toContain('text-muted');
+    // Cyan is the unread read; the resting row is plain foreground ink.
+    expect(inboxIcon().getAttribute('class')).toContain('text-foreground');
     expect(inboxIcon().getAttribute('class')).not.toContain('text-cyan-ink');
   });
 
@@ -135,10 +139,22 @@ describe('Workbench sidebar inbox counter', () => {
     expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}99+`);
   });
 
-  it('shows the platform-appropriate search shortcut', () => {
-    renderSidebar();
+  it('keeps Search in the Projects header, before New Project and without needing it', async () => {
+    const user = userEvent.setup();
+    const onOpenSearch = vi.fn();
+    const { rerender } = renderSidebar(true, onOpenSearch);
 
-    expect(screen.getByText(`${tabModifierLabel()}K`)).toBeTruthy();
+    const header = screen.getByText(en.workbench.projectsLabel).parentElement!;
+    expect(within(header).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
+      .toEqual([en.workbench.search.entry, en.workbench.addProject]);
+
+    // Search is not a project-creation affordance: withholding creation must
+    // take the add control away and leave the palette entry exactly where it is.
+    capabilities.can_use_files = false;
+    rerender(sidebarElement(true, onOpenSearch));
+    expect(screen.queryByRole('button', { name: en.workbench.addProject })).toBeNull();
+    await user.click(within(header).getByRole('button', { name: en.workbench.search.entry }));
+    expect(onOpenSearch).toHaveBeenCalledOnce();
   });
 
   it('withdraws feed and tree activation while the retained sidebar is hidden', () => {
@@ -163,7 +179,7 @@ describe('Workbench sidebar capability navigation', () => {
 
     const toggle = screen.getByRole('button', { name: en.nav.capabilities });
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByRole('link', { name: `${en.appShell.title} Agent OS` }).getAttribute('href')).toBe('/');
+    expect(screen.getByRole('link', { name: `${en.appShell.title} ${en.appShell.subtitle}` }).getAttribute('href')).toBe('/');
     expect(screen.getByRole('navigation').id).toBe(toggle.getAttribute('aria-controls'));
     for (const name of destinations) expect(screen.getByRole('link', { name })).toBeTruthy();
 
