@@ -5,11 +5,13 @@
 // it when they arrive there, which happens on every flush. So "on its own" is a
 // property of the open call, and these tests are what make it one.
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 import en from '../../i18n/en.json';
 import { ImageViewerProvider } from './image-viewer';
 import { useImageViewer, type ImageViewerOpenOptions } from './image-viewer-context';
@@ -47,6 +49,16 @@ const paging = () => ({
   previous: screen.queryByLabelText('Previous'),
   counter: screen.queryByText('1 / 3'),
 });
+
+const transformScale = (element: Element | null): number => {
+  if (!(element instanceof HTMLElement)) return 1;
+  const inline = element.getAttribute('style') ?? '';
+  const inlineScale = inline.match(/scale\(([-+]?\d*\.?\d+)\)/)?.[1];
+  if (inlineScale) return Number(inlineScale);
+  const transform = window.getComputedStyle(element).transform;
+  const matrix = transform.match(/^matrix\(([^)]+)\)$/)?.[1]?.split(',').map(Number);
+  return matrix && matrix.length >= 2 ? Math.hypot(matrix[0], matrix[1]) : 1;
+};
 
 // The zoom stage observes its own box; jsdom has no layout to report.
 beforeEach(() => {
@@ -116,5 +128,101 @@ describe('ImageViewerProvider — paging belongs to the gallery, not to every im
     fireEvent.keyDown(window, { key: 'Escape' });
 
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('ImageViewerProvider — retained route activity owns global keys', () => {
+  const retained = (active: boolean, options?: ImageViewerOpenOptions) => (
+    <I18nextProvider i18n={i18n}>
+      <MemoryRouter>
+        <RouteSurfaceActivityBoundary active={active}>
+          <div hidden={!active} inert={!active || undefined} aria-hidden={!active || undefined}>
+            <ImageViewerProvider images={GALLERY}>
+              <Opener src={GALLERY[0]} options={options} />
+            </ImageViewerProvider>
+          </div>
+        </RouteSurfaceActivityBoundary>
+      </MemoryRouter>
+    </I18nextProvider>
+  );
+
+  it.each(['Escape', 'ArrowLeft', 'ArrowRight'] as const)(
+    'passes hidden %s to the foreground while retaining the open image',
+    (key) => {
+    const view = render(retained(true));
+    fireEvent.click(screen.getByText('open'));
+    const image = document.querySelector('img');
+    expect(image?.getAttribute('src')).toBe(GALLERY[0]);
+
+    view.rerender(retained(false));
+    const foreground = vi.fn();
+    window.addEventListener('keydown', foreground);
+    try {
+      fireEvent.keyDown(window, { key });
+      expect(foreground).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('img')).toBe(image);
+      expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[0]);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    } finally {
+      window.removeEventListener('keydown', foreground);
+    }
+    },
+  );
+
+  it('restores foreground capture after repeated suspension without replacing the viewer instance', () => {
+    const view = render(retained(true));
+    fireEvent.click(screen.getByText('open'));
+    const image = document.querySelector('img');
+    expect(image).not.toBeNull();
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      view.rerender(retained(false));
+      view.rerender(retained(true));
+    }
+    expect(document.querySelector('img')).toBe(image);
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[1]);
+
+    const recordingAbort = vi.fn();
+    window.addEventListener('keydown', recordingAbort);
+    try {
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(recordingAbort).not.toHaveBeenCalled();
+      expect(screen.queryByRole('dialog')).toBeNull();
+    } finally {
+      window.removeEventListener('keydown', recordingAbort);
+    }
+  });
+
+  it('retains the zoom transform across suspension and resume', async () => {
+    const view = render(retained(true));
+    fireEvent.click(screen.getByText('open'));
+    const image = document.querySelector('img');
+    const transform = document.querySelector('.react-transform-component');
+    expect(image).not.toBeNull();
+    expect(transform).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    await waitFor(() => expect(transformScale(transform)).toBeGreaterThan(1));
+    const zoomedScale = transformScale(transform);
+
+    view.rerender(retained(false));
+    view.rerender(retained(true));
+    expect(document.querySelector('img')).toBe(image);
+    expect(transformScale(document.querySelector('.react-transform-component'))).toBeCloseTo(zoomedScale);
+  });
+
+  it('keeps isolated image semantics after returning to the foreground', () => {
+    const view = render(retained(true, { isolated: true }));
+    fireEvent.click(screen.getByText('open'));
+    view.rerender(retained(false, { isolated: true }));
+    view.rerender(retained(true, { isolated: true }));
+
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.queryByLabelText('Next')).toBeNull();
+    expect(screen.queryByLabelText('Previous')).toBeNull();
+    expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[0]);
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[0]);
   });
 });

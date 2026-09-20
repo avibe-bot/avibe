@@ -5,6 +5,8 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
+import { tabModifierLabel } from '../../apps/appLaunch';
 
 const inbox = vi.hoisted(() => ({
   totalUnread: 0,
@@ -13,8 +15,17 @@ const inbox = vi.hoisted(() => ({
   unreadBySession: {} as Record<string, number>,
   markRead: vi.fn(),
 }));
+const hookCalls = vi.hoisted(() => ({
+  inbox: vi.fn(),
+  tree: vi.fn(),
+}));
 
-vi.mock('../../context/WorkbenchInboxContext', () => ({ useWorkbenchInbox: () => inbox }));
+vi.mock('../../context/WorkbenchInboxContext', () => ({
+  useWorkbenchInbox: (options?: { feed?: boolean }) => {
+    hookCalls.inbox(options);
+    return inbox;
+  },
+}));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({
     capabilities: {
@@ -27,20 +38,23 @@ vi.mock('../../context/InstanceAuthorizationContext', () => ({
   }),
 }));
 vi.mock('../../context/WorkbenchProjectsContext', () => ({
-  useWorkbenchProjectsTree: () => ({
-    projects: [],
-    projectsError: null,
-    sessionsOf: () => [],
-    isExpanded: () => false,
-    toggleExpanded: vi.fn(),
-    loadMore: vi.fn(),
-    creatingSession: null,
-    createSessionForProject: vi.fn(),
-    renameProject: vi.fn(),
-    archiveProject: vi.fn(),
-    reorderProjects: vi.fn(),
-    isReorderingProjects: false,
-  }),
+  useWorkbenchProjectsTree: (options?: { active?: boolean }) => {
+    hookCalls.tree(options);
+    return {
+      projects: [],
+      projectsError: null,
+      sessionsOf: () => [],
+      isExpanded: () => false,
+      toggleExpanded: vi.fn(),
+      loadMore: vi.fn(),
+      creatingSession: null,
+      createSessionForProject: vi.fn(),
+      renameProject: vi.fn(),
+      archiveProject: vi.fn(),
+      reorderProjects: vi.fn(),
+      isReorderingProjects: false,
+    };
+  },
   useWorkbenchProjectsActions: () => ({}),
 }));
 vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => ({ open: vi.fn() }) }));
@@ -59,10 +73,12 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-const renderSidebar = () => render(
+const renderSidebar = (active = true) => render(
   <I18nextProvider i18n={i18n}>
     <MemoryRouter initialEntries={['/']}>
-      <WorkbenchSidebar />
+      <RouteSurfaceActivityBoundary active={active}>
+        <WorkbenchSidebar />
+      </RouteSurfaceActivityBoundary>
     </MemoryRouter>
   </I18nextProvider>,
 );
@@ -74,6 +90,8 @@ beforeEach(() => {
   inbox.unreadSessions = 0;
   inbox.inboxSessions = [];
   inbox.unreadBySession = {};
+  hookCalls.inbox.mockClear();
+  hookCalls.tree.mockClear();
 });
 
 afterEach(() => {
@@ -87,7 +105,7 @@ describe('Workbench sidebar inbox counter', () => {
 
     const link = screen.getByRole('link', { name: en.workbench.nav.inbox });
     // A zero badge is still a badge — an empty inbox draws no attention at all.
-    expect(link.textContent).toBe('');
+    expect(link.textContent).toBe(en.workbench.nav.inbox);
     expect(inboxIcon().getAttribute('class')).toContain('text-muted');
     expect(inboxIcon().getAttribute('class')).not.toContain('text-cyan-ink');
   });
@@ -98,7 +116,7 @@ describe('Workbench sidebar inbox counter', () => {
     inbox.unreadBySession = { ses_a: 4, ses_b: 3 };
     renderSidebar();
 
-    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe('7');
+    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}7`);
     expect(inboxIcon().getAttribute('class')).toContain('text-cyan-ink');
   });
 
@@ -106,6 +124,19 @@ describe('Workbench sidebar inbox counter', () => {
     inbox.totalUnread = 150;
     renderSidebar();
 
-    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe('99+');
+    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}99+`);
+  });
+
+  it('shows the platform-appropriate search shortcut', () => {
+    renderSidebar();
+
+    expect(screen.getByText(`${tabModifierLabel()}K`)).toBeTruthy();
+  });
+
+  it('withdraws feed and tree activation while the retained sidebar is hidden', () => {
+    renderSidebar(false);
+
+    expect(hookCalls.inbox).toHaveBeenCalledWith({ feed: false });
+    expect(hookCalls.tree).toHaveBeenCalledWith({ active: false });
   });
 });

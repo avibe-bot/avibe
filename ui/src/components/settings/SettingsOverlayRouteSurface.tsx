@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { resolvePath, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { Navigator } from 'react-router-dom';
@@ -21,6 +21,24 @@ type SettingsOverlayRouteSurfaceProps = {
   fallbackElement: ReactElement;
 };
 
+const isForegroundFocusOwner = (element: Element | null): element is HTMLElement => {
+  if (!(element instanceof HTMLElement) || !element.isConnected) return false;
+  if (element.closest('[data-settings-overlay], [inert], [aria-hidden="true"]')) return false;
+  // Retained modal owners can recreate their editor while Settings is open. A
+  // recreated input is the owner of the return focus, but it cannot be the
+  // frozen target because that DOM node did not exist when Settings opened.
+  // Radix's modal DialogContent intentionally exposes role=dialog and its
+  // open state, but does not emit aria-modal. AppWindow also uses role=dialog;
+  // its data-window-id keeps ordinary retained windows out of this branch.
+  if (element.closest(
+    '[role="dialog"][aria-modal="true"]:not([data-window-id]), '
+      + '[role="dialog"][data-state="open"][aria-labelledby]:not([data-window-id])',
+  )) {
+    return true;
+  }
+  return false;
+};
+
 export const SettingsOverlayRouteSurface = ({
   children,
   fallbackElement,
@@ -30,6 +48,28 @@ export const SettingsOverlayRouteSurface = ({
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
+  const lastFocusRef = useRef<HTMLElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const settingsSurfaceOpenRef = useRef(settingsSurfaceOpen);
+  const locationRef = useRef(location);
+  const settingsVisitRef = useRef(0);
+  const focusFrameRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    settingsSurfaceOpenRef.current = settingsSurfaceOpen;
+    locationRef.current = location;
+  }, [location, settingsSurfaceOpen]);
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement && !event.target.closest('[data-settings-overlay]')) {
+        lastFocusRef.current = event.target;
+      }
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => document.removeEventListener('focusin', onFocusIn);
+  }, []);
+  useEffect(() => () => {
+    if (focusFrameRef.current !== null) window.cancelAnimationFrame(focusFrameRef.current);
+  }, []);
   // The route this surface renders behind any overlay — the retained origin
   // while Settings is open, the foreground route otherwise.
   const backgroundLocation = settingsSurfaceOpen ? origin.location : location;
@@ -58,7 +98,7 @@ export const SettingsOverlayRouteSurface = ({
   return (
     <>
       <div
-        className="contents"
+        className={settingsSurfaceOpen ? 'hidden' : 'contents'}
         aria-hidden={settingsSurfaceOpen || undefined}
         inert={settingsSurfaceOpen || undefined}
       >
@@ -83,38 +123,56 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
-              // The overlay covers the work area and stops at the shell sidebar,
-              // which is what keeps the origin project/session visible behind it.
-              // This overrides the primitive's historical 240 default with the
-              // sidebar's own live width: the dialog is portaled outside the
-              // shell's subtree, so that document-level custom property is what
-              // keeps the two edges together while the sidebar is being dragged.
-              //
-              // Below md the surface is the whole viewport, so the primitive's
-              // left border would draw a hairline down the screen edge and make
-              // Settings-from-home look different from a direct Settings link.
-              // There is no sidebar to divide from until the offset applies.
-              className={origin.location.pathname === '/setup'
-                ? 'border-l-0 md:left-0'
-                : 'border-l-0 md:left-[var(--app-sidebar-w)] md:border-l'}
+              // Settings owns the whole viewport. The retained Workbench origin
+              // remains mounted behind this portal for drafts and return state,
+              // but its sidebar is not part of the Settings surface at any width.
+              className="left-0 border-l-0 md:left-0 md:border-l-0"
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;
                 if (
                   target instanceof Element
-                  // The toggle closes the overlay itself, and the sidebar's
-                  // resize edge is not a dismissal at all: it moves this
-                  // surface's own left edge, so grabbing it must not close what
-                  // the drag is laying out.
-                  && target.closest('[data-settings-toggle="true"], [data-sidebar-resizer="true"]')
+                  && target.closest('[data-settings-toggle="true"]')
                 ) {
                   event.preventDefault();
                 }
               }}
+              onOpenAutoFocus={() => {
+                if (focusFrameRef.current !== null) {
+                  window.cancelAnimationFrame(focusFrameRef.current);
+                  focusFrameRef.current = null;
+                }
+                settingsVisitRef.current += 1;
+                // Freeze the origin focus for this visit. Retained app windows
+                // may focus themselves on return, before Radix's deferred close
+                // callback runs; that must not replace the initiating control.
+                returnFocusRef.current = lastFocusRef.current;
+              }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
-                window.requestAnimationFrame(() => {
-                  document.querySelector<HTMLElement>('[data-settings-toggle="true"]')?.focus();
+                const visit = settingsVisitRef.current;
+                const expectedOrigin = origin;
+                const target = returnFocusRef.current;
+                focusFrameRef.current = window.requestAnimationFrame(() => {
+                  focusFrameRef.current = null;
+                  // A close callback may outlive a rapid Settings reopen or a
+                  // route change. Its old focus decision must not cross either
+                  // boundary and land in the new foreground surface.
+                  if (
+                    settingsSurfaceOpenRef.current
+                    || settingsVisitRef.current !== visit
+                    || expectedOrigin === null
+                    || locationPath(locationRef.current) !== locationPath(expectedOrigin.location)
+                  ) return;
+                  if (target?.isConnected && !target.closest('[inert]')) {
+                    target.focus({ preventScroll: true });
+                    return;
+                  }
+                  if (isForegroundFocusOwner(document.activeElement)) return;
+                  const fallback = Array.from(
+                    document.querySelectorAll<HTMLElement>('[data-settings-toggle="true"]'),
+                  ).find((candidate) => !candidate.closest('[inert]'));
+                  fallback?.focus({ preventScroll: true });
                 });
               }}
             >
