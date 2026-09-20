@@ -133,7 +133,7 @@ describe('QueueStrip — compatible queued messages read as one batch', () => {
       </I18nextProvider>,
     );
     const send = screen.getByRole('button', {
-      name: state === 'reconciling_steer' ? 'Send result pending' : 'Sending…',
+      name: state === 'reconciling_steer' ? 'Send status not confirmed' : 'Sending…',
     });
     expect((send as HTMLButtonElement).disabled).toBe(true);
     expect(Boolean(send.querySelector('.animate-spin'))).toBe(state !== 'reconciling_steer');
