@@ -82,6 +82,14 @@ def opencode_auth_path(home: Path | None) -> Path:
     return get_opencode_auth_path(home)
 
 
+def opencode_catalog_path(home: Path | None) -> Path:
+    if home is not None:
+        return home / ".cache/opencode/models.json"
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    root = Path(cache_home).expanduser() if cache_home else Path.home() / ".cache"
+    return root / "opencode/models.json"
+
+
 def codex_config_paths(home: Path | None, projects: tuple[Path, ...]) -> tuple[Path, ...]:
     config_path, _ = get_codex_config_paths(home)
     return tuple(dict.fromkeys([config_path.absolute(), *(root / ".codex/config.toml" for root in projects)]))
@@ -115,6 +123,15 @@ def plan_native_cleanup(
     document after a parse failure.
     """
     edits: dict[Path, NativeFileEdit] = {}
+    selected_backends = {item.backend for item in items}
+    if any(set(item.required_backends) - selected_backends for item in items):
+        raise TakeoverStateError("shared native credentials require joint consent")
+    for item in items:
+        for guard in item.file_snapshots:
+            if guard.path in edits and edits[guard.path] != guard:
+                raise TakeoverStateError("conflicting native credential snapshots")
+            guard.check()
+            edits[guard.path] = guard
     # Native-store resolution owns credential paths (including isolated secure
     # roots), while this planner owns one final file image for the whole batch.
     for item in items:
@@ -129,8 +146,10 @@ def plan_native_cleanup(
                 before["raw"].encode() if before["exists"] else None,
                 after["raw"].encode() if after["exists"] else None,
             )
-            if path in edits and edits[path] != edit:
-                raise TakeoverStateError("conflicting native credential snapshots")
+            if path in edits:
+                previous = edits[path]
+                if previous.before != edit.before or (previous.after != previous.before and previous != edit):
+                    raise TakeoverStateError("conflicting native credential snapshots")
             edits[path] = edit
 
     def edit_json(path: Path, transform, *, jsonc: bool = False, guard_unchanged: bool = False) -> None:
@@ -172,10 +191,10 @@ def plan_native_cleanup(
             payload.pop("apiKeyHelper", None)
 
         for path in claude_settings_paths(home, project_roots):
-            edit_json(path, clear_settings)
+            edit_json(path, clear_settings, guard_unchanged=True)
         backup_path = get_claude_oauth_settings_backup_path(home).absolute()
         backup_edit = edits.get(backup_path)
-        if backup_edit and backup_edit.after is not None:
+        if backup_edit and backup_edit.before != backup_edit.after and backup_edit.after is not None:
             backup = _object(backup_edit.after)
             if set(backup) <= {"version", "env"} and not backup.get("env"):
                 edits[backup_path] = NativeFileEdit(backup_path, backup_edit.before, None)
@@ -195,9 +214,12 @@ def plan_native_cleanup(
             for key in ("OPENAI_API_KEY", "tokens", "auth_mode", "last_refresh"):
                 payload.pop(key, None)
 
-        edit_json(auth_path, clear_auth)
+        edit_json(auth_path, clear_auth, guard_unchanged=True)
         for config_path in codex_config_paths(home, project_roots):
             content = _read_regular(config_path)
+            if config_path in edits and content != edits[config_path].before:
+                raise TakeoverStateError("native configuration changed")
+            edits.setdefault(config_path, NativeFileEdit(config_path, content, content))
             if content is None:
                 continue
             try:
@@ -243,6 +265,7 @@ def plan_native_cleanup(
 
     if "opencode" in backends:
         vendors = {item.vendor for item in items if item.backend == "opencode"}
+        shell_values = dict(pair for item in items for pair in item.shell_values)
 
         def clear_providers(payload: dict) -> None:
             providers = payload.get("provider")
@@ -258,14 +281,17 @@ def plan_native_cleanup(
                 if isinstance(options, dict):
                     value = options.get("apiKey")
                     if value and value not in selected_secrets:
-                        # An unset environment placeholder supplied no native
-                        # credential; an auth.json fallback was the imported key.
-                        unresolved = (
+                        # The inventory bound the saved assignment, or proved
+                        # its absence before selecting the auth.json fallback.
+                        reference = (
                             isinstance(value, str)
                             and value.startswith("{env:") and value.endswith("}")
-                            and not os.environ.get(value[5:-1])
+                            and (
+                                not shell_values.get(value[5:-1])
+                                or shell_values[value[5:-1]] in selected_secrets
+                            )
                         )
-                        if not unresolved:
+                        if not reference:
                             raise TakeoverStateError("another native credential requires migration")
                     options.pop("apiKey", None)
                     options.pop("baseURL", None)
@@ -280,4 +306,21 @@ def plan_native_cleanup(
                 payload.pop(vendor, None)
 
         edit_json(opencode_auth_path(home), clear_provider_auth, guard_unchanged=True)
+    if backends:
+        from .migration_shell import cleanup_shell_profile, read_shell_profiles
+
+        selected_values: dict[str, str] = {}
+        for item in items:
+            for name, value in item.shell_values:
+                if name in selected_values and selected_values[name] != value:
+                    raise TakeoverStateError("conflicting native credential snapshots")
+                selected_values[name] = value
+        for profile in read_shell_profiles(home, frozenset(selected_values)):
+            previous = edits.get(profile.path)
+            if previous and previous.before != profile.before:
+                raise TakeoverStateError("native configuration changed")
+            # Keep guards even when this profile contributes no selected line.
+            edits[profile.path] = cleanup_shell_profile(profile, selected_values)
+    for edit in edits.values():
+        edit.check()
     return list(edits.values())
