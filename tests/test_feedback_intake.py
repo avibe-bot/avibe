@@ -236,6 +236,8 @@ def test_crash_after_write_preserves_unknown_and_releases_kernel_slot(github):
         assert len(github.issues) == 2
         third = make_payload()
         assert execute(worker, third).returncode == 1
+        assert worker.receipt(json.loads(third)["request_id"])["state"] == "failed"
+        assert worker.reserve(worker._parse_payload(third)) is None
         assert len(github.issues) == 2
         for payload, process in processes:
             process.kill()
@@ -453,3 +455,157 @@ def test_real_vault_child_output_is_bounded_and_killed(real_vault, tmp_path, mon
         worker._vault(str(uuid.uuid4()), uuid.uuid4().hex)
     assert time.monotonic() - start < 6
     assert not real_vault.calls
+
+
+@pytest.mark.parametrize("terminal", ["created", "failed"])
+@pytest.mark.parametrize("poll_mode", ["404", "malformed", "disconnect", "pending"])
+def test_helper_preserves_verified_terminal_receipt(github, tmp_path, terminal, poll_mode):
+    class Handler(BaseHTTPRequestHandler):
+        mode = "initial"
+        posts = 0
+        def do_POST(self):  # noqa: N802
+            type(self).posts += 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(202)
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        def do_GET(self):  # noqa: N802
+            request_id = self.path.split("=",1)[1]
+            if self.mode == "disconnect":
+                self.close_connection = True
+                return
+            value = dict(schema_version=1,request_id=request_id,state=terminal)
+            if terminal == "created":
+                value.update(issue_number=123, issue_url="https://github.com/avibe-bot/avibe/issues/123")
+            if self.mode == "malformed":
+                value["request_id"] = "wrong"
+            if self.mode == "pending":
+                value = dict(schema_version=1,request_id=request_id,state="pending")
+            self.send_response(404 if self.mode == "404" else 200)
+            self.end_headers()
+            self.wfile.write(json.dumps(value).encode())
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    env = dict(os.environ, AVIBE_FEEDBACK_TEST_SHARE_BASE_URL=f"http://127.0.0.1:{server.server_port}")
+    command = [sys.executable,str(HELPER),"submit","bug","Saved terminal", "--public-confirmed"]
+    try:
+        first = subprocess.run(command,input=b"body",env=env,capture_output=True,check=False)
+        receipt = json.loads(first.stdout)
+        assert receipt["state"] == terminal
+        Handler.mode = poll_mode
+        for command2 in (command, [sys.executable,str(HELPER),"resume",receipt["request_id"]]):
+            result = subprocess.run(command2,input=b"body",env=env,capture_output=True,check=False)
+            assert json.loads(result.stdout) == receipt
+        assert Handler.posts == 1
+        assert (Path(env["AVIBE_HOME"]) / "state/feedback-intake/outbox.sqlite").is_file()
+        assert not (Path(env["HOME"]) / ".avibe-other/state/feedback-intake/outbox.sqlite").exists()
+    finally:
+        server.shutdown()
+        thread.join(2)
+
+
+def test_helper_429_retries_only_same_saved_attempt(github, tmp_path):
+    class Handler(BaseHTTPRequestHandler):
+        posts = []
+        accepted = False
+        def do_POST(self):  # noqa: N802
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            self.posts.append(raw)
+            self.send_response(202 if self.accepted else 429)
+            self.end_headers()
+            self.wfile.write(b'{}')
+        def do_GET(self):  # noqa: N802
+            request_id = self.path.split("=",1)[1]
+            value = dict(schema_version=1,request_id=request_id,state="created",issue_number=123,
+                         issue_url="https://github.com/avibe-bot/avibe/issues/123")
+            self.send_response(200 if self.accepted and len(self.posts)>1 else 404)
+            self.end_headers()
+            self.wfile.write(json.dumps(value).encode())
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    env = dict(os.environ, AVIBE_FEEDBACK_TEST_SHARE_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+               AVIBE_HOME=str(tmp_path / "custom-avibe-home"))
+    command = [sys.executable,str(HELPER),"submit","bug","Rate limited", "--public-confirmed"]
+    try:
+        first = subprocess.run(command,input=b"report",env=env,capture_output=True)
+        limited = json.loads(first.stdout)
+        assert first.returncode == 3 and limited["retryable"] is True
+        request_id = limited["request_id"]
+        resumed = subprocess.run([sys.executable,str(HELPER),"resume",request_id],env=env,capture_output=True)
+        assert resumed.returncode == 3 and len(Handler.posts) == 1
+        Handler.accepted = True
+        second = subprocess.run(command,input=b"report",env=env,capture_output=True)
+        assert second.returncode == 0
+        assert json.loads(second.stdout)["request_id"] == request_id
+        assert Handler.posts[0] == Handler.posts[1]
+        assert (tmp_path / "custom-avibe-home/state/feedback-intake/outbox.sqlite").is_file()
+        assert not (Path(env["HOME"]) / ".avibe/state/feedback-intake/outbox.sqlite").exists()
+    finally:
+        server.shutdown()
+        thread.join(2)
+
+
+def test_runtime_manifest_validation_survives_optimized_python(tmp_path):
+    manifest = tmp_path / "bad-manifest.json"
+    archive = tmp_path / "vibe-show-runtime-node-linux-x64.tgz"
+    manifest.write_text('{}')
+    archive.write_bytes(b'not an archive')
+    destination = tmp_path / "extract"
+    result = subprocess.run([sys.executable,"-O",str(APP / "integration/prepare-runtime.py"),
+                             str(manifest),str(archive),str(destination)],capture_output=True)
+    assert result.returncode != 0 and b"Runtime manifest hash mismatch" in result.stderr
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("receipt_state", ["failed", "created", "unavailable"])
+def test_429_requires_absent_receipt_and_terminal_receipt_wins(github, tmp_path, receipt_state):
+    class Handler(BaseHTTPRequestHandler):
+        posts = 0
+        def do_POST(self):  # noqa: N802
+            type(self).posts += 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(429)
+            self.end_headers()
+            self.wfile.write(b'{}')
+        def do_GET(self):  # noqa: N802
+            value = dict(schema_version=1,request_id=self.path.split("=",1)[1],state=receipt_state)
+            if receipt_state == "created":
+                value.update(issue_number=123, issue_url="https://github.com/avibe-bot/avibe/issues/123")
+            self.send_response(503 if receipt_state == "unavailable" else 200)
+            self.end_headers()
+            self.wfile.write(json.dumps(value).encode())
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    env = dict(os.environ,AVIBE_FEEDBACK_TEST_SHARE_BASE_URL=f"http://127.0.0.1:{server.server_port}")
+    command = [sys.executable,str(HELPER),"submit","bug","Receipt precedence", "--public-confirmed"]
+    try:
+        for _ in range(2):
+            result = subprocess.run(command,input=b"body",env=env,capture_output=True)
+            assert json.loads(result.stdout)["state"] == ("unknown" if receipt_state == "unavailable" else receipt_state)
+        assert Handler.posts == 1
+        with sqlite3.connect(Path(env["AVIBE_HOME"]) / "state/feedback-intake/outbox.sqlite") as db:
+            assert db.execute("SELECT retryable FROM attempts").fetchone()[0] == 0
+    finally:
+        server.shutdown()
+        thread.join(2)
+
+
+def test_expired_pending_reservation_is_durable_no_write(github):
+    worker = load_worker()
+    payload = worker._parse_payload(make_payload())
+    token = worker.reserve(payload)
+    worker._update(payload["request_id"], deadline=0)
+    assert worker.receipt(payload["request_id"])["state"] == "failed"
+    assert worker._row(payload["request_id"])["state"] == "failed"
+    child = subprocess.run([sys.executable,str(WORKER),"execute",payload["request_id"],token], capture_output=True)
+    assert child.returncode == 1 and not github.calls
+    assert worker.reserve(payload) is None

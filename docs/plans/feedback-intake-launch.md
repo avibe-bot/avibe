@@ -170,7 +170,7 @@ Kernel-owned file locks bound active upstream workers to two and release only
 on actual worker exit. Workers enforce an absolute 20-second reservation
 cutoff with SIGALRM; delayed Vault delivery cannot start a stale write. The
 supervisor tracks and kills actual descendants, including avault's separate
-process session, on timeout or excess output. Interrupted pending or unknown
+process session, on timeout or excess output. Expired pending reservations become durable failed without a write; unknown
 reservations never become new writes. The remote GitHub operation may still
 complete after disconnection: no exactly-once or remote cancellation claim.
 
@@ -186,3 +186,11 @@ normal install authority separately; no release/merge is granted by this plan.
 The app integration verifies the frozen manifest hash and platform archive hash
 before using packaged Runtime 5e31. Local macOS compatibility is not proof of
 Linux live commissioning, write permission or universal client distribution.
+
+First review refinement: worker slot rejection before claiming a pending row
+persists a known no-write failed receipt. A native pre-reservation 429 instead
+leaves no service receipt; the client requires both 429 and receipt 404, durably records that result and
+permits only a later explicit identical submit with the same saved ID/bytes.
+Resume remains status-only. Saved verified terminal receipts survive polling
+outages, and client state honors AVIBE_HOME. Artifact verification uses explicit
+errors so optimized Python cannot remove commissioning checks.

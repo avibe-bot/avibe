@@ -286,11 +286,15 @@ The flag records the Agent's completed approval step; it is not a substitute
 for approval. For a feature use `feature`. Bounds are 200 title characters,
 20000 UTF-8 body bytes and 32768 encoded request bytes. It prints the request ID
 and only a validated receipt; exit 0 means verified `created`, exit 2 means keep
-this attempt and report its state. Run the same installed helper with
-`resume <request_id>` for status only. Repeating the same title/body/kind also
-uses the saved attempt without another upload, including after helper crashes.
-The outbox lives at `~/.avibe/state/feedback-intake/outbox.sqlite` with private
-permissions. Successful/failed receipts discard report bytes but keep the
+this attempt and report its state. Exit 3 is a definitive pre-reservation HTTP
+429 plus receipt GET 404: no write was admitted; later repeat the identical `submit` to retry the
+same saved ID and bytes. `resume` remains status-only even for this case. Run the same installed helper with
+`resume <request_id>` for status only. Repeating the same title/body/kind uses the saved attempt; only an explicitly
+recorded pre-reservation 429 permits another upload, including after crashes.
+The outbox lives at `$AVIBE_HOME/state/feedback-intake/outbox.sqlite`, defaulting
+to `~/.avibe/state/feedback-intake/outbox.sqlite`, with private permissions.
+`AVIBE_FEEDBACK_OUTBOX` is an explicit directory override. Previously verified
+terminal receipts remain available locally during a receiver outage. Successful/failed receipts discard report bytes but keep the
 correlation/digest to prevent accidental duplicate publication. Unknown attempts
 retain the exact report. Do not delete/reset the outbox to retry an unknown write.
 A 404 receipt, 502/504, malformed receipt or unavailable service proves no safe

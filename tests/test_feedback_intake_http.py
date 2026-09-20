@@ -1,5 +1,6 @@
 """Actual UI → pinned packaged Runtime → TS → real Vault CLI → GitHub fake."""
 import asyncio
+import fcntl
 import importlib.util
 import os
 from pathlib import Path
@@ -104,6 +105,33 @@ async def test_real_http_packaged_runtime_receipts_and_private_ledger(real_vault
             assert unknown.json() == dict(schema_version=1, request_id=unknown_id, state="unknown")
             await client.post(prefix + "/api/feedback", content=unknown_payload, headers=headers)
             assert len(real_vault.issues) == 2
+            # Actual worker started through HTTP/CLI must publish a durable
+            # known-no-write result when both kernel slots are occupied.
+            locks = [open(os.environ["AVIBE_FEEDBACK_DATABASE"] + f".slot{i}", "a") for i in range(2)]
+            saturated_payload = make_payload(title="Saturated worker slots")
+            saturated_id = json.loads(saturated_payload)["request_id"]
+            try:
+                for lock in locks:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                saturated = await client.post(prefix + "/api/feedback", content=saturated_payload, headers=headers)
+                assert saturated.status_code == 503
+                failed = await client.get(prefix + "/api/feedback-status", params={"request_id":saturated_id}, headers=headers)
+                assert failed.json() == dict(schema_version=1, request_id=saturated_id, state="failed")
+            finally:
+                for lock in locks:
+                    lock.close()
+            assert len(real_vault.issues) == 2
+            # Fill the persistent admission quota and prove 429 creates no row.
+            from tests.test_feedback_intake import load_worker
+            worker = load_worker()
+            with worker._database() as db:
+                import time
+                db.execute("UPDATE limits SET count=5,window=? WHERE name='minute'", (int(time.time())//60,))
+            limited_payload = make_payload(title="Pre-reservation limited")
+            limited = await client.post(prefix + "/api/feedback", content=limited_payload, headers=headers)
+            assert limited.status_code == 429
+            missing = await client.get(prefix + "/api/feedback-status", params={"request_id":json.loads(limited_payload)["request_id"]}, headers=headers)
+            assert missing.status_code == 404 and len(real_vault.issues) == 2
     finally:
         server.should_exit = True
         if task:

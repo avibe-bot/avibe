@@ -67,7 +67,8 @@ correlation, not bearer secrets. Unknown IDs return 404; status never calls GitH
 One transaction reserves ID, canonical payload digest, report and durable global
 quota counters: 5 new reservations/minute, 30/day, 10000 total receipts. Changed
 payload under an existing ID returns 409. Exact repeats never issue another write.
-Two kernel file locks bound upstream workers across processes. Four handler
+Two kernel file locks bound upstream workers across processes. Slot rejection
+before a worker claims its row persists failed (known no-write), not unknown. Four handler
 children per Runtime module and bounded body/output/time limit local work;
 these are resource caps, not user identity or per-user rate limits. An anonymous
 attacker can consume the public quota. No availability or exactly-once guarantee.
@@ -77,7 +78,9 @@ hard timer before authenticated calls; late delivery refuses to write. The
 supervisor tracks actual descendants because avault starts another session.
 Timeout/overflow kills tracked children; the worker deadline remains independent.
 An upstream request already received by GitHub cannot be cancelled or proven lost.
-The ledger therefore records unknown before the first write and never retries it.
+The ledger records unknown atomically immediately before the first write and
+never retries it. Pending expiry is durable failed; read-only identity binding
+does not make the outcome uncertain.
 
 A valid GitHub 201 identity is committed before readback. Only exact immutable
 Issue ID, number, URL, repository, actor ID/login, title and body checks expose
@@ -108,8 +111,11 @@ reconcile the final exact wheel/version/hash and installation authority.
 
 The user approves the sanitized title/body, public repository and official actor
 once. The helper commits the exact payload and UUID before POST and retains a
-private attempt outbox. `resume UUID` only reads status; repeated identical
-reports coalesce locally. Unknown never authorizes a replacement write. Security,
+private attempt outbox under AVIBE_HOME (default ~/.avibe). `resume UUID` only
+reads status; repeated identical reports coalesce locally. A definitive
+pre-reservation 429 with a 404 receipt is retained as retryable: explicit identical submit reuses
+the same ID/bytes after capacity returns. Unknown never authorizes a replacement
+write. Saved terminal receipts survive unavailable or malformed polling responses. Security,
 vulnerability and private reports stay off this public route. Existing direct
 user-authorized GitHub behavior remains supported.
 

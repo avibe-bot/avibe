@@ -179,13 +179,22 @@ def _update(request_id, **fields):
                    (*fields.values(), request_id))
 
 
+def _fail_pending(request_id):
+    with _database() as db:
+        db.execute("UPDATE receipts SET state='failed' WHERE request_id=? AND state='pending'", (request_id,))
+
+
 def receipt(request_id):
     row = _row(request_id)
     if row is None:
         raise FeedbackError(404)
     state = row["state"]
     if state == "pending" and time.time() >= row["deadline"]:
-        state = "unknown"
+        _fail_pending(request_id)
+        # An atomic write claim may have won concurrently. Never project over
+        # that evidence; execute also checks the deadline in its claim.
+        row = _row(request_id)
+        state = row["state"]
     result = {"schema_version": 1, "request_id": request_id, "state": state}
     if state == "created":
         result.update(issue_number=row["issue_number"], issue_url=row["issue_url"])
@@ -290,6 +299,8 @@ def execute(request_id, reservation_token, *, reconcile=False):
         raise FeedbackError()
     remaining = row["deadline"] - time.time()
     if remaining <= 0:
+        if not reconcile:
+            _fail_pending(request_id)
         raise FeedbackError()
     # Independent hard bound survives CLI death and detached avault children.
     # The default signal terminates without releasing the slot early in Python.
@@ -304,16 +315,13 @@ def execute(request_id, reservation_token, *, reconcile=False):
                 _binding(token)
                 _verify(token, row)
                 return
+            _binding(token)
             with _database() as db:
-                changed = db.execute("UPDATE receipts SET state='unknown' WHERE request_id=? AND state='pending'",
-                                     (request_id,)).rowcount
+                changed = db.execute("UPDATE receipts SET state='unknown' WHERE request_id=? AND state='pending' AND deadline>?",
+                                     (request_id, time.time())).rowcount
             if changed != 1:
+                _fail_pending(request_id)
                 return
-            try:
-                _binding(token)
-            except FeedbackError:
-                _update(request_id, state="failed")
-                raise
             payload = json.loads(row["payload"])
             status, issue = _github(token, "POST", f"/repos/{TARGET_FULL_NAME}/issues",
                                     {"title": payload["title"], "body": payload["body"]})
@@ -325,6 +333,13 @@ def execute(request_id, reservation_token, *, reconcile=False):
             issue_id, number, url = _identity(issue)
             _update(request_id, issue_id=issue_id, issue_number=number, issue_url=url)
             _verify(token, _row(request_id))
+    except FeedbackError:
+        # Slot exhaustion or missing credentials happens before this worker
+        # claims the pending row. Persist that known no-write outcome, without
+        # ever downgrading unknown/created evidence from a claimed operation.
+        if not reconcile:
+            _fail_pending(request_id)
+        raise
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
 
