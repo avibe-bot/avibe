@@ -293,6 +293,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     });
   }, [visuals]);
 
+  const releaseUpgradeLock = (name: string) =>
+    setUpgradeLocks((current) => (current[name] ? { ...current, [name]: false } : current));
+
   const upgradeAgent = async (name: string) => {
     setRefreshingAgents((current) => ({ ...current, [name]: true }));
     setUpgradeLocks((current) => ({ ...current, [name]: true }));
@@ -312,9 +315,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
         await detect(name, installedPath || agents[name]?.cli_path || name);
       } else {
+        // A failed upgrade leaves the pill on `update` with no probe in flight, so
+        // the visuals-driven release never fires; settle the lock here instead of
+        // stranding the button disabled until a remount.
+        releaseUpgradeLock(name);
         showToast(result.message || t('backendLifecycle.upgradeFailed'), 'error');
       }
     } catch (cause) {
+      releaseUpgradeLock(name);
       showToast(String(cause), 'error');
     } finally {
       setRefreshingAgents((current) => ({ ...current, [name]: false }));
@@ -611,12 +619,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name)}
             configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name] || !agent.enabled || agent.status !== 'ok'}
-            enabledControl={<button type="button" role="switch" aria-checked={agent.enabled}
-              aria-label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
-              className="onboarding-enable-switch"
-              onClick={() => toggle(name, !agent.enabled)}>
-              <span />
-            </button>}
+            enabledControl={<ToggleSwitch variant="onboarding" enabled={agent.enabled}
+              label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
+              onClick={() => toggle(name, !agent.enabled)} />}
             lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
               readyLabel={t('onboarding.setup.installed')}
               refreshKey={chipRefresh[name]}

@@ -346,6 +346,17 @@
      those shadows that moves between themes. */
   --card-wash: rgba(91, 255, 160, 0.078);
 
+  /* The onboarding enable switch, drawn per theme by the reference: a lit border
+     on the on-state in dark, none in light; a dark thumb on the lit track in dark,
+     a white thumb in light. Named here so both palettes re-anchor them and the
+     component stylesheet holds no literals. */
+  --switch-onboarding-track-off: #1a1a26;
+  --switch-onboarding-border-off: #ffffff24;
+  --switch-onboarding-track-on: #5bffa0;
+  --switch-onboarding-border-on: #5bffa057;
+  --switch-onboarding-thumb-off: #9ba3b8;
+  --switch-onboarding-thumb-on: #080812;
+
   /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
   --gradient-console:
     radial-gradient(50% 40% at 5% 5%, rgba(91, 255, 160, 0.20), rgba(91, 255, 160, 0) 100%),
@@ -503,8 +514,15 @@
     --bg-page: var(--gradient-console);
 
     /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
+
        swaps only the hue to the light brand mint. */
     --card-wash: rgba(16, 185, 129, 0.078);
+    --switch-onboarding-track-off: #d7dce5;
+    --switch-onboarding-border-off: #00000000;
+    --switch-onboarding-track-on: #10b981;
+    --switch-onboarding-border-on: #00000000;
+    --switch-onboarding-thumb-off: #ffffff;
+    --switch-onboarding-thumb-on: #ffffff;
 
     /* Wider CTA glow than dark: the same neon spreads far less over a white card,
        so 16px read as almost nothing here (owner decision 2026-08-14). */
@@ -634,6 +652,12 @@
   --onboarding-glow-blur: 16px;
   --onboarding-glow-spread: -4px;
   --onboarding-glow-alpha: 14.1%;
+  --switch-onboarding-track-off: #d7dce5;
+  --switch-onboarding-border-off: #00000000;
+  --switch-onboarding-track-on: #10b981;
+  --switch-onboarding-border-on: #00000000;
+  --switch-onboarding-thumb-off: #ffffff;
+  --switch-onboarding-thumb-on: #ffffff;
 }
 
 html,

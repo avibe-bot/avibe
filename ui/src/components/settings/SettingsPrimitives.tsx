@@ -155,11 +155,25 @@ export const SearchField: React.FC<SearchFieldProps> = ({
 // fill --mint, blur 8 #5BFFA055 glow, 38×22 with knob inset 3.
 // Off state mirrors fcMl6 (Switch/Unchecked): fill + stroke = --border-strong
 // (14% white dark / 14% black light) for sufficient contrast against bg-background.
-export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; disabled?: boolean; label?: string }> = ({
+interface ToggleSwitchProps {
+  enabled: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  label?: string;
+  /** `settings` is the dense mint switch the settings rows use; `onboarding` is
+      the larger themed switch the setup cards draw in the identity header's
+      trailing slot — same role, ARIA state, thumb motion and disabled behaviour,
+      different geometry and palette, owned by `onboarding.css` through the
+      managed `--switch-onboarding-*` tokens. */
+  variant?: 'settings' | 'onboarding';
+}
+
+export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
   enabled,
   onClick,
   disabled,
   label,
+  variant = 'settings',
 }) => (
   <button
     type="button"
@@ -168,18 +182,22 @@ export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; dis
     aria-label={label}
     disabled={disabled}
     onClick={onClick}
-    className={clsx(
-      'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-mint/40 disabled:opacity-50',
-      enabled
-        ? 'border-mint/50 bg-mint shadow-glow-xs-mint'
-        : 'border-border-strong bg-border-strong'
-    )}
+    className={variant === 'onboarding'
+      ? 'onboarding-enable-switch'
+      : clsx(
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-mint/40 disabled:opacity-50',
+          enabled
+            ? 'border-mint/50 bg-mint shadow-glow-xs-mint'
+            : 'border-border-strong bg-border-strong'
+        )}
   >
     <span
-      className={clsx(
-        'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
-        enabled ? 'translate-x-[18px]' : 'translate-x-1'
-      )}
+      className={variant === 'onboarding'
+        ? undefined
+        : clsx(
+            'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
+            enabled ? 'translate-x-[18px]' : 'translate-x-1'
+          )}
     />
   </button>
 );

@@ -35,12 +35,6 @@
   /* The enable switch the connection puts in the role's slot: a 42x24 track with
      a 2px border and a 16px thumb, drawn per theme by the reference (eq9QT) —
      dark keeps a lit border on the on-state, light keeps none. */
-  --ob-switch-off: #1a1a26;
-  --ob-switch-off-border: #ffffff24;
-  --ob-switch-on: #5bffa0;
-  --ob-switch-on-border: #5bffa057;
-  --ob-switch-thumb: #9ba3b8;
-  --ob-switch-thumb-on: #080812;
   --ob-notice-fg: #d0ddd6;
   --ob-notice-link: #3fe0e5;
   --ob-idle-dot: #4c5060;
@@ -157,12 +151,6 @@
     --ob-active-border: #10b981;
     --ob-active-shadow: var(--shadow-glow-onboarding-mint);
     --ob-divider: #08081214;
-    --ob-switch-off: #d7dce5;
-    --ob-switch-off-border: #00000000;
-    --ob-switch-on: #10b981;
-    --ob-switch-on-border: #00000000;
-    --ob-switch-thumb: #ffffff;
-    --ob-switch-thumb-on: #ffffff;
     --ob-notice-fg: #435f52;
     --ob-notice-link: #0e7490;
     --ob-idle-dot: #5c6079;
@@ -197,12 +185,6 @@
   --ob-active-border: #10b981;
   --ob-active-shadow: var(--shadow-glow-onboarding-mint);
   --ob-divider: #08081214;
-  --ob-switch-off: #d7dce5;
-  --ob-switch-off-border: #00000000;
-  --ob-switch-on: #10b981;
-  --ob-switch-on-border: #00000000;
-  --ob-switch-thumb: #ffffff;
-  --ob-switch-thumb-on: #ffffff;
   --ob-notice-fg: #435f52;
   --ob-notice-link: #0e7490;
   --ob-idle-dot: #5c6079;
@@ -606,9 +588,9 @@
   width: 42px;
   height: 24px;
   padding: 2px;
-  border: 2px solid var(--ob-switch-off-border);
+  border: 2px solid var(--switch-onboarding-border-off);
   border-radius: 999px;
-  background: var(--ob-switch-off);
+  background: var(--switch-onboarding-track-off);
   cursor: pointer;
   transition: background-color 0.18s, border-color 0.18s;
 }
@@ -623,15 +605,15 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--ob-switch-thumb);
+  background: var(--switch-onboarding-thumb-off);
   transition: transform 0.18s, background-color 0.18s;
 }
 .onboarding-enable-switch[aria-checked="true"] {
-  background: var(--ob-switch-on);
-  border-color: var(--ob-switch-on-border);
+  background: var(--switch-onboarding-track-on);
+  border-color: var(--switch-onboarding-border-on);
 }
 .onboarding-enable-switch[aria-checked="true"] > span {
-  background: var(--ob-switch-thumb-on);
+  background: var(--switch-onboarding-thumb-on);
   transform: translateX(18px);
 }
 .onboarding-enable-switch:focus-visible { outline: 2px solid var(--mint); outline-offset: 4px; }
