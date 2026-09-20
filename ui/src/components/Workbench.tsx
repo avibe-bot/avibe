@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { Bot, ChevronDown, Clock, FolderOpen, Smartphone } from 'lucide-react';
+import { Activity, Bot, FolderPlus, Smartphone, Sparkles } from 'lucide-react';
 
 import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 import { useNewSession } from '../lib/useNewSession';
@@ -11,12 +11,15 @@ import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
 import { ReadyBanner } from './workbench/ReadyBanner';
 import { shouldShowReadyBanner, useBackendReadiness, useSetupHandoff } from './workbench/backendReadiness';
-import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../lib/sessionInfo';
-import logoImg from '../assets/logo.png';
 import { CreateViaChatDialog } from './workbench/CreateViaChatDialog';
-import { Button } from './ui/button';
+
+// The pill treatment the approved home puts under the heading. Disabled styling
+// is this home's own: the reference never shows a send in flight, but a pill
+// that stays lit while it is inert would be lying.
+const SUGGESTION_PILL_CLASS = 'group flex items-center gap-2 rounded-full border border-border-strong bg-surface px-3 py-2 text-[12px] text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50';
+const SUGGESTION_ICON_CLASS = 'size-3.5 text-muted group-hover:text-mint-ink';
 
 // The home owns one unsent draft. Files and voice stay in its Composer until
 // explicit Send binds the selected project/Agent and commits the first message.
@@ -38,7 +41,6 @@ export const Workbench: React.FC = () => {
     errorText: t,
   });
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
 
   // The wizard hands `{ onboardingCompleted: true }` to this route. That is an
@@ -92,132 +94,107 @@ export const Workbench: React.FC = () => {
 
   if (!capabilities.can_chat) return <Navigate to="/projects" replace />;
 
-  const workspaceLabel = ns.target?.display_name ?? t('workbench.home.chooseWorkspace');
-  const workspaceChipClass = 'flex h-7 min-w-0 max-w-full sm:max-w-[220px] items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50';
-  const workspaceChipBody = (
-    <>
-      <span className="min-w-0 truncate">{workspaceLabel}</span>
-      <ChevronDown className="size-3 shrink-0" />
-    </>
-  );
-  // One affordance, two contents by capability. Opening folders is how a
-  // workspace is chosen (design: the chip opens the directory browser directly,
-  // with no menu in between); someone who cannot open folders still has to be
-  // able to pick among the projects they already have, so the same chip lists
-  // them instead of becoming a control that does nothing.
-  const workspaceChip = canCreateProject ? (
-    <button
-      type="button"
-      onClick={() => setNewProjectOpen(true)}
-      disabled={ns.sending}
-      title={ns.target?.folder_path}
-      aria-label={ns.target ? t('workbench.home.workspaceAria', { path: ns.target.folder_path }) : t('workbench.home.chooseWorkspace')}
-      className={workspaceChipClass}
-    >
-      {workspaceChipBody}
-    </button>
-  ) : (
-    <Popover open={workspaceMenuOpen} onOpenChange={setWorkspaceMenuOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          disabled={ns.sending || ns.projects.length === 0}
-          title={ns.target?.folder_path}
-          aria-label={ns.target ? t('workbench.home.workspaceAria', { path: ns.target.folder_path }) : t('workbench.home.chooseWorkspace')}
-          className={workspaceChipClass}
-        >
-          {workspaceChipBody}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-[320px] p-2">
-        <ProjectPicker
-          projects={ns.projects}
-          targetId={ns.target?.id}
-          onSelect={(id) => {
-            ns.setSelected(id);
-            setWorkspaceMenuOpen(false);
-          }}
-          onNewProject={() => setNewProjectOpen(true)}
-          disabled={ns.sending}
-        />
-      </PopoverContent>
-    </Popover>
-  );
-
   return (
-    // Desktop: the discovery block is centred in whatever height is left and the
-    // composer sits at the bottom (design rhythm — not a fixed block plus a fixed
-    // gap). Mobile DOESN'T get the tall centred column: it fights the iOS
-    // keyboard. There the block flows from the top and the composer pins itself
-    // to the bottom of the scroll area instead (see below).
-    //
-    // The column is fluid. 856 in the source is what a 1200 staging window minus
-    // the 248 sidebar and its padding happens to leave — no max width is
-    // expressed anywhere in the design, so none is imposed here.
-    <div className="flex w-full flex-col gap-6 md:min-h-[calc(100dvh-4rem)]">
+    // Desktop centres the card and the input column as one group. Mobile
+    // DOESN'T get the tall centred container: it fights the iOS keyboard
+    // (focusing the composer leaves a big gap / pushes it off-screen).
+    // Top-aligned normal flow lets iOS scroll the focused composer into view
+    // above the keyboard the way it does for any in-flow input, and the shell
+    // already keeps the tab bar clear of the bottom of this page.
+    <div className="flex w-full flex-col items-center gap-5 md:min-h-[calc(100dvh-7rem)] md:justify-center">
       {showReadyBanner && currentBackend && (
-        <ReadyBanner backend={currentBackend} onDismiss={dismissReadyBanner} />
+        <div className="w-full max-w-[640px]">
+          <ReadyBanner backend={currentBackend} onDismiss={dismissReadyBanner} />
+        </div>
       )}
 
-      <div className="flex flex-col items-center justify-center gap-6 py-6 md:flex-1 md:py-0">
-        <div className="flex flex-col items-center gap-4 text-center">
-          <img src={logoImg} alt="" aria-hidden="true" className="h-12 w-16 object-contain" />
-          <h1 className="text-[clamp(22px,4vw,30px)] font-semibold text-foreground">{t('workbench.home.heroTitle')}</h1>
-          <p className="max-w-[520px] text-[14px] leading-[1.5] text-muted">{t('workbench.home.heroBody')}</p>
+      {/* Welcome card — a centred bounded panel, not a full-bleed fill. */}
+      <div className="flex w-full max-w-[640px] flex-col items-center gap-6 rounded-2xl border border-border bg-surface-2 px-6 py-10">
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/40 bg-mint-soft text-mint-ink shadow-glow-md-mint">
+          <Sparkles className="size-6" />
         </div>
-
+        <div className="flex max-w-[520px] flex-col items-center gap-3 text-center">
+          <h1 className="text-[22px] font-semibold text-foreground">{t('workbench.home.heroTitle')}</h1>
+          <p className="text-[13px] leading-[1.55] text-muted">{t('workbench.home.heroBody')}</p>
+        </div>
+        {/* Three first moves. Each one keeps the owner this home already has:
+            the directory browser, the Agents route and the background-task
+            dialog — the pills restore the look, not an older destination. */}
         <div className="flex flex-wrap items-center justify-center gap-2">
-          <Button variant="outline" size="sm" disabled={ns.sending}
-            onClick={() => canCreateProject ? setNewProjectOpen(true) : setWorkspaceMenuOpen(true)}>
-            <FolderOpen className="size-4" />{t('workbench.home.openProject')}
-          </Button>
-          {capabilities.can_manage_agents && (
-            <Button variant="outline" size="sm" asChild>
-              <Link to="/agents"><Bot className="size-4" />{t('workbench.home.manageAgents')}</Link>
-            </Button>
+          {canCreateProject && (
+            <button
+              type="button"
+              onClick={() => setNewProjectOpen(true)}
+              disabled={ns.sending}
+              className={SUGGESTION_PILL_CLASS}
+            >
+              <FolderPlus className={SUGGESTION_ICON_CLASS} />
+              <span>{t('workbench.home.openProject')}</span>
+            </button>
           )}
-          <Button variant="outline" size="sm" disabled={ns.sending} onClick={() => setNewTaskOpen(true)}>
-            <Clock className="size-4" />{t('workbench.home.createTask')}
-          </Button>
+          {capabilities.can_manage_agents && (
+            // A route, so it still opens in a new tab on middle-click.
+            <Link to="/agents" className={SUGGESTION_PILL_CLASS}>
+              <Bot className={SUGGESTION_ICON_CLASS} />
+              <span>{t('workbench.home.manageAgents')}</span>
+            </Link>
+          )}
+          <button
+            type="button"
+            onClick={() => setNewTaskOpen(true)}
+            disabled={ns.sending}
+            className={SUGGESTION_PILL_CLASS}
+          >
+            <Activity className={SUGGESTION_ICON_CLASS} />
+            <span>{t('workbench.home.createTask')}</span>
+          </button>
         </div>
       </div>
 
-      {/* Keep the action row above the mobile tab bar while the content scrolls. */}
-      <div className="flex flex-col gap-4 pb-2 max-md:sticky max-md:bottom-[var(--mobile-nav-clearance)] max-md:z-10 max-md:bg-background max-md:pt-3">
-        {/* A card that scrolls behind an opaque block reads as cut in half. The
-            short fade above it says "passing behind", which is what happens. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 -top-4 h-4 bg-gradient-to-t from-background to-transparent md:hidden"
-        />
+      {/* Input — the project chips and the Agent picker stand above the shared
+          Composer, so where the session lands and which Agent runs it are both
+          visible before anything is typed. */}
+      <div className="flex w-full max-w-[640px] flex-col gap-3">
+        {ns.projects.length > 0 && (
+          <ProjectPicker
+            projects={ns.projects}
+            targetId={ns.target?.id}
+            onSelect={ns.setSelected}
+            onNewProject={() => setNewProjectOpen(true)}
+            disabled={ns.sending}
+          />
+        )}
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-muted">{t('newSession.agent')}</div>
+          <AgentRoutePicker
+            value={ns.agentRoute}
+            agents={ns.agents}
+            onChange={ns.setAgentRoute}
+            defaultLabel={ns.effectiveDefaultAgentName
+              ? t('newSession.defaultAgentNamed', { name: ns.effectiveDefaultAgentName })
+              : t('newSession.defaultAgent')}
+            disabled={ns.sending}
+            align="start"
+            // Fill the column on mobile (≈ full screen); on desktop hug content
+            // and cap at 62% so it reads like the compact Chat-header picker
+            // instead of a full-width 640px bar. self-start defeats the flex-col
+            // stretch that would otherwise force the trigger to the column width.
+            triggerClassName="max-w-full sm:max-w-[62%] sm:self-start"
+          />
+        </div>
         <Composer
           stageMedia
           onSend={send}
           placeholder={t('workbench.home.inputPlaceholder')}
           disabled={ns.sending || !ns.loaded}
           sendDisabled={Boolean(ns.uncertainSessionId)}
-          actions={
-            <>
-              <AgentRoutePicker
-                value={ns.agentRoute}
-                agents={ns.agents}
-                onChange={ns.setAgentRoute}
-                defaultLabel={ns.effectiveDefaultAgentName
-                  ? t('newSession.defaultAgentNamed', { name: ns.effectiveDefaultAgentName })
-                  : t('newSession.defaultAgent')}
-                disabled={ns.sending}
-                align="start"
-                triggerClassName="h-7 min-w-0 max-w-full sm:max-w-[240px] rounded-md border-transparent bg-transparent px-2 py-0 hover:bg-foreground/[0.06]"
-              />
-              {workspaceChip}
-            </>
-          }
+          className="max-w-[640px]"
         />
         {ns.needsProject && (
           <div className="px-2 text-[10.5px] text-gold-ink">{t('workbench.home.noProjectForChat')}</div>
         )}
         {ns.error && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
+          <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {ns.error}
             {ns.uncertainSessionId && (
               <Link className="ml-2 underline underline-offset-2" target="_blank" rel="noopener noreferrer"
