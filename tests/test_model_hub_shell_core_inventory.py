@@ -419,6 +419,30 @@ CASES = [
     case("complete-source", "validation-function-not-code", """complete -F 'OPENAI_API_KEY=new' fixture""", False),
     case("compgen-target", "validation-unknown-no-invented-target", """compgen -V "$ARRAY" -W fixture""", False),
     case("compgen-target", "validation-literal-target-code-format", """compgen -V OPENAI_API_KEY -F "$FUNCTION" """, True),
+    *[
+        case("eval-source", f"envelope-{path}-{index}", line, writer, path=path)
+        for path in (".bashrc", ".zshrc")
+        for index, (line, writer) in enumerate((
+            ("eval '-Q; read OPENAI_API_KEY'", path == ".zshrc"),
+            ("eval '--; read OPENAI_API_KEY'", path == ".zshrc"),
+            ("eval '-Q; echo OPENAI_API_KEY'", False),
+            ("eval '--; echo OPENAI_API_KEY'", False),
+            ("eval -Q 'read OPENAI_API_KEY'", False),
+            ("eval -- '-Q; read OPENAI_API_KEY'", True),
+            ("eval -- '--; read OPENAI_API_KEY'", True),
+            ("eval -- -- 'read OPENAI_API_KEY'", False),
+            ("eval '--' 'read OPENAI_API_KEY'", True),
+            ("eval -- -- '; read OPENAI_API_KEY'", True),
+            ("eval -- -- '; echo OPENAI_API_KEY'", False),
+            ("eval '-Q;' 'read OPENAI_API_KEY'", path == ".zshrc"),
+            ('eval "$FLAGS" "read OPENAI_API_KEY"', True),
+            ('eval "-$FLAGS" "read OPENAI_API_KEY"', True),
+            ('eval "$FLAGS" "echo OPENAI_API_KEY"', False),
+            ('eval -- "$FLAGS" "read OPENAI_API_KEY"', False),
+            ("""eval '-$FLAGS' 'read OPENAI_API_KEY'""", False),
+            ('eval "-Q$FLAGS" "read OPENAI_API_KEY"', False),
+        ))
+    ],
 ]
 
 
@@ -477,7 +501,8 @@ def test_core_independent_backend(home, tmp_path, line):
 
 @pytest.mark.parametrize("depth", [16, 100, 1100])
 @pytest.mark.parametrize("writer", [True, False])
-def test_written_code_work_is_linear_in_context_count(monkeypatch, depth, writer):
+@pytest.mark.parametrize("dialect", ["bash", "zsh"])
+def test_written_code_work_is_linear_in_context_count(monkeypatch, depth, writer, dialect):
     original = shell._WrittenCode.visit
     calls = 0
 
@@ -489,7 +514,7 @@ def test_written_code_work_is_linear_in_context_count(monkeypatch, depth, writer
 
     monkeypatch.setattr(shell._WrittenCode, "visit", counted)
     text = "eval " * depth + ("read" if writer else "echo") + " OPENAI_API_KEY"
-    assert shell._written_names(text, frozenset({KEY})) == ({KEY} if writer else set())
+    assert shell._written_names(text, frozenset({KEY}), dialect=dialect) == ({KEY} if writer else set())
 
 
 @pytest.mark.parametrize("writer", [True, False])

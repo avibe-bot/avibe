@@ -1198,8 +1198,19 @@ def _builtin_writers(words: list[_Token], analysis: _WrittenCode, dialect: str) 
     elif command == "let":
         found.update(_arithmetic_writers(" ".join(arg.value for arg in arguments), names))
     elif command == "eval":
-        for _, operands in _option_cases(arguments):
-            analysis.add("source", " ".join(arg.value for arg in operands), dialect)
+        if dialect == "zsh":
+            # execbuiltin has no option alphabet for eval: it strips only
+            # one initial --, then bin_eval joins the remaining written source.
+            if arguments and arguments[0].value == "--":
+                arguments = arguments[1:]
+            elif arguments and not arguments[0].literal and re.match(r"-{0,2}[$`~{*?\[]", arguments[0].value):
+                # An unknown initial word could supply that single --.
+                # Keep both written-source possibilities without expanding it.
+                analysis.add("source", " ".join(arg.value for arg in arguments[1:]), dialect)
+            analysis.add("source", " ".join(arg.value for arg in arguments), dialect)
+        else:
+            for _, operands in _option_cases(arguments):
+                analysis.add("source", " ".join(arg.value for arg in operands), dialect)
     elif command == "trap":
         _trap_writers(arguments, analysis, dialect)
     elif command == "fc":

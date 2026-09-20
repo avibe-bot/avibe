@@ -289,6 +289,12 @@ The pre-existing shell and writer-role suites remain additional coverage.
   changes Zsh options, not its builtin table: every recognized written `-c`
   body keeps Zsh roles, including with sh/ksh/csh/unknown/dynamic mode names.
   No compatibility-option state or host environment is inferred.
+- Zsh `eval` has a NULL option alphabet in `Src/builtin.c`: `execbuiltin`
+  removes only one initial standalone `--`, then `bin_eval` joins written
+  source. Other dash-leading text is not an invalid option. An unknown initial
+  word can supply that one boundary, but it does not enable letter options.
+  Tests distinguish Bash invalid options, Zsh command/data text, split source,
+  quoted/unknown boundaries, and a second `--` that must remain source.
 - The worklist keys dialect, role and written source/argv. It has no recursion
   cutoff. Tests bound visited contexts for 1100 nested evals and 200 duplicate
   callbacks; both the related writer and echo/data controls run. Option tests
