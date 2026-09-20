@@ -885,6 +885,14 @@ export const ChatPage: React.FC = () => {
   // navigation away and back to the same session, so the session id alone is
   // not enough to keep an older request from clearing a newer spinner.
   const queueSendGenerationRef = useRef(0);
+  // Queue reads can overlap independently of send-now (for example, a
+  // queue.updated event can start a newer read while the post-send refresh is
+  // still in flight). Only a read that is not older than the latest committed
+  // read may replace the visible queue, so an older response cannot resurrect
+  // rows that a newer snapshot already observed as gone or hide newly queued
+  // rows.
+  const queueReadGenerationRef = useRef(0);
+  const committedQueueReadGenerationRef = useRef(0);
   const [initialDraft, setInitialDraft] = useState<string | null>(null);
   const draftTimerRef = useRef<number | null>(null);
   // The debounced draft save still owed to the server, tagged with the session
@@ -1261,10 +1269,13 @@ export const ChatPage: React.FC = () => {
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return;
+    const generation = ++queueReadGenerationRef.current;
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
       if (isCurrentRequest && !isCurrentRequest()) return;
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
+      if (generation < committedQueueReadGenerationRef.current) return;
+      committedQueueReadGenerationRef.current = generation;
       setQueue(res.queued ?? []);
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
