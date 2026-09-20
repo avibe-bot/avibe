@@ -359,7 +359,7 @@ by label so it fails on the history, not on the element type. Unit scope adds th
 root and holds internal back destinations to links. Re-validated: the six browser cases on the built app, the five
 affected unit files (91), the browser suite's `typecheck`, `lint` on the changed files, and `build`.
 
-## Review round 3 repair — queue refresh commit ordering
+## Review round 3 repair — queue snapshot commit ordering
 
 One finding exposed a race between overlapping authoritative queue reads. A
 post-send refresh could start before a newly queued row was inserted, while a
@@ -367,14 +367,23 @@ later `queue.updated` refresh started after it; if the later snapshot resolved
 first, the older response could still pass the send-now predicate and overwrite
 the visible queue, hiding the new row and its Recall/Remove controls.
 
-The existing session and send-now ownership guards remain unchanged. The shared
-`refreshQueue` path now assigns every read a monotonic generation and commits a
-successful response only when it is not older than the latest committed read.
-This is a read-ordering repair, not a queue ownership or server-claim change.
-`ChatPage.hydration.test.tsx` covers the class by resolving the newer snapshot
-first and proving that the late older response cannot replace it. Re-validated
-locally: the focused Vitest scope (94 tests), UI lint, test typechecks, and
-production build.
+The existing session and send-now ownership guards remain unchanged. The peer
+repair at `7450fd669` made the shared `refreshQueue` path assign every read a
+monotonic generation and commit a successful response only when it is not older
+than the latest committed read. This continuation puts the bootstrap queue
+snapshot through that same issued/committed sequence, so initial and
+authorization bootstrap cannot overwrite a newer ordinary refresh. Failed reads
+still do not advance the committed generation, preserving a valid older
+successful fallback. This is a read-ordering repair, not a queue ownership or
+server-claim change.
+
+`ChatPage.hydration.test.tsx` covers the peer reverse-resolution case, both
+bootstrap/refresh directions through the real `ChatPage` consumer, and the
+newer-read failure fallback; the queue row consumer remains covered by its
+existing tests. The continuation candidate passed 97 focused tests (hydration
+and queue-row consumers), UI test typechecks, the UI lint baseline, and the
+production build. The existing project-order suite also passed once with
+`retries: 0` (16 passed, 2 declared skips); no drag source or test was changed.
 
 ## Producer integration — what the end-to-end run found
 
