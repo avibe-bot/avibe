@@ -462,6 +462,12 @@ export type MigrationItem = {
   /** The already-masked credential that also appears inside `masked_detail`,
    *  carried separately so provider and key can render as two elements. */
   masked_credential?: string | null;
+  /** Display-safe persisted source file locators, never credential content.
+   *  Older servers omit this metadata. */
+  source_paths?: string[];
+  /** Server-computed transitive closure of backends sharing persisted shell
+   *  assignments. They must migrate together. Missing/empty means this backend. */
+  required_backends?: AgentBackend[];
 };
 
 export type MigrationScan = { items: MigrationItem[] };

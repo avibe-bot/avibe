@@ -1600,15 +1600,23 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "After migration, CLI authentication will be fully managed by Model Hub.",
+        "subtitle": "Import authentication saved in configuration files or supported credential stores. Credentials injected into running CLIs are not imported. After migration, CLI authentication will be fully managed by Model Hub.",
         "empty": "No configuration found to migrate.",
+        "sharedFiles": "These backends share authentication saved in files and must migrate together: {{backends}}. Changing one selection updates the others.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Migration failed, please retry",
         "blocked": {
-          "config": "Adjust this CLI's configuration, then scan again.",
-          "environment": "Remove this CLI’s environment-based credentials, then retry.",
-          "credential": "Allow credential access, then retry.",
-          "fallback": "Use the existing Add flow for this CLI, then scan again."
+          "config": "Check this CLI's saved configuration, then scan again.",
+          "environment": "This environment-based authentication cannot be imported. Save the key in a supported configuration file, then scan again.",
+          "credential": "This credential could not be read or is not supported. Check credential access and the saved authentication format, then scan again.",
+          "dynamic_shell": "This file uses expressions or commands that cannot be safely read. Save the required authentication as literal values in a supported configuration file, then scan again. Migration never executes shell code.",
+          "ambiguous_shell": "Conflicting saved assignments were found. Resolve the assignments in the listed files to an unambiguous literal value, then scan again.",
+          "unreadable": "This source file could not be read. Check that it exists and that Avibe has read access, then scan again.",
+          "reference": "A referenced variable has no unambiguous saved literal value. Configure and save the corresponding key in the listed configuration or shell startup file, then scan again.",
+          "helper": "Credentials supplied by a command cannot be imported. Save them in a supported static configuration or add the source manually in Model Hub.",
+          "token": "This token's authentication form is not supported for migration. Use a supported authentication method or add the source manually in Model Hub.",
+          "headers": "Custom credential headers cannot be imported. Use a supported authentication method or add the source manually in Model Hub.",
+          "fallback": "This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually."
         },
         "applying": "Migrating…",
         "errors": {
