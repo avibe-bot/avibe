@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.reply_enhancer import strip_silent_blocks
 from modules.agents.codex import search_history
 from modules.agents.codex.event_handler import (
     _MAX_CITATION_SOURCES_PER_THREAD,
@@ -46,6 +47,19 @@ PROBE_URL = "https://example.com/citation-probe-source"
 
 def marker(*ref_ids: str) -> str:
     return f"{START}cite{SEP}{SEP.join(ref_ids)}{END}"
+
+
+def cached_sources(handler, thread_id: str) -> dict:
+    """The sources one thread's cache entry currently holds.
+
+    Reads the handler's own bookkeeping, which carries a thread's readiness
+    alongside its sources, so a test about the bound does not have to know which
+    of the two it is looking at.
+    """
+    entry = handler._search_sources_by_thread.get(thread_id)
+    if entry is None:
+        return {}
+    return dict(getattr(entry, "sources", entry))
 
 
 class IsolatedCodexHome:
@@ -85,6 +99,30 @@ class IsolatedCodexHome:
             },
         }
 
+    def recorded_extension_search(
+        self, *results: dict, owner: str, turn: str = "turn-0"
+    ) -> dict:
+        """The same row as the shipped binary writes it today.
+
+        The native search tool lives in an extension namespace now, so a current
+        rollout records its completed item as ``Extension`` carrying ``kind:
+        "web.search"`` rather than naming the item ``WebSearch``. Both forms are
+        in the local corpus (1023 old-form rows with results against 267 new-form
+        ones), and every row codex-cli 0.154.0 writes is this one - captured from
+        an isolated native turn against a loopback provider, not invented here.
+        """
+        row = self.recorded_search(*results, owner=owner, turn=turn)
+        item = row["payload"]["item"]
+        row["payload"]["item"] = {
+            "type": "Extension",
+            "kind": "web.search",
+            "id": item["id"],
+            "query": item["query"],
+            "action": item["action"],
+            "results": item["results"],
+        }
+        return row
+
     def record_history(
         self,
         home: Path,
@@ -115,8 +153,10 @@ class IsolatedCodexHome:
         connection.close()
 
     def web_result(self, ref_id: str, url: str, title: str = "T") -> dict:
+        """One ``results[]`` entry, keeping the fields the native tool sends."""
         return {
-            "type": "web",
+            "type": "text_result",
+            "thumbnail_url": "https://images.example.com/thumb.png",
             "domain": "example.com",
             "ref_id": ref_id,
             "snippet": "snippet",
@@ -164,7 +204,7 @@ class CodexCitationCaptureTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         self.handler = CodexEventHandler(_StubAgent())
 
     def sources(self, thread_id: str) -> dict:
-        return dict(self.handler._search_sources_by_thread.get(thread_id) or {})
+        return cached_sources(self.handler, thread_id)
 
     def test_a_completed_search_is_stored_under_its_thread(self):
         params = web_search(
@@ -448,6 +488,38 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
             [{"index": 1, "ref_id": "turn0view1", "title": "中文標題", "url": PROBE_URL, "label": "example.com"}],
         )
 
+    async def test_a_hidden_block_neither_numbers_nor_leaks_its_source(self):
+        """``<silent>`` content is removed downstream, so it may not be attributed.
+
+        Numbering a hidden marker would open the reader's sidecar at index 2 and
+        describe a badge whose link was stripped with the block.
+        """
+        await self.handler._on_item_completed(
+            web_search(
+                "thread-a",
+                {"ref_id": "turn0view0", "title": "T", "url": GUIDE_URL},
+                {"ref_id": "turn0view1", "title": "T", "url": PROBE_URL},
+            ),
+            self.request,
+        )
+        await self.handler._on_item_completed(
+            agent_message(
+                "thread-a",
+                f"<silent>internal{marker('turn0view0')}</silent>"
+                f"Visible.{marker('turn0view1')}",
+            ),
+            self.request,
+        )
+        await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
+
+        call = self.result_call()
+        self.assertEqual(
+            [(c["index"], c["url"]) for c in call.kwargs["citations"]], [(1, PROBE_URL)]
+        )
+        self.assertEqual(
+            strip_silent_blocks(call.args[1]), f"Visible. [example.com]({PROBE_URL})"
+        )
+
     async def test_the_unresolved_label_is_localized(self):
         self.agent.controller._t = lambda key: "（来源不可用）" if key == "message.citationUnresolved" else key
 
@@ -466,6 +538,190 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         call = self.result_call()
         self.assertIsNone(call.args[1])
         self.assertIsNone(call.kwargs["citations"])
+
+
+class CodexCitationReadinessTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestCase):
+    """When a narration message that cites something may be delivered.
+
+    A search and the answer that cites it are two notifications, and nothing in
+    the transport promises the search arrives first. An intermediate message is
+    therefore held while a ref it names has no source yet - and only then. The
+    hold ends at the first terminal boundary the turn reaches, so it is bounded
+    by the turn rather than by a guess about ordering; it never reorders the
+    narration around it, and a message that cites nothing is never delayed by
+    anything except messages already ahead of it.
+    """
+
+    def setUp(self):
+        self.isolate_codex_home()
+        self.agent = _StubAgent()
+        self.handler = CodexEventHandler(self.agent)
+        self.request = _request()
+        self.agent._turn_registry.register_turn("turn-1", self.request)
+        self.emitted = self.agent.controller.emit_agent_message
+        # One list for both surfaces: several cases below are about the order a
+        # reader sees, which per-mock await lists cannot express.
+        self.delivered: list[str] = []
+        self.emitted.side_effect = lambda *a, **k: self.delivered.append(a[2])
+        self.agent.emit_result_message.side_effect = lambda *a, **k: self.delivered.append(a[1])
+
+    async def item(self, params: dict) -> None:
+        await self.handler._on_item_completed(params, self.request)
+
+    def guide_search(self, ref_id: str = "turn0view0") -> dict:
+        return web_search("thread-a", {"ref_id": ref_id, "title": "T", "url": GUIDE_URL})
+
+    async def test_a_cited_narration_waits_for_the_search_that_defines_it(self):
+        """Review C's sequence: the citing message is flushed before the search."""
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn0view0')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        self.assertEqual(self.delivered, [])
+
+        await self.item(self.guide_search())
+
+        self.assertEqual(self.delivered, [f"Progress. [developers.openai.com]({GUIDE_URL})"])
+        self.assertEqual([c["url"] for c in self.emitted.await_args.kwargs["citations"]], [GUIDE_URL])
+
+        await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
+
+        self.assertEqual(self.delivered[-1], "Final answer.")
+
+    async def test_a_held_narration_is_delivered_when_the_turn_completes(self):
+        """The wait is bounded by the turn: a ref that never arrives still ships."""
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn9view9')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+        self.assertEqual(self.delivered, [])
+
+        await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
+
+        self.assertEqual(self.delivered, [f"Progress. {UNRESOLVED}", "Final answer."])
+
+    async def test_an_interrupted_turn_still_delivers_what_it_narrated(self):
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn9view9')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        await self.handler._on_turn_completed(
+            {"threadId": "thread-a", "turn": {"id": "turn-1", "status": "interrupted"}},
+            self.request,
+        )
+
+        self.assertEqual(self.delivered, [f"Progress. {UNRESOLVED}"])
+
+    async def test_a_failed_turn_delivers_its_narration_before_the_error(self):
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn9view9')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        await self.handler._on_turn_completed(
+            {
+                "threadId": "thread-a",
+                "turn": {"id": "turn-1", "status": "failed", "error": {"message": "boom"}},
+            },
+            self.request,
+        )
+
+        self.assertEqual(self.delivered[0], f"Progress. {UNRESOLVED}")
+
+    async def test_a_terminal_error_delivers_the_held_narration(self):
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn9view9')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        await self.handler._on_error({"turnId": "turn-1", "error": {"message": "boom"}}, self.request)
+
+        self.assertEqual(self.delivered[0], f"Progress. {UNRESOLVED}")
+
+    async def test_a_retried_error_is_not_a_boundary(self):
+        """``willRetry`` means the turn is still running, so nothing settles."""
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn0view0')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        await self.handler._on_error(
+            {"turnId": "turn-1", "willRetry": True, "error": {"message": "transient"}},
+            self.request,
+        )
+        self.assertEqual(self.delivered, [])
+
+        await self.item(self.guide_search())
+
+        self.assertEqual(self.delivered, [f"Progress. [developers.openai.com]({GUIDE_URL})"])
+
+    async def test_a_superseded_turn_settles_without_speaking(self):
+        """A hidden turn's queue is discarded, exactly as its result candidate is."""
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn9view9')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        self.handler.clear_pending("turn-1")
+        await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
+
+        self.assertEqual(self.delivered, [])
+
+    async def test_an_uncited_narration_is_never_delayed(self):
+        await self.item(agent_message("thread-a", "Progress."))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        self.assertEqual(self.delivered, ["Progress."])
+        self.emitted.assert_awaited_once_with(
+            self.request.context, "assistant", "Progress.", parse_mode="markdown"
+        )
+
+    async def test_a_resolvable_citation_is_not_delayed_either(self):
+        await self.item(self.guide_search())
+        await self.item(agent_message("thread-a", f"Progress.{marker('turn0view0')}"))
+        await self.item(agent_message("thread-a", "Final answer."))
+
+        self.assertEqual(self.delivered, [f"Progress. [developers.openai.com]({GUIDE_URL})"])
+
+    async def test_nothing_overtakes_a_held_narration(self):
+        """Holding one message must not let the messages behind it change places."""
+        self.agent._get_formatter = lambda context: SimpleNamespace(
+            format_toolcall=lambda name, payload: f"[{name}]"
+        )
+        await self.item(agent_message("thread-a", f"First.{marker('turn0view0')}"))
+        await self.item(agent_message("thread-a", "Second."))
+        await self.item(
+            {
+                "threadId": "thread-a",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "commandExecution",
+                    "command": "ls",
+                    "status": "completed",
+                    "exitCode": 0,
+                    "aggregatedOutput": "",
+                },
+            }
+        )
+        await self.item(agent_message("thread-a", "Third."))
+
+        self.assertEqual(self.delivered, [])
+
+        await self.item(self.guide_search())
+
+        self.assertEqual(
+            self.delivered,
+            [f"First. [developers.openai.com]({GUIDE_URL})", "[bash]", "Second."],
+        )
+
+    async def test_a_second_held_message_resolves_against_its_own_ref(self):
+        """The queue drains as far as it can, and stops at the first unready entry."""
+        await self.item(agent_message("thread-a", f"First.{marker('turn0view0')}"))
+        await self.item(agent_message("thread-a", f"Second.{marker('turn0view1')}"))
+        await self.item(agent_message("thread-a", "Third."))
+
+        await self.item(
+            web_search("thread-a", {"ref_id": "turn0view1", "title": "T", "url": PROBE_URL})
+        )
+        self.assertEqual(self.delivered, [])
+
+        await self.item(self.guide_search())
+
+        self.assertEqual(
+            self.delivered,
+            [
+                f"First. [developers.openai.com]({GUIDE_URL})",
+                f"Second. [example.com]({PROBE_URL})",
+            ],
+        )
 
 
 class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestCase):
@@ -498,6 +754,14 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         self.agent.emit_result_message.assert_awaited()
         return self.agent.emit_result_message.await_args
 
+    async def next_answer(self, thread_id: str, text: str):
+        """A later Avibe turn in the same conversation, with its own request."""
+        self._turns = getattr(self, "_turns", 1) + 1
+        turn_id = f"turn-{self._turns}"
+        request = _request(f"session-{self._turns}")
+        self.agent._turn_registry.register_turn(turn_id, request)
+        return await self.answer(thread_id, text, turn_id=turn_id, request=request)
+
     async def test_a_fresh_handler_cites_a_search_it_never_saw(self):
         """The restart case: the notification is gone, the recorded result is not."""
         self.record_history(
@@ -510,6 +774,55 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         self.assertEqual(call.args[1], f"As established. [developers.openai.com]({GUIDE_URL})")
         self.assertEqual([c["url"] for c in call.kwargs["citations"]], [GUIDE_URL])
+
+    async def test_the_history_shape_the_shipped_binary_writes_is_read(self):
+        """The current native rollout names the item ``Extension``/``web.search``.
+
+        Reproduced against the real 0.154.0 app-server: with standalone search
+        active, the recorded ``item_completed`` row carries the extension name
+        and kind, not ``WebSearch``. A reader that only knows the older name
+        recovers nothing from any history this binary writes.
+        """
+        self.record_history(
+            self.home,
+            "thread-a",
+            [
+                self.recorded_extension_search(
+                    self.web_result("turn0search0", PROBE_URL), owner="thread-a"
+                )
+            ],
+        )
+
+        call = await self.answer("thread-a", f"Probed.{marker('turn0search0')}")
+
+        self.assertEqual(call.args[1], f"Probed. [example.com]({PROBE_URL})")
+        self.assertEqual([c["url"] for c in call.kwargs["citations"]], [PROBE_URL])
+
+    async def test_both_recorded_shapes_are_read_from_one_history(self):
+        """A conversation spanning the rename keeps every source it recorded."""
+        self.record_history(
+            self.home,
+            "thread-a",
+            [
+                self.recorded_search(
+                    self.web_result("turn0view0", GUIDE_URL), owner="thread-a"
+                ),
+                self.recorded_extension_search(
+                    self.web_result("turn1search0", PROBE_URL),
+                    owner="thread-a",
+                    turn="turn-1",
+                ),
+            ],
+        )
+
+        call = await self.answer(
+            "thread-a",
+            f"Old.{marker('turn0view0')} New.{marker('turn1search0')}",
+        )
+
+        self.assertEqual(
+            [c["url"] for c in call.kwargs["citations"]], [GUIDE_URL, PROBE_URL]
+        )
 
     async def test_a_fork_cites_the_parent_history_it_carries(self):
         """A fork's file opens with the parent's rows, still under the parent's id."""
@@ -658,17 +971,145 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         self.assertEqual(call.args[1], f"Claimed. {UNRESOLVED}")
         self.assertIsNone(call.kwargs["citations"])
 
-    def test_an_unsafe_thread_id_never_reaches_the_filesystem(self):
-        """The id is interpolated into a lookup and a path, so it is validated first."""
-        for thread_id in ("../../etc/passwd", "a/b", "thread a", "", "thread;drop"):
-            self.assertEqual(
-                search_history.read_thread_search_sources(thread_id, limit=8),
-                [],
-                thread_id,
-            )
+    async def test_a_live_search_does_not_hide_the_recorded_ones(self):
+        """A cache entry says what this process saw, not what the thread contains.
 
-    def test_recovered_sources_are_bounded(self):
-        """A thread with a long search history cannot grow the read without limit."""
+        One live search creates the thread's entry. The refs an earlier answer
+        cited are not in it, and they are the ones a resume or a restart lost -
+        so a live result must not be read as "this thread is fully known".
+        """
+        self.record_history(
+            self.home,
+            "thread-a",
+            [self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")],
+        )
+        live = web_search("thread-a", self.web_result("turn1view0", PROBE_URL))
+        self.handler._record_search_sources(live, live["item"])
+
+        call = await self.answer("thread-a", f"Both.{marker('turn0view0', 'turn1view0')}")
+
+        self.assertEqual(
+            call.args[1],
+            f"Both. [developers.openai.com]({GUIDE_URL}) [example.com]({PROBE_URL})",
+        )
+
+    async def test_the_source_bound_never_discards_the_ref_being_resolved(self):
+        """Bounding the cache may cost a re-read; it may never cost the link."""
+        results = [
+            self.web_result(f"turn0view{i}", f"https://example.com/{i}")
+            for i in range(_MAX_CITATION_SOURCES_PER_THREAD + 1)
+        ]
+        self.record_history(
+            self.home, "thread-a", [self.recorded_search(*results, owner="thread-a")]
+        )
+        live = web_search("thread-a", *results)
+        self.handler._record_search_sources(live, live["item"])
+        self.assertNotIn("turn0view0", cached_sources(self.handler, "thread-a"))
+
+        call = await self.answer("thread-a", f"The oldest one.{marker('turn0view0')}")
+
+        self.assertEqual(call.args[1], "The oldest one. [example.com](https://example.com/0)")
+
+    async def test_an_empty_history_that_later_records_a_search_is_re_read(self):
+        """A history is a growing file, so "not there yet" is not "not there"."""
+        path = self.record_history(self.home, "thread-a", [])
+
+        first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
+        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+
+        with path.open("a", encoding="utf-8") as handle:
+            row = self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")
+            handle.write(f"{json.dumps(row)}\n")
+
+        call = await self.next_answer("thread-a", f"Second.{marker('turn0view0')}")
+
+        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+
+    async def test_a_history_that_appears_later_is_found(self):
+        """Codex indexes the thread when it writes it; a lookup miss is not final."""
+        first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
+        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+
+        self.record_history(
+            self.home,
+            "thread-a",
+            [self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")],
+        )
+
+        call = await self.next_answer("thread-a", f"Second.{marker('turn0view0')}")
+
+        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+
+    @unittest.skipIf(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        "root can read a mode-000 file, so the failure branch cannot be reached",
+    )
+    async def test_an_unreadable_history_is_re_read_once_it_can_be_read(self):
+        """A read that failed learned nothing, so it may not be remembered as absence.
+
+        Restoring the mode changes neither size nor mtime, so nothing about the
+        file itself says to look again: it is the incomplete read that must not
+        settle into negative truth.
+        """
+        path = self.record_history(
+            self.home,
+            "thread-a",
+            [self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")],
+        )
+        path.chmod(0o000)
+        self.addCleanup(path.chmod, 0o600)
+
+        with self.assertLogs(search_history.logger, level="WARNING"):
+            first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
+        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+
+        path.chmod(0o600)
+
+        call = await self.next_answer("thread-a", f"Second.{marker('turn0view0')}")
+
+        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+
+    async def test_a_missing_ref_does_not_rescan_an_unchanged_history(self):
+        """The cost of a ref that is genuinely absent is paid once per history."""
+        self.record_history(
+            self.home,
+            "thread-a",
+            [self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")],
+        )
+        scans: list[bool] = []
+        real = search_history.read_thread_search_sources
+
+        def spy(*args, **kwargs):
+            read = real(*args, **kwargs)
+            scans.append(read.scanned)
+            return read
+
+        with mock.patch.object(codex_event_handler, "read_thread_search_sources", spy):
+            await self.answer("thread-a", f"First.{marker('turn9view9')}")
+            call = await self.next_answer("thread-a", f"Second.{marker('turn9view9')}")
+
+        self.assertEqual(scans, [True, False])
+        self.assertEqual(call.args[1], f"Second. {UNRESOLVED}")
+
+    async def test_the_latest_recorded_definition_of_a_ref_wins(self):
+        """A rollout file may redefine a ref; the newest row is the trustworthy one."""
+        self.record_history(
+            self.home,
+            "thread-a",
+            [
+                self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a"),
+                self.recorded_search(
+                    self.web_result("turn0view0", PROBE_URL), owner="thread-a", turn="turn-1"
+                ),
+            ],
+        )
+
+        call = await self.answer("thread-a", f"Cited.{marker('turn0view0')}")
+
+        self.assertEqual(call.args[1], f"Cited. [example.com]({PROBE_URL})")
+
+    def test_a_read_carries_only_the_refs_it_was_asked_for(self):
+        """The read is directed by the message, which is what bounds it."""
         self.record_history(
             self.home,
             "thread-a",
@@ -683,10 +1124,58 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
             ],
         )
 
-        recovered = search_history.read_thread_search_sources("thread-a", limit=5)
+        read = search_history.read_thread_search_sources("thread-a", wanted={"turn0view3"})
 
-        self.assertEqual([s.ref_id for s in recovered], [f"turn0view{i}" for i in range(15, 20)])
+        self.assertEqual(
+            {ref: source.url for ref, source in read.sources.items()},
+            {"turn0view3": "https://example.com/3"},
+        )
+        self.assertTrue(read.scanned)
+        self.assertTrue(read.complete)
 
+    def test_an_unchanged_history_is_not_scanned_again(self):
+        self.record_history(
+            self.home,
+            "thread-a",
+            [self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")],
+        )
+
+        first = search_history.read_thread_search_sources("thread-a", wanted={"nope"})
+        self.assertTrue(first.scanned)
+        self.assertEqual(first.sources, {})
+
+        again = search_history.read_thread_search_sources(
+            "thread-a", wanted={"nope"}, unchanged=first.fingerprint
+        )
+
+        self.assertFalse(again.scanned)
+        self.assertEqual(again.fingerprint, first.fingerprint)
+
+    def test_a_changed_history_is_scanned_again(self):
+        path = self.record_history(
+            self.home,
+            "thread-a",
+            [self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")],
+        )
+        first = search_history.read_thread_search_sources("thread-a", wanted={"turn1view0"})
+
+        with path.open("a", encoding="utf-8") as handle:
+            row = self.recorded_search(self.web_result("turn1view0", PROBE_URL), owner="thread-a")
+            handle.write(f"{json.dumps(row)}\n")
+
+        again = search_history.read_thread_search_sources(
+            "thread-a", wanted={"turn1view0"}, unchanged=first.fingerprint
+        )
+
+        self.assertTrue(again.scanned)
+        self.assertEqual(again.sources["turn1view0"].url, PROBE_URL)
+
+    def test_an_unsafe_thread_id_never_reaches_the_filesystem(self):
+        """The id is interpolated into a lookup and a path, so it is validated first."""
+        for thread_id in ("../../etc/passwd", "a/b", "thread a", "", "thread;drop"):
+            read = search_history.read_thread_search_sources(thread_id, wanted={"turn0view0"})
+            self.assertEqual(read.sources, {}, thread_id)
+            self.assertFalse(read.scanned, thread_id)
 
 if __name__ == "__main__":
     unittest.main()

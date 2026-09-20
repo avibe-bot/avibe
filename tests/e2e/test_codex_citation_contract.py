@@ -1,37 +1,40 @@
 """The real installed Codex CLI's citation wire contract, end to end.
 
 Every other citation test starts from a marker someone typed into a fixture.
-This one starts from the real ``codex`` app-server binary: a loopback Responses
-provider answers with text carrying OpenAI's citation markers, the real native
-process relays it, and the notifications Avibe actually receives are captured.
-Those captured notifications - not hand-written ones - are then replayed through
-the product path (``CodexEventHandler`` -> ``BaseAgent.emit_result_message`` ->
-``ConsolidatedMessageDispatcher`` -> ``persist_agent_message``) and read back out
-of SQLite.
+This one starts from the real ``codex`` app-server binary: a loopback provider
+serves both halves of a cited answer - the web search the native process runs,
+and the model text that cites it - and the notifications Avibe actually receives
+are captured. Those captured notifications - not hand-written ones - are then
+replayed through the product path (``CodexEventHandler`` ->
+``BaseAgent.emit_result_message`` -> ``ConsolidatedMessageDispatcher`` ->
+``persist_agent_message``) and read back out of SQLite.
 
-What the loopback can and cannot produce, stated plainly:
+Both halves are reproducible against a loopback provider, which is worth stating
+because it was once assumed only the first was:
 
-* it CAN produce the marker, because the marker is ordinary text in the model's
-  answer. That is the half worth proving on real bytes - the delimiters are
-  private-use codepoints (U+E200..U+E202), exactly the kind of thing a UTF-8
-  round trip, a JSON escape, or a whitespace trim could quietly destroy.
-* it CANNOT produce a genuine ``webSearch`` ``results[]``. Those come from the
-  hosted search service behind the ``supports_standalone_web_search`` provider
-  flag, not from the Responses endpoint this loopback serves - the shipped
-  binary exposes no search path a local provider could answer. The search item
-  replayed below is therefore shaped from the binary's own schema
-  (``ref_id`` / ``title`` / ``url``, ref ids of the ``turn0view0`` form, as
-  recorded in ``_tmp/codex-citation-verification-20260919.md``), and that is
-  called out here rather than dressed up as captured traffic.
+* the marker is ordinary text in the model's answer. That half is worth proving
+  on real bytes because the delimiters are private-use codepoints
+  (U+E200..U+E202), exactly the kind of thing a UTF-8 round trip, a JSON escape,
+  or a whitespace trim could quietly destroy.
+* ``results[]`` comes from the binary's standalone search tool, which posts to
+  ``<provider base_url>/alpha/search`` - a path this provider answers itself.
+  Activating it takes ``model_providers.<p>.supports_standalone_web_search``
+  plus the under-development ``features.standalone_web_search``; with both set
+  the binary offers the ``web`` namespace, calls ``web.run``, and reports this
+  provider's own results back as a genuine search item. So the search item
+  replayed below is a captured native notification, not a schema fixture.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import subprocess
 import types
+from http import HTTPStatus
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -39,6 +42,7 @@ from config.v2_config import ModelHubBackendModelConfig
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from modules.agents.base import BaseAgent
 from modules.agents.codex.event_handler import CodexEventHandler
+from modules.agents.codex.search_history import is_web_search_item
 from modules.agents.codex.transport import CodexTransport
 from modules.agents.model_hub import ModelHubLaunch, build_codex_hub_launch
 from modules.im import MessageContext
@@ -62,10 +66,24 @@ TOKEN = "isolated-citation-contract-fixture"
 MODEL = "citation-route-alias"
 SESSION_ID = "sescitation01"
 
-START, SEP, END = "\ue200", "\ue202", "\ue201"
+START, SEP, END = "", "", ""
 GUIDE_URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
 PROBE_URL = "https://example.com/citation-probe-source"
 UNRESOLVED = "(source unavailable)"
+
+SEARCH_QUERY = "native web search guide"
+# The standalone search tool joins this to the provider base_url the Hub launch
+# builds (``<gateway>/v1``), so the loopback gateway can answer it.
+SEARCH_PATH = "/v1/alpha/search"
+# ``codex_api::search::SearchResponse``: prose for the model, plus the citable
+# results the native process reports back as the search item's ``results[]``.
+SEARCH_RESPONSE = {
+    "output": "Two sources on native web search.",
+    "results": [
+        {"ref_id": "turn0view0", "title": "Web search - OpenAI API", "url": GUIDE_URL},
+        {"ref_id": "turn0view1", "title": "引用探针来源 — Café", "url": PROBE_URL},
+    ],
+}
 
 # One answer exercising every boundary at once: a resolvable ref, a multi-ref
 # marker whose second ref is unknown, the grammar quoted inside a fenced code
@@ -78,12 +96,6 @@ ANSWER = (
     f"Truncated tail {START}cite{SEP}turn0view0"
 )
 
-# Shaped from the binary's own schema, not captured - see the module docstring.
-SEARCH_RESULTS = [
-    {"ref_id": "turn0view0", "title": "Web search - OpenAI API", "url": GUIDE_URL},
-    {"ref_id": "turn0view1", "title": "引用探针来源 — Café", "url": PROBE_URL},
-]
-
 
 @pytest.fixture
 def citation_runtime(codex_catalog_runtime, record_property):
@@ -95,6 +107,8 @@ def citation_runtime(codex_catalog_runtime, record_property):
     record_property("codex_version", version)
     Path(runtime.env["CODEX_HOME"], "config.toml").write_text(
         'cli_auth_credentials_store = "file"\n'
+        # The search tool has to be offered before the model can call it.
+        "[tools]\nweb_search = true\n"
     )
     catalog_path = runtime.home / "citation-models.json"
     catalog_path.write_bytes(_codex_hub_catalog_bytes(
@@ -115,20 +129,71 @@ def _substitute(node):
     return node
 
 
+def _search_call_frames(model: str) -> list[bytes]:
+    """The first model response: one call into the binary's ``web`` namespace."""
+    call = {
+        "type": "function_call",
+        "id": "fc_search_001",
+        "call_id": "call_search_001",
+        "name": "run",
+        "namespace": "web",
+        "arguments": json.dumps({"search_query": [{"q": SEARCH_QUERY}]}),
+        "status": "completed",
+    }
+    response = {"id": "resp_search_001", "object": "response", "model": model}
+    return [
+        upstream._sse("response.created", {
+            "type": "response.created", "sequence_number": 0,
+            "response": {**response, "status": "in_progress"},
+        }),
+        upstream._sse("response.output_item.done", {
+            "type": "response.output_item.done",
+            "sequence_number": 1, "output_index": 0, "item": call,
+        }),
+        upstream._sse("response.completed", {
+            "type": "response.completed", "sequence_number": 2,
+            "response": {
+                **response, "status": "completed", "output": [call],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            },
+        }),
+    ]
+
+
 @pytest.fixture
-def cited_answer_upstream(monkeypatch):
-    """Make the loopback model answer with real citation-marker text."""
-    original = upstream._responses_stream_frames
+def searched_answer_upstream(monkeypatch) -> list[object]:
+    """Serve one real web search, then the answer citing it; record the search.
+
+    Two loopback behaviours, both needed before the native process will produce a
+    search item of its own: the first model response calls ``web.run``, and the
+    provider answers the standalone search request the binary then posts to its
+    own base URL.
+    """
+    original_frames = upstream._responses_stream_frames
+    original_post = upstream.MockLLMUpstreamHandler.do_POST
+    responses = itertools.count(1)
+    searched: list[object] = []
 
     def frames(model):
+        if next(responses) == 1:
+            return _search_call_frames(model)
         rebuilt = []
-        for frame in original(model):
+        for frame in original_frames(model):
             head, _, data = frame.partition(b"data: ")
             event = head.decode("utf-8").removeprefix("event: ").strip() or None
             rebuilt.append(upstream._sse(event, _substitute(json.loads(data))))
         return rebuilt
 
+    def do_POST(handler):  # noqa: N802 -- BaseHTTPRequestHandler's own name
+        if urlsplit(handler.path).path != SEARCH_PATH:
+            original_post(handler)
+            return
+        searched.append(handler._read_json_body())
+        handler._write_json(HTTPStatus.OK, SEARCH_RESPONSE)
+
     monkeypatch.setattr(upstream, "_responses_stream_frames", frames)
+    monkeypatch.setattr(upstream.MockLLMUpstreamHandler, "do_POST", do_POST)
+    return searched
 
 
 def _run_real_turn(fixture, gateway) -> list[tuple[str, dict]]:
@@ -140,6 +205,17 @@ def _run_real_turn(fixture, gateway) -> list[tuple[str, dict]]:
         gateway_base_url=gateway.url, gateway_token=TOKEN,
     )
     args, env = build_codex_hub_launch([], runtime.env, launch, model_catalog_path=catalog_path)
+    provider = next(
+        value.split('"')[1] for value in args if value.startswith('model_provider="')
+    )
+    args = args + [
+        # Standalone search is what makes ``results[]`` real: the tool posts to
+        # this provider's own endpoint instead of a hosted service. It is still
+        # under development, so the provider flag alone does not enable it.
+        "-c", f"model_providers.{provider}.supports_standalone_web_search=true",
+        "-c", "features.standalone_web_search=true",
+        "-c", "suppress_unstable_features_warning=true",
+    ]
 
     async def probe():
         transport = CodexTransport(
@@ -164,10 +240,10 @@ def _run_real_turn(fixture, gateway) -> list[tuple[str, dict]]:
                 "turn/start",
                 {
                     "threadId": thread["thread"]["id"],
-                    "input": [{"type": "text", "text": "Cite the web search guide."}],
+                    "input": [{"type": "text", "text": "Search the web and cite the guide."}],
                 },
             )
-            result = await asyncio.wait_for(completed.get(), timeout=30)
+            result = await asyncio.wait_for(completed.get(), timeout=60)
             assert result["turn"]["status"] == "completed", result
         finally:
             await transport.stop()
@@ -176,39 +252,57 @@ def _run_real_turn(fixture, gateway) -> list[tuple[str, dict]]:
     return asyncio.run(probe())
 
 
-def _captured(fixture) -> tuple[dict, dict]:
-    """The real ``item/completed`` answer and ``turn/completed`` for one turn."""
+def _captured(fixture) -> tuple[dict, dict, dict]:
+    """The real search, answer, and ``turn/completed`` notifications for one turn."""
     with upstream.MockLLMUpstream() as gateway:
         gateway.configure(protocol="openai_responses")
         notifications = _run_real_turn(fixture, gateway)
-    message = next(
-        params
-        for method, params in notifications
-        if method == "item/completed" and params.get("item", {}).get("type") == "agentMessage"
-    )
+
+    def completed(match):
+        return next(
+            params
+            for method, params in notifications
+            if method == "item/completed" and match(params.get("item") or {})
+        )
+
+    # Recognized by the production predicate, so the shape the binary happens to
+    # name its search item is the shape the product path accepts.
+    search = completed(lambda item: is_web_search_item(item) and item.get("results"))
+    message = completed(lambda item: item.get("type") == "agentMessage")
     completion = next(params for method, params in notifications if method == "turn/completed")
-    return message, completion
+    return search, message, completion
 
 
-def test_real_codex_relays_citation_markers_verbatim(citation_runtime, cited_answer_upstream):
+def test_real_codex_relays_citation_markers_verbatim(citation_runtime, searched_answer_upstream):
     """The private-use marker must reach Avibe's parse point byte for byte."""
-    message, completion = _captured(citation_runtime)
+    search, message, completion = _captured(citation_runtime)
 
     assert message["item"]["text"] == ANSWER
     assert f"{START}cite{SEP}turn0view0{END}" in message["item"]["text"]
+    # The sources are the binary's own: it called the search tool, the tool
+    # posted the model's query to this provider, and the results came back as one
+    # native item - untouched, including a non-ASCII title.
+    assert searched_answer_upstream, "the binary never posted a standalone search"
+    assert SEARCH_QUERY in json.dumps(searched_answer_upstream[0], ensure_ascii=False)
+    assert [result["ref_id"] for result in search["item"]["results"]] == [
+        "turn0view0",
+        "turn0view1",
+    ]
+    assert search["item"]["results"][1]["title"] == "引用探针来源 — Café"
     # The completion notification is what triggers resolution, and it must name
     # the same thread and turn: that scoping is the only reason a ref_id - which
     # is unique nowhere else - is safe to look up at all.
     assert message["threadId"] and message["turnId"]
+    assert search["threadId"] == message["threadId"]
     assert completion.get("threadId") == message["threadId"]
     assert completion["turn"]["id"] == message["turnId"]
 
 
 def test_real_notifications_deliver_and_persist_resolved_citations(
-    citation_runtime, cited_answer_upstream, monkeypatch, tmp_path,
+    citation_runtime, searched_answer_upstream, monkeypatch, tmp_path,
 ):
     """Replay the captured real notifications through the real product path."""
-    message, completion = _captured(citation_runtime)
+    search, message, completion = _captured(citation_runtime)
     thread_id, turn_id = message["threadId"], message["turnId"]
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
@@ -255,19 +349,9 @@ def test_real_notifications_deliver_and_persist_resolved_citations(
     agent._turn_registry.register_turn(turn_id, request)
 
     async def replay():
-        # The search result arrives in its own notification, before the answer.
-        await handler._on_item_completed(
-            {
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "item": {
-                    "type": "webSearch",
-                    "query": "web search guide",
-                    "results": SEARCH_RESULTS,
-                },
-            },
-            request,
-        )
+        # The search arrives in its own notification, ahead of the answer that
+        # cites it - as captured, ids and all.
+        await handler._on_item_completed(search, request)
         await handler._on_item_completed(message, request)
         await handler._on_turn_completed(completion, request)
 

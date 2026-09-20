@@ -948,6 +948,27 @@ def mask_markdown_code(text: str) -> str:
     return _mask_ranges(text, ranges)
 
 
+def mask_hidden_and_code(text: str) -> str:
+    """Blank code regions *and* silent blocks without changing string offsets.
+
+    ``mask_markdown_code`` answers "would CommonMark read this as code"; a
+    consumer that rewrites what the user will actually see needs the other half
+    too, because a silent block is removed before delivery. Numbering or
+    rewriting a marker inside one would spend a citation index on text nobody
+    reads and, worse, lift its URL out of the block that was meant to hide it.
+    Masking both here means the marker leaves with its block, untouched.
+    """
+    if not text:
+        return text
+    if "<silent" not in text.lower():
+        return mask_markdown_code(text)
+    candidates = _silent_control_candidates(text)
+    ranges, markdown_mask = _silent_control_ranges_and_mask(text, candidates)
+    if not ranges:
+        return markdown_mask
+    return _mask_ranges(markdown_mask, ranges)
+
+
 def _markdown_code_ranges(
     text: str,
 ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:

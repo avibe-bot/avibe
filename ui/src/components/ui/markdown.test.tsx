@@ -1,5 +1,8 @@
 /* @vitest-environment jsdom */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { createInstance } from 'i18next';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -126,6 +129,33 @@ describe('Markdown source citations', () => {
 
   const badges = (container: HTMLElement) =>
     Array.from(container.querySelectorAll<HTMLAnchorElement>('a[data-citation-index]'));
+
+  // One shared table with tests/test_citations.py: the backend writes `url`,
+  // and this asserts the real renderer hands back exactly that href, so a badge
+  // cannot quietly stop matching the link it describes. Read at runtime rather
+  // than imported so the fixture stays outside Vite's module graph.
+  const urlIdentity = (JSON.parse(
+    readFileSync(resolve(process.cwd(), '../tests/fixtures/citation_url_identity.json'), 'utf8'),
+  ) as { cases: { why: string; raw: string; url: string | null; label: string | null }[] })
+    .cases.filter((entry): entry is { why: string; raw: string; url: string; label: string } =>
+      Boolean(entry.url));
+
+  it.each(urlIdentity)('keeps a canonical citation URL identical through the renderer ($why)', ({ url, label }) => {
+    const citation = guide({ url, label });
+    const { container } = renderMarkdown(`Cited. ${link(citation)}`, [citation]);
+    const [badge] = badges(container);
+
+    expect(badge).toBeDefined();
+    expect(badge.getAttribute('href')).toBe(url);
+  });
+
+  it.each(urlIdentity)('labels a citation with the host a browser resolves ($why)', ({ url, label }) => {
+    // Attribution names the host the browser reaches - punycode included - not
+    // the bytes the URL spells.
+    const host = new URL(url).host;
+
+    expect(host === label || host === `www.${label}`).toBe(true);
+  });
 
   it('renders a cited link as a numbered badge that is itself the link', () => {
     const citation = guide();

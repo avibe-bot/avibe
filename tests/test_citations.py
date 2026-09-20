@@ -16,6 +16,7 @@ left implicit in the happy path:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -25,12 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.citations import (
     CitationSource,
+    citation_ref_ids,
     clean_title,
     has_citation_markers,
     resolve_citations,
     safe_url,
     source_label,
+    unresolved_refs,
 )
+from core.reply_enhancer import strip_silent_blocks
 
 START, SEP, END = "\ue200", "\ue202", "\ue201"
 UNRESOLVED = "(source unavailable)"
@@ -420,3 +424,162 @@ class TestDetectionAndSpacing:
     @pytest.mark.parametrize("text", [None, "", "no markers here"])
     def test_text_without_markers_is_returned_unchanged_with_no_sidecar(self, text):
         assert resolve(text) == (text, [])
+
+
+class TestHiddenBlocks:
+    """A citation inside a ``<silent>`` block belongs to no delivered message.
+
+    The block is removed downstream of this rewrite, so numbering a marker
+    inside one attributes a source the reader never sees: the sidecar opens at
+    index 2, the badge it describes has no link, and the visible citation is
+    misnumbered. Hidden markers are therefore skipped exactly the way code is -
+    left literal, so they leave with the block that hid them.
+    """
+
+    def test_a_hidden_marker_is_neither_numbered_nor_rewritten(self):
+        raw = (
+            f"<silent>internal note{marker('turn0view0')}</silent>"
+            f"Visible.{marker('turn0view1')}"
+        )
+
+        text, citations = resolve(raw)
+
+        assert marker("turn0view0") in text
+        assert text.endswith("Visible. [example.com](https://example.com/citation-probe-source)")
+        assert [(c["index"], c["ref_id"]) for c in citations] == [(1, "turn0view1")]
+
+    def test_stripping_the_block_leaves_exactly_the_visible_citation(self):
+        raw = (
+            f"<silent>hidden{marker('turn0view0')}</silent>"
+            f"Visible.{marker('turn0view1')}"
+        )
+
+        text, _ = resolve(raw)
+
+        assert strip_silent_blocks(text) == (
+            "Visible. [example.com](https://example.com/citation-probe-source)"
+        )
+
+    def test_an_entirely_hidden_message_carries_no_sidecar(self):
+        raw = f"<silent>only this{marker('turn0view0')}</silent>"
+
+        text, citations = resolve(raw)
+
+        assert text == raw
+        assert citations == []
+
+    def test_a_hidden_block_inside_a_code_example_hides_nothing(self):
+        """``<silent>`` shown as code is not a control, so the prose marker resolves."""
+        raw = f"`<silent>`\nVisible.{marker('turn0view0')}"
+
+        text, citations = resolve(raw)
+
+        assert "[developers.openai.com]" in text
+        assert [c["ref_id"] for c in citations] == ["turn0view0"]
+
+
+class TestRequestedRefs:
+    """What a message asks for, which is what a backend has to go looking for.
+
+    A backend reads its recorded history to fill the gaps in a message's
+    attribution, so it needs the refs that message actually requests - not every
+    ref it ever saw. The same eligibility rules apply as to the rewrite: code and
+    hidden blocks ask for nothing, and a malformed ref is not a request.
+    """
+
+    def test_the_requested_refs_are_reported_in_first_appearance_order(self):
+        text = f"A{marker('turn0view1')} B{marker('turn0view0', 'turn0view1')}"
+
+        assert citation_ref_ids(text) == ["turn0view1", "turn0view0"]
+
+    @pytest.mark.parametrize(
+        "text",
+        [None, "", "plain text", f"{START}cite{SEP}turn0view0", f"{START}visualize{SEP}x{END}"],
+        ids=["none", "empty", "no-marker", "unterminated", "sibling-marker"],
+    )
+    def test_text_that_asks_for_nothing_reports_nothing(self, text):
+        assert citation_ref_ids(text) == []
+
+    def test_a_marker_in_code_asks_for_nothing(self):
+        assert citation_ref_ids(f"```\n{marker('turn0view0')}\n```") == []
+
+    def test_a_marker_in_a_hidden_block_asks_for_nothing(self):
+        assert citation_ref_ids(f"<silent>{marker('turn0view0')}</silent>") == []
+
+    def test_a_malformed_ref_is_not_a_request(self):
+        assert citation_ref_ids(f"A{marker('has space', 'turn0view0', 'x' * 65)}") == [
+            "turn0view0"
+        ]
+
+
+class TestUnresolvedRefs:
+    """Which requested refs are still waiting for a source, and which never will be.
+
+    A backend holds a message while a ref it names may still arrive. A ref whose
+    source is already present but unusable is not waiting for anything - holding
+    it would delay the message forever - so it is reported as resolved-as-far-as-
+    it-goes and degrades to the visible label instead.
+    """
+
+    def test_a_ref_with_no_source_is_unresolved(self):
+        assert unresolved_refs(["turn0view0", "turn9view9"], SOURCES) == ["turn9view9"]
+
+    def test_a_fully_sourced_message_is_not_waiting(self):
+        assert unresolved_refs(["turn0view0", "turn0view1"], SOURCES) == []
+
+    @pytest.mark.parametrize(
+        "url",
+        ["javascript:alert(1)", "", "https:///path", "not-a-url"],
+        ids=["unsafe-scheme", "empty", "hostless", "unparseable-authority"],
+    )
+    def test_a_source_that_can_never_be_linked_is_not_waited_for(self, url):
+        sources = {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=url)}
+
+        assert unresolved_refs(["turn0view0"], sources) == []
+
+    def test_nothing_requested_means_nothing_unresolved(self):
+        assert unresolved_refs([], SOURCES) == []
+
+
+class TestUrlIdentityAcrossTheBoundary:
+    """One URL table, asserted on both sides of the backend/renderer boundary.
+
+    The sidecar is matched against the ``href`` the Markdown renderer produced,
+    so the two have to agree byte for byte. The renderer normalizes its link
+    destinations (percent-encoding, escape resolution, surrogate repair) and the
+    backend cannot see that happen, so every case here is also rendered by
+    ``ui/src/components/ui/markdown.test.tsx`` from this same fixture. A ``url``
+    of ``null`` means the raw value must be rejected rather than canonicalized.
+    """
+
+    CASES = json.loads(
+        (Path(__file__).resolve().parent / "fixtures/citation_url_identity.json").read_text(
+            encoding="utf-8"
+        )
+    )["cases"]
+
+    @pytest.mark.parametrize("case", CASES, ids=[c["why"] for c in CASES])
+    def test_the_backend_produces_the_url_the_renderer_will_keep(self, case):
+        assert safe_url(case["raw"]) == (case["url"] or "")
+
+    @pytest.mark.parametrize(
+        "case", [c for c in CASES if c["url"]], ids=[c["why"] for c in CASES if c["url"]]
+    )
+    def test_the_label_attributes_the_host_a_browser_would_reach(self, case):
+        assert source_label(case["url"]) == case["label"]
+
+    @pytest.mark.parametrize(
+        "case", [c for c in CASES if c["url"]], ids=[c["why"] for c in CASES if c["url"]]
+    )
+    def test_canonicalizing_a_canonical_url_changes_nothing(self, case):
+        """The rewrite runs once per message; it must be a fixed point regardless."""
+        assert safe_url(case["url"]) == case["url"]
+
+    def test_a_rewritten_message_carries_the_canonical_url_in_both_halves(self):
+        raw = "https://example.com/中文"
+        sources = {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=raw)}
+
+        text, citations = resolve(f"Cited.{marker('turn0view0')}", sources)
+
+        assert citations[0]["url"] == "https://example.com/%E4%B8%AD%E6%96%87"
+        assert f"({citations[0]['url']})" in text

@@ -1,0 +1,131 @@
+{
+  "description": "One shared table for the URL a citation is allowed to carry.\n\nA citation is delivered twice: as the destination of an ordinary Markdown link every surface can follow, and as the `url` of a `message.content.citations` row. The Web renderer draws a badge only when the two agree exactly, so the backend has to write the destination the real Markdown pipeline (remark-parse -> remark-rehype's normalizeUri -> defaultUrlTransform) produces from it - a fixed point - and has to label it with the host a browser actually resolves.\n\nBoth sides of that boundary read this file: tests/test_citations.py asserts core.citations produces `url`/`label` from `raw`, and ui/src/components/ui/markdown.test.tsx renders `url` and asserts the DOM href and the WHATWG host come back unchanged. Neither side can drift without the other failing. `url: null` means the raw value must be rejected outright rather than repaired.",
+  "cases": [
+    {
+      "why": "an ordinary result needs no rewriting at all",
+      "raw": "https://developers.openai.com/api/docs/guides/tools-web-search",
+      "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
+      "label": "developers.openai.com"
+    },
+    {
+      "why": "a non-ASCII path: the renderer percent-encodes it, so the backend must too",
+      "raw": "https://example.com/中文",
+      "url": "https://example.com/%E4%B8%AD%E6%96%87",
+      "label": "example.com"
+    },
+    {
+      "why": "a non-ASCII host resolves through IDNA, so the label is the punycode the browser visits",
+      "raw": "https://例え.jp/x",
+      "url": "https://%E4%BE%8B%E3%81%88.jp/x",
+      "label": "xn--r8jz45g.jp"
+    },
+    {
+      "why": "parentheses would end the Markdown destination early; the renderer keeps the escapes",
+      "raw": "https://en.wikipedia.org/wiki/Cite_(disambiguation)",
+      "url": "https://en.wikipedia.org/wiki/Cite_%28disambiguation%29",
+      "label": "en.wikipedia.org"
+    },
+    {
+      "why": "a space cannot survive a Markdown destination unencoded",
+      "raw": "https://example.com/a b",
+      "url": "https://example.com/a%20b",
+      "label": "example.com"
+    },
+    {
+      "why": "an escape that already looks like one is preserved, never double-encoded",
+      "raw": "https://example.com/p%41q",
+      "url": "https://example.com/p%41q",
+      "label": "example.com"
+    },
+    {
+      "why": "a literal percent is not an escape",
+      "raw": "https://example.com/100%",
+      "url": "https://example.com/100%25",
+      "label": "example.com"
+    },
+    {
+      "why": "two characters that are not both alphanumeric do not make an escape",
+      "raw": "https://example.com/%-a",
+      "url": "https://example.com/%25-a",
+      "label": "example.com"
+    },
+    {
+      "why": "P1: a raw backslash in the authority sends urlsplit and the browser to different hosts",
+      "raw": "https://attacker.example\\@developers.openai.com/page",
+      "url": "https://attacker.example%5C@developers.openai.com/page",
+      "label": "developers.openai.com"
+    },
+    {
+      "why": "P1: a backslash inside the host itself is not a host a browser will resolve",
+      "raw": "https://attacker.example\\developers.openai.com/",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "CommonMark resolves an entity in a destination, so the stored URL is the resolved one",
+      "raw": "https://example.com/s?a=1&amp;b=2",
+      "url": "https://example.com/s?a=1&b=2",
+      "label": "example.com"
+    },
+    {
+      "why": "a destination that would resolve twice is pinned after the first resolution",
+      "raw": "https://example.com/s?a=1&amp;amp;b=2",
+      "url": "https://example.com/s?a=1%26amp;b=2",
+      "label": "example.com"
+    },
+    {
+      "why": "brackets are Markdown label punctuation and are encoded on both sides",
+      "raw": "https://example.com/a[b]",
+      "url": "https://example.com/a%5Bb%5D",
+      "label": "example.com"
+    },
+    {
+      "why": "angle brackets and quotes would make a pointy destination or break out of an attribute",
+      "raw": "https://example.com/<x>\"y\"",
+      "url": "https://example.com/%3Cx%3E%22y%22",
+      "label": "example.com"
+    },
+    {
+      "why": "a tab is dropped before parsing, exactly as a browser drops it",
+      "raw": "https://example.com/a\tb",
+      "url": "https://example.com/ab",
+      "label": "example.com"
+    },
+    {
+      "why": "a lone surrogate has no encoding; the renderer substitutes U+FFFD",
+      "raw": "https://example.com/\ud800",
+      "url": "https://example.com/%EF%BF%BD",
+      "label": "example.com"
+    },
+    {
+      "why": "the host is named without its www prefix, which is not what distinguishes the source",
+      "raw": "https://www.example.com/x",
+      "url": "https://www.example.com/x",
+      "label": "example.com"
+    },
+    {
+      "why": "a browser lowercases the host but not the path, so the label is lowercase and the URL is not",
+      "raw": "https://Example.COM/X",
+      "url": "https://Example.COM/X",
+      "label": "example.com"
+    },
+    {
+      "why": "an entity must not be able to smuggle a scheme past the check",
+      "raw": "&#x6a;avascript:alert(1)",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "an unsafe scheme is rejected, not repaired",
+      "raw": "javascript:alert(1)",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "a URL with no host names no source",
+      "raw": "https:///path",
+      "url": null,
+      "label": null
+    }
+  ]
+}
