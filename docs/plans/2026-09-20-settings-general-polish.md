@@ -540,3 +540,30 @@ fix. `C-SETTINGS-10` plays the reported gesture end to end in a browser, where
 the history stack is real: hold the lazy chunk, open inline Settings, release
 it, pick Files from the launcher, and require Files to stay in front. It fails
 against either half of the fix reverted on its own.
+
+## Review round 5: who put the entry there
+
+Round 4 traded one misfire for a quieter one, and Codex caught the trade. With
+the index cleared, the exit replaces the Settings entry going forward, so the
+entry the command was pushed into survives underneath. Press Back and the
+command url mounts again and raises its window.
+
+Verified in a browser rather than argued: after the launcher exit the stack is
+`[/apps/show/ses-show, /]` at index 1, and Back lands on index 0, focuses the
+existing Show Page window — two windows, not three — and replaces to `/`.
+
+No API erases a history entry you are not standing on, and every way of
+standing on this one runs the command to get there. So the question is not how
+to erase it but whether it should be erased, and that turns on who put it
+there. On desktop nothing in the product navigates to `/apps/show/:id`: the
+Dock calls `wm.openApp` directly, the App Library and app search both branch to
+the window on a desktop viewport, and the only caller that routes is the mobile
+Dock drawer — a surface with neither this Settings placement nor this launcher.
+A desktop session holds that entry only because the user opened that url.
+
+Back returning them to the page that url names, raising its window, is what the
+url means; a fresh visit to it does the same. The alternative Codex asks for —
+removing the spent command from history — would send Back out of the app
+instead. The two halves are one rule: an exit the user did not aim at the Show
+Page must not raise it, and a Back they did aim there must. `C-SETTINGS-10`
+now carries both, which is the coverage gap the finding named.

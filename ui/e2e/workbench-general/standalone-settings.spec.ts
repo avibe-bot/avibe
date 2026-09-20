@@ -620,6 +620,22 @@ test('C-SETTINGS-10: a command route finished under Settings does not re-run ove
   await expect(page).toHaveURL(`${origin}/`);
   // Left forward, not popped back onto the entry the command already spent.
   expect(await page.evaluate(() => history.state.idx)).toBe(originIndex);
+
+  // Back still reaches that entry, and should: leaving Settings forward cannot
+  // erase a history entry it is not standing on, and no browser API can. What
+  // saves it is who put the entry there. On desktop nothing in the product
+  // navigates to this url — the Dock, the App Library and app search all open
+  // the window directly, and only mobile, which has neither this Settings
+  // placement nor this launcher, routes to it. So a desktop session holds this
+  // entry only because the user opened that url themselves, and Back returning
+  // them to the page they opened, raising its window, is what that url means.
+  // Both halves are the same rule read twice: an exit the user did not aim at
+  // the Show Page must not raise it, and a Back they did aim there must.
+  await page.goBack();
+  await expect(page).toHaveURL(`${origin}/`);
+  await expect(windows).toHaveCount(2); // raised, not duplicated
+  await page.waitForTimeout(400);
+  expect(await topWindow()).toBe('Show Page');
   expect(denied).toEqual([]);
   expect(pageErrors).toEqual([]);
 });
