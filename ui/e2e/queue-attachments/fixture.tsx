@@ -68,6 +68,12 @@ const LONG_IMAGE = 'q3-2026-customer-onboarding-migration-runbook-screenshot-fin
 
 const QUEUE: WorkbenchMessage[] = [
   queued('q-text', 'A queued message with no files at all'),
+  queued(
+    'q-long-text',
+    'A queued message that becomes a long readable paragraph when expanded so its row actions stay beside the first visible line while the text continues below. '.repeat(
+      4,
+    ),
+  ),
   queued('q-image', '', [media('med_1', 'annotation-region.png')]),
   queued('q-mixed', 'Compare these against the spec', FIVE),
   queued('q-broken', '', [media('med_broken', 'console-log.png')]),
