@@ -84,11 +84,14 @@ selected/hover states), then at most one targeted correction/confirmation batch.
 Keep screenshot/probe limitations explicit; no real credentials, cloud/native
 interaction, production user data, service restart or shared deployment.
 
-Commit on this isolated branch, open a new non-draft PR to master, and read back
-title/body/base/head. Use --body-file. Retain exact-head Codex review, all expected
-CI and zero unresolved whole-PR threads; no manual review trigger or CI rerun.
-Use one durable combined lane PR/CI Watch and a separate PM gate Watch once the
-PR exists; never touch retired #2058 or unrelated Watches. No merge authority.
+The implementation lane commits and hands back a clean local candidate with its
+evidence, then ends its turn; it performs no remote writes. PM independently
+checks the bounded diff and opens the new non-draft PR to master, reading back
+title/body/base/head with --body-file. PM owns the delivery loop and one durable
+combined PR/CI Watch once the PR exists; this local-only lane needs no Watch.
+Retain exact-head Codex review, all expected CI and zero unresolved whole-PR
+threads; no manual review trigger or CI rerun. Never touch retired #2058 or
+unrelated Watches. No merge authority.
 
 ## Implementation and evidence
 
