@@ -11,6 +11,8 @@ import { Badge } from '@/components/ui/badge';
 import { ChatImage, LinkedImageContent, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
+import { CitationBadge } from '@/components/ui/citation-badge';
+import { findCitation, type CitationSource } from '@/lib/citations';
 import { inAppChatPath } from '@/lib/applicationRoutes';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
 import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
@@ -71,6 +73,17 @@ function linkifySecretRequests(text: string): string {
     last = m.index + m[0].length;
   }
   return result + rewrite(text.slice(last));
+}
+
+// The visible text of a rendered link, flattened back to a string. A citation is
+// matched on the exact (destination, link text) pair the backend wrote, so a link
+// the agent authored itself in its own prose keeps its own wording instead of
+// collapsing into a numbered badge.
+function linkText(children: React.ReactNode): string {
+  if (typeof children === 'string') return children;
+  if (typeof children === 'number') return String(children);
+  if (Array.isArray(children)) return children.map(linkText).join('');
+  return '';
 }
 
 // Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
@@ -180,6 +193,12 @@ export const Markdown: React.FC<{
    *  or quoted text could mint an "agent asked for this secret" card that creates a vault
    *  secret on click. */
   secretRequests?: boolean;
+  /** Citation sidecar — when present, a link this renderer can match against it
+   *  renders as a compact numbered source badge instead of a bare domain link
+   *  (see lib/citations). ONLY the agent-reply surface sets this: the badge is an
+   *  attribution claim, so a user bubble or a quoted preview must not be able to
+   *  mint one. The text already reads correctly without it. */
+  citations?: CitationSource[];
   /** Agent-reply opt-in: `/abs/path` and `./relative/path` Markdown links open
    *  in Avibe's Editor. Relative paths resolve from the owning Session workdir. */
   localFileWorkdir?: string | null;
@@ -197,6 +216,7 @@ export const Markdown: React.FC<{
   softBreaks = false,
   references,
   secretRequests = false,
+  citations,
   localFileWorkdir,
   onOpenLocalFile,
   readOnly = false,
@@ -267,6 +287,13 @@ export const Markdown: React.FC<{
           const name = url.slice(SECRET_LINK_SCHEME.length + 1);
           return secretRequests ? <SecretRequestCard name={name} readOnly={readOnly} /> : <span>{children}</span>;
         }
+        // A backend-resolved source citation → compact numbered badge with a
+        // title/domain preview. Only on the interactive surface: the badge is an
+        // anchor, which would be invalid interactive content inside a clickable
+        // row — the ``!interactive`` branch below already renders the plain
+        // domain text, which still attributes the source.
+        const citation = interactive ? findCitation(citations, url, linkText(children)) : null;
+        if (citation) return <CitationBadge citation={citation} />;
         if (interactive && url && isProxyMediaUrl(url)) {
           return <FileCard href={url}>{children}</FileCard>;
         }
@@ -332,7 +359,7 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive, secretRequests, readOnly, localFileWorkdir, onOpenLocalFile],
+    [interactive, secretRequests, citations, readOnly, localFileWorkdir, onOpenLocalFile],
   );
 
   // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees

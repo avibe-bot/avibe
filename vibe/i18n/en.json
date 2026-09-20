@@ -743,7 +743,8 @@
   },
   "message": {
     "ack": "{agent} received, processing...",
-    "quickReplyNote": "Reply: {text}"
+    "quickReplyNote": "Reply: {text}",
+    "citationUnresolved": "(source unavailable)"
   },
   "backend": {
     "claude": "ClaudeCode",

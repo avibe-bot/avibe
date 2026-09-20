@@ -3844,6 +3844,7 @@ class Controller:
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
         delivery: Any = None,
+        citations: Optional[list[dict[str, Any]]] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         result = await self.message_dispatcher.emit_agent_message(
@@ -3861,8 +3862,9 @@ class Controller:
             # ``emit_backend_failure`` does: ``message_dispatcher`` is a
             # substitutable collaborator (six test suites replace it), so passing
             # an optional diagnostic unconditionally would change the required
-            # signature of every stand-in.
+            # signature of every stand-in. The citation sidecar rides the same way.
             **({"delivery": delivery} if delivery is not None else {}),
+            **({"citations": citations} if citations else {}),
         )
         manager = getattr(self, "session_turns", None)
         complete = getattr(manager, "on_terminal_delivery_complete", None)

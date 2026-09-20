@@ -132,6 +132,7 @@ import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
+import type { CitationSource } from '../../lib/citations';
 import { QuickReplies } from './QuickReplies';
 import { QueuedAttachmentGroup, QueuedAttachmentSheet } from './QueuedAttachments';
 import { ActivityCard, ActivityChip } from './AgentActivityGroup';
@@ -4748,6 +4749,10 @@ export const MessageRow = memo(function MessageRow({
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
       // keeps the card it had before that row had its own type.
       secretRequests={agentAuthored}
+      // Same authorship gate: a numbered source badge asserts that the ANSWER
+      // cited that page, so only the agent's own reply may draw one. Without the
+      // sidecar the link still renders — as the plain domain the backend wrote.
+      citations={agentAuthored ? (message.content as { citations?: CitationSource[] } | null)?.citations : undefined}
       localFileWorkdir={agentAuthored ? session.workdir : undefined}
       onOpenLocalFile={agentAuthored ? onOpenLocalFile : undefined}
       // …and on an archived transcript the card is locked: archiving EXPIRED the

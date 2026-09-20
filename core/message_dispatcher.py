@@ -2090,6 +2090,7 @@ class ConsolidatedMessageDispatcher:
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
+        citations: Optional[list[dict[str, Any]]] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2130,6 +2131,11 @@ class ConsolidatedMessageDispatcher:
         compatibility default remains one terminal result. Explicit nonterminal
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
+
+        ``citations`` is the resolved source sidecar for a message whose text
+        already carries the citation links (see ``core.citations``). It is stored
+        with the row, not folded into the text, so the Web transcript can render
+        compact badges while every IM platform keeps the plain Markdown links.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
@@ -2515,6 +2521,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -2524,6 +2531,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -2532,6 +2540,7 @@ class ConsolidatedMessageDispatcher:
                         recorded_text,
                         metadata=output_metadata,
                         native_message_id=native_output_id,
+                        citations=citations,
                     )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
@@ -2618,6 +2627,7 @@ class ConsolidatedMessageDispatcher:
                     metadata=output_metadata,
                     native_message_id=native_output_id,
                     error_sink=persist_errors,
+                    citations=citations,
                 )
                 if delivery is not None:
                     delivery.persisted_row = persisted_notify
@@ -2930,6 +2940,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -2939,6 +2950,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
 
                 if settlement_waits_for_persistence:
@@ -3071,7 +3083,7 @@ class ConsolidatedMessageDispatcher:
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
-        persist_agent_message(target_context, canonical_type, persist_text)
+        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
 
         # Target platform toolcall-delivery gate stays in FRONT of the concise
         # shortcut: when a turn is routed via ``delivery_override`` to a target

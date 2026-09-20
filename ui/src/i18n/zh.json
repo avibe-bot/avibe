@@ -4178,6 +4178,10 @@
       "vaultExpired": "已过期",
       "agentFallback": "智能体"
     },
+    "citation": {
+      "badge": "来源 {{index}}：{{source}}",
+      "open": "打开来源页面"
+    },
     "annotation": {
       "titleUser": "用户批注",
       "titleAgent": "Agent 批注",

@@ -592,7 +592,15 @@ class BaseAgent(ABC):
         suffix: Optional[str] = None,
         request: Optional[AgentRequest] = None,
         output: MessageOutput | None = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[str]:
+        """Emit a terminal result.
+
+        ``citations`` is the resolved source sidecar for the answer body (see
+        ``core.citations``). The body already carries ordinary Markdown links, so
+        every surface stays readable without it; the sidecar is what lets the Web
+        transcript render them as compact citation badges.
+        """
         if output is None and request is not None:
             output = request.output
         if output is None:
@@ -645,6 +653,7 @@ class BaseAgent(ABC):
                     parse_mode=parse_mode,
                     is_error=is_error,
                     output=output,
+                    citations=citations,
                 )
             else:
                 # No visible text (show_duration off + empty result/suffix) is still
@@ -699,6 +708,7 @@ class BaseAgent(ABC):
                 is_error=is_error,
                 result_footer=result_footer,
                 output=output,
+                citations=citations,
             )
 
         # Remove ack reaction after result is sent

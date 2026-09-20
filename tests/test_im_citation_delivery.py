@@ -1,0 +1,145 @@
+"""IM delivery of cited answers.
+
+The Web transcript upgrades a citation into a badge from the structured sidecar.
+Every IM platform instead gets exactly what it always got: ordinary Markdown
+links in the message body, rendered to that platform's own clickable link
+syntax by the formatter it already had. This file pins both halves of that -
+the sidecar reaches persistence and never the wire, and the links survive each
+platform's renderer with their source attribution intact.
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from core.message_dispatcher import ConsolidatedMessageDispatcher
+from modules.im import MessageContext
+from modules.im.formatters.avibe_formatter import AvibeFormatter
+from modules.im.formatters.discord_formatter import DiscordFormatter
+from modules.im.formatters.feishu_formatter import FeishuFormatter
+from modules.im.formatters.telegram_formatter import TelegramFormatter
+from modules.im.formatters.wechat_formatter import WeChatFormatter
+from tests.test_message_dispatcher_platform_limits import _StubController
+
+URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
+LINK = f"[developers.openai.com]({URL})"
+CITED = f"Native web search is documented. {LINK}"
+CITATIONS = [
+    {
+        "index": 1,
+        "ref_id": "turn0view0",
+        "title": "Web search - OpenAI API",
+        "url": URL,
+        "label": "developers.openai.com",
+    }
+]
+
+
+class CitationDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def deliver(self, platform: str, text: str, **kwargs):
+        controller = _StubController(platform)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="u1", channel_id="c1", platform=platform)
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            await dispatcher.emit_agent_message(context, "result", text, **kwargs)
+        return controller.im_client.sent, persist
+
+    async def test_every_platform_receives_the_links_and_never_the_sidecar(self):
+        for platform in ("slack", "telegram", "discord", "lark", "wechat"):
+            with self.subTest(platform=platform):
+                sent, _ = await self.deliver(platform, CITED, citations=CITATIONS)
+
+                delivered = "".join(text for _, _, text, _ in sent)
+                self.assertEqual(delivered, CITED)
+                self.assertNotIn("ref_id", delivered)
+                self.assertNotIn("turn0view0", delivered)
+
+    async def test_the_sidecar_reaches_persistence(self):
+        _, persist = await self.deliver("slack", CITED, citations=CITATIONS)
+
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.kwargs["citations"], CITATIONS)
+
+    async def test_an_uncited_answer_still_persists_without_a_sidecar(self):
+        _, persist = await self.deliver("slack", "Plain answer.")
+
+        self.assertIsNone(persist.call_args.kwargs["citations"])
+
+    async def test_the_sidecar_does_not_change_how_a_long_answer_is_chunked(self):
+        """Chunking reads the text only, so the two runs must be byte-identical."""
+        controller = _StubController("wechat", max_bytes=1900)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="wechat-user", channel_id="wechat-user", platform="wechat")
+        long_text = f"{'详' * 1200}\n\n{CITED}\n\n{'细' * 1200}"
+
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(context, "result", long_text, citations=CITATIONS)
+            with_sidecar = [text for _, _, text, _ in controller.im_client.sent]
+            controller.im_client.sent.clear()
+            await dispatcher.emit_agent_message(context, "result", long_text)
+            without_sidecar = [text for _, _, text, _ in controller.im_client.sent]
+
+        self.assertGreater(len(with_sidecar), 1)
+        self.assertEqual(with_sidecar, without_sidecar)
+        self.assertEqual("".join(with_sidecar), long_text)
+
+    async def test_the_declared_parse_mode_is_untouched(self):
+        sent, _ = await self.deliver("slack", CITED, parse_mode="markdown", citations=CITATIONS)
+
+        self.assertEqual([parse_mode for _, _, _, parse_mode in sent], ["markdown"])
+
+
+class CitationRenderingPerPlatformTests(unittest.TestCase):
+    """Each platform's own renderer, fed the exact text the backend emits."""
+
+    def test_telegram_renders_an_anchor_carrying_the_source_domain(self):
+        rendered = TelegramFormatter().render(CITED)
+
+        self.assertIn(f'<a href="{URL}">developers.openai.com</a>', rendered)
+
+    def test_telegram_keeps_a_cited_url_holding_markdown_punctuation_intact(self):
+        """``safe_url`` percent-encodes the parens, so the link cannot end early."""
+        url = "https://en.wikipedia.org/wiki/Foo_%28bar%29"
+
+        rendered = TelegramFormatter().render(f"See [en.wikipedia.org]({url})")
+
+        self.assertIn(f'<a href="{url}">en.wikipedia.org</a>', rendered)
+
+    def test_telegram_leaves_a_cited_link_inside_a_code_block_literal(self):
+        rendered = TelegramFormatter().render(f"```\n{LINK}\n```")
+
+        self.assertIn("developers.openai.com](https", rendered)
+        self.assertNotIn("<a href", rendered)
+
+    def test_markdown_native_platforms_pass_the_link_through(self):
+        for formatter in (DiscordFormatter(), FeishuFormatter(), AvibeFormatter()):
+            with self.subTest(formatter=type(formatter).__name__):
+                self.assertEqual(
+                    formatter.format_link("developers.openai.com", URL),
+                    LINK,
+                )
+
+    def test_wechat_keeps_the_url_visible_because_it_has_no_hyperlinks(self):
+        """Plain text, so attribution has to survive as readable text."""
+        rendered = WeChatFormatter().format_link("developers.openai.com", URL)
+
+        self.assertIn("developers.openai.com", rendered)
+        self.assertIn(URL, rendered)
+
+
+class SlackCitationRenderingTests(unittest.TestCase):
+    def test_slack_converts_the_link_to_mrkdwn(self):
+        from markdown_to_mrkdwn import SlackMarkdownConverter
+
+        rendered = SlackMarkdownConverter().convert(CITED)
+
+        self.assertIn(f"<{URL}|developers.openai.com>", rendered)
+
+
+if __name__ == "__main__":
+    unittest.main()

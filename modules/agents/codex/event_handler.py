@@ -10,11 +10,13 @@ import logging
 import os
 import re
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
+from core.citations import CitationSource, has_citation_markers, resolve_citations
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 
@@ -27,6 +29,11 @@ _GENERATED_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".webp"}
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ATTACHMENT_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(attachment://[^)\s]+\)")
 _ImageSnapshot = dict[Path, tuple[int, int]]
+# Bounds for the citation source cache. Generous enough that an ordinary
+# multi-search conversation always resolves, small enough that a long-lived
+# process cannot grow it without limit.
+_MAX_CITATION_THREADS = 16
+_MAX_CITATION_SOURCES_PER_THREAD = 512
 
 
 class CodexEventHandler:
@@ -41,6 +48,13 @@ class CodexEventHandler:
         self._agent = agent
         self._image_snapshots_by_turn: dict[str, tuple[str, _ImageSnapshot]] = {}
         self._pending_image_snapshots_by_session: dict[str, tuple[str, _ImageSnapshot]] = {}
+        # Citable web-search results, keyed by Codex thread then ref_id. A ref_id
+        # is only unique inside its own native thread, and a later Avibe turn can
+        # cite a search run in an earlier one, so the scope is the thread - never
+        # the turn, and never one map shared across threads.
+        self._search_sources_by_thread: OrderedDict[str, OrderedDict[str, CitationSource]] = (
+            OrderedDict()
+        )
 
     def snapshot_generated_images(self, thread_id: str, base_session_id: str) -> None:
         """Record generated images present before a Codex turn starts."""
@@ -218,6 +232,7 @@ class CodexEventHandler:
         await asyncio.to_thread(self._persist_turn_generated_images, params)
         pending = turn_state.pending_assistant if turn_state else None
         pending_text = pending[0] if pending else None
+        pending_text, citations = self._resolve_citations(pending_text, params, tracked_request)
         result_text = self._append_generated_images(pending_text, params, tracked_request)
         self._agent._turn_registry.pop_turn(turn_id)
         if pending and (pending[0] or "").strip():
@@ -229,6 +244,7 @@ class CodexEventHandler:
                 started_at=tracked_request.started_at,
                 parse_mode=pending_parse_mode or "markdown",
                 request=tracked_request,
+                citations=citations,
             )
         else:
             await self._agent.emit_result_message(
@@ -238,6 +254,7 @@ class CodexEventHandler:
                 started_at=tracked_request.started_at,
                 parse_mode="markdown",
                 request=tracked_request,
+                citations=citations,
             )
         thread_id = self._extract_thread_id(params) or self._agent._session_mgr.get_thread_id(
             tracked_request.base_session_id
@@ -264,11 +281,15 @@ class CodexEventHandler:
                 prev_is_visible = bool(prev and strip_silent_blocks(prev[0]).strip())
                 if text_is_visible and prev_is_visible:
                     prev_text, prev_pm = prev
+                    prev_text, prev_citations = self._resolve_citations(prev_text, params, request)
                     await self._agent.controller.emit_agent_message(
                         request.context,
                         "assistant",
                         prev_text,
                         parse_mode=prev_pm or "markdown",
+                        # Forwarded only when there is a sidecar, so a message
+                        # without citations keeps the call it always had.
+                        **({"citations": prev_citations} if prev_citations else {}),
                     )
                 # A silent terminal response may settle the turn, but it must
                 # not displace an earlier visible result candidate.
@@ -335,8 +356,78 @@ class CodexEventHandler:
                     parse_mode="markdown",
                 )
 
+        elif item_type == "webSearch":
+            self._record_search_sources(params, item)
+
         elif item_type == "imageGeneration":
             await asyncio.to_thread(self._persist_generated_image, params, item)
+
+    def _record_search_sources(self, params: dict[str, Any], item: dict[str, Any]) -> None:
+        """Harvest a completed web search's results so later markers can cite them.
+
+        This is a bounded cache, not durable truth: a ref whose search predates an
+        eviction (or a restart) resolves to the unresolved label rather than to a
+        guess. Codex re-sends the results when a thread is re-read, so an ordinary
+        resumed conversation re-populates itself.
+        """
+        thread_id = self._extract_thread_id(params)
+        results = item.get("results")
+        if not thread_id or not isinstance(results, list):
+            return
+        harvested: list[CitationSource] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            ref_id = result.get("ref_id") or result.get("refId")
+            url = result.get("url")
+            if not isinstance(ref_id, str) or not ref_id or not isinstance(url, str) or not url:
+                continue
+            title = result.get("title")
+            harvested.append(
+                CitationSource(
+                    ref_id=ref_id,
+                    title=title if isinstance(title, str) else "",
+                    url=url,
+                )
+            )
+        # A search with nothing citable must not claim a cache slot of its own -
+        # that slot would evict a thread whose refs an answer can still cite.
+        if not harvested:
+            return
+        sources = self._search_sources_by_thread.get(thread_id)
+        if sources is None:
+            sources = OrderedDict()
+            self._search_sources_by_thread[thread_id] = sources
+        self._search_sources_by_thread.move_to_end(thread_id)
+        for source in harvested:
+            sources[source.ref_id] = source
+            sources.move_to_end(source.ref_id)
+            while len(sources) > _MAX_CITATION_SOURCES_PER_THREAD:
+                sources.popitem(last=False)
+        while len(self._search_sources_by_thread) > _MAX_CITATION_THREADS:
+            self._search_sources_by_thread.popitem(last=False)
+
+    def _resolve_citations(
+        self,
+        text: str | None,
+        params: dict[str, Any],
+        request: AgentRequest,
+    ) -> tuple[str | None, list[dict[str, Any]] | None]:
+        """Rewrite an outgoing message's citation markers into links + sidecar.
+
+        Resolution happens at emit time, not when the text arrives, so a search
+        result that lands between the message item and the turn completing is
+        still available to the message that cites it.
+        """
+        if not has_citation_markers(text):
+            return text, None
+        sources = self._search_sources_by_thread.get(self._extract_thread_id(params)) or {}
+        resolved, citations = resolve_citations(
+            text,
+            sources,
+            unresolved_label=self._t("message.citationUnresolved", request),
+        )
+        return resolved, citations or None
 
     def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:
         turn = params.get("turn")

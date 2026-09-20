@@ -290,6 +290,7 @@ def persist_agent_message(
     *,
     quick_replies: Optional[list[str]] = None,
     result_footer: Optional[str] = None,
+    citations: Optional[list[dict[str, Any]]] = None,
     metadata: Optional[dict[str, Any]] = None,
     native_message_id: Optional[str] = None,
     error_sink: Optional[list] = None,
@@ -407,6 +408,12 @@ def persist_agent_message(
                 # transcript can render it beside the timestamp without guessing.
                 if result_footer:
                     content = {**(content or {}), "result_footer": result_footer}
+                # Resolved citation sources. ``text`` already carries the links, so
+                # every surface reads correctly without this; the structured copy is
+                # what lets the Web transcript render compact source badges, and it
+                # survives reload because it lives on the row, not in the delivery.
+                if citations:
+                    content = {**(content or {}), "citations": list(citations)}
                 appended_row = _append_quietly(
                     conn,
                     scope_id=scope_id,
