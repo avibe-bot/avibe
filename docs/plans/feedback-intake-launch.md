@@ -314,3 +314,24 @@ status-query outcome after observed429, status-independent POST body handling,
 interruption after the durable observation, fresh404-gated recovery, monotonic
 server receipt precedence and the existing one-write race. Any new finding in
 this lifecycle class returns to PM before another edit or push.
+
+## Post-merge public edge compatibility finding (2026-09-20)
+
+After PR #2066 was merged, the first read-only request through the allocated
+public edge exposed a client compatibility defect. The default
+`Python-urllib/3.x` user agent was rejected by the edge with Cloudflare 1010,
+while the same GET request with `avibe-feedback-intake/1` reached the application
+and returned the expected empty receipt (`404` and `{}`). A browser user agent
+also reached the application. This was an edge admission policy interaction;
+the receiver protocol, status-only POST contract, receipt semantics, and fixed
+destination were unchanged. No credential or GitHub write was involved.
+
+The smallest correction fixes the existing use-avibe helper's product
+`User-Agent` to `avibe-feedback-intake/1` for every request. Content-Type,
+redirect blocking, proxy disabling, deadlines, POST status handling, unknown
+outcome protection, and GET-only resume remain unchanged. A focused consumer
+test sends both GET and POST through the helper's real `urllib.request.Request`
+and loopback HTTP path and asserts that the product user agent arrives at the
+server for both methods. The public-edge observation is operational evidence,
+not a CI dependency; no external request or public Issue creation is required
+for this correction.

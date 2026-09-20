@@ -30,6 +30,13 @@ def load_worker():
     return module
 
 
+def load_client():
+    spec = importlib.util.spec_from_file_location("feedback_client", HELPER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def make_payload(request_id=None, **overrides):
     value = dict(schema_version=1, request_id=request_id or str(uuid.uuid4()), kind="bug",
                  title="Workbench: 中文 ☃", body="Observed: 中文 ☃\n\nExpected: newlines & # $(data).", public_consent=True)
@@ -550,6 +557,55 @@ def test_helper_429_retries_only_same_saved_attempt(github, tmp_path):
     finally:
         server.shutdown()
         thread.join(2)
+
+
+def test_helper_sends_product_user_agent_for_get_and_post(monkeypatch):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            self.server.requests.append((self.command, self.headers, b""))
+            raw = b"{}"
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):  # noqa: N802
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            self.server.requests.append((self.command, self.headers, body))
+            raw = b'{"ok":true}'
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("AVIBE_FEEDBACK_TEST_MODE", "1")
+    monkeypatch.setenv(
+        "AVIBE_FEEDBACK_TEST_SHARE_BASE_URL",
+        f"http://127.0.0.1:{server.server_port}",
+    )
+    try:
+        client = load_client()
+        assert client._request("/api/feedback-status?request_id=missing") == (404, {})
+        assert client._request("/api/feedback", body=b"{}") == (202, None)
+        assert [request[0] for request in server.requests] == ["GET", "POST"]
+        assert all(
+            request[1]["User-Agent"] == "avibe-feedback-intake/1"
+            for request in server.requests
+        )
+        assert server.requests[1][2] == b"{}"
+    finally:
+        server.shutdown()
+        thread.join(2)
+        server.server_close()
 
 
 def test_runtime_manifest_validation_survives_optimized_python(tmp_path):
