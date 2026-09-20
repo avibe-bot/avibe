@@ -16,7 +16,10 @@ from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
-from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
+from vibe.model_hub_runtime.api_key_vendors import (
+    official_api_key_base_url,
+    validate_api_key_auth_scheme,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -164,6 +167,7 @@ class EngineStateStore:
         vendor: str = "custom",
         protocol: str = "openai_chat",
         base_url: str | None = None,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         if not isinstance(value, str) or not value:
@@ -173,6 +177,12 @@ class EngineStateStore:
             raise EngineStateError("credential vendor is empty")
         if protocol not in _PROTOCOLS:
             raise EngineStateError("unsupported source protocol")
+        try:
+            validate_api_key_auth_scheme(
+                normalized_vendor, protocol, base_url, value, auth_scheme,
+            )
+        except ValueError:
+            raise EngineStateError("unsupported API key authentication scheme") from None
         normalized_base_url = _validated_base_url(base_url)
         with self._lock:
             credential_ref = f"cred_{secrets.token_hex(16)}"
@@ -190,6 +200,7 @@ class EngineStateStore:
                         "protocol": protocol,
                         "base_url": normalized_base_url,
                         "value": value,
+                        **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
                     },
                     temporary_path=credential_tmp,
                     credential_ref=credential_ref,
@@ -443,17 +454,24 @@ class EngineStateStore:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         """Compare transient native material with an engine-owned API key."""
 
         metadata = self.credential_metadata(credential_ref)
         if metadata.get("kind") != "api_key":
             return False
+        try:
+            validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
+        except ValueError:
+            raise EngineStateError("unsupported API key authentication scheme") from None
         normalized_base_url = _validated_base_url(base_url)
         if (
             metadata.get("vendor") != vendor.strip().lower()
             or metadata.get("protocol") != protocol
             or metadata.get("base_url") != normalized_base_url
+            or metadata.get("auth_scheme") != auth_scheme
         ):
             return False
         if not isinstance(secret, str):
@@ -609,6 +627,22 @@ class EngineStateStore:
                 return None
             if kind not in {"api_key", "oauth"}:
                 raise EngineStateError("credential is unavailable")
+            if kind == "api_key":
+                try:
+                    validate_api_key_auth_scheme(
+                        payload.get("vendor"), payload.get("protocol"), payload.get("base_url"),
+                        payload.get("value"), payload.get("auth_scheme"),
+                    )
+                    if payload.get("auth_scheme") is not None and (
+                        payload.get("protocol") != "anthropic"
+                        or not isinstance(payload.get("value"), str)
+                        or not payload["value"]
+                    ):
+                        raise ValueError
+                except ValueError:
+                    raise EngineStateError("unsupported API key authentication scheme") from None
+            elif payload.get("auth_scheme") is not None:
+                raise EngineStateError("unsupported API key authentication scheme")
             return payload
 
     def has_current_source_credential(
@@ -654,6 +688,10 @@ class EngineStateStore:
             ):
                 return False
             if credential_kind == "api_key":
+                validate_api_key_auth_scheme(
+                    normalized_vendor, protocol, normalized_base_url,
+                    payload.get("value"), payload.get("auth_scheme"),
+                )
                 return (
                     payload.get("protocol") == protocol
                     and payload.get("base_url") == normalized_base_url

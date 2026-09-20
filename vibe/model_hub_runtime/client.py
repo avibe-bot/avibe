@@ -42,7 +42,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolUsageReport,
     observe_buffered_protocol_response,
 )
-from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_urls
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_urls, validate_api_key_auth_scheme
 from vibe.model_hub_runtime.state import SourceRecord
 
 
@@ -757,6 +757,7 @@ async def probe_models(
     protocol: str,
     base_url: str | None,
     secret: str | None,
+    auth_scheme: str | None = None,
     timeout: float = 15.0,
 ) -> tuple[DiscoveredModel, ...]:
     """Probe the one allowlisted models path without redirecting credentials.
@@ -767,6 +768,7 @@ async def probe_models(
     arrives belongs to anyone who asks and therefore attests to no credential.
     """
     normalized_vendor = vendor.strip().lower()
+    validate_api_key_auth_scheme(normalized_vendor, protocol, base_url, secret, auth_scheme)
     root = base_url or _OFFICIAL_BASE_URLS.get(normalized_vendor)
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
@@ -781,7 +783,7 @@ async def probe_models(
         # stays on the uncredentialed request: it must differ in exactly one way.
         headers["anthropic-version"] = "2023-06-01"
     if secret is not None:
-        if protocol == "anthropic":
+        if protocol == "anthropic" and auth_scheme != "bearer":
             headers["x-api-key"] = secret
         else:
             headers["Authorization"] = f"Bearer {secret}"

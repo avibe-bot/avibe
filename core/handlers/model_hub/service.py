@@ -405,7 +405,7 @@ class UnavailableEngineAdapter:
 
     async def provision_credential(
         self, vendor: str, protocol: str, secret: str, base_url: str | None,
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
@@ -427,12 +427,16 @@ class UnavailableEngineAdapter:
     async def matches_api_key_credential(
         self, credential_ref: str, vendor: str, protocol: str,
         secret: str, base_url: str | None,
+        *, auth_scheme: str | None = None,
     ) -> bool:
+        raise EngineUnavailableError
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         raise EngineUnavailableError
 
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
@@ -640,9 +644,11 @@ async def _provision_transient_credential_with_cancellation_ownership(
     vendor: str,
     key: str,
     base_url: str | None,
-    *, on_reserved: Callable[[str], None] | None = None,
+    *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
 ) -> str:
-    options = {"on_reserved": on_reserved} if on_reserved is not None else {}
+    options: dict[str, Any] = {"on_reserved": on_reserved} if on_reserved is not None else {}
+    if auth_scheme is not None:
+        options["auth_scheme"] = auth_scheme
     return await _acquire_credential_ref_with_cancellation_ownership(
         service,
         service.adapter.provision_transient_credential(vendor, key, base_url, **options),
@@ -1671,6 +1677,7 @@ class ModelHubService:
         payload: Mapping[str, Any],
         *,
         require_proven: bool = False,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         if set(payload) - {"vendor", "base_url", "key", "protocol"}:
@@ -1690,6 +1697,7 @@ class ModelHubService:
             vendor,
             key.strip(),
             base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
         try:
@@ -1716,10 +1724,11 @@ class ModelHubService:
     async def _require_proven_source_payload(
         self,
         payload: Mapping[str, Any],
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         return await self._observe_source_payload(
             payload, require_proven=True, on_reserved=on_reserved,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
         )
 
     async def _provision_oauth_credential(
@@ -3222,12 +3231,16 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
 
             old_credential_ref = source.credential_ref
+            auth_scheme = await self._engine_call(
+                self.adapter.credential_auth_scheme(old_credential_ref)
+            )
             replacement_ref = await self._engine_call(
                 self.adapter.provision_credential(
                     source.vendor,
                     source.protocol,
                     key,
                     source.base_url,
+                    **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
                 )
             )
             committed = False

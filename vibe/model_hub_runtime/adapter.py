@@ -44,7 +44,7 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
-from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
+from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol, validate_api_key_auth_scheme
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -724,10 +724,12 @@ async def _probe_protocol_response(
     protocol: str,
     base_url: str | None,
     secret: str,
+    auth_scheme: str | None = None,
     timeout: float = 15.0,
 ) -> _ProtocolEvidence:
     """Require a response from the candidate protocol's distinct request path."""
 
+    validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
     if not root:
         raise EngineClientError("source requires a base URL for protocol observation")
@@ -744,11 +746,10 @@ async def _probe_protocol_response(
         "Accept": "application/json",
     }
     if protocol == "anthropic":
-        headers = {
-            "x-api-key": secret,
-            "anthropic-version": "2023-06-01",
-            "Accept": "application/json",
-        }
+        headers["anthropic-version"] = "2023-06-01"
+        if auth_scheme != "bearer":
+            headers.pop("Authorization")
+            headers["x-api-key"] = secret
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -923,6 +924,7 @@ async def _authenticate_with_models_witness(
     protocol: str,
     base_url: str | None,
     secret: str,
+    auth_scheme: str | None = None,
 ) -> _ModelsWitnessResult:
     """Read the owned interface's model listing as the authentication witness.
 
@@ -957,12 +959,14 @@ async def _authenticate_with_models_witness(
     listing, so one call both authenticates the source and populates it.
     """
 
+    scheme_options = {"auth_scheme": auth_scheme} if auth_scheme is not None else {}
     try:
         models = await probe_models(
             vendor=vendor,
             protocol=protocol,
             base_url=base_url,
             secret=secret,
+            **scheme_options,
         )
     except EngineClientError as exc:
         if exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
@@ -974,6 +978,7 @@ async def _authenticate_with_models_witness(
             protocol=protocol,
             base_url=base_url,
             secret=None,
+            **scheme_options,
         )
     except EngineClientError as refusal:
         if refusal.status_code in _AUTHENTICATION_ERROR_STATUSES:
@@ -1724,6 +1729,7 @@ class CLIProxyEngineAdapter:
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         return await run_owned_in_thread(
@@ -1732,6 +1738,7 @@ class CLIProxyEngineAdapter:
             vendor=vendor,
             protocol=protocol,
             base_url=base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
 
@@ -1896,6 +1903,8 @@ class CLIProxyEngineAdapter:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         return await asyncio.to_thread(
             self.state_store.matches_api_key_credential,
@@ -1904,7 +1913,14 @@ class CLIProxyEngineAdapter:
             protocol,
             secret,
             base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
         )
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+        if metadata.get("kind") != "api_key":
+            raise EngineStateError("API key credential is unavailable")
+        return metadata.get("auth_scheme")
 
     async def retarget_api_key_credential(
         self,
@@ -1934,6 +1950,7 @@ class CLIProxyEngineAdapter:
             vendor=normalized_vendor,
             protocol=protocol,
             base_url=base_url,
+            **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
         )
 
     async def credential_supports_refresh(self, credential_ref: str) -> bool:
@@ -1949,22 +1966,25 @@ class CLIProxyEngineAdapter:
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Store an unbound observation key until the observation settles.
 
         The observation seam determines protocol from upstream responses, so the
-        temporary record deliberately uses a neutral engine-store protocol marker;
-        ``observe_source`` reads only the opaque ref's secret and never treats that
-        marker as a protocol conclusion.
+        legacy temporary record uses a neutral engine-store protocol marker.
+        Explicit Bearer is restricted to the Anthropic interface. Neither marker
+        supplies authentication evidence; observation still needs upstream proof.
         """
 
+        validate_api_key_auth_scheme(vendor, None, base_url, secret, auth_scheme)
         return await run_owned_in_thread(
             self.state_store.store_api_key,
             secret,
             vendor=vendor,
-            protocol="openai_chat",
+            protocol="anthropic" if auth_scheme == "bearer" else "openai_chat",
             base_url=base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
 
@@ -2091,6 +2111,7 @@ class CLIProxyEngineAdapter:
                 protocol=protocol,
                 base_url=normalized_base_url,
                 secret=secret,
+                **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
             )
         except EngineClientError as exc:
             raise ModelDiscoveryError("model discovery failed") from exc
@@ -2133,12 +2154,19 @@ class CLIProxyEngineAdapter:
         if metadata.get("vendor") != normalized_vendor:
             raise EngineStateError("credential does not match observation target")
         credential_kind = metadata.get("kind")
+        auth_scheme = metadata.get("auth_scheme")
+        scheme_options = {"auth_scheme": auth_scheme} if auth_scheme is not None else {}
         secret: str | None = None
         oauth_auth: _AuthRecord | None = None
         if credential_kind == "api_key":
             if metadata.get("base_url") != normalized_base_url:
                 raise EngineStateError("credential does not match observation target")
             secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+            if auth_scheme is not None:
+                for protocol in protocol_order:
+                    validate_api_key_auth_scheme(
+                        normalized_vendor, protocol, base_url, secret, auth_scheme,
+                    )
         elif credential_kind == "oauth":
             if normalized_base_url is not None:
                 raise EngineStateError("credential does not match observation target")
@@ -2185,6 +2213,7 @@ class CLIProxyEngineAdapter:
                         protocol=protocol,
                         base_url=base_url,
                         secret=secret or "",
+                        **scheme_options,
                     )
                 elif credential_kind == "oauth" and owner_scoped_protocol:
                     # A pinned subscription has no upstream to probe: the engine
@@ -2226,6 +2255,7 @@ class CLIProxyEngineAdapter:
                     protocol=protocol,
                     base_url=base_url,
                     secret=secret or "",
+                    **scheme_options,
                 )
                 if witness.credential is _ModelsWitness.REJECTED:
                     received_rejection = True
@@ -2264,6 +2294,7 @@ class CLIProxyEngineAdapter:
                         protocol=proved_protocol,
                         base_url=base_url,
                         secret=secret or "",
+                        **scheme_options,
                     )
                 else:
                     models = await self.discover_models(
@@ -2304,6 +2335,7 @@ class CLIProxyEngineAdapter:
                         protocol=proved_protocol,
                         base_url=base_url,
                         secret=secret or "",
+                        **scheme_options,
                     )
                 else:
                     models = await self.discover_models(

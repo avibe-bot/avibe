@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from config.v2_config import normalize_model_hub_base_url, normalize_model_hub_vendor_id
 
@@ -17,6 +18,65 @@ _LEGACY_OFFICIAL_BASE_URLS = {
     # treating it like OpenAI for persisted Sources that omit ``base_url``.
     "codex": "https://api.openai.com/v1",
 }
+
+
+def validate_api_key_auth_scheme(
+    vendor: str,
+    protocol: str | None,
+    base_url: str | None,
+    secret: str | None,
+    auth_scheme: str | None,
+) -> str | None:
+    """Validate explicit static transport without reinterpreting legacy keys.
+
+    A missing protocol is only for an unbound observation credential. A missing
+    secret is only for the credentialless contrast of an already validated
+    transport. The pinned CPA sends ordinary custom Claude keys as Bearer, but
+    interprets ``sk-ant-oat`` anywhere in a key as OAuth independently of kind.
+    """
+    if auth_scheme is None:
+        return None
+    try:
+        if (
+            auth_scheme != "bearer"
+            or not isinstance(vendor, str)
+            or vendor.strip().lower() != "anthropic"
+            or protocol not in (None, "anthropic")
+            or not isinstance(base_url, str)
+            or any(ord(char) <= 32 or ord(char) == 127 for char in base_url)
+        ):
+            raise ValueError
+        normalized = normalize_model_hub_base_url(base_url)
+        if normalized is None:
+            raise ValueError
+        parsed = urlsplit(normalized)
+        hostname = parsed.hostname
+        # Inspect the parsed authority, never a substring of the whole URL.
+        # Reject encoded/ambiguous authorities before a HTTP library normalizes
+        # them differently. Match CPA's HTTPS/default-port first-party gate.
+        if (
+            not hostname
+            or "%" in parsed.netloc
+            or "\\" in parsed.netloc
+            or parsed.port == 0
+        ):
+            raise ValueError
+        if (
+            parsed.scheme == "https"
+            and hostname.encode("idna").decode("ascii").lower() == "api.anthropic.com"
+            and parsed.port in (None, 443)
+        ):
+            raise ValueError
+        if secret is not None and (
+            not isinstance(secret, str)
+            or not secret.strip()
+            or "sk-ant-oat" in secret
+            or any(ord(char) < 32 or ord(char) == 127 for char in secret)
+        ):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("unsupported API key authentication scheme") from None
+    return "bearer"
 
 
 @dataclass(frozen=True)

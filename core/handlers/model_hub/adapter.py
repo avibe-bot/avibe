@@ -450,6 +450,7 @@ class EngineAdapter(Protocol):
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Store an API-key secret in the ENGINE-OWNED credential store and
@@ -461,7 +462,8 @@ class EngineAdapter(Protocol):
         reservation and before any secret bytes are written. A callback failure
         forbids the write. Hub OAuth credentials never pass through here —
         they are created engine-side by the OAuth flow and surfaced via
-        ``OAuthFlowState.credential_ref``."""
+        ``OAuthFlowState.credential_ref``. ``auth_scheme`` optionally preserves
+        an explicit static transport; omission retains legacy semantics."""
         ...
 
     async def provision_oauth_credential(
@@ -511,8 +513,14 @@ class EngineAdapter(Protocol):
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         """Compare transient native material inside custody; return no secrets."""
+        ...
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        """Read validated, non-secret static transport metadata for replacement."""
         ...
 
     async def retarget_api_key_credential(
@@ -548,6 +556,7 @@ class EngineAdapter(Protocol):
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Provision an unbound credential for an unsaved observation.
