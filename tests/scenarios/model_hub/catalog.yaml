@@ -1131,6 +1131,10 @@ scenarios:
     test: tests/e2e/test_model_hub_migration_persisted.py::test_f4_persisted_configuration_migrates_with_runtime_auth_present
     related_tests:
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_not_removed
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_transport_is_refused_without_cleanup
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_oauth_history_fence_survives_later_api_batch_over_http
   - id: G1
     name: A guard echo missing agents remains confirmable
     status: assert

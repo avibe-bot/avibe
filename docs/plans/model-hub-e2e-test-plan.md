@@ -93,7 +93,7 @@ Out of scope (documented, not dropped silently):
 | F1 | seed hermetic HOME with native claude/codex/opencode configs; scan | complete Claude API-key custody is importable; access-only Codex OAuth and unsupported OpenCode credentials remain visible blockers; no credential material is returned | assert |
 | F2 | apply the selected complete backend group | Claude API-key custody is committed and its direct native auth is cleaned; blocked Codex/OpenCode material and unrelated Claude settings remain unchanged | assert |
 | F3 | first open `/settings/models` after upgrade with importable items | banner visible (B2 — currently only in wizard: expected-fail until mounted) | fix-first |
-| F4 | already-Hub agents with populated runtime auth; import saved CLI/shell files | runtime values neither supply nor block import; static Bearer retains its header through CPA; public/wrong-key proof preserves files; unrelated shell bytes remain exact | assert |
+| F4 | already-Hub agents with populated runtime auth; import saved CLI/shell files, then repair damaged private custody | runtime values neither supply nor block import; dynamic writers refuse without cleanup; static Bearer survives migration and replacement through actual CPA even when the old private file is missing/corrupt; recorded/unknown OAuth history survives later batches and refuses speculative reprovision; public/wrong-key proof preserves files and unrelated bytes/modes | assert |
 
 ### G. Guards and contract hygiene (C51–C53, B3,B7,B13,B16)
 | ID | Steps | Expect | Status |
