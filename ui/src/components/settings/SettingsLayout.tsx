@@ -234,6 +234,7 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  const setupOrigin = useSettingsOverlayContext()?.location.pathname === '/setup';
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
@@ -324,19 +325,19 @@ export const SettingsLayout: React.FC = () => {
   }, [location.pathname]);
 
   const mobileBackTarget = useMemo(() => {
-    if (atRoot) return '/';
+    if (atRoot || setupOrigin) return '/';
     const activeSection = activeTrail.at(-1);
     if (!activeSection) return '/settings';
     return normalizedSettingsPath(location.pathname) === normalizedSettingsPath(activeSection.path)
       ? '/settings'
       : activeSection.path;
-  }, [activeTrail, atRoot, location.pathname]);
+  }, [activeTrail, atRoot, location.pathname, setupOrigin]);
 
   // One class string for both branches below, so the touch target and the
   // chevron cannot drift apart depending on where the control points.
   const mobileBackClassName = '-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden';
 
-  const mobileBackLabel = mobileBackTarget === '/'
+  const mobileBackLabel = setupOrigin ? t('common.back') : mobileBackTarget === '/'
     ? t('settings.backToWorkbench')
     : mobileBackTarget === '/settings'
       ? t('settings.backToSections')

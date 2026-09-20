@@ -16,6 +16,7 @@ import { createAgentCollectionReadAuthority } from './collectionReadAuthority';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { MigrationDialog } from './MigrationDialog';
+import { resumeGatewayAdoption } from './gatewayAdoption';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import type { AgentBackend, AgentMode, AgentSupply, MigrationItem } from './types';
 
@@ -119,8 +120,18 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
     if (!agent || agent.mode === mode || switching) return;
     setSwitching(mode);
     try {
-      const next = await modelsApi.setAgentMode(backend, mode);
-      if (!aliveRef.current) return;
+      const next = mode === 'hub'
+        ? await (async () => {
+            const result = await resumeGatewayAdoption(modelsApi, agentReads, backend);
+            if (!result.ok) throw new Error(result.failure.reason);
+            if (result.candidates.length > 0) {
+              if (aliveRef.current) setMigrateOpen(true);
+              return null;
+            }
+            return modelsApi.setAgentMode(backend, 'hub');
+          })()
+        : await modelsApi.setAgentMode(backend, mode);
+      if (!aliveRef.current || !next) return;
       setAgent(next);
       if (mode === 'direct') {
         showToast(t('settings.models.supplyMode.switchedDirect') as string, 'success');
@@ -148,10 +159,9 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
   const mode = agent.mode;
   const hubOutcome = connectOutcome(agent, null);
-  // Only surface the import strip for configs the migration dialog can actually
-  // apply — a reauth-only scan would open a dead-end dialog (reauth rows are
-  // disabled and excluded from apply), so those don't count as importable.
-  const importable = detected.filter((i) => i.proposed_action !== 'reauth');
+  // The strip advertises an actionable import row. A blocked-only native
+  // configuration is still handled by the Direct → Hub migration dialog.
+  const importable = detected.filter((i) => i.proposed_action === 'import');
   const detectItem = importable.find((i) => i.kind === 'api_key' || i.kind === 'opencode_provider') ?? importable[0] ?? null;
 
   return (
@@ -242,8 +252,10 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
       <MigrationDialog
         open={migrateOpen}
+        eligible={(item) => item.backend === backend}
         onClose={() => setMigrateOpen(false)}
         onApplied={() => {
+          setMigrateOpen(false);
           void load();
           void scan();
         }}

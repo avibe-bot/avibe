@@ -2,12 +2,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentDetection } from '../steps/AgentDetection';
 import { AssistantRow } from './AssistantRow';
 import en from '../../i18n/en.json';
 import type { BackendConnectionState } from '../../context/ApiContext';
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(),
@@ -19,7 +20,8 @@ vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermissi
 vi.mock('../settings/providers/BackendProviderConfig', () => ({ BackendProviderConfig: ({ backend }: { backend: string }) => <div>Existing provider: {backend}</div> }));
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
-const wrap = (node: React.ReactNode) => <MemoryRouter><I18nextProvider i18n={i18n}>{node}</I18nextProvider></MemoryRouter>;
+const LocationProbe = () => <span data-testid="location">{useLocation().pathname}</span>;
+const wrap = (node: React.ReactNode, active = true) => <MemoryRouter><I18nextProvider i18n={i18n}><RouteSurfaceActiveContext.Provider value={active}>{node}</RouteSurfaceActiveContext.Provider><LocationProbe /></I18nextProvider></MemoryRouter>;
 const data = () => ({ __onboardingDetected: true, agents: Object.fromEntries(['claude', 'codex', 'opencode'].map((name) => [name, { enabled: true, cli_path: name, status: 'missing' }])) });
 const row = (name: string) => within(screen.getByLabelText(name));
 beforeEach(() => {
@@ -83,6 +85,55 @@ describe('assistant installation presentation', () => {
     expect(screen.queryByText('API Key connected')).toBeNull();
     fireEvent.click(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+  it('refreshes connection readiness when a retained settings surface returns', async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true,
+      backend,
+      installed: true,
+      enabled: true,
+      auth: 'none',
+      application: 'applied',
+      ready: false,
+      entry_eligible: false,
+    }));
+    const view = render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />, false));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true,
+      backend,
+      installed: true,
+      enabled: true,
+      auth: 'api_key',
+      application: 'applied',
+      ready: true,
+      entry_eligible: true,
+    }));
+    view.rerender(wrap(<AgentDetection data={saved} onNext={vi.fn()} />, true));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(6));
+    expect(await row('Claude Code').findByRole('button', { name: 'API Key connected' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
+  });
+  it('opens Model Hub directly when the backend is already Hub-owned', async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true,
+      backend,
+      installed: true,
+      enabled: true,
+      auth: 'none',
+      application: 'applied',
+      ready: false,
+      entry_eligible: false,
+      supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    const action = await row('Claude Code').findByRole('button', { name: en.settings.backends.openModelHub });
+    fireEvent.click(action);
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/models'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
   });
   it('an available update keeps Continue and configuration usable', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';

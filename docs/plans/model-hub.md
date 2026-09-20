@@ -960,9 +960,13 @@ dead-end error string.
 and installation is supported exactly when it equals one
 `manifest.assets[].platform`. The install route and status reads mirror this closed
 state set; prose cannot add another runtime health value. `RuntimeDependency.enabled`
-is orthogonal persisted user intent: it defaults to false when absent, explicit Start
-sets it true, explicit Stop sets it false, and service startup starts the runtime only
-when it is true. A transient process loss changes health, never this switch state.
+is orthogonal persisted user intent. New configurations default it to true without an
+enable-confirmation dialog. The additive persisted
+`model_hub.runtime_default_applied: bool` marker defaults to true; a pre-marker disk
+shape is upgraded once to `enabled: true` and the marker is then persisted. Later
+explicit Stop writes `enabled: false` and does not get re-enabled by that one-time
+defaulting rule. Service startup starts the runtime only when the persisted intent is
+true, and a transient process loss changes health, never this switch state.
 
 | Decision | Meaning | Entry and exit rule | `status.error_key` |
 | --- | --- | --- | --- |
@@ -1733,11 +1737,11 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
 ## 6. Modes & onboarding
 
 - **Gateway (wire value `hub`, default)**: every backend on a fresh installation starts
-  in Gateway mode. An existing installation with no Model Hub state starts in Direct;
-  each backend moves to Gateway only after the user explicitly switches it in the
-  Models page. This onboarding rule prevents a silent routing change for existing
-  users without introducing an internal contract-conversion path. Avibe injects
-  runtime-only configuration into processes
+  in Gateway mode. An existing installation with no backend-mode state remains in
+  Direct; each backend moves to Gateway only after the user explicitly switches it in
+  the Models page. Runtime availability is default-on independently of this per-backend
+  mode choice and never asks the user to confirm enablement. Avibe injects runtime-only
+  configuration into processes
   it launches (env vars for Claude Code; `-c` overrides for Codex app-server;
   `OPENCODE_CONFIG` overlay for OpenCode, gateway-config hash tracked for
   long-lived `opencode serve`). Native user configs are never written.
@@ -1762,28 +1766,44 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
   A `native_cli` hop inside Gateway mode is labelled **Native**, not Direct: Avibe still
   owns the pre-stream same-turn fallback and recovery policy. Product copy reserves
   “Direct” for `mode: direct` and does not explain either path as “not through Gateway.”
-- **Native-config import** remains copy-only and reversible, a per-item checklist
-  grouped by backend. Its action comes only from the authoritative matrix below; prose,
-  scan code, and contract examples cannot add another value or infer a different default.
+- **Native-config import** is a custody-takeover flow, not a copy-only compatibility
+  path. Consent is grouped by backend and CLI account, with one consequence sentence
+  and one Start migration action. Its action comes only from the authoritative matrix
+  below; prose, scan code, and contract examples cannot add another value or infer a
+  different default. Runtime enablement never substitutes for this consent.
 
 **Native-config import action matrix (authoritative and exhaustive; owner ruling
-2026-08-09).** Originals are never modified or deleted, and Direct remains available.
+2026-09-19).** The server owns one transaction for Source custody, default Route
+placement, backend mode, and native cleanup. Before the transaction is exposed,
+failure or dismissal can leave the native snapshot unchanged. Once exposed, recovery
+is forward-only: it retains the current owner, blocks the affected backend, and
+finishes cleanup and projection rather than restoring a stale native grant.
 
 | Decision | Action | Eligible detected item | Default / apply behavior |
 | --- | --- | --- | --- |
-| `import.keep_native` | `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store, create the backend's singleton `native_cli` Source, and run the same §4.2 default placement and effective adoption as Add Source; reject a duplicate native Source before OAuth or partial commit |
-| `import.copy_key` | `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source, run the same §4.2 default placement and effective adoption as Add Source, and leave the original file byte-identical |
-| `import.reauth` | `reauth` | detected material that cannot be safely copied or retained as a usable native login | not auto-applied as import; direct the user into the explicit authentication flow |
+| `import.copy_key` | `import` | Claude or Codex OAuth with a complete refresh-capable grant (Codex also requires `account_id`), or an API key plus optional Base URL including an OpenCode provider key | API-key rows are selected by default when the backend has no blocker; OAuth rows are selected only after grouped CLI consent. Stage and validate the Hub credential, then expose custody, convert or create the Source, place its Routes, switch the selected backend to Hub, and remove only the replaced native material |
+| `import.keep_native` | `keep_native` | access-only, unsupported, malformed, or otherwise non-exportable native credential | visible and unselected as an action-required blocker; it is never silently skipped and cannot be submitted as a successful takeover. The affected backend remains blocked until re-authentication or repair |
+| `import.reauth` | `reauth` | explicitly invalid grant or credential shape requiring a new authentication flow | visible and unselected; it cannot be applied as an import and routes the user to the existing explicit authentication path |
 | `import.controlled` | `controlled_import` | future engine-owned OAuth-import capability that can preserve refresh semantics | reserved and not selectable/applicable in v3; explicit OAuth add is the only hub-held subscription path |
 
 The final mirror registry compares this exact action enum with
 `models.migration.action.<value>` in both UI locale files, following AC-19's closed-enum
 guard; deferred still has explanatory copy even though it is not selectable.
 
-The `keep_native` default prevents silent credential movement and does not replace
-§4.1's ChatGPT add-flow recommendation. A hub-held subscription is established only
-through explicit OAuth add, not native-file import. The import entry points are first
-open after upgrade, the setup wizard, and the backend-page banner.
+`keep_native` and `reauth` are blocker presentations, not successful outcomes. A
+compatible refresh-capable grant does not require a new browser login. If a matching
+native Source already exists, takeover upgrades that Source in place: its Source ID,
+user-owned default membership, and Route identities remain intact while custody changes
+from `native_cli` to `hub`. If a reused API-key or native Source is absent from both
+the consenting backend's defaults and explicit Routes, append it to that backend's
+defaults before cleanup; preserve all other memberships and Routes. A duplicate
+Source is never created. Shared OpenCode credentials resolving to the same vendor,
+protocol and target across config layers produce one candidate with the union of
+manual model IDs; consent still binds every contributing layer and cleanup journals
+every physical path, including no-op snapshots for model-only and absent OpenCode
+layers so asynchronous provisioning cannot hide a changed credential or model. The import entry
+points are the setup wizard, the backend-page migration dialog, and One-click migration
+for existing Hub users.
 - **Add-source closing loop (v3).** Creating a Source returns
   `added_to: [{backend, menu_model, source_id, model_id, position}]` for every exact hop
 selected by the effective planner after commit. `adopted_by: [{backend, menu_model}]` is the stable

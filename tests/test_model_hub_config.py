@@ -1580,6 +1580,11 @@ def _legacy_model_hub_payload(current: dict) -> dict:
     }
 
 
+def _recovery_model_hub_payload() -> dict:
+    """The safe Model Hub section used by malformed-config recovery."""
+    return ModelHubConfig.from_payload({"enabled": False}).to_payload()
+
+
 def test_config_reload_rejects_pre_v4_opencode_shape_on_invalid_config_path(
     monkeypatch,
     tmp_path,
@@ -1618,7 +1623,7 @@ def test_config_reload_rejects_pre_v4_opencode_shape_on_invalid_config_path(
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     assert config_path.read_text(encoding="utf-8") == original
     backups = list(config_path.parent.glob("config.json.bak-recovery-*"))
@@ -1651,7 +1656,7 @@ def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_pa
         loaded = V2Config.load(config_path=config_path)
 
         assert loaded.show_duration is True
-        assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+        assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
         assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
         assert config_path.read_text(encoding="utf-8") == original
 
@@ -2069,7 +2074,7 @@ def test_config_reload_recovers_dangling_legacy_custom_source_order(monkeypatch,
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
     assert config_path.read_text(encoding="utf-8") == original
 
@@ -2097,7 +2102,7 @@ def test_config_reload_recovers_backend_ineligible_legacy_custom_source_order(
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
     assert config_path.read_text(encoding="utf-8") == original
 
@@ -2282,7 +2287,7 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     loaded = V2Config.load(config_path=config_path)
 
     assert loaded.show_duration is True
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     persisted = json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]
     if invalid_invariant == "opencode-identity":
@@ -2354,8 +2359,14 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["show_duration"] is True
-    assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
-    assert persisted["model_hub"]["enabled"] is False
+    assert set(persisted["model_hub"]) == {
+        "enabled",
+        "runtime_default_applied",
+        "sources",
+        "agents",
+    }
+    assert persisted["model_hub"]["enabled"] is True
+    assert persisted["model_hub"]["runtime_default_applied"] is True
     assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
 
 
@@ -2387,8 +2398,14 @@ def test_config_reload_does_not_overwrite_config_changed_before_replace(
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["show_duration"] is True
-    assert set(persisted["model_hub"]) == {"enabled", "sources", "agents"}
-    assert persisted["model_hub"]["enabled"] is False
+    assert set(persisted["model_hub"]) == {
+        "enabled",
+        "runtime_default_applied",
+        "sources",
+        "agents",
+    }
+    assert persisted["model_hub"]["enabled"] is True
+    assert persisted["model_hub"]["runtime_default_applied"] is True
     assert loaded.load_warnings and "before replacement" in " ".join(loaded.load_warnings)
     backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
     assert backups and any(backup.read_text(encoding="utf-8") == original for backup in backups)
@@ -2406,7 +2423,7 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     recovery = api.client_config_payload(loaded)["config_recovery"]
     assert recovery["required"] is True
@@ -2446,7 +2463,7 @@ def test_config_reload_recovers_non_scalar_model_hub_enums(monkeypatch, tmp_path
     loaded = V2Config.load(config_path=config_path)
 
     assert loaded.show_duration is True
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
 
 
@@ -2480,7 +2497,7 @@ def test_config_reload_recovers_malformed_reasoning_tier_provenance_only(
     assert loaded.platforms.enabled == ["slack"]
     assert loaded.agents.codex.enabled is True
     assert loaded.agents.codex.cli_path == "/preserved/codex"
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.recovered_sections == ("model_hub",)
     assert loaded.whole_config_recovery is False
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
@@ -2644,7 +2661,7 @@ def test_config_reload_does_not_infer_malformed_legacy_source_order(
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.model_hub.to_payload() == _recovery_model_hub_payload()
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
     assert config_path.read_text(encoding="utf-8") == original
     assert list(config_path.parent.glob("config.json.bak-recovery-*"))
@@ -2741,13 +2758,15 @@ def test_config_reload_recovers_invalid_encoding_with_backup(monkeypatch, tmp_pa
     assert list(config_path.parent.glob("config.json.bak-invalid-encoding-*"))
 
 
-def test_legacy_and_fresh_configs_both_default_direct():
+def test_legacy_configs_stay_direct_while_fresh_configs_default_to_gateway():
     payload = api.config_to_payload(default_config(), include_secrets=True)
     payload.pop("model_hub")
     legacy = V2Config.from_payload(payload)
 
     assert {agent.mode for agent in legacy.model_hub.agents.values()} == {"direct"}
-    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"direct"}
+    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"hub"}
+    assert default_config().model_hub.enabled is True
+    assert default_config().model_hub.runtime_default_applied is True
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
@@ -2804,14 +2823,28 @@ def test_final_config_rejects_retired_global_priority_key():
         ModelHubConfig.from_payload(payload)
 
 
-def test_model_hub_enabled_defaults_off_for_older_configs():
+def test_markerless_model_hub_config_applies_the_one_time_gateway_default():
     payload = ModelHubConfig().to_payload()
     payload.pop("enabled")
+    payload.pop("runtime_default_applied")
+
+    loaded = ModelHubConfig.from_payload(payload)
+
+    assert loaded.enabled is True
+    assert loaded.runtime_default_applied is True
+    assert loaded.to_payload()["enabled"] is True
+    assert loaded.to_payload()["runtime_default_applied"] is True
+
+
+def test_explicit_stop_after_default_upgrade_remains_disabled():
+    payload = ModelHubConfig().to_payload()
+    payload["enabled"] = False
+    payload["runtime_default_applied"] = True
 
     loaded = ModelHubConfig.from_payload(payload)
 
     assert loaded.enabled is False
-    assert loaded.to_payload()["enabled"] is False
+    assert loaded.runtime_default_applied is True
 
 
 @pytest.mark.parametrize("value", [None, 0, 1, "false"])

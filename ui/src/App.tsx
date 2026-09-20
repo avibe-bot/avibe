@@ -92,6 +92,8 @@ const SettingsModelsPage = lazy(() =>
   import('./components/settings/models/SettingsModelsPage').then((m) => ({ default: m.SettingsModelsPage })),
 );
 import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
+import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
+import { settingsOverlayOriginFromState } from './lib/settingsOverlay';
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
@@ -283,6 +285,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
     const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
     const [authorizationUnavailable, setAuthorizationUnavailable] = useState(false);
+    const [setupModelHubAllowed, setSetupModelHubAllowed] = useState(false);
     const authorizationUnavailableRef = useRef(false);
     const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
@@ -290,7 +293,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // off /setup; that pathname flip re-runs the effect so the stale
     // `needs-setup` status refreshes to `ready` instead of bouncing the
     // user straight back to /setup.
-    const isSetupRoute = location.pathname === '/setup';
+    // Model Hub opened over the wizard is still the same setup visit. Keep the
+    // wizard mounted so closing Settings returns to its current step.
+    const isSetupRoute = location.pathname === '/setup'
+        || (location.pathname === MODEL_HUB_SETTINGS_PATH
+            && settingsOverlayOriginFromState(location.state)?.location.pathname === '/setup');
     const previousIsSetupRouteRef = useRef(isSetupRoute);
 
     useEffect(() => {
@@ -356,6 +363,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // the fresh config resolves. Showing Loading for that single
         // transition is fine — it's the setup boundary, not every nav.
         setGuardStatus('loading');
+        setSetupModelHubAllowed(false);
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (cancelled) return;
@@ -396,6 +404,10 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
             }
             return getConfig().then(config => {
                 if (cancelled) return;
+                // Only successful config/session reads can grant this narrow
+                // setup repair route. Unlike Diagnostics it is not a bypass.
+                setSetupModelHubAllowed(Boolean(config?.mode
+                    && 'capabilities' in session && session.capabilities?.can_manage_instance));
                 const setupState = config?.setup_state;
                 const setupReady = typeof setupState?.needs_setup === 'boolean'
                     ? setupState.needs_setup === false
@@ -489,7 +501,8 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         return <AccessBlocked code={blockedCode} />;
     }
     if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
-        if (location.pathname === '/setup' && authorizationSession) {
+        if (authorizationSession && (location.pathname === '/setup'
+            || (location.pathname === MODEL_HUB_SETTINGS_PATH && setupModelHubAllowed))) {
             return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
         }
         // A wizard finish navigates from /setup to / before the re-validation

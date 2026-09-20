@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Check, Download, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { Check, Download, ExternalLink, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
 import { Button } from '../ui/button';
@@ -28,7 +28,7 @@ export interface AssistantRowProps {
   connectionError?: string;
   configuringDisabled?: boolean;
   /** Presentation only. The connection owner must supply confirmed state. */
-  connection?: 'subscription' | 'api_key';
+  connection?: 'subscription' | 'api_key' | 'hub';
 }
 
 /**
@@ -60,7 +60,7 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
       {/* The state row is where the story puts its caption: the lifecycle pill on the
           left and, opposite it, the single action that pill offers — update or
           install. Both stay on this row so the card body below is the note and the
-          two connection methods, exactly as the design stacks them. */}
+          connection methods, exactly as the design stacks them. */}
       <div className="onboarding-assistant-state">
         {installing || detecting || status === 'unknown' ? (
           <Badge variant="secondary"><RefreshCw size={12} className={installing || detecting ? 'motion-safe:animate-spin' : ''} />
@@ -87,21 +87,31 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
       <div className="onboarding-assistant-body">
         {/* The note is the guidance for the state the card is in, the way the frames
             draw it — what to do next when nothing is installed, how to connect when
-            the binary is ready, and what a settled connection means — rather than a
-            static description of the assistant. The frames keep it to one line at
-            every tier, which a per-state sentence is short enough to honour in both
-            languages. */}
+            the binary is ready, what a settled connection means, and where a
+            hub-owned credential is managed — rather than a static description of the
+            assistant. The frames keep it to one line at every tier, which a
+            per-state sentence is short enough to honour in both languages. */}
         <p className="onboarding-assistant-note">
-          {status === 'missing'
-            ? t('onboarding.setup.installFirstNamed', { name: label })
-            : connection
-              ? t(`onboarding.setup.${connection}ConnectedHint`)
-              : t(`onboarding.setup.${backend}Guide`)}
+          {connection === 'hub'
+            ? t('settings.backends.nativeAuthHubOwned')
+            : status === 'missing'
+              ? t('onboarding.setup.installFirstNamed', { name: label })
+              : connection
+                ? t(`onboarding.setup.${connection}ConnectedHint`)
+                : t(`onboarding.setup.${backend}Guide`)}
         </p>
         {/* One full-width row per connection method, subscription above API Key, and
             the connected state wearing the same row with a mint check. */}
         <div className="onboarding-assistant-actions">
-          {connection ? (
+          {connection === 'hub' ? (
+            /* A hub-supplied credential is managed in Model Gateway, so the row names
+               where it lives and clicking it goes there. */
+            <button type="button" className="onboarding-method-connected" onClick={onConfigure}
+              disabled={configuringDisabled || installing || detecting}>
+              <ExternalLink size={16} />
+              {t('settings.backends.openModelHub')}
+            </button>
+          ) : connection ? (
             /* A button wearing the connected row: it reads as the static receipt the
                design draws, and clicking it still reopens the connection dialog,
                which is the only way back into a settled connection from this card. */

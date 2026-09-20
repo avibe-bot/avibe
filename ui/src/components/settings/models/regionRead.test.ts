@@ -97,14 +97,6 @@ describe('RegionRead', () => {
     expect(violations).toEqual([]);
   });
 
-  it('keeps adoption decisions on the tagged runtime read', () => {
-    const dialog = readFileSync(join(__dirname, 'EnableGatewayDialog.tsx'), 'utf8');
-
-    expect(dialog).toMatch(/runtime: RegionRead<RuntimeDependency>/);
-    expect(dialog).toMatch(/foldRegionRead<RuntimeDependency,[\s\S]*?degraded: \(\) => \(\{ kind: 'unavailable' \}\)/);
-    expect(dialog).not.toMatch(/runtime: RuntimeDependency \| null/);
-  });
-
   it('routes overview collections and exact chain reads through the per-backend latest authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const definitionStart = page.indexOf('const readChainRequests');
