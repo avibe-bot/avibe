@@ -25,8 +25,9 @@ or resolution events unsupported by that waiter.
 ## Fixed protocol (v1)
 
 PM accepted the allocated public Show Session `ses9u23mgw6dr`, share ID
-`132vCvND49U`, on 2026-09-20. It is public at access revision 1; the intake
-remains unavailable until commissioning verifies the reviewed app. No client accepts a destination
+`132vCvND49U`, on 2026-09-20. PM observed it private at access revision 2 with the same staged binding; the
+intake remains unavailable until commissioning verifies the reviewed app. This
+source change does not change page visibility. No client accepts a destination
 from report text, issues or redirects. POST endpoint is
 https://avibe-feedback-app.avibe.bot/p/132vCvND49U/api/feedback; GET receipt
 endpoint is
@@ -194,3 +195,48 @@ permits only a later explicit identical submit with the same saved ID/bytes.
 Resume remains status-only. Saved verified terminal receipts survive polling
 outages, and client state honors AVIBE_HOME. Artifact verification uses explicit
 errors so optimized Python cannot remove commissioning checks.
+
+## PM R2 whole-class decision (2026-09-20)
+
+PM independently reproduced retry-intent interruption, wrong-platform archive
+acceptance and unsupported extraction-filter invocation at head d9933a310.
+Reviews 5259791943 (f8b630568) and 5259828654 (d9933a310) are two findings-bearing
+heads. Admission/outcome lifecycle and artifact acceptance each appeared on
+both; the writer paused cleanly. PM completed the whole-class diagnosis and
+authorized this bounded continuation in the original scope. Counts do not reset;
+any further finding in either class returns to PM before another edit/push.
+No queue, daemon, new endpoint, receiver schema rewrite or core/runtime change.
+
+The receiver remains the durable owner of GitHub write admission. A same-ID,
+same-bytes recovery delivery can coalesce with an older arriving delivery only
+because reserve/claim are atomic and no receipt is reset or evicted. Delivery
+recovery is not permission for a second GitHub operation.
+
+Client state separates the historical eligibility flag (`retryable`, meaning a
+previous definitive POST429 plus minimal GET404) from phase and send generation:
+
+| Evidence / phase | Publicly reported result | Explicit identical submit | resume |
+| --- | --- | --- | --- |
+| Initial sending/unknown, no rejection history | unknown until valid receipt | GET only, even after404 | GET only |
+| Historical429+404, rate_limited | local rate_limited admission | GET first; minimal404 permits one same-ID/bytes send | GET only |
+| Historical429+404, sending interrupted/uncertain | unknown; prior rejection does not describe current send | GET first; minimal404 permits one recovery delivery | GET only |
+| Any observed pending/unknown receipt | saved server state | GET only permanently | GET only |
+| Verified created/failed | saved terminal receipt, including URL | GET only permanently | GET only |
+
+Before every explicit recovery send, valid pending/unknown/created/failed settles
+eligibility permanently. Unavailable, malformed, redirected or other responses
+suppress delivery. A GET404 without historical eligibility grants nothing. A
+fresh minimal404 permits exactly one delivery attempt in that invocation; the
+client commits sending plus a generation while retaining historical evidence.
+Only that generation's429+404 can record rate_limited. All receipt merges run in
+transactions: terminal evidence never regresses, unknown never returns to
+pending, and late rejection cannot restore rights over an observed reservation.
+Old rows lacking eligibility remain conservative; no unknown reset is added.
+
+Artifact preparation imports the existing side-effect-free platform selector
+and safe extractor from core.managed_runtime. The executing platform chooses
+exactly one manifest entry; manifest SHA/version, entry filename and actual hash
+are checked before extraction. The shared extractor supplies legacy Python3.10
+member/link containment, type and collision checks as well as modern data_filter.
+All acceptance/confinement checks remain explicit under -O. Local platform
+success is not Linux guest acceptance. The staged share is private revision2.

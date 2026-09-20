@@ -121,7 +121,7 @@ receiver alone does not update a client's installed Skill. The helper is bound
 to the operator's HTTPS Show share and `cs-agent-bot` posting identity; it
 creates one UUIDv4, persists the exact payload in its local outbox, and reads
 the separate public receipt before claiming an Issue URL. `resume <request_id>`
-only reads that receipt; only a known pre-admission 429 permits explicit resubmit.
+only reads receipts; explicit delivery recovery requires saved rejection and a fresh404.
 
 If the user wants to contribute back with code, suggest a pull request in that repository.
 

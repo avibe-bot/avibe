@@ -521,9 +521,10 @@ def test_helper_429_retries_only_same_saved_attempt(github, tmp_path):
             request_id = self.path.split("=",1)[1]
             value = dict(schema_version=1,request_id=request_id,state="created",issue_number=123,
                          issue_url="https://github.com/avibe-bot/avibe/issues/123")
-            self.send_response(200 if self.accepted and len(self.posts)>1 else 404)
+            present = self.accepted and len(self.posts)>1
+            self.send_response(200 if present else 404)
             self.end_headers()
-            self.wfile.write(json.dumps(value).encode())
+            self.wfile.write(json.dumps(value if present else {}).encode())
         def log_message(self, *args):
             pass
     server = ThreadingHTTPServer(("127.0.0.1",0),Handler)

@@ -286,19 +286,31 @@ The flag records the Agent's completed approval step; it is not a substitute
 for approval. For a feature use `feature`. Bounds are 200 title characters,
 20000 UTF-8 body bytes and 32768 encoded request bytes. It prints the request ID
 and only a validated receipt; exit 0 means verified `created`, exit 2 means keep
-this attempt and report its state. Exit 3 is a definitive pre-reservation HTTP
-429 plus receipt GET 404: no write was admitted; later repeat the identical `submit` to retry the
-same saved ID and bytes. `resume` remains status-only even for this case. Run the same installed helper with
-`resume <request_id>` for status only. Repeating the same title/body/kind uses the saved attempt; only an explicitly
-recorded pre-reservation 429 permits another upload, including after crashes.
+this attempt and report its state. Exit 3 means the last delivery received a
+definitive POST429 plus minimal GET404. `resume <request_id>` always performs
+GET only, in every phase.
+
+Only an explicit identical `submit` can recover a delivery with retained
+429+404 history. Before uploading, it checks the fixed receipt endpoint again:
+a fresh minimal404 permits one attempt with the same ID and exact bytes;
+pending/unknown/created/failed permanently revoke this recovery permission.
+Unavailable, malformed, redirected or other replies suppress POST. A generic
+initial unknown attempt never becomes eligible from GET404 alone.
+
+If a recovery delivery is interrupted or uncertain, report unknown: the old429
+does not prove the latest delivery was rejected. A later explicit identical
+submit can repeat the above check, without making a new ID or editing bytes.
+The receiver's durable reserve/claim coalesces even concurrently arriving
+same-ID deliveries; this is delivery recovery, not permission for another
+GitHub write. Never reset or evict its ledger to manufacture a404. There are
+no automatic resends, and an observed server unknown remains status-only.
+
 The outbox lives at `$AVIBE_HOME/state/feedback-intake/outbox.sqlite`, defaulting
 to `~/.avibe/state/feedback-intake/outbox.sqlite`, with private permissions.
-`AVIBE_FEEDBACK_OUTBOX` is an explicit directory override. Previously verified
-terminal receipts remain available locally during a receiver outage. Successful/failed receipts discard report bytes but keep the
-correlation/digest to prevent accidental duplicate publication. Unknown attempts
-retain the exact report. Do not delete/reset the outbox to retry an unknown write.
-A 404 receipt, 502/504, malformed receipt or unavailable service proves no safe
-retry; retain the draft and ID. No receipt means no verified Issue URL.
+`AVIBE_FEEDBACK_OUTBOX` is an explicit directory override. Validated terminal
+receipts survive outages; successful/failed receipts discard report bytes but
+retain correlation/digest. Unknown attempts keep their exact report. Do not
+reset the outbox to retry. No receipt means no verified Issue URL.
 
 Official intake supports new Issues only. When duplicate search identifies the
 same issue, offer its public link. Adding a comment requires the existing

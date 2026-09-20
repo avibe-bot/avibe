@@ -78,18 +78,84 @@ def _database():
         raise SystemExit("feedback outbox must be an absolute path")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     db = sqlite3.connect(root / "outbox.sqlite", timeout=3)
+    db.row_factory = sqlite3.Row
     db.execute("PRAGMA synchronous=FULL")
     db.execute("CREATE TABLE IF NOT EXISTS attempts (request_id TEXT PRIMARY KEY, digest TEXT UNIQUE, payload BLOB, receipt TEXT)")
     db.execute("BEGIN IMMEDIATE")
-    if "retryable" not in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}:
+    columns = {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
+    if "retryable" not in columns:
         db.execute("ALTER TABLE attempts ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0")
+    if "phase" not in columns:
+        db.execute("ALTER TABLE attempts ADD COLUMN phase TEXT NOT NULL DEFAULT 'unknown'")
+        # The old flag proves only a previous definitive 429+404. A missing flag
+        # or saved receipt cannot be promoted by a later 404 into replay rights.
+        db.execute("UPDATE attempts SET phase='rate_limited' WHERE retryable=1 AND receipt IS NULL")
+        db.execute("UPDATE attempts SET retryable=0,phase='observed' WHERE receipt IS NOT NULL")
+    if "generation" not in columns:
+        db.execute("ALTER TABLE attempts ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
     db.commit()
     return db
 
 
+def _attempt(db, request_id):
+    return db.execute("SELECT * FROM attempts WHERE request_id=?", (request_id,)).fetchone()
+
+
+def _saved_receipt(row):
+    try:
+        value = json.loads(row["receipt"]) if row["receipt"] else None
+    except (ValueError, TypeError, RecursionError):
+        return None
+    return value if _valid_receipt(value, row["request_id"]) else None
+
+
+def _observe(db, request_id, found):
+    """Merge server evidence monotonically, even across concurrent processes."""
+    if not _valid_receipt(found, request_id):
+        return False
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        saved = _saved_receipt(_attempt(db, request_id))
+        # Terminal evidence is immutable locally; unknown cannot regress to
+        # pending. Every valid receipt permanently revokes delivery recovery.
+        if saved and (saved["state"] in ("created", "failed") or
+                      saved["state"] == "unknown" and found["state"] == "pending"):
+            found = saved
+        db.execute("UPDATE attempts SET receipt=?,retryable=0,phase='observed',"
+                   "payload=CASE WHEN ? IN ('created','failed') THEN NULL ELSE payload END WHERE request_id=?",
+                   (json.dumps(found), found["state"], request_id))
+    return True
+
+
+def _claim_recovery(db, request_id):
+    """Called only after a fresh 404 during an explicit identical submit."""
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        row = _attempt(db, request_id)
+        if not row["retryable"] or row["receipt"] is not None or row["payload"] is None:
+            return None
+        generation = row["generation"] + 1
+        # Retain historical rejection separately. A crash or lost response now
+        # means unknown delivery, with explicit recovery still subject to GET.
+        db.execute("UPDATE attempts SET phase='sending',generation=? WHERE request_id=?", (generation, request_id))
+    return generation
+
+
+def _record_rejection(db, request_id, generation):
+    # A late response cannot overwrite newer sending intent or restore rights
+    # over another process's receipt. Only this exact send's 429+404 qualifies.
+    with db:
+        db.execute("UPDATE attempts SET retryable=1,phase='rate_limited' WHERE request_id=? "
+                   "AND generation=? AND phase='sending' AND receipt IS NULL", (request_id, generation))
+
+
+def _poll(request_id):
+    return _request("/api/feedback-status?" + urllib.parse.urlencode({"request_id": request_id}))
+
+
 def main():
     os.umask(0o077)
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Only explicit identical submit can recover a previously rate-limited delivery after a fresh absent receipt. Resume never uploads.")
     sub = parser.add_subparsers(dest="command", required=True)
     submit = sub.add_parser("submit")
     submit.add_argument("kind", choices=("bug", "feature"))
@@ -101,7 +167,8 @@ def main():
     resume.add_argument("request_id")
     args = parser.parse_args()
     db = _database()
-    post = False
+    generation = None
+    existing = False
     if args.command == "submit":
         if args.body_file == "-":
             raw = sys.stdin.buffer.read(MAX_BODY_BYTES + 1)
@@ -120,22 +187,19 @@ def main():
         content = dict(kind=args.kind, title=args.title, body=body)
         digest = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         db.execute("BEGIN IMMEDIATE")
-        row = db.execute("SELECT request_id,payload,retryable FROM attempts WHERE digest=?", (digest,)).fetchone()
+        row = db.execute("SELECT * FROM attempts WHERE digest=?", (digest,)).fetchone()
         if row:
-            request_id, payload, retryable = row
-            if retryable and payload is not None:
-                # Only a definitive pre-reservation 429 permits an explicit
-                # identical submit to retry. Claim it durably before upload.
-                db.execute("UPDATE attempts SET retryable=0 WHERE request_id=?", (request_id,))
-                post = True
+            request_id, payload = row["request_id"], row["payload"]
+            existing = True
         else:
             request_id = str(uuid.uuid4())
             payload = json.dumps(dict(schema_version=1, request_id=request_id, public_consent=True, **content),
                                  ensure_ascii=False, separators=(",", ":")).encode()
             if len(payload) > MAX_REQUEST_BYTES:
                 raise SystemExit("encoded request exceeds 32768 bytes")
-            db.execute("INSERT INTO attempts(request_id,digest,payload) VALUES(?,?,?)", (request_id, digest, payload))
-            post = True
+            db.execute("INSERT INTO attempts(request_id,digest,payload,phase,generation) VALUES(?,?,?,'sending',1)",
+                       (request_id, digest, payload))
+            generation = 1
         db.commit()  # Exact bytes and ID are durable before any network operation.
     else:
         request_id = args.request_id
@@ -153,46 +217,40 @@ def main():
     if hasattr(signal, "SIGALRM"):
         signal.signal(signal.SIGALRM, timeout)
         signal.alarm(35)
-    result = {"schema_version": 1, "request_id": request_id, "state": "unknown"}
-    saved = db.execute("SELECT receipt FROM attempts WHERE request_id=?", (request_id,)).fetchone()[0]
     try:
-        saved = json.loads(saved) if saved else None
-    except (ValueError, TypeError):
-        saved = None
-    if _valid_receipt(saved, request_id) and saved["state"] in ("created", "failed"):
-        result = saved
-    post_status = 0
-    try:
-        if post:
+        if existing:
+            row = _attempt(db, request_id)
+            if row["retryable"] and row["receipt"] is None:
+                # No upload if the receipt route is unavailable, malformed,
+                # redirected or non-404. GET404 alone never grants eligibility.
+                status, found = _poll(request_id)
+                if status == 200:
+                    _observe(db, request_id, found)
+                elif status == 404 and found == {}:
+                    generation = _claim_recovery(db, request_id)
+        post_status = 0
+        if generation is not None:
             try:
                 post_status, _ = _request("/api/feedback", body=payload)
             except (OSError, ValueError, urllib.error.URLError):
-                pass  # Even 502/504 can follow a completed write. Always read the receipt.
-        status, found = _request("/api/feedback-status?" + urllib.parse.urlencode({"request_id": request_id}))
-        if status == 200 and _valid_receipt(found, request_id) and result["state"] not in ("created", "failed"):
-            result = found
-            db.execute("UPDATE attempts SET receipt=?,retryable=0,payload=CASE WHEN ? IN ('created','failed') THEN NULL ELSE payload END WHERE request_id=?",
-                       (json.dumps(found), found["state"], request_id))
-            db.commit()
-        elif post_status == 429 and status == 404 and result["state"] == "unknown":
-            # Both pieces of evidence are required: the fixed receiver refused
-            # admission and its receipt route confirms no reservation exists.
-            db.execute("UPDATE attempts SET retryable=1 WHERE request_id=?", (request_id,))
-            db.commit()
+                pass  # A possible write remains unknown, including retries.
+        status, found = _poll(request_id)
+        if status == 200:
+            _observe(db, request_id, found)
+        elif generation is not None and post_status == 429 and status == 404 and found == {}:
+            _record_rejection(db, request_id, generation)
     except (OSError, ValueError, urllib.error.URLError, RecursionError, TotalDeadline):
         pass
     finally:
         if hasattr(signal, "SIGALRM"):
             signal.alarm(0)
-        if result["state"] in ("created", "failed"):
-            db.execute("UPDATE attempts SET retryable=0 WHERE request_id=?", (request_id,))
-            db.commit()
-        retryable = bool(db.execute("SELECT retryable FROM attempts WHERE request_id=?", (request_id,)).fetchone()[0])
+        row = _attempt(db, request_id)
+        result = _saved_receipt(row) or {"schema_version": 1, "request_id": request_id, "state": "unknown"}
+        rate_limited = row["retryable"] and row["phase"] == "rate_limited" and row["receipt"] is None
         db.close()
-    if retryable and result["state"] == "unknown":
-        # Local admission evidence only; this is not a public receipt state.
+    if rate_limited:
         print(json.dumps({"request_id": request_id, "admission": "rate_limited", "retryable": True}))
-        print("No write was admitted (HTTP 429). Later repeat the identical submit to retry this saved ID; resume remains status-only.", file=sys.stderr)
+        print("Last delivery was rate limited (429+404). Explicit identical submit may recover this same ID after a fresh receipt check; resume is GET-only.", file=sys.stderr)
         return 3
     print(json.dumps(result, ensure_ascii=False))
     if result["state"] != "created":

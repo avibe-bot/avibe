@@ -6,7 +6,7 @@ user's current Agent. The fixed destination is `avibe-bot/avibe` (repository ID
 that binding. No GitHub account is needed on the submitting client.
 
 Allocated endpoint: https://avibe-feedback-app.avibe.bot/p/132vCvND49U/ on guest
-`avibe-feedback`, Show Session `ses9u23mgw6dr`. Allocation/public visibility does
+`avibe-feedback`, Show Session `ses9u23mgw6dr`. PM observed the staged share private at access revision 2. Allocation does
 not mean intake is active. The exact reviewed artifact, supported base package,
 Runtime and live write/readback still require commissioning by PM/ops.
 
@@ -112,12 +112,18 @@ reconcile the final exact wheel/version/hash and installation authority.
 The user approves the sanitized title/body, public repository and official actor
 once. The helper commits the exact payload and UUID before POST and retains a
 private attempt outbox under AVIBE_HOME (default ~/.avibe). `resume UUID` only
-reads status; repeated identical reports coalesce locally. A definitive
-pre-reservation 429 with a 404 receipt is retained as retryable: explicit identical submit reuses
-the same ID/bytes after capacity returns. Unknown never authorizes a replacement
-write. Saved terminal receipts survive unavailable or malformed polling responses. Security,
-vulnerability and private reports stay off this public route. Existing direct
-user-authorized GitHub behavior remains supported.
+reads status in every phase. Prior definitive429+minimal404 is retained separately
+from sending intent. Only a later explicit identical submit first obtaining a
+fresh minimal404 may attempt one same-ID/bytes delivery. Unavailable/malformed/
+redirected status suppresses upload. Every observed server receipt permanently
+revokes recovery; terminal evidence never regresses under concurrent updates.
+An interrupted recovery is reported unknown, not rate limited based on old
+history. This relies on the fixed receiver's unreset ledger coalescing original
+and recovery deliveries into at most one GitHub write. An initial unknown
+without429 history cannot be replayed. See the launch plan's complete state table.
+Saved terminal receipts survive polling outages. Security, vulnerability and
+private reports stay off this public route. Existing direct user-authorized
+GitHub behavior remains supported.
 
 Before launch, independently review the exact head, all CI and review threads;
 verify the installed artifact hashes, real Runtime→Vault identity context and
