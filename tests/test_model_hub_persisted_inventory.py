@@ -285,7 +285,7 @@ def test_claude_key_and_bearer_are_both_retained(home):
 def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, tmp_path):
     path = home / ".claude/settings.json"
     _write(path, json.dumps({"env": {
-        "ANTHROPIC_API_KEY": "fixture-same-bytes", "ANTHROPIC_AUTH_TOKEN": "fixture-same-bytes",
+        "ANTHROPIC_AUTH_TOKEN": "fixture-same-bytes",
         "ANTHROPIC_BASE_URL": "https://relay.example/anthropic",
     }}))
     service, store, adapter = _service(tmp_path, migration_home=home)
@@ -311,14 +311,27 @@ def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, 
     adapter.provision_credential = provision_with_scheme
     adapter.provision_transient_credential = transient_with_scheme
     adapter.matches_api_key_credential = matches_with_scheme
+    # A pre-existing legacy Source has the same bytes/target but a different
+    # header scheme. It must not be reused for the new saved Bearer token.
+    from config.v2_config import ModelHubSourceConfig
+    legacy_ref = asyncio.run(adapter.provision_credential(
+        "anthropic", "anthropic", "fixture-same-bytes", "https://relay.example/anthropic",
+    ))
+    store.config.sources.append(ModelHubSourceConfig.from_payload({
+        "id": "src_legacyfixture", "kind": "api_key", "vendor": "anthropic",
+        "display_name": "Legacy fixture", "protocol": "anthropic",
+        "base_url": "https://relay.example/anthropic",
+        "supply_channel": "hub", "billing": "metered",
+        "state": {"status": "standby"}, "models": [], "credential_ref": legacy_ref,
+    }))
     rows = service.migration_scan()["items"]
     ids = [row["id"] for row in rows]
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 2
-    assert set(proof_schemes) == {None, "bearer"}
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert proof_schemes == ["bearer"]
     assert set(schemes.values()) == {None, "bearer"}
     assert len(store.config.sources) == len(adapter.provisioned) == 2
     assert "auth_scheme" not in json.dumps(store.config.to_payload())
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 2
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
     assert len(adapter.provisioned) == 2
 
 

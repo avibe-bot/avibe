@@ -289,7 +289,7 @@ def _write_claude(home: Path, *, malformed: bool = False) -> None:
             {
                 "env": {
                     "ANTHROPIC_API_KEY": "sk-ant-test-123456789",
-                    "ANTHROPIC_BASE_URL": "https://anthropic.example/v1",
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
                 },
                 "permissions": {"allow": ["Read"]},
             },

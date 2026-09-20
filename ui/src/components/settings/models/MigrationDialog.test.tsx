@@ -406,6 +406,12 @@ describe('MigrationDialog — persisted authentication', () => {
       en: /Custom credential headers cannot be imported.*supported authentication method/,
       zh: /自定义认证请求头.*受支持的认证方式/,
     },
+    {
+      reason: 'transport',
+      path: '/home/用户/.bashrc',
+      en: /cannot send.*saved authentication in the same way.*original files are unchanged.*permissions will not fix/,
+      zh: /无法按此接口原有的方式发送认证.*原配置文件未改动.*修改文件权限不能解决/,
+    },
   ] as const;
 
   it.each(['en', 'zh'] as const)('shows every blocked file and its specific %s remedy while preserving backend selection', async (language) => {
@@ -428,7 +434,9 @@ describe('MigrationDialog — persisted authentication', () => {
     const warnings = within(status).getAllByRole('listitem');
     expect(warnings).toHaveLength(blockedReasons.length);
     for (const { path, ...reason } of blockedReasons) {
-      const warning = warnings.find((element) => within(element).queryByText(path));
+      const warning = warnings.find((element) => (
+        within(element).queryByText(path) && within(element).queryByText(reason[language])
+      ));
       expect(warning).toBeTruthy();
       expect(within(warning!).getByText(reason[language])).toBeTruthy();
     }

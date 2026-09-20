@@ -370,6 +370,8 @@ def _migration_fixture(monkeypatch, tmp_path):
     path = tmp_path / "fixture-config.json"
     monkeypatch.setattr(paths, "get_config_path", lambda: path)
     config = _config()
+    # Use a supported API-key target; pure mapper cases still cover relays.
+    config.agents.claude.base_url = "https://api.anthropic.com/fixture-path"
     config.save(config_path=path)
     service, _, adapter = _service(tmp_path, migration_home=home)
     service.store = V2ModelHubConfigStore()
