@@ -229,8 +229,13 @@ export const AppShell: React.FC = () => {
   // the sidebar reads, so it stays on that. This asks whether Settings has TAKEN
   // OVER the shell, and it is the one everything BEHIND Settings must read:
   // standalone Settings stands in for the sidebar, so the shell retires; inline
-  // Settings opens beside a live sidebar, so the shell stays awake, navigable
-  // and able to own its windows and palettes.
+  // Settings opens beside a live sidebar, so that column stays awake and
+  // navigable, and so do the palettes, which float above the surface.
+  //
+  // "Beside", not "behind": inline's surface is opaque from the sidebar's
+  // trailing edge rightwards, so anything it covers is live-but-invisible,
+  // which is worse than retired. The window layer is the one such thing, and
+  // it reads `settingsOpen` instead.
   //
   // The rule, not the hook: the shell is what publishes `ShellSidebarContext`,
   // so it cannot read its own broadcast and feeds the same function directly.
@@ -429,8 +434,14 @@ export const AppShell: React.FC = () => {
             floats above app windows. */}
         <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
+            {/* `settingsOpen`, not `settingsCoversSidebar`: this control lives in
+                the sidebar column, but what it produces lives in the window
+                layer, which Settings covers in BOTH placements (see below). A
+                launcher whose every result is invisible is not a live control,
+                so it retires with the windows it opens rather than with the
+                column it sits in. Its Dock goes with it — same component. */}
             {canUseApps && (
-              <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
+              <RouteSurfaceActivityBoundary active={!settingsOpen}>
                 <AppsLauncher />
               </RouteSurfaceActivityBoundary>
             )}
@@ -591,14 +602,25 @@ export const AppShell: React.FC = () => {
       </RouteSurfaceActivityBoundary>
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
-          and the AppsLauncher bridge open windows via the WindowManager. */}
+          and the AppsLauncher bridge open windows via the WindowManager.
+
+          `settingsOpen`, not `settingsCoversSidebar` — the one thing behind
+          Settings that retires in BOTH placements. This layer deliberately
+          spans the whole viewport at z-20, above the sidebar's z-10, so a
+          window can be dragged over the sidebar and maximize can fill the
+          screen. Inline Settings is opaque from the sidebar's trailing edge
+          rightwards at z-30, so leaving the layer live there shows a window as
+          a strip over the sidebar with its title bar, controls and content all
+          hidden behind Settings: visible, unusable, and covering the one column
+          inline exists to keep. Inline keeps the sidebar column live, not
+          everything its surface covers. */}
       {canUseApps && (
         <div
-          hidden={settingsCoversSidebar}
-          inert={settingsCoversSidebar || undefined}
-          aria-hidden={settingsCoversSidebar || undefined}
+          hidden={settingsOpen}
+          inert={settingsOpen || undefined}
+          aria-hidden={settingsOpen || undefined}
         >
-          <WindowLayer active={!settingsCoversSidebar} />
+          <WindowLayer active={!settingsOpen} />
         </div>
       )}
     </div>
