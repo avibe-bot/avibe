@@ -239,8 +239,9 @@ checked once in the final visual batch.
 
 ## Implementation and evidence
 
-Delivered on `fix/sidebar-2061-presentation-20260920`, local only, awaiting
-independent PM verification.
+Implemented on `fix/sidebar-2061-presentation-20260920` and handed back locally
+at `fa6a57bb09fc12e2e0c8b0eb311f09b5c888a67c` for independent PM verification.
+Remote acceptance requires the new PR's exact-head review and CI.
 
 ### What changed
 
@@ -270,6 +271,14 @@ viewport, language or theme) is unchanged. `mobile-continuation`'s `pickClaude`
 now dismisses the Agent popover, because in the restored layout it is anchored
 over the project row.
 
+The restored home uses normal page flow on a short phone, so the primary action
+can require scrolling. The short-phone geometry case now checks real overflow
+at scrollTop zero, then scrolls to the end and retains send hit-testing,
+actionability, draft preservation and bottom-nav clearance. The normal-height
+control still checks these at scrollTop zero. This is an explicit adaptation to
+the approved layout, not a claim that short-phone first-paint visibility is
+unchanged. The page itself must not overflow horizontally.
+
 ### Pre-existing failures repaired in passing
 
 The build-config suite was already red before this branch: a probe of the
@@ -288,7 +297,14 @@ Vitest 4765 passed across 332 files; lint, `tsc -b`, test typecheck, both e2e
 project typechecks and the production build all pass. Browser suites:
 workbench-general 67 passed, workbench-general-build 8 passed (base head: 6
 failed / 2 passed), home-media 55 passed (before: 20 failed / 35 passed),
-project-order 16 passed. No Playwright suite runs in CI; only lint does.
+project-order 16 passed with two existing platform-specific skips. The browser
+configs use retries=0. These are local results, not remote CI evidence.
+
+The workflow named `lint` also runs UI unit tests and Playwright suites in its
+`ui-checks` job: model catalog/provider, the onboarding hub ownership case,
+project-order, inbox-return, badge-triggers and Workbench sidebar-floating.
+The full Workbench general/build and home-media selections above have broader
+local coverage than the workflow. No workflow change is part of this PR.
 
 The visual batch used the suites' own captures — `home-{en,zh}-{light,dark}-
 {desktop,narrow}` under `ui/e2e/.artifacts/workbench-general/shots/` and the 20
@@ -300,3 +316,19 @@ picker and the single-row composer. The remaining differences are fixture data
 (one project instead of five, an Agent with no model or effort to show) and the
 capability group rendering expanded, which the owner already ruled is a render
 state rather than a new default. No targeted confirmation batch was needed.
+
+### Independent PM verification before PR creation
+
+PM verified all 14 changed paths against the granted scope and compared 893
+baseline source/asset/workflow/dependency entries: only the six permitted source,
+unit-test and locale paths differ in that inventory. Queue, Composer, shared
+pickers, new-session hook, project drag, tokens and workflows are unchanged.
+The current master advance consists of the unrelated #2063 migration fixture
+repair; a mechanical merge with it is conflict-free.
+
+PM reran three relevant unit files (83 passed), the two EN/ZH real-App phone
+geometry cases (2 passed), and the staged-file/project/Agent/Settings/send
+consumer (1 passed). Both phone evidence records have collected empty denied,
+unknown and pageErrors arrays. This does not imply the same guard collection
+for every inherited browser case. The candidate's browser artifacts were
+archived before these targeted reruns, which used separate output directories.
