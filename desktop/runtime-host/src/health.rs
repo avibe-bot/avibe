@@ -10,7 +10,11 @@ const MAX_READINESS_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeReadiness {
+    /// Identity of the Controller Runtime, when it is desktop-managed.
     pub desktop_runtime_id: Option<String>,
+    /// Identity of the UI Runtime serving an external Controller, when the UI
+    /// is known to come from a bundled private tree.
+    pub desktop_ui_runtime_id: Option<String>,
 }
 
 /// Answers whether the Avibe UI and Controller serve this origin and, for an
@@ -117,15 +121,28 @@ pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
         return None;
     };
     let object = payload.as_object()?;
-    let runtime_id = match object.get("desktop_runtime_id") {
+    let controller_runtime_id = match object.get("desktop_runtime_id") {
         Some(value) => Some(value.as_str()?),
         None => None,
     };
-    if !(object.len() == 3 || (object.len() == 4 && runtime_id.is_some()))
+    let ui_runtime_id = match object.get("desktop_ui_runtime_id") {
+        Some(value) => Some(value.as_str()?),
+        None => None,
+    };
+    let expected_len = 3 + usize::from(controller_runtime_id.is_some() || ui_runtime_id.is_some());
+    let keys_valid = object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "schema_version" | "product" | "ready" | "desktop_runtime_id" | "desktop_ui_runtime_id"
+        )
+    });
+    if (controller_runtime_id.is_some() && ui_runtime_id.is_some())
+        || object.len() != expected_len
+        || !keys_valid
         || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
         || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
         || object.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
-        || runtime_id.is_some_and(|value| {
+        || controller_runtime_id.or(ui_runtime_id).is_some_and(|value| {
             value.len() != 64
                 || !value
                     .bytes()
@@ -135,7 +152,8 @@ pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
         return None;
     }
     Some(RuntimeReadiness {
-        desktop_runtime_id: runtime_id.map(str::to_owned),
+        desktop_runtime_id: controller_runtime_id.map(str::to_owned),
+        desktop_ui_runtime_id: ui_runtime_id.map(str::to_owned),
     })
 }
 
@@ -159,6 +177,7 @@ fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> 
     }
     Some(RuntimeReadiness {
         desktop_runtime_id: Some(runtime_id.to_owned()),
+        desktop_ui_runtime_id: None,
     })
 }
 
@@ -171,6 +190,8 @@ mod tests {
     use std::sync::Arc;
 
     const READY_BODY: &str = r#"{"schema_version":1,"product":"avibe","ready":true}"#;
+    const EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY: &str =
+        include_str!("../../../tests/fixtures/desktop_ready_external_controller_bundled_ui.json");
 
     struct TestServer {
         origin: LoopbackOrigin,
@@ -322,12 +343,30 @@ mod tests {
             r#"{"schema_version":1,"product":"avibe","ready":true}"#
         ));
         assert_eq!(
+            parse_avibe_readiness_body(EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None,
+                desktop_ui_runtime_id: Some("a".repeat(64)),
+            })
+        );
+        assert_eq!(
             parse_avibe_readiness_body(&format!(
                 r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"{}"}}"#,
                 "a".repeat(64)
             )),
             Some(RuntimeReadiness {
-                desktop_runtime_id: Some("a".repeat(64))
+                desktop_runtime_id: Some("a".repeat(64)),
+                desktop_ui_runtime_id: None,
+            })
+        );
+        assert_eq!(
+            parse_avibe_readiness_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"{}"}}"#,
+                "b".repeat(64)
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None,
+                desktop_ui_runtime_id: Some("b".repeat(64)),
             })
         );
     }
@@ -340,7 +379,8 @@ mod tests {
                 r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
             )),
             Some(RuntimeReadiness {
-                desktop_runtime_id: Some(runtime_id)
+                desktop_runtime_id: Some(runtime_id),
+                desktop_ui_runtime_id: None,
             })
         );
         assert_eq!(
@@ -374,6 +414,11 @@ mod tests {
             r#"{"ready":false,"code":"controller_unavailable"}"#,
             r#"{"schema_version":1,"product":"avibe","ready":true,"extra":1}"#,
             r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"short"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"short"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":null}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","extra":1}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","desktop_ui_runtime_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
             r#"{"ready":"true"}"#,
             "[]",
         ];
@@ -416,7 +461,8 @@ mod tests {
         assert_eq!(
             probe.mismatched_runtime_identity(&server.origin).await,
             Some(RuntimeReadiness {
-                desktop_runtime_id: Some(runtime_id)
+                desktop_runtime_id: Some(runtime_id),
+                desktop_ui_runtime_id: None,
             })
         );
         assert!(server.finish());

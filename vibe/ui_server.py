@@ -3253,7 +3253,7 @@ async def ready():
     """Report whether the UI and its authoritative Controller are ready."""
 
     from vibe import internal_client, runtime
-    from vibe.desktop_runtime import desktop_runtime_id
+    from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
 
     identity = {"schema_version": 1, "product": "avibe"}
 
@@ -3297,14 +3297,25 @@ async def ready():
         return unavailable("controller_unavailable")
     controller_runtime_id = controller_identity.get("desktop_runtime_id")
     ui_runtime_id = desktop_runtime_id()
-    if controller_runtime_id != ui_runtime_id:
+    if os.environ.get(DESKTOP_RUNTIME_ID_ENV) and ui_runtime_id is None:
+        return unavailable("runtime_identity_invalid")
+    # A healthy Controller without a desktop identity is user-managed.  The UI
+    # may still inherit a bundled identity when `vibe start` reuses that
+    # Controller, so the absence of a Controller identity is affirmative
+    # external readiness rather than an identity mismatch.  A tagged
+    # Controller/UI pair must still agree exactly.
+    if controller_runtime_id is not None and controller_runtime_id != ui_runtime_id:
         mismatch = {**identity, "ready": False, "code": "runtime_identity_mismatch"}
-        if controller_runtime_id is not None:
-            mismatch["desktop_runtime_id"] = controller_runtime_id
+        mismatch["desktop_runtime_id"] = controller_runtime_id
         return response(mismatch, 503)
     payload = {**identity, "ready": True}
     if controller_runtime_id is not None:
         payload["desktop_runtime_id"] = controller_runtime_id
+    elif ui_runtime_id is not None:
+        # The Controller is external, but this UI may still be served from the
+        # bundled Runtime tree. Keep that fact separate from Controller
+        # identity: it never authorizes handover or stopping the Controller.
+        payload["desktop_ui_runtime_id"] = ui_runtime_id
     return response(payload)
 @app.route(MODEL_SERVICE_REFRESH_PATH, methods=["POST"])
 def model_service_refresh():

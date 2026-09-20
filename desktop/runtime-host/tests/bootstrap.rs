@@ -15,18 +15,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use avibe_runtime_host::deep_link::DeepLinks;
 use avibe_runtime_host::{
-    BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime,
-    LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, RuntimeReadiness,
-    RuntimeRemovalState, StatusSink,
+    parse_avibe_readiness_body, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError,
+    LaunchWatch, LaunchedRuntime, LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings,
+    RuntimeLauncher, RuntimeReadiness, RuntimeRemovalState, StatusSink,
 };
 
 const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
+const EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY: &str =
+    include_str!("../../../tests/fixtures/desktop_ready_external_controller_bundled_ui.json");
 type RemovalRecord = RuntimeRemovalState;
 
 /// Answers "not yet" until the given probe call, then "ready" forever.
 struct FakeProbe {
     healthy_from: usize,
     runtime_id: Option<String>,
+    ui_runtime_id: Option<String>,
     identity_mismatch_at: Option<usize>,
     calls: AtomicUsize,
 }
@@ -36,6 +39,17 @@ impl FakeProbe {
         Arc::new(Self {
             healthy_from: call,
             runtime_id: None,
+            ui_runtime_id: None,
+            identity_mismatch_at: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn healthy_from_readiness(call: usize, readiness: &RuntimeReadiness) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: call,
+            runtime_id: readiness.desktop_runtime_id.clone(),
+            ui_runtime_id: readiness.desktop_ui_runtime_id.clone(),
             identity_mismatch_at: None,
             calls: AtomicUsize::new(0),
         })
@@ -45,6 +59,7 @@ impl FakeProbe {
         Arc::new(Self {
             healthy_from: 1,
             runtime_id: Some(runtime_id.to_owned()),
+            ui_runtime_id: None,
             identity_mismatch_at: None,
             calls: AtomicUsize::new(0),
         })
@@ -54,6 +69,7 @@ impl FakeProbe {
         Arc::new(Self {
             healthy_from: usize::MAX,
             runtime_id: Some(runtime_id.to_owned()),
+            ui_runtime_id: None,
             identity_mismatch_at: Some(1),
             calls: AtomicUsize::new(0),
         })
@@ -63,6 +79,7 @@ impl FakeProbe {
         Arc::new(Self {
             healthy_from: 3,
             runtime_id: Some(runtime_id.to_owned()),
+            ui_runtime_id: None,
             identity_mismatch_at: Some(2),
             calls: AtomicUsize::new(0),
         })
@@ -83,12 +100,14 @@ impl HealthProbe for FakeProbe {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         (call >= self.healthy_from).then(|| RuntimeReadiness {
             desktop_runtime_id: self.runtime_id.clone(),
+            desktop_ui_runtime_id: self.ui_runtime_id.clone(),
         })
     }
 
     async fn mismatched_runtime_identity(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
         (self.identity_mismatch_at == Some(self.calls())).then(|| RuntimeReadiness {
             desktop_runtime_id: self.runtime_id.clone(),
+            desktop_ui_runtime_id: None,
         })
     }
 }
@@ -471,6 +490,7 @@ async fn an_unknown_predecessor_never_authorizes_initial_or_polling_handover() {
         let probe = Arc::new(FakeProbe {
             healthy_from: usize::MAX,
             runtime_id: None,
+            ui_runtime_id: None,
             identity_mismatch_at: Some(mismatch_at),
             calls: AtomicUsize::new(0),
         });
@@ -521,6 +541,115 @@ async fn an_absent_runtime_is_started_and_adopted_once_it_answers() {
             BootstrapPhase::Starting,
             BootstrapPhase::Ready,
         ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_helper_adopts_untagged_readiness_after_launch_without_handover_or_pruning() {
+    // The first probe misses, so the bundled helper is started. The next
+    // probe is the real external-adoption shape produced by `/ready`: the
+    // Controller is healthy but has no desktop identity.
+    let readiness = parse_avibe_readiness_body(r#"{"schema_version":1,"product":"avibe","ready":true}"#)
+        .expect("the Python /ready payload is accepted by the Rust parser");
+    assert_eq!(readiness.desktop_runtime_id, None);
+    let probe = FakeProbe::healthy_from_readiness(2, &readiness);
+    let launcher = FakeLauncher::managed(&"b".repeat(64));
+    let host = host(probe, launcher.clone(), fast_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::Adopted);
+    assert_eq!(launcher.calls(), 1);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 0);
+    assert!(!host.has_owned_runtime());
+
+    // The helper may have created the UI from the private tree even though the
+    // adopted Controller is external. Do not delete that tree on a no-ID
+    // readiness response while launch liveness is still uncertain.
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+    assert!(matches!(
+        host.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown]
+    );
+}
+
+#[tokio::test]
+async fn uninstall_keeps_a_preexisting_untagged_external_runtime_external() {
+    let readiness = parse_avibe_readiness_body(r#"{"schema_version":1,"product":"avibe","ready":true}"#)
+        .expect("the Python /ready payload is accepted by the Rust parser");
+    let probe = FakeProbe::healthy_from_readiness(1, &readiness);
+    let launcher = FakeLauncher::working();
+    let host = host(probe, launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert!(host
+        .remove_private_runtime(Some(&origin))
+        .await
+        .expect("external private-runtime cleanup"));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::External]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_external_controller_with_a_bundled_ui_stays_unknown_after_shell_reopen() {
+    let readiness = parse_avibe_readiness_body(EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY)
+        .expect("the tagged UI readiness payload is accepted by the Rust parser");
+    let probe = FakeProbe::healthy_from_readiness(2, &readiness);
+    let launcher = FakeLauncher::managed(&"b".repeat(64));
+    let first = host(probe.clone(), launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert_eq!(
+        first.bootstrap(&Recorder::default()).await.notice.code,
+        BootstrapNoticeCode::Adopted
+    );
+    assert!(matches!(
+        first.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+
+    // Closing the shell drops in-memory state, but the same UI identity in
+    // /ready still proves that private UI files may be serving the Controller.
+    drop(first);
+    let reopened = host(probe, launcher.clone(), fast_settings());
+    assert_eq!(
+        reopened.bootstrap(&Recorder::default()).await.notice.code,
+        BootstrapNoticeCode::Adopted
+    );
+    assert!(matches!(
+        reopened.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "reopening adopts the surviving UI without relaunching it"
+    );
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown, RuntimeRemovalState::Unknown]
     );
 }
 

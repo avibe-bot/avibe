@@ -267,3 +267,122 @@ The orchestrator ratified both bounded fixes within the existing desktop delta.
 Neither requires a new lane, product direction, or lifecycle rewrite. A repeated
 class on the next reviewed head requires another orchestrator diagnosis before
 editing or pushing.
+
+### H3 circuit-breaker ruling: untagged Controller adoption
+
+Review `5259674396` reviewed `c7b749838181d443b19af4faa270f829f13c04fc` and
+added `PRRT_kwDOPbFPYs6kHQt4` / 4056230990 at `vibe/ui_server.py:3304`.
+The finding repeats the original predecessor-identity scenario on a later
+head: `vibe start` correctly reuses a healthy user-managed Controller without a
+desktop identity, but the newly started UI inherits the bundled identity and
+`/ready` reports a mismatch forever. The predecessor-ID boundary remains a
+hard authority boundary; the missing behavior is positive external adoption.
+
+The bounded closure keeps `/ready` as the authoritative service-lock and IPC
+chokepoint. After those checks pass, a healthy Controller with no
+`desktop_runtime_id` is an affirmative versioned external readiness response,
+even if the serving UI inherited a bundled tag. When that UI tag is valid, the
+response carries it separately as optional `desktop_ui_runtime_id`; this field
+records which UI artifact is serving and never identifies or authorizes the
+Controller. A truly external Controller/UI pair with no UI tag keeps the
+existing three-field response. A tagged Controller whose ID differs from the
+UI remains a five-field mismatch and can never authorize handover without a
+validated predecessor identity. Invalid identity, owner change, unavailable
+Controller, and not-ready responses remain rejected. No spawn-time environment
+rewrite, persistent adoption model, or new receipt protocol is introduced.
+
+The desktop consumers apply the same rule in both adoption paths. A bundled
+launcher receiving affirmative readiness without a Controller ID adopts it
+without handover, pruning, or scoped stop authority. Polling after the helper
+starts also accepts that external readiness; a tagged different Controller ID
+still follows the existing handover path. During uninstall, affirmative
+readiness with `desktop_ui_runtime_id` is always `Unknown`, including in a new
+host after the shell has been reopened, because the private UI may still be
+serving beside the external Controller. Older three-field no-ID peers remain
+`Unknown` whenever the host has local helper attempt/liveness evidence. A
+truly external three-field Controller/UI pair with no helper evidence retains
+`External` cleanup behavior.
+
+The required consuming transitions are:
+
+| Scenario | `/ready` identity | Bootstrap result | Handover/prune/stop | Uninstall decision |
+| --- | --- | --- | --- | --- |
+| Existing external Controller/UI | no IDs | adopt | none | `External` when the host did not launch it |
+| Bundled UI beside an untagged Controller | `desktop_ui_runtime_id` | adopt | none | `Unknown`; preserve private trees, including after reopen |
+| Bundled helper starts an older no-field peer | no IDs after launch | adopt during polling | none | `Unknown` while local liveness evidence remains |
+| Bundled helper and Controller share the expected ID | expected ID | adopt | prune superseded installs only | `Managed` |
+| Tagged Controller has a different ID | other valid ID | mismatch/handover through validated predecessor path | no authority from the body itself | existing managed/external rules |
+| Missing/invalid/not-ready identity | unavailable or invalid | reject or keep polling | no handover authority | fail closed when liveness is uncertain |
+
+Tests must cover the real Python reused-service/missing-UI path and its
+untagged `/ready` response, the Rust parser's exact three-field and
+`desktop_ui_runtime_id` payloads, polling adoption after a helper launch, and
+uninstall reaching `Unknown` while preserving private Runtime/backend trees,
+including after a fresh RuntimeHost reopen. Existing valid handover, no-ID
+mismatch rejection, receipt lifetime/refusal, fresh inactive cleanup, and
+safe successful cleanup remain part of this contract.
+
+The first H3 candidate exposed a boundary the initial ruling missed: the
+in-memory liveness fence disappears when the shell closes, so a later host
+cannot know that its bundled UI may still be using private files. The smallest
+stateless correction is to let the already authoritative `/ready` response
+carry the live UI identity separately. `desktop_ui_runtime_id` is optional in
+schema version 1, accepts the same validated lowercase hexadecimal identity as
+the Controller field, and is never used for handover, stop authority, managed
+classification, or pruning. Old valid payloads remain accepted; malformed or
+ambiguous new shapes fail closed. The orchestrator reproduced the failure as
+`adopt -> Unknown removal -> reopen -> External removal`, and authorized this
+producer/parser/consumer correction before commit or push.
+
+### Revised H3 candidate evidence before commit
+
+- The revised candidate remains limited to the producer, readiness parser and
+  direct RuntimeHost consumers, plus the shared contract fixture
+  `tests/fixtures/desktop_ready_external_controller_bundled_ui.json`. Python's
+  `/ready` producer test and `runtime.ui_server_healthy` read that same
+  affirmative external-Controller/bundled-UI shape; the Rust parser and
+  bootstrap test include it directly. The fixture therefore exercises the
+  actual cross-language field names and values rather than two independently
+  invented payloads.
+- `uv run pytest -q tests/test_desktop_runtime.py tests/test_internal_client.py`
+  passed `133` tests. This includes the real reused-service `cmd_start` path,
+  the single missing-UI spawn and reused receipt, valid and malformed optional
+  identity payloads, producer output, and `ui_server_healthy` acceptance of the
+  new shape. The Python tests reject null, uppercase, short, ambiguous and
+  extra-field identities.
+- RuntimeHost bootstrap consumers passed `cargo test --test bootstrap` with
+  `28` tests. `a_helper_adopts_untagged_readiness_after_launch_without_handover_or_pruning`
+  proves polling adoption after helper launch and the no-authority/Unknown
+  uninstall fence. `an_external_controller_with_a_bundled_ui_stays_unknown_after_shell_reopen`
+  starts the helper on the first host, drops that host, adopts the same
+  producer fixture in a fresh host, asserts one launch total, no handover or
+  prune, and `Unknown` on both removal attempts. The pre-existing
+  `unknown_runtime_ownership_blocks_private_file_removal` consumer still
+  proves that Unknown refuses deletion of private Runtime and backend roots.
+- Rust readiness unit tests passed `11` tests, full RuntimeHost library tests
+  passed earlier with `94` tests, and RuntimeHost Clippy with `-D warnings`
+  passed. `cargo fmt --all -- --check`, changed-Python Ruff, and
+  `git diff --check` passed. Cargo emitted only its existing permission warning
+  while attempting to clean a shared global cache; compilation, tests and
+  lint completed successfully. No notification, process-stop, spawn-environment,
+  persistence or predecessor-authority behavior was widened.
+- The earlier opt-in mock-upstream Model Hub suite passed `69` tests with `20`
+  expected skips. The migration E2E attempt remains accurately recorded as
+  `3 failed, 71 passed, 20 skipped` in the earlier evidence: the workspace
+  lacked the separately supplied offline engine manifest, and the run closed
+  at `engine_down` / `migration_native_busy` before credential mutation. This
+  observes the fixture limitation; it does not prove a causal production
+  authentication failure and was not retried against a network asset or the
+  installed service.
+
+The orchestrator independently reviewed all eight candidate paths at the
+`c7b749838181d443b19af4faa270f829f13c04fc` base and approved this bounded fix
+for commit and push. Its consuming spot-check passed `133` Python tests, `28`
+bootstrap tests, `11` readiness-parser tests, and the existing
+`unknown_runtime_ownership_blocks_private_file_removal` consumer (`40` Rust
+checks in total). The prior destructive transition `[Unknown, External]` is
+now covered by the fresh-host regression and expects `[Unknown, Unknown]`.
+The remote desktop was still `c7b749838181d443b19af4faa270f829f13c04fc`,
+and the three findings-bearing review heads remain H1 `92c600aa78`, H2
+`007f631613`, and H3 `c7b749838`, with the H3 thread still open until the
+pushed fix is evidenced.

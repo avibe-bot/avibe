@@ -245,7 +245,9 @@ impl RuntimeHost {
         };
         let state = match active_origin {
             Some(origin) => match self.probe.readiness(origin).await {
+                Some(readiness) if readiness.desktop_ui_runtime_id.is_some() => RuntimeRemovalState::Unknown,
                 Some(readiness) if readiness.desktop_runtime_id.is_some() => RuntimeRemovalState::Managed,
+                Some(_) if liveness_uncertain => RuntimeRemovalState::Unknown,
                 Some(_) => RuntimeRemovalState::External,
                 None if launched_by_host => RuntimeRemovalState::Managed,
                 None => RuntimeRemovalState::Unknown,
@@ -578,7 +580,15 @@ fn readiness_matches_launched_runtime(
     readiness: &RuntimeReadiness,
 ) -> bool {
     match launcher.and_then(|launcher| launcher.expected_runtime_id()) {
-        Some(expected) => readiness.desktop_runtime_id.as_deref() == Some(expected),
+        // A validated ready response without a desktop identity is an
+        // externally managed Controller. It may still be served by a UI that
+        // inherited the bundled launcher's identity, so polling must adopt it
+        // just as the initial probe does. A tagged response remains bound to
+        // the exact bundled identity.
+        Some(expected) => readiness
+            .desktop_runtime_id
+            .as_deref()
+            .is_none_or(|actual| actual == expected),
         None => true,
     }
 }
@@ -612,6 +622,7 @@ mod tests {
         async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
             Some(RuntimeReadiness {
                 desktop_runtime_id: None,
+                desktop_ui_runtime_id: None,
             })
         }
     }
@@ -710,6 +721,7 @@ mod tests {
         async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
             self.0.swap(true, Ordering::SeqCst).then_some(RuntimeReadiness {
                 desktop_runtime_id: None,
+                desktop_ui_runtime_id: None,
             })
         }
     }

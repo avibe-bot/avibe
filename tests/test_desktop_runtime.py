@@ -6,6 +6,7 @@ import json
 import socket
 import threading
 import urllib.error
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,7 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
-from vibe import cli, runtime
+from vibe import cli, internal_client, runtime
 from vibe.desktop_runtime import (
     desktop_runtime_id,
     desktop_endpoint_payload,
@@ -34,6 +35,15 @@ from vibe.desktop_runtime import (
     ui_listener_hosts,
 )
 from vibe.ui_server import _bind_ui_sockets, app
+
+
+READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "desktop_ready_external_controller_bundled_ui.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 @pytest.mark.parametrize(
@@ -324,6 +334,33 @@ def test_ui_server_health_requires_versioned_ready_identity_for_companion_listen
     assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
 
 
+def test_ui_server_health_accepts_the_external_controller_bundled_ui_shape(monkeypatch):
+    class Response:
+        status = 200
+
+        def __init__(self, payload=b""):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return self._payload
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            return Response(json.dumps(READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE).encode("utf-8"))
+        return Response()
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+
+    assert runtime.ui_server_healthy("100.97.103.112", 5123) is True
+
+
 @pytest.mark.parametrize(
     ("status", "payload"),
     [
@@ -381,6 +418,70 @@ def test_ready_identity_accepts_valid_desktop_runtime_id():
             ).encode("utf-8")
 
     assert runtime._ui_ready_identity_state(Response()) is True
+
+
+def test_ready_identity_accepts_valid_external_controller_ui_runtime_id():
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "product": "avibe",
+                    "ready": True,
+                    "desktop_ui_runtime_id": "b" * 64,
+                }
+            ).encode("utf-8")
+
+    assert runtime._ui_ready_identity_state(Response()) is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": True,
+            "desktop_ui_runtime_id": "short",
+        },
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": True,
+            "desktop_runtime_id": "a" * 64,
+            "desktop_ui_runtime_id": "b" * 64,
+        },
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": True,
+            "desktop_ui_runtime_id": None,
+        },
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": True,
+            "desktop_ui_runtime_id": "A" * 64,
+        },
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": True,
+            "desktop_ui_runtime_id": "b" * 64,
+            "unexpected": True,
+        },
+    ],
+)
+def test_ready_identity_rejects_invalid_or_ambiguous_runtime_ids(payload):
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    assert runtime._ui_ready_identity_state(Response()) is None
 
 
 def test_ui_server_compatibility_accepts_versioned_not_ready_identity(monkeypatch):
@@ -782,7 +883,6 @@ def test_ready_reports_desktop_runtime_identity(monkeypatch):
     [
         ("a" * 64, "b" * 64),
         ("a" * 64, None),
-        (None, "a" * 64),
     ],
 )
 def test_ready_rejects_a_runtime_identity_mismatch(
@@ -810,6 +910,120 @@ def test_ready_rejects_a_runtime_identity_mismatch(
             else {}
         ),
     }
+
+
+def test_ready_adopts_a_healthy_untagged_controller_even_when_ui_inherits_bundle_identity(monkeypatch):
+    response = _ready_response(
+        monkeypatch,
+        [1234, 1234],
+        controller_ready=True,
+        controller_runtime_id=None,
+        ui_runtime_id="a" * 64,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE
+
+
+def test_ready_rejects_an_invalid_bundled_ui_identity(monkeypatch):
+    response = _ready_response(
+        monkeypatch,
+        [1234, 1234],
+        controller_ready=True,
+        controller_runtime_id=None,
+        ui_runtime_id="invalid",
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "runtime_identity_invalid",
+    }
+
+
+def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
+    monkeypatch,
+    capsys,
+):
+    """The reused-service path must start only the missing UI and become adoptable."""
+
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+        memory=SimpleNamespace(enabled=False),
+        language="en",
+    )
+    spawned = []
+    process_times = {1234: 1789010100.1235, 5678: 1789010100.4565}
+
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args: None)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(cli.runtime, "process_create_time", lambda pid: process_times[pid])
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("browser is disabled"))
+
+    def reused_service(**kwargs):
+        kwargs["start_info"].capture(1234, reused=True)
+        return 1234
+
+    monkeypatch.setattr(cli.runtime, "start_service", reused_service)
+    monkeypatch.setattr(
+        internal_client,
+        "health_identity_sync",
+        lambda: {"ok": True, "service": "vibe-remote-internal", "version": 1},
+    )
+
+    async def health_identity():
+        return {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+    monkeypatch.setattr("vibe.internal_client.health_identity", health_identity)
+    monkeypatch.setattr(
+        cli.runtime,
+        "spawn_background",
+        lambda args, pid_path, *logs, **kwargs: (
+            spawned.append((args, logs, kwargs)),
+            pid_path.write_text("5678", encoding="utf-8"),
+            5678,
+        )[-1],
+    )
+
+    def wait_for_ui(host, port):
+        response = app.test_client().get("/ready", base_url=f"http://{host}:{port}")
+        assert response.status_code == 200
+        assert response.get_json() == READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE
+        return True
+
+    monkeypatch.setattr(cli.runtime, "wait_for_ui_server", wait_for_ui)
+    monkeypatch.setattr(cli.runtime, "stop_service", lambda: pytest.fail("reused Controller must survive"))
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_ui",
+        lambda **_kwargs: pytest.fail("the missing UI path must not stop a surviving UI"),
+    )
+
+    assert cli.cmd_start(open_browser=False) == 0
+
+    receipt_line = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("@avibe-start-receipt:")
+    )
+    assert json.loads(receipt_line.split(":", 1)[1]) == {
+        "schema_version": 1,
+        "outcome": "reused",
+        "service_pid": 1234,
+        "ui_pid": 5678,
+        "service_create_unix_ms": process_times[1234] * 1000,
+        "ui_create_unix_ms": process_times[5678] * 1000,
+    }
+    assert len(spawned) == 1
 
 
 @pytest.mark.parametrize(
