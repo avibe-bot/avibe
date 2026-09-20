@@ -91,13 +91,21 @@ blob with no way to reach the page the answer is based on.
   rather than HTML's — micromark is the parser behind this renderer, and it
   replaces the C1 range and the noncharacters with `U+FFFD` instead of applying
   the Windows-1252 mapping that would make `&#x80;` a `€` the rendered link
-  never opens. What is left is cleaned exactly the way WHATWG's URL parser
-  cleans its own input, because that is what decides the page: an ASCII tab or
-  newline is removed wherever it sits, leading and trailing C0 controls and
-  spaces are trimmed, and everything else — a C1 control, a zero-width, a
+  never opens. The raw string is cleaned first, exactly the way WHATWG's URL
+  parser cleans its own input, because that is what decides the page: an ASCII
+  tab or newline is removed wherever it sits, leading and trailing C0 controls
+  and spaces are trimmed, and everything else — a C1 control, a zero-width, a
   private-use code point — survives to be percent-encoded rather than deleted.
   Deleting it moved the destination silently
-  (`https://example.com/p&#x80;q` became `https://example.com/pq`). Then
+  (`https://example.com/p&#x80;q` became `https://example.com/pq`). That order —
+  clean the literals, then resolve the references — is the only one that keeps
+  both halves of the contract, because the two spellings are not the same
+  character to a Markdown parser: a literal tab or newline *ends* a destination,
+  so `[x](https://example.com/p<TAB>q)` renders as no link at all, while the
+  same character written as `&Tab;`, `&#x9;` or `&#xA;` is part of the
+  destination and comes out of the renderer percent-encoded as `%09` / `%0A`.
+  Cleaning after resolution would have deleted it and pointed the persisted URL
+  at `…/pq`, a page the badge never opens. Then
   percent-encoding that matches `normalizeUri` — existing `%XX` escapes
   preserved, lone surrogates repaired to `U+FFFD`, parentheses encoded so a
   Markdown destination cannot truncate, and the result a fixed point of itself —
@@ -117,12 +125,22 @@ blob with no way to reach the page the answer is based on.
   `2130706433`, `0x7f.1`, `127.1` and `017700000001` are all attributed to
   `127.0.0.1` instead of hiding a loopback destination behind the digits that
   spell it, and a form the parser refuses (`256.1.1.1`, `1.2.3.4.5`,
-  `example.com.0x1`) names no host and is rejected. A host too long for a label
-  is elided from the **left**, keeping the registrable suffix visible and whole
-  labels only: `developers.openai.com.<padding>.attacker.example` is shown as
-  `…attacker.example`, never as `developers.openai.com…`, which would name a
-  site the link never opens. So neither an unsafe URL nor an ordinary unrelated
-  link can become a fabricated citation. One fixture,
+  `example.com.0x1`) names no host and is rejected. A number written wider than
+  32 bits is refused as a host rather than converted, which also keeps CPython's
+  4300-digit bound on decimal `int()` off an untrusted host: `https://9…9/x`
+  with five thousand digits names no host instead of raising. A host too long for
+  a label is elided from the **left**, keeping the host's tail verbatim — the
+  label is always the last 63 characters behind an ellipsis, so it is either the
+  host or a suffix of it. `developers.openai.com.<padding>.attacker.example` is
+  shown as a tail that ends in `.attacker.example`, never as
+  `developers.openai.com…`, which would name a site the link never opens; and
+  never as `…co.uk` either, which keeping whole labels only would have produced
+  for a 62-character label under `co.uk` — a public suffix every site beneath it
+  shares, and the perfect place to hide a long attacker label. Only the leftmost
+  piece may be partial, and a partial piece cannot read as a different domain:
+  it is short only when whole labels already fill the budget, and those are the
+  rightmost ones, so the registrable domain is shown whole. So neither an unsafe
+  URL nor an ordinary unrelated link can become a fabricated citation. One fixture,
   `tests/fixtures/citation_url_identity.json`, is asserted by both the Python
   canonicalizer and the real renderer.
 - **Surface rules.** The badge is the link itself — hover or focus reveals the

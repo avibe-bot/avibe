@@ -153,16 +153,18 @@ describe('Markdown source citations', () => {
     // Attribution names the host the browser reaches - punycode included, and
     // an IPv4 form serialized the way the URL parser serializes it - not the
     // bytes the URL spells. A host too long for a badge is elided from the
-    // LEFT, so what is shown must still be a suffix of that host: a label cut
-    // from the right would read as a domain the link never opens.
+    // LEFT and keeps the host's tail verbatim, so the shown text is exactly the
+    // last 63 characters: a label cut from the right would read as a domain the
+    // link never opens, and keeping whole labels only left `…co.uk`, a public
+    // suffix shared by every site a long label could hide behind.
     const host = new URL(url).host;
     const elided = label.startsWith('…');
     const shown = elided ? label.slice(1) : label;
 
     expect(label.length).toBeLessThanOrEqual(64);
     if (elided) {
-      expect(host.endsWith(shown)).toBe(true);
-      expect(host).not.toBe(shown);
+      expect(shown).toBe(host.slice(-63));
+      expect(label.length).toBe(64);
     } else {
       expect(host === shown || host === `www.${shown}`).toBe(true);
     }
@@ -176,6 +178,28 @@ describe('Markdown source citations', () => {
     const citation = guide({ url: 'https://example.com/p%EF%BF%BDq' });
     const { container } = renderMarkdown(
       `Cited. [${citation.label}](https://example.com/p&#x80;q)`,
+      [citation],
+    );
+    const [badge] = badges(container);
+
+    expect(badge).toBeDefined();
+    expect(badge.getAttribute('href')).toBe(citation.url);
+  });
+
+  it.each([
+    ['&Tab;', '%09'],
+    ['&#x9;', '%09'],
+    ['&#xA;', '%0A'],
+    ['&#xD;', '%0D'],
+  ])('escapes a %s reference in a destination the way the backend does', (reference, encoded) => {
+    // The character a reference spells is part of the destination, so micromark
+    // percent-encodes it. Only a LITERAL tab or newline is removed - and that
+    // one never reaches here, because it ends the destination and leaves no
+    // link at all. The backend cleans literals off first and resolves
+    // references after, which is the only order that keeps these two hrefs.
+    const citation = guide({ url: `https://example.com/p${encoded}q` });
+    const { container } = renderMarkdown(
+      `Cited. [${citation.label}](https://example.com/p${reference}q)`,
       [citation],
     );
     const [badge] = badges(container);

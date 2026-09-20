@@ -146,6 +146,36 @@
       "label": null
     },
     {
+      "why": "P1: a host of digits wider than an address is refused rather than converted",
+      "raw": "https://99999999999/x",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "the check is the address, not the width: ten digits can overflow too",
+      "raw": "https://9999999999/x",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "the widest address that does fit is still read as one",
+      "raw": "https://4294967295/x",
+      "url": "https://4294967295/x",
+      "label": "255.255.255.255"
+    },
+    {
+      "why": "a hexadecimal part too wide is a number the parser refuses, never a domain name",
+      "raw": "https://example.0xFFFFFFFFFFFFFFFF/x",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "a leading zero makes the part octal however many zeros follow it",
+      "raw": "https://00000000000000000000127/x",
+      "url": "https://00000000000000000000127/x",
+      "label": "0.0.0.87"
+    },
+    {
       "why": "CommonMark resolves an entity in a destination, so the stored URL is the resolved one",
       "raw": "https://example.com/s?a=1&amp;b=2",
       "url": "https://example.com/s?a=1&b=2",
@@ -182,9 +212,27 @@
       "label": "example.com"
     },
     {
-      "why": "a named tab reference is removed exactly as a literal tab is",
+      "why": "P1: a named tab reference is part of the destination, so the renderer escapes it",
       "raw": "https://example.com/p&Tab;q",
-      "url": "https://example.com/pq",
+      "url": "https://example.com/p%09q",
+      "label": "example.com"
+    },
+    {
+      "why": "the same tab spelled numerically, which a literal tab in a destination cannot reach",
+      "raw": "https://example.com/p&#x9;q",
+      "url": "https://example.com/p%09q",
+      "label": "example.com"
+    },
+    {
+      "why": "P1: a newline reference is escaped too; removing it pointed the citation elsewhere",
+      "raw": "https://example.com/p&#xA;q",
+      "url": "https://example.com/p%0Aq",
+      "label": "example.com"
+    },
+    {
+      "why": "a carriage return reference goes the same way rather than being dropped",
+      "raw": "https://example.com/p&#xD;q",
+      "url": "https://example.com/p%0Dq",
       "label": "example.com"
     },
     {
@@ -221,7 +269,13 @@
       "why": "P1: a host too long to show is elided from the left, keeping the registrable suffix",
       "raw": "https://developers.openai.com.padding.padding.padding.padding.padding.padding.attacker.example/x",
       "url": "https://developers.openai.com.padding.padding.padding.padding.padding.padding.attacker.example/x",
-      "label": "\u2026padding.padding.padding.padding.padding.attacker.example"
+      "label": "\u2026adding.padding.padding.padding.padding.padding.attacker.example"
+    },
+    {
+      "why": "P1: whole labels alone left only the public suffix a long label was hiding behind",
+      "raw": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.co.uk/x",
+      "url": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.co.uk/x",
+      "label": "\u2026aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.co.uk"
     },
     {
       "why": "a browser lowercases the host but not the path, so the label is lowercase and the URL is not",

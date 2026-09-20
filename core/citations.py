@@ -60,6 +60,13 @@ _URL_TRIMMED = "".join(chr(code) for code in range(0x21))
 _DECIMAL_DIGITS = frozenset("0123456789")
 _OCTAL_DIGITS = frozenset("01234567")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+# The widest an IPv4 number can be written per radix and still fit in 32 bits
+# (``4294967295``, ``0xffffffff``, ``0o37777777777``), and the stand-in for one
+# written wider. Every check that consumes a number rejects a value this big, so
+# the exact magnitude past the cap never matters - and not converting it keeps
+# CPython's bound on decimal ``int`` conversion out of an untrusted host.
+_IPV4_WIDEST = {10: 10, 16: 8, 8: 11}
+_IPV4_TOO_LARGE = 1 << 32
 
 # A CommonMark character reference, which is what a link destination resolves
 # before it becomes an href. Providers that lifted a URL out of HTML hand over
@@ -169,19 +176,29 @@ def _resolve_references(value: str) -> str:
 def _normalize_destination(value: str) -> str:
     """The provider's URL string as a browser reads it, before Markdown escaping.
 
-    Providers lift URLs out of HTML, so one round of character references is
-    resolved first; what is left is cleaned the way WHATWG's URL parser cleans
-    its own input - every ASCII tab or newline removed wherever it sits, and
-    leading or trailing C0 controls and spaces trimmed. Everything else survives
-    to be percent-encoded, because that is what the browser does with it.
+    The two passes are ordered the way the pipeline applies them, because they
+    disagree about the same character. A *literal* tab or newline is cleaned off
+    first, the way WHATWG's URL parser cleans its own input - removed wherever it
+    sits, with leading and trailing C0 controls and spaces trimmed - and it has
+    to be: a literal tab in a Markdown destination ends the destination, so
+    ``[x](https://example.com/p<TAB>q)`` renders as no link at all.
 
-    Deleting the rest instead - which a blanket control scrub either side of the
-    reference pass used to do - silently moved the page a citation pointed at:
-    ``https://example.com/p&#x80;q`` became ``https://example.com/pq`` rather
-    than the ``p%EF%BF%BDq`` the renderer produces, so the stored URL no longer
-    identified the destination it was delivered as.
+    A tab a *character reference* spells is a different character. Providers lift
+    URLs out of HTML, so one round of references is resolved after that cleanup,
+    and what it produces is part of the destination: micromark percent-encodes
+    it, so ``p&Tab;q``, ``p&#x9;q`` and ``p&#xA;q`` have the hrefs ``p%09q``,
+    ``p%09q`` and ``p%0Aq``. Resolving before the cleanup deleted exactly those,
+    pointing the citation at ``p&#x9;q`` rendered as ``pq`` - a different page,
+    silently.
+
+    Everything else a reference produces survives to be percent-encoded too,
+    because that is what the browser does with it. Deleting it instead - which a
+    blanket control scrub either side of the reference pass used to do - moved
+    the page the same way: ``https://example.com/p&#x80;q`` became
+    ``https://example.com/pq`` rather than the ``p%EF%BF%BDq`` the renderer
+    produces.
     """
-    return _URL_REMOVED_RE.sub("", _resolve_references(value)).strip(_URL_TRIMMED)
+    return _resolve_references(_URL_REMOVED_RE.sub("", value).strip(_URL_TRIMMED))
 
 
 def _ipv4_number(part: str) -> Optional[int]:
@@ -190,6 +207,13 @@ def _ipv4_number(part: str) -> Optional[int]:
     A leading ``0x`` makes the part hexadecimal and a bare leading ``0`` makes
     it octal, which is how ``0x7f.1`` and ``017700000001`` both reach
     ``127.0.0.1``.
+
+    A part written wider than 32 bits is still a number - a browser reads it and
+    then fails the address - so it answers with a value past the cap rather than
+    with ``None``, which would call it a domain name instead. That also keeps
+    ``int`` off a host spelled with thousands of digits, which CPython refuses to
+    convert at all (``sys.set_int_max_str_digits``): an unhandled ``ValueError``
+    there would have escaped ``safe_url`` on nothing but an untrusted string.
     """
     if not part:
         return None
@@ -203,6 +227,8 @@ def _ipv4_number(part: str) -> Optional[int]:
             part, radix, digits = part[1:], 8, _OCTAL_DIGITS
     if not all(char in digits for char in part):
         return None
+    if len(part.lstrip("0")) > _IPV4_WIDEST[radix]:
+        return _IPV4_TOO_LARGE
     return int(part, radix)
 
 
@@ -376,16 +402,26 @@ def source_label(url: str, title: str = "") -> str:
         return title[:_LABEL_MAX].strip()
     if len(host) <= _LABEL_MAX:
         return host
-    # Shorten a long host from the LEFT. The registrable domain is its tail, so
-    # a label cut from the right names a site the link never opens:
-    # ``developers.openai.com.<padding>.attacker.example`` would be shown as
-    # ``developers.openai.com…`` in both the IM link text and the badge preview.
-    # Whole labels only, so the elision cannot invent one.
-    tail = host[-(_LABEL_MAX - 1) :]
-    boundary = tail.find(".")
-    if 0 <= boundary < len(tail) - 1:
-        tail = tail[boundary + 1 :]
-    return f"…{tail}"
+    # Shorten a long host from the LEFT, keeping the tail verbatim: the label is
+    # always either the host or a suffix of it, marked by the ellipsis.
+    #
+    # A label cut from the right names a site the link never opens -
+    # ``developers.openai.com.<padding>.attacker.example`` shown as
+    # ``developers.openai.com…`` - and keeping only whole labels degrades the
+    # other way: ``<62 chars>.co.uk`` would be shown as ``…co.uk``, a public
+    # suffix every site under it shares and the perfect place to hide a long
+    # attacker label. So the budget is filled from the right instead, and only
+    # the leftmost piece - the one the ellipsis is attached to - may be partial.
+    #
+    # That cannot compress a host into a different plausible domain, because the
+    # two cases exclude each other. A short fragment only happens when whole
+    # labels already fill most of the budget, and those are the rightmost labels,
+    # so the registrable domain is shown whole and the fragment sits in a
+    # subdomain slot. A fragment of the registrable label itself only happens
+    # when little else fits, which leaves it most of the 63 characters - more
+    # than a DNS label may hold minus a few, so nothing recognizable can hide in
+    # what is left out.
+    return "…" + host[-(_LABEL_MAX - 1) :]
 
 
 def _escape_label(value: str) -> str:

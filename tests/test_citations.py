@@ -293,9 +293,106 @@ class TestUntrustedMetadata:
         assert label.endswith(".attacker.example")
         assert not label.startswith("developers.openai.com")
         assert host.endswith(label[1:])
-        assert len(label) <= 64
-        # Whole labels only: an elision may not invent one out of a fragment.
-        assert "." + label[1:] in "." + host
+        assert len(label) == 64
+
+    def test_an_elision_shows_a_site_and_not_only_a_public_suffix(self):
+        """``…co.uk`` is every site under it, which is where a long label hides.
+
+        Keeping whole labels only was what produced that: the one label left of
+        the suffix did not fit, so all of it was dropped. The budget is filled
+        from the right instead, and the ellipsis marks the partial piece.
+        """
+        host = "a" * 62 + ".co.uk"
+
+        label = source_label(f"https://{host}/x")
+
+        assert label != "…co.uk"
+        assert label == "…" + host[-63:]
+        assert len(label) == 64
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "a" * 70 + ".uk",
+            "a" * 62 + ".co.uk",
+            "a" * 100,
+            "developers.openai.com." + "padding." * 6 + "attacker.example",
+            "x" * 30 + "." + "y" * 30 + ".example.com",
+        ],
+    )
+    def test_an_elided_label_is_always_a_tail_of_the_host(self, host):
+        """The one invariant both surfaces assert: never a fabricated middle."""
+        label = source_label(f"https://{host}/x")
+
+        assert label.startswith("…")
+        assert len(label) == 64
+        assert host.endswith(label[1:])
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("p&Tab;q", "p%09q"),
+            ("p&#x9;q", "p%09q"),
+            ("p&#9;q", "p%09q"),
+            ("p&#xA;q", "p%0Aq"),
+            ("p&#10;q", "p%0Aq"),
+            ("p&NewLine;q", "p%0Aq"),
+            ("p&#xD;q", "p%0Dq"),
+            # A literal one never reaches the renderer as part of a destination:
+            # it ends the destination, so ``[x](...p<TAB>q)`` is not a link.
+            ("p\tq", "pq"),
+            ("p\nq", "pq"),
+            ("p\rq", "pq"),
+        ],
+    )
+    def test_a_tab_a_reference_spells_is_escaped_and_a_literal_one_is_dropped(
+        self, raw, expected
+    ):
+        """The two are different characters, and the order of the passes decides.
+
+        WHATWG's input cleanup removes a literal tab or newline, so it runs on
+        the raw string. What a character reference resolves to afterwards is part
+        of the destination, and micromark percent-encodes it - measured, not
+        assumed: ``[x](https://example.com/p&Tab;q)`` renders
+        ``https://example.com/p%09q``. Resolving before the cleanup deleted
+        exactly those characters, silently moving the page.
+        """
+        assert safe_url(f"https://example.com/{raw}") == f"https://example.com/{expected}"
+
+    @pytest.mark.parametrize(
+        "host, expected",
+        [
+            # Wider than 32 bits: a browser reads the number and then fails the
+            # address, so this names no source rather than naming a domain.
+            ("99999999999", ""),
+            ("9999999999", ""),
+            ("0x" + "f" * 20, ""),
+            ("0" + "7" * 20, ""),
+            ("example.0x" + "F" * 16, ""),
+            ("1.2.3." + "9" * 4400, ""),
+            # Long enough that CPython refuses the decimal conversion outright.
+            ("9" * 5000, ""),
+            # The boundary that does fit, and an octal part however many zeros
+            # pad it - both measured against ``new URL`` in a real browser.
+            ("4294967295", "255.255.255.255"),
+            ("0" * 20 + "127", "0.0.0.87"),
+        ],
+    )
+    def test_a_numeric_host_wider_than_an_address_is_refused_not_converted(
+        self, host, expected
+    ):
+        """An untrusted host of digits must not reach ``int`` unbounded.
+
+        CPython refuses to convert a decimal string past
+        ``sys.int_info.default_max_str_digits`` (4300), so a host spelled with
+        thousands of digits raised ``ValueError`` out of ``safe_url`` - on
+        nothing but a search result. The magnitude is what matters anyway: every
+        check an IPv4 number reaches rejects a value this big.
+        """
+        url = f"https://{host}/x"
+
+        assert source_label(url) == expected
+        assert bool(safe_url(url)) is bool(expected)
 
     def test_markdown_punctuation_in_a_url_is_percent_encoded(self):
         """An unencoded ``)`` would truncate the link and leave prose behind it."""
