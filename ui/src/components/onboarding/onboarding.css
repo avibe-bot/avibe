@@ -109,6 +109,9 @@
   --ob-action-h: 56px;
   --ob-action-fs: 17px;
   --ob-action-icon: 19px;
+  /* The story's status caption is authored per tier like the rest of the card's
+     type: 12 on the standard desktops, 15 at the large reading, 13 stacked. */
+  --ob-cap-fs: 12px;
 
   /* One content width for the story and the assistant cards, written as the
      rule the reference's four rows describe rather than as four numbers: 976 on
@@ -286,6 +289,7 @@
     --ob-note-lh: 23px;
     --ob-method-h: 42px;
     --ob-method-fs: 14px;
+    --ob-cap-fs: 15px;
     --ob-h1: 50px;
     --ob-h1-lh: 68px;
     --ob-sub: 20px;
@@ -446,6 +450,25 @@
   gap: 20px;
   min-height: var(--ob-stage-h);
   margin-bottom: 20px;
+}
+
+/* The reference swaps the two screens as one composition: the outgoing layer
+   blurs out upward while the incoming one arrives from below with the same
+   blur, over 200ms. One keyed node per step can only draw the arrival, and the
+   arrival is the half a person watches; CSS animation keeps it off the frozen
+   clock the geometry tests hold the story on. */
+.onboarding-step {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.onboarding-step-enter {
+  animation: onboarding-step-enter 450ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes onboarding-step-enter {
+  from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
 }
 
 .onboarding-heading {
@@ -623,7 +646,7 @@
   flex-shrink: 0;
   min-height: calc(23 * var(--ob-u));
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--ob-cap-fs);
 }
 .onboarding-status-icon { flex-shrink: 0; }
 .onboarding-status-text { white-space: nowrap; }
@@ -1166,6 +1189,7 @@
     --ob-h1-lh: 41px;
     --ob-sub: 14px;
     --ob-sub-lh: 22px;
+    --ob-cap-fs: 13px;
     --ob-heading-gap: 12px;
     /* A phone reserves two title lines and one subtitle line: the English title
        wraps here while the Chinese does not, and the two steps must not disagree

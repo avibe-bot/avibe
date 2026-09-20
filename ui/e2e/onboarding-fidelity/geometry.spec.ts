@@ -158,6 +158,13 @@ test.describe('desktop reference geometry', () => {
     onPixel(ports[1].x + ports[1].width / 2, cards[1].x);
     onPixel(ports[2].x + ports[2].width / 2, cards[1].x + cards[1].width);
     onPixel(ports[3].x + ports[3].width / 2, cards[2].x);
+    // The story's caption is authored per tier like the rest of the card's type —
+    // 12 on the standard desktops, 15 at the large reading — so a fixed 10 that
+    // reads small against the frame is caught here.
+    const capSize = await page.locator('.onboarding-story-status')
+      .first().evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
+    expect(capSize).toBeCloseTo(reference.card >= 300 ? 15 : 12, 0);
+
     // The identity header's mark takes its tier's authored size — 28 under a 900px
     // window and below, 32 at 1001+, 35 at the large reading — including the nested
     // span `BackendIcon` sizes inline, or the visible mark stays at one tier while

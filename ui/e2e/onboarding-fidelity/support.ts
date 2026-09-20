@@ -213,6 +213,13 @@ export async function setDocumentHidden(page: Page, hidden: boolean) {
 export async function openSetup(page: Page, lang: string) {
   await page.getByRole('button', { name: lang === 'zh' ? '开始使用' : 'Get started' }).click();
   await page.locator('.onboarding-assistants').waitFor();
+  // The step switch plays a 450ms entrance that translates and blurs the incoming
+  // composition. It runs on the document timeline, so a frozen clock does not hold
+  // it; geometry read mid-entrance would be geometry of a composition still
+  // arriving. CSS animations, unlike timers, settle on their own.
+  await page.locator('.onboarding-step').evaluate((node) => Promise.all(
+    node.getAnimations({ subtree: false }).map((animation) => animation.finished.catch(() => null)),
+  ));
 }
 
 /**

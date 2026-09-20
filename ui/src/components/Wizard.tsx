@@ -44,6 +44,10 @@ export function Wizard() {
   const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
   const [recovery, setRecovery] = useState<VibeAgentBrief | null>(null);
   const [step, setStep] = useState<'welcome' | 'agents'>('welcome');
+  // The first screen arrives without an entrance of its own — the reference opens
+  // on it, settled. Only a switch between the two screens plays the transition, so
+  // the flag flips in the two places that move between them, never on mount.
+  const [entered, setEntered] = useState(false);
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState('');
   const completing = useRef(false);
@@ -118,8 +122,14 @@ export function Wizard() {
   return <div className="onboarding-shell">
     <SetupHeader />
     <main className="onboarding-shell-content">
-      {step === 'welcome' ? <Welcome data={data} onNext={(next) => { setData({ ...data, ...Object(next) }); setStep('agents'); window.scrollTo({ top: 0, behavior: 'instant' }); }} />
-        : <AgentDetection data={data} completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined} onNext={complete} onBack={(next) => { setData({ ...data, ...next }); setStep('welcome'); window.scrollTo({ top: 0, behavior: 'instant' }); }} />}
+      {/* One keyed wrapper per step: switching steps swaps the composition and
+          the incoming one fades, slides and unblurs in, the way the reference's
+          connection layer arrives over the introduction. Reduced motion takes the
+          whole shell's animation away, so the swap stays instant for it. */}
+      <div key={step} className={entered ? 'onboarding-step onboarding-step-enter' : 'onboarding-step'}>
+        {step === 'welcome' ? <Welcome data={data} onNext={(next) => { setData({ ...data, ...Object(next) }); setStep('agents'); setEntered(true); window.scrollTo({ top: 0, behavior: 'instant' }); }} />
+          : <AgentDetection data={data} completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined} onNext={complete} onBack={(next) => { setData({ ...data, ...next }); setStep('welcome'); setEntered(true); window.scrollTo({ top: 0, behavior: 'instant' }); }} />}
+      </div>
     </main>
   </div>;
 }
