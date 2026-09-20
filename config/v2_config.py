@@ -3567,8 +3567,9 @@ class ModelHubConfig:
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in MODEL_HUB_BACKENDS
         }
     )
-    # Current writers stamp this even when saving enabled=False. Only disk
-    # loading may promote an old absent/false marker together with enabled=True.
+    # Fresh configs and explicit Start/Stop consume the default. Disk observers
+    # retain a pending false marker until lock-owning startup commits promotion;
+    # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
 
     @staticmethod
@@ -4065,7 +4066,7 @@ class V2Config:
             # default. In particular, a store reload after a failed startup
             # backup/CAS must not undo the failure's disabled-runtime result.
             config.model_hub.enabled = True if persist_migrations else previous_runtime_enabled
-            config.model_hub.runtime_default_applied = True
+            config.model_hub.runtime_default_applied = persist_migrations
             migrated = True
         elif migration_warnings or recovery_warnings:
             # Do not materialize a new runtime default while recovering an

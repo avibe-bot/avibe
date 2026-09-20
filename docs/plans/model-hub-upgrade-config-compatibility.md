@@ -26,9 +26,16 @@ writer during the upgrade overlap, not lost credentials or a Codex-only bug.
    migration-persistence choice. Non-persisting reads retain the stored runtime
    intent, rather than activating the uncommitted pending default in memory.
    This also prevents a store reload from bypassing a failed startup backup/CAS.
+   An absent/false default marker stays pending (`false`) in this projection
+   and through unrelated settings, Memory, and generic config writes; only
+   startup promotion or an explicit runtime action consumes it.
 4. Keep the shipped marker, fresh-install defaults, backend routing modes,
-   source custody, and one-time runtime promotion unchanged. A subsequent
-   deliberate Stop stays stopped across reads and new-service startups.
+   source custody, and one-time runtime promotion unchanged. Explicit runtime
+   Start/Stop persist their chosen enabled state together with a true marker,
+   even when the enabled state was already equal. Start records run intent
+   before preparing the engine, as before; refused/failed Stop leaves the
+   config and pending marker unchanged. A deliberate Stop stays stopped
+   across reads and new-service startups.
 5. Explicit settings/config writes remain writes. This change does not promise
    arbitrary old-reader support after a new version deliberately saves a new
    schema, nor roll back a config already migrated by an earlier release.
@@ -51,6 +58,10 @@ blanket unknown-field tolerance, or a gateway retry/fallback.
   restricted-permission backup. A rejected second service does not reach
   migration. Backup failure and concurrent writes retain their existing
   fail-closed behavior.
+- Unrelated writes keep a pending legacy upgrade pending until startup.
+  Explicit Start/Stop consume it without changing sources or backend modes;
+  refused/busy/failed Stop does not. Cover absent and false markers with
+  both enabled states, including already-disabled Stop.
 - Re-run the existing migration, settings, CLI, service-lock, and upgrade
   suites. Separately replay the installed historical reader against a
   fixture touched by the changed reader; no native CLI, credentials,

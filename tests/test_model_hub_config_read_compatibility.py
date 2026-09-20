@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import stat
+from unittest.mock import AsyncMock
 
 import pytest
 
 from config import paths
-from config.v2_config import ModelHubConfig, ModelHubRouteConfig, ModelHubRouteHopConfig, V2Config
+from config.v2_config import (
+    ModelHubConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
+    V2Config,
+    atomic_update_memory,
+    update_config_fields,
+)
+from core.handlers.model_hub.adapter import EngineHealth, EngineStatus
+from core.handlers.model_hub.events import BoundedEventLog
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, V2ModelHubConfigStore
 from core.services import settings
-from tests.test_model_hub_resolution import _service, _source
+from tests.test_model_hub_resolution import FakeAdapter, _service, _source
 from vibe import api, cli, runtime, upgrade
 
 
@@ -218,4 +230,147 @@ def test_rejected_service_cannot_reach_migration(monkeypatch):
     with pytest.raises(SystemExit):
         main.main()
     assert path.read_bytes() == original
+    assert not list(path.parent.glob("config.json.bak-*"))
+
+
+@pytest.mark.parametrize("writer", ("transaction", "save", "settings_api", "memory"))
+@pytest.mark.parametrize("marker", ("absent", False))
+@pytest.mark.parametrize("enabled", (False, True))
+def test_unrelated_writer_keeps_upgrade_pending_until_startup(writer, marker, enabled):
+    import main
+
+    path, _ = legacy_config(enabled=enabled)
+    original = json.loads(path.read_text(encoding="utf-8"))
+    if marker is False:
+        original["model_hub"]["runtime_default_applied"] = False
+        path.write_text(json.dumps(original), encoding="utf-8")
+
+    if writer == "transaction":
+        update_config_fields(lambda config: setattr(config, "language", "zh"))
+    elif writer == "save":
+        config = V2Config.load()
+        config.language = "zh"
+        config.save()
+    elif writer == "settings_api":
+        api.save_config({"language": "zh"}, validate_remote_access_network=False)
+    else:
+        atomic_update_memory(lambda memory: memory)
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["model_hub"]["runtime_default_applied"] is False
+    assert written["model_hub"]["enabled"] is enabled
+    assert written["model_hub"]["sources"] == original["model_hub"]["sources"]
+    assert written["model_hub"]["agents"] == original["model_hub"]["agents"]
+    if writer != "memory":
+        assert written["language"] == "zh"
+    assert V2ModelHubConfigStore().load().runtime_default_applied is False
+    assert not list(path.parent.glob("config.json.bak-*"))
+    pending = path.read_bytes()
+
+    startup = main.load_config()
+
+    assert startup.model_hub.runtime_default_applied is True
+    assert startup.model_hub.enabled is True
+    [backup] = path.parent.glob("config.json.bak-model-hub-migration-*")
+    assert backup.read_bytes() == pending
+    after = path.read_bytes()
+    assert main.load_config().model_hub.enabled is True
+    assert path.read_bytes() == after
+
+
+def pending_runtime_service(tmp_path, *, enabled, marker):
+    path, _ = legacy_config(enabled=enabled)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for backend in payload["model_hub"]["agents"].values():
+        backend["mode"] = "direct"
+    if marker is False:
+        payload["model_hub"]["runtime_default_applied"] = False
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    adapter = FakeAdapter()
+    adapter.stop_runtime = AsyncMock(return_value=EngineStatus(
+        EngineHealth.NOT_STARTED, "fixture", True, "127.0.0.1", None, None,
+    ))
+    service = ModelHubService(
+        store=V2ModelHubConfigStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "runtime-events.json"),
+    )
+    return path, service, adapter
+
+
+@pytest.mark.parametrize("action", ("runtime_start", "runtime_stop"))
+@pytest.mark.parametrize("enabled", (False, True))
+@pytest.mark.parametrize("marker", ("absent", False))
+def test_explicit_runtime_action_consumes_pending_marker(tmp_path, action, enabled, marker):
+    import main
+
+    path, service, adapter = pending_runtime_service(tmp_path, enabled=enabled, marker=marker)
+    before = json.loads(path.read_text(encoding="utf-8"))
+
+    outcome = asyncio.run(getattr(service, action)())
+
+    expected = action == "runtime_start"
+    assert outcome["enabled"] is expected
+    if action == "runtime_stop":
+        adapter.stop_runtime.assert_awaited_once()
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["model_hub"]["runtime_default_applied"] is True
+    assert written["model_hub"]["enabled"] is expected
+    assert written["model_hub"]["sources"] == before["model_hub"]["sources"]
+    assert written["model_hub"]["agents"] == before["model_hub"]["agents"]
+    after = path.read_bytes()
+    assert main.load_config().model_hub.enabled is expected
+    assert path.read_bytes() == after
+    assert not list(path.parent.glob("config.json.bak-*"))
+
+
+@pytest.mark.parametrize("failure", ("in-use", "installing", "missing-adapter", "adapter-error"))
+@pytest.mark.parametrize("marker", ("absent", False))
+def test_unsuccessful_runtime_stop_does_not_consume_pending_marker(tmp_path, failure, marker):
+    import main
+
+    path, service, adapter = pending_runtime_service(tmp_path, enabled=False, marker=marker)
+    if failure == "in-use":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["model_hub"]["agents"]["codex"]["mode"] = "hub"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    elif failure == "installing":
+        adapter.stop_runtime.return_value = EngineStatus(
+            EngineHealth.INSTALLING, None, False, "127.0.0.1", None, None,
+        )
+    elif failure == "missing-adapter":
+        adapter.stop_runtime = None
+    else:
+        adapter.stop_runtime.side_effect = RuntimeError("fixture stop failed")
+    before = path.read_bytes()
+
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.runtime_stop())
+
+    assert caught.value.code == {
+        "in-use": "runtime_in_use",
+        "installing": "runtime_busy",
+    }.get(failure, "engine_down")
+    assert path.read_bytes() == before
+    assert V2ModelHubConfigStore().load().runtime_default_applied is False
+    assert main.load_config().model_hub.enabled is True
+
+
+@pytest.mark.parametrize("marker", ("absent", False))
+def test_runtime_start_failure_retains_explicit_start_intent(tmp_path, marker):
+    import main
+
+    path, service, adapter = pending_runtime_service(tmp_path, enabled=False, marker=marker)
+    adapter.start = AsyncMock(side_effect=RuntimeError("fixture start failed"))
+
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.runtime_start())
+
+    assert caught.value.code == "engine_down"
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["model_hub"]["runtime_default_applied"] is True
+    assert written["model_hub"]["enabled"] is True
+    after = path.read_bytes()
+    assert main.load_config().model_hub.enabled is True
+    assert path.read_bytes() == after
     assert not list(path.parent.glob("config.json.bak-*"))

@@ -285,7 +285,7 @@ def test_read_only_load_preserves_runtime_intent_without_upgrade_backup(tmp_path
     path, original = write_config(tmp_path, legacy_payload(tmp_path))
     loaded = V2Config.load(config_path=path, persist_migrations=False)
     assert loaded.model_hub.enabled is False
-    assert loaded.model_hub.runtime_default_applied is True
+    assert loaded.model_hub.runtime_default_applied is False
     assert path.read_bytes() == original
     assert not list(path.parent.glob("config.json.bak-*"))
 
