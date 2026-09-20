@@ -386,3 +386,47 @@ and runs whole when the surface is live again.
 - `e2e/workbench-general/geometry.spec.ts` — in a browser, opening a Dock tile
   beside inline Settings leaves focus inside the window. Non-vacuous: dropping
   the early return fails it.
+
+## Review round 2: the exit cannot be refused
+
+The round-2 finding asked the window-foreground exit to carry an authorization
+verdict: a dirty `/apps/editor` retained behind Settings would put the
+router-wide unsaved-changes blocker in front of `closeSettingsOverlay()`, and
+cancelling that prompt would leave the window appended and focused behind a
+Settings surface that never closed — half of an action the user declined.
+
+The premise does not hold, and the reason is the same boundary that answered the
+round-1 `ShowPageRoute` finding. `useUnsavedChanges` reads
+`useRouteSurfaceActive()` and registers `null` while its surface is inactive, so
+the route retained behind Settings withdraws its registration for the whole
+visit. `shouldBlock` then sees an empty registry and lets the close through:
+there is no prompt, no verdict to propagate, and no half-applied state to guard
+against.
+
+That is the right answer rather than a lucky one. Closing the overlay returns to
+the very route the overlay was opened over, which stayed mounted the entire time
+with its draft intact — nothing is discarded, so a "Discard unsaved changes?"
+prompt would be false in both of its branches. Adding `authorizeRouteAction()`
+here would be a no-op today (it reads the same empty registry) and a lie the day
+the withdrawal changed.
+
+Both round-1 and round-2 findings therefore share one class — what an inactive
+route surface may still do — and that class already has a single owner in
+`RouteSurfaceActivityBoundary`. Round 1 brought `ShowPageRoute` under it; the
+unsaved-changes registry was already there.
+
+`UnsavedChangesProvider.test.tsx` pins the guarantee at the level of the
+behaviour rather than the mechanism: leaving the overlay while a dirty route is
+retained prompts nothing and closes Settings, and the same harness still prompts
+when a navigation really does leave that route. Non-vacuous both ways —
+dropping the `routeSurfaceActive` gate reproduces exactly the prompt the finding
+described.
+
+### Out of scope, found while diagnosing
+
+Navigating from an open Settings surface to a *different* route unmounts the
+retained dirty route without prompting, because its registration is withdrawn
+for the duration of the visit. That is pre-existing behaviour in the
+unsaved-changes feature, independent of the Settings menu placement work, and it
+wants its own change: the withdrawal should cover transitions that return to the
+origin, not every transition made while the overlay is open.
