@@ -176,6 +176,18 @@ test.describe('desktop reference geometry', () => {
       expect(logo.height).toBeCloseTo(logoSize, 0);
     }
 
+    // In the band that still draws three columns on a narrow window, the identity
+    // row has less room than its logo, switch and label want; the name yields
+    // before anything spills through the card edge.
+    if (reference.column <= 768 + 1) {
+      for (let index = 0; index < cards.length; index += 1) {
+        const name = (await boxes(page, '.onboarding-card-name'))[index];
+        const enable = (await boxes(page, '.onboarding-assistant-enable'))[index];
+        expect(name.x).toBeGreaterThanOrEqual(cards[index].x - 0.5);
+        expect(enable.x + enable.width).toBeLessThanOrEqual(cards[index].x + cards[index].width + 0.5);
+      }
+    }
+
     // And the handoff runs along the cards' shared midline.
     const midline = cards[0].y + reference.card / 2;
     for (const port of ports) onPixel(port.y + port.height / 2, midline);

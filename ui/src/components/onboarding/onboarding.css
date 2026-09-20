@@ -558,6 +558,7 @@
   height: var(--ob-card-logo) !important;
 }
 .onboarding-card-logo { flex-shrink: 0; }
+.onboarding-assistant-enable { flex-shrink: 0; }
 .onboarding-card-logo svg {
   width: 100%;
   height: 100%;
@@ -568,7 +569,11 @@
   font-weight: 550;
   letter-spacing: -0.3px;
   line-height: 1.5;
-  white-space: nowrap;
+  /* At the tall tier's still-three-column band a card can be narrower than its
+     logo, switch and an unbreakable name; the name yields first — wrapping or
+     ellipsising — before the row spills through the card edge. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 /* The trailing slot. The role is text; the connection puts its switch here instead, and
    both are pushed to the card's inner edge by the same rule. */
