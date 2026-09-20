@@ -44,9 +44,10 @@ function highestVisibleWindow(windows: readonly WindowInstance[]): WindowInstanc
  * `onWindowForeground`: the shell can hide the whole window layer (Settings does), in
  * which case a window brought forward would arrive invisible. Rather than teach every
  * caller — launcher, Dock, deep link, a window focusing itself on restore — to ask what
- * is covering it, the manager tells the shell that a window is coming forward and lets
- * the shell clear the way. `focus` and `openApp` are the only two places that can put a
- * window on top (`restore` goes through `focus`), so both announce it.
+ * is covering it, the manager offers `announceForeground` and lets the shell clear the
+ * way. The announcement is made for the caller by `useWindowManager`, not by the methods
+ * here, because whether it is warranted depends on the caller and only the caller's own
+ * context can answer it — see the hook.
  */
 export const WindowManagerProvider: React.FC<{
   children: React.ReactNode;
@@ -180,8 +181,11 @@ export const WindowManagerProvider: React.FC<{
     return !message || window.confirm(message);
   }, []);
 
-  const focus = useCallback((id: string) => {
+  const announceForeground = useCallback(() => {
     foregroundRef.current?.();
+  }, [foregroundRef]);
+
+  const focus = useCallback((id: string) => {
     setFocusedId(id);
     setWindows((prev) => {
       const target = prev.find((w) => w.id === id);
@@ -191,7 +195,7 @@ export const WindowManagerProvider: React.FC<{
       if (target.z === nextZ - 1 && prev.every((w) => w.id === id || w.z < target.z)) return prev;
       return prev.map((w) => (w.id === id ? { ...w, z: nextZ } : w));
     });
-  }, [foregroundRef]);
+  }, []);
 
   const focusCanvas = useCallback(() => {
     setFocusedId(null);
@@ -200,7 +204,6 @@ export const WindowManagerProvider: React.FC<{
   }, []);
 
   const openApp = useCallback<WindowManagerValue['openApp']>((appId, opts) => {
-    foregroundRef.current?.();
     const def = APP_REGISTRY[appId];
     const size = { ...DEFAULT_SIZE, ...def?.defaultSize };
     const i = openCount.current++ % CASCADE_WRAP;
@@ -230,7 +233,7 @@ export const WindowManagerProvider: React.FC<{
     ]);
     setFocusedId(id);
     return id;
-  }, [foregroundRef]);
+  }, []);
 
   const close = useCallback((id: string) => {
     closeGuards.current.delete(id);
@@ -339,6 +342,7 @@ export const WindowManagerProvider: React.FC<{
     () => ({
       windows,
       focusedId,
+      announceForeground,
       openApp,
       close,
       focus,
@@ -356,7 +360,7 @@ export const WindowManagerProvider: React.FC<{
       gestureActive,
       setGestureActive,
     }),
-    [windows, focusedId, openApp, close, focus, focusCanvas, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose, gestureActive],
+    [windows, focusedId, announceForeground, openApp, close, focus, focusCanvas, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose, gestureActive],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;

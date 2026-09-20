@@ -65,6 +65,7 @@ import {
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
+import { useRouteSurfaceActive } from './lib/routeSurfaceActivity';
 import { onPageReactivated } from './lib/pageActivity';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
@@ -563,6 +564,7 @@ const AppsRouteFallback = () => {
 // render the Library body full-screen (the same component, its page shell).
 const LibraryRoute = () => {
   const isDesktop = useIsDesktop();
+  const surfaceActive = useRouteSurfaceActive();
   const wm = useWindowManager();
   const navigate = useNavigate();
   const location = useLocation();
@@ -571,8 +573,13 @@ const LibraryRoute = () => {
   // opens on the Show Pages inventory the bookmark asked for, not the Apps tab.
   const initialTab = new URLSearchParams(location.search).get('view') === 'pages' ? ('showpages' as const) : undefined;
 
+  // Only while this surface is the live one — same handoff as ShowPageRoute, and
+  // the same reason: the window coming forward and the redirect back to the canvas
+  // are one gesture, and a retired surface may do neither. The boundary already
+  // refuses the redirect, so running here would spend the latch on a half-done
+  // launch. It waits, and runs whole once the surface is live again.
   useEffect(() => {
-    if (!isDesktop || handledRef.current) return;
+    if (!surfaceActive || !isDesktop || handledRef.current) return;
     handledRef.current = true;
     const own = wm.windows.filter((w) => w.appId === 'library');
     const target = own.find((w) => !w.minimized) ?? own[0];
@@ -586,7 +593,7 @@ const LibraryRoute = () => {
       wm.openApp('library', { params: { initialTab } });
     }
     navigate('/', { replace: true });
-  }, [isDesktop, wm, navigate, initialTab, location.key]);
+  }, [surfaceActive, isDesktop, wm, navigate, initialTab, location.key]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (

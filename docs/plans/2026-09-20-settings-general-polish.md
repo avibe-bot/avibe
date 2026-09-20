@@ -430,3 +430,57 @@ for the duration of the visit. That is pre-existing behaviour in the
 unsaved-changes feature, independent of the Settings menu placement work, and it
 wants its own change: the withdrawal should cover transitions that return to the
 origin, not every transition made while the overlay is open.
+
+## Review round 3: the announcement belongs to the caller
+
+Round 3 found two more launch paths with the shape round 1 fixed in
+`ShowPageRoute`: `ShowPageLaunchControl.openWindow` awaits `prepare()` before
+`openApp`, and `ChatPage.openLocalFile` awaits `fileMeta`. Both components stay
+mounted behind the Settings overlay, so a user who opens Settings mid-await gets
+Settings thrown away by a launch they had already moved on from. Both premises
+check out.
+
+Three findings-bearing heads, all one class, so the circuit breaker applies and
+the diagnosis moves up a level. The class is mine: `onWindowForeground` is new
+in this PR, and the mistake was where it was wired. Putting the announcement
+inside the provider's `focus` and `openApp` gave every caller an obligation none
+of them knows about — "clear whatever covers the window layer" — and left each
+one to discover for itself that the obligation has a condition. Patching two
+more call sites would have bought the same bug a fourth head.
+
+The announcement is the one thing the window manager does on someone else's
+behalf, so it is the one thing that depends on who is asking. It moves to
+`useWindowManager`, the single consumer boundary, where `useRouteSurfaceActive()`
+already answers "is this caller still what the user is looking at". The provider
+exposes `announceForeground` and calls it from nothing; the hook calls it ahead
+of `openApp`, `focus`, `restore` and `toggleMaximize`. Every present and future
+caller inherits the gate, and none of them has to know it exists.
+
+The gate reads its answer when the method is *called*, not when the closure was
+made — through `useLatestRef`, not the memo's dependencies. That is the whole
+point for the suspended launches above: their closure was created while the
+surface was live and only the call is late, so a render-time check would still
+let the stale continuation announce.
+
+Rejected: gating each awaited call site (the shape that already needed three
+rounds to enumerate), moving the exit up to shell chrome (it would stop the Dock
+from working in inline mode, which is the bug this PR opened with), and teaching
+`RouteSurfaceActivityBoundary` about windows (it would couple routing to the
+window manager to serve one caller).
+
+`LibraryRoute` gets the `surfaceActive` gate that `ShowPageRoute` got in round
+1 — same latch, same half-done handoff, and it was simply missed.
+`toggleMaximize` reaches the top through `focus`, so it announced before this
+refactor; it is wrapped too, rather than silently losing the behaviour.
+
+`WindowManagerProvider.test.tsx` pins both halves: a retired caller still gets
+its window opened and focused but announces nothing, and a reference captured
+while the surface was live announces by whether the surface is live at the call.
+Non-vacuous — removing the gate fails both.
+
+### Correction to this PR's own validation
+
+`npx tsc --noEmit` in `ui/` checks nothing: `ui/tsconfig.json` is a solution file
+with `"files": []` and only project references. The real typecheck is `tsc -b`,
+which is what `npm run build` runs — and it caught a nullability error in the
+first version of the hook that the vacuous command had reported clean.

@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo } from 'react';
 
 import type { AppId } from '../apps/registry';
+import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 // One open app window. Bounds are in CSS px relative to the window LAYER (the
@@ -37,6 +38,13 @@ export interface WindowManagerValue {
   windows: WindowInstance[];
   /** The app window that owns foreground focus, or null while the canvas owns it. */
   focusedId: string | null;
+  /**
+   * Tell the shell a window is coming to the front so it can clear whatever hides the
+   * window layer (Settings does). `useWindowManager` calls this for you from `openApp`,
+   * `focus` and `restore` when the caller is entitled to it; there is no reason to call
+   * it directly, and the methods below deliberately do not.
+   */
+  announceForeground: () => void;
   openApp: (appId: AppId, opts?: OpenAppOptions) => string;
   close: (id: string) => void;
   focus: (id: string) => void;
@@ -85,10 +93,57 @@ export interface WindowManagerValue {
 
 export const WindowManagerContext = createContext<WindowManagerValue | null>(null);
 
-export function useWindowManager(): WindowManagerValue {
+/**
+ * The window manager, with the foreground announcement already wired in.
+ *
+ * Bringing a window forward has to clear whatever hides the window layer, but only when
+ * the caller still speaks for what the user is looking at. A route retained behind the
+ * Settings overlay is still mounted and still running: an `await` it started before the
+ * overlay opened — `ShowPageLaunchControl` preparing a page, `ChatPage` reading a file's
+ * metadata — resumes after it, and its `openApp` would otherwise throw Settings away on
+ * behalf of a user who has moved on. So the provider's methods announce nothing and this
+ * hook announces for them, which puts the decision where the answer lives: one gate the
+ * launcher, the Dock, a deep link and every future caller inherit without knowing the
+ * rule exists.
+ *
+ * The check is read when the method is CALLED, not when the closure was made, because
+ * that is the moment being judged — the suspended continuation above was created while
+ * its surface was still live, and only the call is late.
+ */
+function useWindowManagerContext(): WindowManagerValue {
   const ctx = useContext(WindowManagerContext);
   if (!ctx) throw new Error('useWindowManager must be used within a WindowManagerProvider');
   return ctx;
+}
+
+export function useWindowManager(): WindowManagerValue {
+  const ctx = useWindowManagerContext();
+  const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
+  const announceIfLive = useCallback(() => {
+    if (surfaceActiveRef.current) ctx.announceForeground();
+  }, [ctx, surfaceActiveRef]);
+  return useMemo(() => {
+    const { openApp, focus, restore, toggleMaximize } = ctx;
+    return {
+      ...ctx,
+      openApp: (appId: AppId, opts?: OpenAppOptions) => {
+        announceIfLive();
+        return openApp(appId, opts);
+      },
+      focus: (id: string) => {
+        announceIfLive();
+        focus(id);
+      },
+      restore: (id: string) => {
+        announceIfLive();
+        restore(id);
+      },
+      toggleMaximize: (id: string) => {
+        announceIfLive();
+        toggleMaximize(id);
+      },
+    };
+  }, [ctx, announceIfLive]);
 }
 
 // A window body calls this to veto its own close while there's unsaved work: pass
