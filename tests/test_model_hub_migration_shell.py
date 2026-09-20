@@ -21,7 +21,7 @@ NAMES = frozenset({KEY, OTHER})
 
 
 def _profile(tmp_path, content: str | bytes):
-    path = tmp_path / ".zshrc"
+    path = tmp_path / ".bashrc"
     path.write_bytes(content.encode() if isinstance(content, str) else content)
     return next(profile for profile in read_shell_profiles(tmp_path, NAMES) if profile.path == path)
 

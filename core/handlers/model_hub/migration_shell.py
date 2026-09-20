@@ -30,6 +30,7 @@ _OPERATORS = ("<<<", "<<-", "&&", "||", ";;", ";&", "<<", ">>", "<&", ">&", "|&"
 _SEPARATORS = {";", ";;", ";&", "&", "&&", "||", "|", "|&", "(", ")", "((", "))"}
 _DECLARATIONS = {"export", "readonly", "declare", "typeset", "local"}
 _COMMAND_PREFIXES = {"if", "then", "elif", "else", "while", "until", "do", "!", "time", "always"}
+_ZSH_PROFILES = frozenset({".zshenv", ".zprofile", ".zshrc", ".zlogin"})
 
 
 @dataclass(frozen=True, repr=False)
@@ -288,7 +289,7 @@ def _arithmetic_writers(text: str, names: frozenset[str]) -> set[str]:
     }
 
 
-def _embedded_writers(token: _Token, names: frozenset[str], depth: int) -> set[str]:
+def _embedded_writers(token: _Token, names: frozenset[str], depth: int, dialect: str) -> set[str]:
     found: set[str] = set()
     for kind, body in token.expansions:
         if kind == "parameter":
@@ -299,13 +300,13 @@ def _embedded_writers(token: _Token, names: frozenset[str], depth: int) -> set[s
                 # A fallback is data, but substitutions inside it can write.
                 for statement in _statements(body):
                     for nested in statement.tokens:
-                        found.update(_embedded_writers(nested, names, depth + 1))
+                        found.update(_embedded_writers(nested, names, depth + 1, dialect))
             else:
                 found.update(_arithmetic_writers(body, names))
         elif kind == "arithmetic":
             found.update(_arithmetic_writers(body, names))
         elif depth < 12:
-            found.update(_written_names(body, names, depth + 1))
+            found.update(_written_names(body, names, depth + 1, dialect))
         else:
             # Beyond this bounded grammar, retain explicit writer evidence
             # rather than silently ignoring a deeply nested assignment.
@@ -313,46 +314,380 @@ def _embedded_writers(token: _Token, names: frozenset[str], depth: int) -> set[s
     return found
 
 
-def _array_reader_writers(arguments: list[_Token], names: frozenset[str], depth: int) -> set[str]:
-    """Locate mapfile/readarray's array without mistaking option data for it."""
-    found: set[str] = set()
+def _options(
+    arguments: list[_Token],
+    flags: str = "",
+    required: str = "",
+    *,
+    numeric: str = "",
+    plus: bool = False,
+    long: Mapping[str, tuple[str, str]] | None = None,
+    stop_after: str = "",
+) -> tuple[dict[str, _Token | None], list[_Token]] | None:
+    """Decode argument roles, not values; the last occurrence of an option wins.
+
+    A required short argument may be attached, separate, or end a bundle.
+    Zsh's optional numeric arguments consume only a digit-leading word/suffix.
+    Long optional arguments are attached-only. Stop at the first operand/--.
+    Invalid known syntax cannot invoke the builtin (expansions are inventoried
+    separately, before this function). No argv is ever expanded or executed.
+    """
+    options: dict[str, _Token | None] = {}
     index = 0
     while index < len(arguments):
-        argument = arguments[index].value
+        token = arguments[index]
+        argument = token.value
         if argument == "--":
-            index += 1
-            break
-        if not argument.startswith("-") or argument == "-":
-            break
-        for position, option in enumerate(argument[1:], start=2):
-            if option == "t":
-                continue
-            if option not in "dnOsuCc":
-                # Unknown syntax cannot establish an explicit writer's absence.
-                return found | {arg.value for arg in arguments[index + 1:] if arg.value in names}
-            value = argument[position:]
-            if not value:
+            return options, arguments[index + 1:]
+        if plus and argument == "+":
+            options["+"] = None
+            return options, arguments[index + 1:]
+        if len(argument) < 2 or argument[0] not in ("-+" if plus else "-"):
+            return options, arguments[index:]
+        if argument.startswith("--"):
+            name, separator, value = argument[2:].partition("=")
+            spec = (long or {}).get(name)
+            if spec is None:
+                return None
+            flag, arity = spec
+            operand = None
+            if separator:
+                if arity == "none":
+                    return None
+                operand = _Token(value, value, token.literal)
+            elif arity == "required":
                 index += 1
                 if index >= len(arguments):
-                    return found
-                value = arguments[index].value
-            if option == "C":
-                # A callback is evaluated by Bash, but we only inventory its
-                # explicit syntax; named functions and files are never followed.
-                found.update(
-                    _written_names(value, names, depth + 1)
-                    if depth < 12 else _arithmetic_writers(value, names)
-                )
-            break
+                    return None
+                operand = arguments[index]
+            options[flag] = operand
+            index += 1
+            if flag in stop_after:
+                return options, arguments[index:]
+            continue
+        position = 1
+        while position < len(argument):
+            flag = argument[position]
+            position += 1
+            operand = None
+            if flag in required or flag in numeric:
+                suffix = argument[position:]
+                if suffix and (flag in required or suffix[0].isdigit()):
+                    operand = _Token(suffix, suffix, token.literal)
+                    position = len(argument)
+                elif not suffix and index + 1 < len(arguments) and (
+                    flag in required or re.match(r"[0-9]", arguments[index + 1].value)
+                ):
+                    index += 1
+                    operand = arguments[index]
+                elif flag in required:
+                    return None
+            elif flag not in flags:
+                return None
+            options.pop(flag, None)
+            options.pop("+" + flag, None)
+            options[("+" if argument[0] == "+" else "") + flag] = operand
+            if flag in stop_after:
+                return options, arguments[index + 1:]
         index += 1
-    destination = arguments[index].value if index < len(arguments) else "MAPFILE"
-    if destination in names:
-        found.add(destination)
+    return options, []
+
+
+def _destination(value: str, names: frozenset[str]) -> set[str]:
+    """Inspect an actual lvalue, including explicit writes in an array index."""
+    match = re.fullmatch(rf"({_NAME})(?:\[(.*)\])?", value, re.DOTALL)
+    if not match:
+        return set()
+    found = {match[1]} & names
+    if match[2] is not None:
+        found.update(_arithmetic_writers(match[2], names))
     return found
 
 
-def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int) -> set[str]:
-    found = set().union(*(_embedded_writers(token, names, depth) for token in tokens))
+def _assignment_writers(value: str, names: frozenset[str], *, arithmetic: bool = False) -> set[str]:
+    match = _WRITER.match(value)
+    if not match:
+        return set()
+    found = _destination(value[:match.end() - 1].removesuffix("+"), names)
+    if arithmetic:
+        found.update(_arithmetic_writers(value[match.end():], names))
+    return found
+
+
+def _array_reader_writers(
+    arguments: list[_Token], names: frozenset[str], depth: int, dialect: str,
+) -> set[str]:
+    parsed = _options(arguments, "t", "dnOsuCc")
+    if parsed is None:
+        return set()
+    options, operands = parsed
+    found = _destination(operands[0].value if operands else "MAPFILE", names)
+    callback = options.get("C")
+    if callback is not None:
+        # Only an explicit callback is code. Named functions are never followed.
+        found.update(
+            _written_names(callback.value, names, depth + 1, dialect)
+            if depth < 12 else _arithmetic_writers(callback.value, names)
+        )
+    return found
+
+
+def _read_writers(arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
+    parsed = (
+        _options(arguments, "rszpqAclneE", "du", numeric="kt")
+        if dialect == "zsh" else _options(arguments, "ersE", "adinNptu")
+    )
+    if parsed is None:
+        return set()
+    options, operands = parsed
+    if dialect == "zsh":
+        if "e" in options:
+            return set()  # Echo-only, unlike Bash's Readline -e.
+        targets = [arg.value for arg in operands] or ["reply" if "A" in options else "REPLY"]
+        targets[0] = targets[0].partition("?")[0] or ("reply" if "A" in options else "REPLY")
+        if options.keys() & {"A", "k", "q", "z"}:
+            targets = targets[:1]
+    else:
+        timeout = options.get("t")
+        if timeout is not None and re.fullmatch(r"0+(?:\.0*)?", timeout.value):
+            return set()  # Bash's -t 0 checks availability without assigning.
+        array = options.get("a")
+        targets = [array.value] if array is not None else [arg.value for arg in operands] or ["REPLY"]
+    return set().union(*(_destination(value, names) for value in targets))
+
+
+def _declaration_writers(command: str, arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
+    if dialect == "zsh":
+        parsed = _options(arguments, "AHUafghlmrtuxT", numeric="EFLRZip", plus=True)
+    elif command in {"export", "readonly"}:
+        parsed = _options(arguments, "afAnp")
+    else:
+        parsed = _options(arguments, "aAfFgIilnprtux", plus=True)
+    if parsed is None:
+        return set()
+    options, operands = parsed
+    if options.keys() & {"f", "+f"}:
+        return set()
+    if dialect != "zsh" and options.keys() & {"F", "+F"}:
+        return set()
+    if ("p" in options or "+" in options) and (dialect == "zsh" or command not in {"export", "readonly"}):
+        return set()
+    # Attribute-only declarations are not newly stored credentials. An explicit
+    # integer RHS or array subscript is an evaluation context, quoted or not.
+    return set().union(*(
+        _assignment_writers(
+            arg.value, names,
+            arithmetic="i" in options or (dialect == "zsh" and bool(options.keys() & {"E", "F"})),
+        )
+        for arg in operands
+    ))
+
+
+def _printf_slots(format: str, dialect: str) -> list[tuple[int, str]]:
+    """Locate format arguments without rendering, expanding, or evaluating.
+
+    Track *, precision, %% and format reuse so %s data is never a %n target.
+    Zsh's explicit positional slots are syntax only; numeric fields are known
+    arithmetic contexts in Zsh, but not in Bash/POSIX printf.
+    """
+    slots: list[tuple[int, str]] = []
+    cursor = 0
+    index = 0
+
+    def argument(position: int, kind: str) -> int:
+        nonlocal cursor
+        explicit = re.match(r"([1-9][0-9]*)\$", format[position:]) if dialect == "zsh" else None
+        slot = int(explicit[1]) - 1 if explicit else cursor
+        if not explicit:
+            cursor += 1
+        slots.append((slot, kind))
+        return position + len(explicit[0]) if explicit else position
+
+    while index < len(format):
+        if format[index] == "\\":
+            index += 2
+            continue
+        if format[index] != "%":
+            index += 1
+            continue
+        index += 1
+        if index < len(format) and format[index] == "%":
+            index += 1
+            continue
+        explicit = re.match(r"[1-9][0-9]*\$", format[index:]) if dialect == "zsh" else None
+        value_position = index
+        if explicit:
+            index += len(explicit[0])
+        while index < len(format) and format[index] in "#0- +'":
+            index += 1
+        for precision in (False, True):
+            if precision:
+                if index >= len(format) or format[index] != ".":
+                    break
+                index += 1
+            if index < len(format) and format[index] == "*":
+                index = argument(index + 1, "number")
+            else:
+                while index < len(format) and format[index].isdigit():
+                    index += 1
+        while index < len(format) and format[index] in "hjlLtz":
+            index += 1
+        if index >= len(format):
+            break
+        conversion = format[index]
+        time_format = False
+        if conversion == "(" and dialect != "zsh":
+            end = _group_end(format, index, "(", ")")
+            if format[end:end + 1] != "T":
+                break
+            index = end
+            conversion = "T"
+            time_format = True
+        if conversion not in "csbqQndiouxXeEfFgGaA" and not time_format:
+            break
+        kind = "destination" if conversion == "n" else (
+            "number" if conversion in "diouxXeEfFgGaAT" else "data"
+        )
+        argument(value_position if explicit else index, kind)
+        index += 1
+    return slots
+
+
+def _printf_writers(arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
+    parsed = _options(arguments, required="v")
+    if parsed is None:
+        return set()
+    options, operands = parsed
+    if not operands:
+        return set()
+    destination = options.get("v")
+    found = _destination(destination.value, names) if destination is not None else set()
+    format, values = operands[0], operands[1:]
+    if not format.literal:
+        # A dynamic format might use %n. Only explicit name operands can be
+        # destinations; this does not infer a format from the environment.
+        return found | {arg.value for arg in values if arg.value in names}
+    slots = _printf_slots(format.value, dialect)
+    stride = max((slot + 1 for slot, _ in slots), default=0)
+    if not stride:
+        return found
+    for start in range(0, len(values), stride):
+        for slot, kind in slots:
+            if start + slot >= len(values):
+                continue
+            value = values[start + slot].value
+            if kind == "destination" and value in names:
+                found.add(value)
+            elif kind == "number" and dialect == "zsh" and value[:1] not in {"'", '"'}:
+                found.update(_arithmetic_writers(value, names))
+    return found
+
+
+_ENV_LONG_OPTIONS = {
+    "ignore-environment": ("i", "none"), "null": ("0", "none"), "debug": ("v", "none"),
+    "unset": ("u", "required"), "chdir": ("C", "required"),
+    "split-string": ("S", "required"), "argv0": ("a", "required"),
+    "quoting-style": ("quoting", "required"),
+    "block-signal": ("block", "optional"), "default-signal": ("default", "optional"),
+    "ignore-signal": ("ignore", "optional"), "list-signal-handling": ("list", "none"),
+}
+
+
+def _env_split(text: str) -> list[_Token] | None:
+    """The literal argv subset of GNU env -S, not shell tokenization.
+
+    In particular, ; is data, # starts a comment only at a word boundary,
+    and \\_ is an argument separator (a space inside double quotes). Preserve
+    ${NAME} symbolically: it is never resolved from the process environment.
+    """
+    words: list[_Token] = []
+    word: list[str] = []
+    started = False
+    literal = True
+    quote: str | None = None
+    index = 0
+
+    def finish() -> None:
+        nonlocal started, literal
+        if started:
+            value = "".join(word)
+            words.append(_Token(value, value, literal))
+        word.clear()
+        started, literal = False, True
+
+    while index < len(text):
+        char = text[index]
+        index += 1
+        if char in "'\"" and (quote is None or char == quote):
+            quote = char if quote is None else None
+            started = True
+            continue
+        if quote is None and char in " \t\n\v\f\r":
+            finish()
+            continue
+        if char == "#" and not started:
+            break
+        if char == "\\" and (quote != "'" or text[index:index + 1] in {"\\", "'"}):
+            if index == len(text):
+                return None
+            char = text[index]
+            index += 1
+            if char == "_" and quote != '"':
+                finish()
+                continue
+            if char == "c":
+                if quote == '"':
+                    return None
+                break
+            escapes = {"_": " ", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+            if char not in escapes and char not in "\"#$'\\":
+                return None
+            char = escapes.get(char, char)
+        elif char == "$" and quote != "'":
+            expansion = re.match(rf"\{{{_NAME}\}}", text[index:])
+            if expansion is None:
+                return None
+            char += expansion[0]
+            index += len(expansion[0])
+            literal = False
+        word.append(char)
+        started = True
+    if quote is not None:
+        return None
+    finish()
+    return words
+
+
+def _env_writers(arguments: list[_Token], names: frozenset[str]) -> set[str]:
+    # Each literal split consumes a written -S occurrence. No expansion may
+    # introduce another option, so nested -S needs neither recursion nor a
+    # fallback which mistakes arbitrary argument data for arithmetic/code.
+    while True:
+        parsed = _options(arguments, "iv0", "uCSa", long=_ENV_LONG_OPTIONS, stop_after="S")
+        if parsed is None:
+            return set()
+        options, operands = parsed
+        split = options.get("S")
+        if split is None:
+            break
+        values = _env_split(split.value)
+        if values is None:
+            return set()
+        arguments = values + operands
+    found: set[str] = set()
+    for token in operands:
+        if token.value == "-" and not found:
+            continue  # Historical env - (empty environment).
+        name, separator, _ = token.value.partition("=")
+        if not separator and token.literal:
+            break
+        if separator and name in names:
+            found.add(name)
+    return found
+
+
+def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, dialect: str) -> set[str]:
+    found = set().union(*(_embedded_writers(token, names, depth, dialect) for token in tokens))
     words: list[_Token] = []
     redirect = False
     for token in tokens:
@@ -374,57 +709,37 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int) ->
         match = _WRITER.match(words[0].raw.replace("\\\r\n", "").replace("\\\n", ""))
         if not match:
             break
-        if match[1] in names:
-            found.add(match[1])
+        found.update(_assignment_writers(words[0].value, names))
         words = words[1:]
     while words and words[0].value in {"command", "builtin"}:
-        words = words[1:]
-        while words and words[0].value.startswith("-"):
-            words = words[1:]
+        parsed = _options(words[1:], "pvV" if words[0].value == "command" else "")
+        if parsed is None:
+            return found
+        options, words = parsed
+        if options.keys() & {"v", "V"}:
+            return found
     if not words:
         return found
     command = words[0].value
     arguments = words[1:]
     if command in _DECLARATIONS:
-        for argument in arguments:
-            match = _WRITER.match(argument.value)
-            if match and match[1] in names:
-                found.add(match[1])
+        found.update(_declaration_writers(command, arguments, names, dialect))
     elif command == "env":
-        index = 0
-        while index < len(arguments):
-            argument = arguments[index].value
-            if argument in {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}:
-                index += 2
-                continue
-            if argument.startswith("-"):
-                index += 1
-                continue
-            match = _WRITER.match(argument)
-            if not match:
-                break
-            if match[1] in names:
-                found.add(match[1])
-            index += 1
+        found.update(_env_writers(arguments, names))
     elif command == "read":
-        index = 0
-        while index < len(arguments):
-            argument = arguments[index].value
-            if argument in {"-p", "-u", "-t", "-n", "-N", "-d", "-i"}:
-                index += 2
-                continue
-            if argument in names:
-                found.add(argument)
-            index += 1
+        found.update(_read_writers(arguments, names, dialect))
     elif command in {"mapfile", "readarray"}:
-        found.update(_array_reader_writers(arguments, names, depth))
+        found.update(_array_reader_writers(arguments, names, depth, dialect))
     elif command == "unset":
-        found.update(argument.value for argument in arguments if argument.value in names)
-    elif command == "getopts" and len(arguments) > 1 and arguments[1].value in names:
-        found.add(arguments[1].value)
+        parsed = _options(arguments, "fmv" if dialect == "zsh" else "fnv")
+        if parsed is not None and "f" not in parsed[0]:
+            found.update(set().union(*(_destination(arg.value, names) for arg in parsed[1])))
+    elif command == "getopts":
+        parsed = _options(arguments)
+        if parsed is not None and len(parsed[1]) >= 2:
+            found.update({"OPTARG", "OPTIND", parsed[1][1].value} & names)
     elif command == "printf":
-        if len(arguments) > 1 and arguments[0].value == "-v" and arguments[1].value in names:
-            found.add(arguments[1].value)
+        found.update(_printf_writers(arguments, names, dialect))
     elif command == "let":
         found.update(_arithmetic_writers(" ".join(arg.value for arg in arguments), names))
     elif command in {"eval", "source", "."}:
@@ -432,17 +747,17 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int) ->
         # references into credentials. Only explicitly embedded writers count.
         body = " ".join(arg.value for arg in arguments)
         found.update(
-            _written_names(body, names, depth + 1)
+            _written_names(body, names, depth + 1, dialect)
             if depth < 12 else _arithmetic_writers(body, names)
         )
     return found
 
 
-def _written_names(text: str, names: frozenset[str], depth: int = 0) -> set[str]:
+def _written_names(text: str, names: frozenset[str], depth: int = 0, dialect: str = "bash") -> set[str]:
     found: set[str] = set()
     for statement in _statements(text):
         for segment in _segments(statement.tokens):
-            found.update(_command_writers(segment, names, depth))
+            found.update(_command_writers(segment, names, depth, dialect))
         if any(token.raw == "((" for token in statement.tokens):
             found.update(_arithmetic_writers(text[statement.start:statement.end], names))
     return found
@@ -450,6 +765,10 @@ def _written_names(text: str, names: frozenset[str], depth: int = 0) -> set[str]
 
 def _parse(path: Path, before: bytes, names: frozenset[str]) -> ShellProfile:
     text = before.decode("utf-8")
+    # Only fixed-path provenance selects grammar, never $SHELL or live state.
+    # POSIX .profile also recognizes explicit Bash extension writers as unsafe;
+    # it does not claim those extensions would execute in every POSIX shell.
+    dialect = "zsh" if path.name in _ZSH_PROFILES else "posix" if path.name == ".profile" else "bash"
     assignments: list[ShellAssignment] = []
     issues: list[ShellIssue] = []
     values: dict[str, str] = {}
@@ -487,7 +806,7 @@ def _parse(path: Path, before: bytes, names: frozenset[str]) -> ShellProfile:
         while index < len(segments):
             segment = segments[index]
             first = segment[0].raw
-            written.update(_command_writers(segment, names, 0))
+            written.update(_command_writers(segment, names, 0, dialect))
             if statement.data:
                 index += 1
                 continue
