@@ -351,8 +351,8 @@ describe('MigrationDialog — the settings default', () => {
 
 describe('MigrationDialog — persisted authentication', () => {
   it.each([
-    ['en', 'Import authentication saved in configuration files or supported credential stores. Credentials injected into running CLIs are not imported. After migration, CLI authentication will be fully managed by Model Hub.'],
-    ['zh', '导入配置文件或受支持凭据库中已保存的认证，不包含模型网关为运行中的 CLI 临时注入的认证。迁移后，CLI 的认证信息将完全交由模型网关管理。'],
+    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. Model Hub will manage the selected authentication after migration.'],
+    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证，不读取运行中的环境变量。迁移后，所选认证由模型网关管理。'],
   ] as const)('explains the saved source boundary and consequence in %s', async (language, sentence) => {
     await i18n.changeLanguage(language);
     serve([CODEX_KEY]);

@@ -202,7 +202,13 @@ def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
 
     # This is an external native writer, not an Avibe-owned auth operation.
     native.write_bytes(original)
-    assert [row["id"] for row in service.migration_scan()["items"]] == ids
+    rescanned_ids = [row["id"] for row in service.migration_scan()["items"]]
+    if rescanned_ids != ids:
+        # Cleanup may have changed other configuration layers. Fresh consent
+        # is required, but it must not provision the restored old OAuth again.
+        with pytest.raises(ModelHubError):
+            asyncio.run(service.migration_apply(ids))
+    ids = rescanned_ids
     assert asyncio.run(service.migration_apply(ids))["applied"] == 1
     assert service.migration_scan()["items"] == []
     assert store.config.to_payload() == current

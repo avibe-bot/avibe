@@ -824,7 +824,8 @@ def test_claude_legacy_snapshots_keep_selection_and_coalesced_file_guards(
     assert expanded[0].proposed_action == "import"
     assert expanded[0].oauth_material["refresh_token"] == "refresh-secret"
     edits = plan_native_cleanup(expanded, home=tmp_path, project_roots=())
-    assert {edit.path for edit in edits} == {primary, legacy}
+    assert {primary, legacy} <= {edit.path for edit in edits}
+    assert all(edit.before == edit.after for edit in edits if edit.path not in {primary, legacy})
     [guard] = [edit for edit in edits if edit.path == primary]
     assert guard.before is guard.after is None
     for edit in edits:

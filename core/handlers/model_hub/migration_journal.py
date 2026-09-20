@@ -166,6 +166,14 @@ class NativeTakeoverJournal:
                 or item.get("backend") not in payload["backends"]
                 for item in payload["items"]
             )
+            or (
+                "inventory_ids" in payload
+                and (
+                    not isinstance(payload["inventory_ids"], list)
+                    or len(payload["inventory_ids"]) != len(payload["items"])
+                    or any(not isinstance(value, str) or not value for value in payload["inventory_ids"])
+                )
+            )
             or not isinstance(payload.get("clean_native_stores", {}), dict)
             or any(
                 backend not in {"claude", "codex"}
@@ -290,6 +298,7 @@ class NativeTakeoverJournal:
             "version": 1,
             "phase": "complete",
             "items": record["items"],
+            **({"inventory_ids": record["inventory_ids"]} if "inventory_ids" in record else {}),
             "backends": record["backends"],
             "source_ids": record["source_ids"],
             "outcome": (

@@ -148,3 +148,62 @@ def test_shared_shell_key_requires_both_backend_consents(
     assert len(store.load().sources) == 1
     source = store.load().sources[0]
     assert all(source.id in store.load().agents[backend].sources.order for backend in ("codex", "opencode"))
+
+
+@pytest.mark.parametrize("has_grant", [False, True])
+@pytest.mark.parametrize("boundary", ["install", "start"])
+def test_external_noop_guard_change_never_owns_rollback_bytes(
+    monkeypatch, tmp_path, isolated_native_boundary, has_grant, boundary,
+):
+    from core.handlers.model_hub.adapter import EngineEnsureResult, EngineHealth, EngineStatus
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = isolated_native_boundary
+    settings = home / ".claude/settings.json"
+    if has_grant:
+        write(settings, {"env": {"ANTHROPIC_API_KEY": "fixture-before-exposure"}})
+    else:
+        keychain = FakeKeychain()
+        monkeypatch.setenv("USER", "fixture-user")
+        keychain.items[("Claude Code-credentials", "fixture-user")] = (
+            '{"mcpOAuth":{"keep":"fixture"}}', "fixture-original",
+        )
+        monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+        monkeypatch.setattr(migration, "read_native_oauth", native_oauth_store.read_native_oauth)
+    profile = home / ".zshrc"
+    write(profile, "# original preference\n")
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["claude"].mode = "direct"
+    before_settings = settings.read_bytes() if settings.exists() else None
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert len(ids) == 1
+    status = EngineStatus(EngineHealth.OK, "fixture", True, "127.0.0.1", 32199, None)
+
+    async def install(**kwargs):
+        if boundary == "install":
+            profile.write_text("# external preference during install\n")
+        return EngineEnsureResult(status, False)
+
+    async def start():
+        if boundary == "start":
+            profile.write_text("# external preference during start\n")
+        return status
+
+    adapter.ensure_installed = install
+    adapter.start = start
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    assert profile.read_text() == f"# external preference during {boundary}\n"
+    assert service.migration_journal.completed() is None
+    if has_grant and boundary == "start":
+        assert service.migration_journal.load()["phase"] == "exposed"
+        assert len(store.config.sources) == 1
+        assert settings.read_bytes() != before_settings
+        assert "claude" in service.migration_blocked_backends
+    else:
+        assert service.migration_journal.load() is None
+        assert not store.config.sources
+        assert store.config.agents["claude"].mode == "direct"
+        assert not service.migration_blocked_backends
+        assert (settings.read_bytes() if settings.exists() else None) == before_settings

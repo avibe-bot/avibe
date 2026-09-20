@@ -227,6 +227,7 @@ class NativeMigrationItem:
     shell_values: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     file_snapshots: tuple[NativeFileEdit, ...] = field(default=(), repr=False)
     auth_scheme: str | None = field(default=None, repr=False)
+    receipt_identity: str | None = field(default=None, repr=False)
 
     def to_payload(self) -> dict[str, object]:
         # Presentation metadata is additive: `vendor` and `display_name` let a
@@ -1215,6 +1216,11 @@ def scan_native_configs(
     }
     candidates: list[NativeMigrationItem] = []
     for item in items:
+        # Keep the credential/target identity independent of both consent's
+        # full file snapshots and an existing Source's custody placement.
+        # Completed receipts can then recognize the exact old grant without
+        # accepting old consent after a file changed.
+        item = replace(item, receipt_identity=item.id)
         if (
             item.native_store_placeholder
             and (clean_native_stores or {}).get(item.backend) == item.native_store_revision
@@ -1480,6 +1486,7 @@ async def _prepare_takeover(
         record = {
             "version": 1, "phase": "prepared",
             "items": [item.to_payload() for item in (consented or selected)],
+            "inventory_ids": [item.receipt_identity or item.id for item in (consented or selected)],
             "backends": backends, "source_ids": source_ids,
             "credentials": provisioned,
             "previous": previous.to_payload(), "updated": updated.to_payload(),
@@ -1525,7 +1532,11 @@ async def _revert_takeover(host: MigrationHost, record: dict[str, Any]) -> None:
         host._save_config(previous)
         host._engine_synced = False
     for raw in reversed(record["files"]):
-        NativeFileEdit.from_payload(raw).apply(reverse=True)
+        edit = NativeFileEdit.from_payload(raw)
+        # A compare-only guard never owned any bytes. An external edit must
+        # stop forward publication, but cannot prevent rollback of our writes.
+        if edit.before != edit.after:
+            edit.apply(reverse=True)
     for edit in reversed(record.get("keychain", [])):
         await asyncio.to_thread(apply_keychain_edit, edit, reverse=True)
     for credential in reversed(record["credentials"]):
@@ -1617,7 +1628,8 @@ async def _resume_takeover(
             # so a newly observed login can be presented for fresh consent.
             if (
                 record["source_ids"] or record["credentials"]
-                or record["files"] or record.get("keychain")
+                or any(raw["before"] != raw["after"] for raw in record["files"])
+                or record.get("keychain")
                 or record["native_before"] != record["native_after"]
             ):
                 record["phase"] = "exposed"
@@ -1673,6 +1685,10 @@ async def _resume_takeover(
                     record.setdefault("validated_source_ids", []).append(credential["source_id"])
                     host.migration_journal.save(record)
         await _verify_clean_native_stores(host, record)
+        # Runtime start is another await boundary. A new saved login or
+        # consumer introduced there must not disappear behind a receipt.
+        for raw in record["files"]:
+            NativeFileEdit.from_payload(raw).check(applied=True)
         if invalid_source_ids:
             terminal_config = host._clone_config(updated)
             for source in terminal_config.sources:
@@ -1774,6 +1790,18 @@ async def apply_native_migration(
         # original authentication. Selection is therefore grouped by backend.
         if any(item.backend in backends and item.id not in item_ids for item in available):
             raise MigrationConflictError
+        if (
+            completed_record is None
+            and record is not None and record["phase"] == "complete"
+            and record.get("inventory_ids")
+            and sorted(record["inventory_ids"]) == sorted(
+                item.receipt_identity or item.id for item in selected
+            )
+        ):
+            # Fresh file-bound consent may describe the same old grant that
+            # an external writer restored after cleanup. Keep the current Hub
+            # credential rather than provisioning/refreshing that old grant.
+            completed_record = record
         async with host.migration_guard(backends) as verify_idle:
             async with host._mutation_lock:
                 if completed_record is not None:
